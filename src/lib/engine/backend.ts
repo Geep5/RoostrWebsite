@@ -148,7 +148,6 @@ class WebBackend {
 				updatedAt: o.updatedAt,
 				channelId: fstr(o.fields, "channel"),
 				icon: fstr(o.fields, "iconEmoji"),
-				isFavorite: o.fields["isFavorite"]?.boolValue === true,
 			});
 		}
 		out.sort((a, b) => b.updatedAt - a.updatedAt);
