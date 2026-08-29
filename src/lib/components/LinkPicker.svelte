@@ -24,7 +24,7 @@
 	let query = $state("");
 	let inputEl: HTMLInputElement | undefined = $state();
 
-	const HIDDEN = new Set(["type", "template", "relation", "agent", "pinned_fact", "milestone", "channel"]);
+	const HIDDEN = new Set(["type", "template", "relation", "agent", "pinned_fact", "milestone", "channel", "skill"]);
 	const candidates = $derived.by(() => {
 		const q = query.trim().toLowerCase();
 		return store.summaries
