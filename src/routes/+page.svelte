@@ -71,7 +71,8 @@
 			<a href="#features">Features</a>
 			<a href="#how">How it works</a>
 			<a href="#agents">Agents</a>
-			<a href="https://github.com/Geep5/Roostr" class="gh">GitHub</a>
+			<a href="/app" class="gh">Open app</a>
+			<a href="https://github.com/Geep5/Roostr">GitHub</a>
 		</div>
 	</nav>
 
@@ -83,7 +84,7 @@
 			Nostr events. No account. No backend. Your key is your identity.
 		</p>
 		<div class="cta">
-			<a class="btn primary" href="https://github.com/Geep5/Roostr">Get Roostr</a>
+			<a class="btn primary" href="/app">Open Roostr Web</a>
 			<a class="btn" href="#how">How it works</a>
 		</div>
 		<div class="shot-wrap">

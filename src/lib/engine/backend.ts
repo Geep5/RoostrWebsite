@@ -1,0 +1,224 @@
+/**
+ * The browser replica backend: ties store + replay + query + sync + mutate
+ * together behind the same surface the desktop app gets from the Odin
+ * server. All state lives on-device; relays are the only network.
+ */
+
+import type { ObjectJSON, ObjectSummary, ChannelJSON, RelationDefJSON, ValueJSON } from "$lib/types";
+import type { ChangeJSON, QueryBody } from "./contracts";
+import { decodeChange, encodeChange, changeId } from "./proto";
+import { computeObject } from "./replay";
+import { runQuery } from "./query";
+import { ChangeStore } from "./store";
+import { RelaySync, DEFAULT_RELAYS } from "./sync";
+import { loadKey, authorIdFor } from "./keys";
+import { runMutation } from "./mutate";
+
+function fstr(fields: Record<string, ValueJSON> | undefined, k: string): string {
+	return fields?.[k]?.stringValue ?? "";
+}
+
+export interface SyncStatus {
+	phase: "idle" | "backfill" | "live" | "error";
+	imported: number;
+	detail?: string;
+}
+
+class WebBackend {
+	private store = new ChangeStore();
+	private sync: RelaySync | null = null;
+	private states = new Map<string, ObjectJSON>();
+	private dirty = new Set<string>();
+	private allDirty = true;
+	private commitListeners = new Set<(ids: string[]) => void>();
+	status: SyncStatus = { phase: "idle", imported: 0 };
+	private statusListeners = new Set<(s: SyncStatus) => void>();
+	author = "";
+	private started = false;
+
+	async start(): Promise<void> {
+		if (this.started) return;
+		const key = loadKey();
+		if (!key) throw new Error("no key");
+		this.started = true;
+		this.author = authorIdFor(key);
+		await this.store.open();
+		this.allDirty = true;
+		this.sync = new RelaySync(key.sk, this.relays(), this.store, {
+			onObjects: (ids) => {
+				for (const id of ids) this.dirty.add(id);
+				const cb = [...this.commitListeners];
+				for (const fn of cb) fn(ids);
+			},
+			onStatus: (s) => {
+				this.status = { phase: s.phase, imported: s.imported ?? this.status.imported, detail: s.detail };
+				for (const fn of this.statusListeners) fn(this.status);
+			},
+		});
+		void this.sync.start();
+	}
+
+	stop(): void {
+		this.sync?.stop();
+		this.sync = null;
+		this.started = false;
+	}
+
+	relays(): string[] {
+		try {
+			const v = JSON.parse(localStorage.getItem("roostr-relays") ?? "null") as string[] | null;
+			return v && v.length ? v : [...DEFAULT_RELAYS];
+		} catch {
+			return [...DEFAULT_RELAYS];
+		}
+	}
+
+	setRelays(relays: string[]): void {
+		localStorage.setItem("roostr-relays", JSON.stringify(relays));
+	}
+
+	onStatus(cb: (s: SyncStatus) => void): () => void {
+		this.statusListeners.add(cb);
+		return () => this.statusListeners.delete(cb);
+	}
+
+	onCommit(cb: (ids: string[]) => void): () => void {
+		this.commitListeners.add(cb);
+		return () => this.commitListeners.delete(cb);
+	}
+
+	/** Recompute any dirty object states. */
+	private async ensure(): Promise<void> {
+		if (this.allDirty) {
+			this.allDirty = false;
+			this.states.clear();
+			for (const id of await this.store.objectIds()) this.dirty.add(id);
+		}
+		if (this.dirty.size === 0) return;
+		const ids = [...this.dirty];
+		this.dirty.clear();
+		for (const id of ids) {
+			const changes = await this.store.changesFor(id);
+			if (changes.length === 0) continue;
+			const obj = computeObject(changes);
+			if (obj) this.states.set(id, obj);
+		}
+	}
+
+	async fetchObject(id: string): Promise<ObjectJSON> {
+		await this.ensure();
+		const obj = this.states.get(id);
+		if (!obj) throw new Error(`unknown object ${id}`);
+		return obj;
+	}
+
+	async fetchObjects(): Promise<ObjectSummary[]> {
+		await this.ensure();
+		const out: ObjectSummary[] = [];
+		for (const o of this.states.values()) {
+			if (o.deleted) continue;
+			out.push({
+				id: o.id,
+				typeKey: o.typeKey,
+				name: fstr(o.fields, "name"),
+				updatedAt: o.updatedAt,
+				channelId: fstr(o.fields, "channel"),
+				icon: fstr(o.fields, "iconEmoji"),
+			});
+		}
+		out.sort((a, b) => b.updatedAt - a.updatedAt);
+		return out;
+	}
+
+	async fetchChannels(): Promise<ChannelJSON[]> {
+		await this.ensure();
+		const out: ChannelJSON[] = [];
+		for (const o of this.states.values()) {
+			if (o.deleted || o.typeKey !== "channel") continue;
+			const members = (o.fields["members"]?.valuesValue?.items ?? [])
+				.map((i) => {
+					const e = i.mapValue?.entries;
+					return e ? { npub: e["npub"]?.stringValue ?? "", role: e["role"]?.stringValue ?? "" } : null;
+				})
+				.filter((m): m is { npub: string; role: string } => !!m);
+			out.push({
+				id: o.id,
+				name: fstr(o.fields, "name"),
+				icon: fstr(o.fields, "iconEmoji"),
+				pinnedIds: (o.fields["pinnedIds"]?.valuesValue?.items ?? []).map((i) => i.stringValue ?? "").filter(Boolean),
+				members,
+				keyId: o.fields["keyId"]?.intValue ?? 1,
+			});
+		}
+		out.sort((a, b) => a.name.localeCompare(b.name));
+		return out;
+	}
+
+	async fetchRelations(): Promise<RelationDefJSON[]> {
+		await this.ensure();
+		const out: RelationDefJSON[] = [];
+		for (const o of this.states.values()) {
+			if (o.deleted || o.typeKey !== "relation") continue;
+			const options = (o.fields["options"]?.valuesValue?.items ?? [])
+				.map((i) => {
+					const e = i.mapValue?.entries;
+					return e
+						? {
+								id: e["id"]?.stringValue ?? "",
+								text: e["text"]?.stringValue ?? "",
+								color: e["color"]?.stringValue ?? "",
+								orderId: e["orderId"]?.stringValue ?? "",
+							}
+						: null;
+				})
+				.filter((x): x is NonNullable<typeof x> => !!x);
+			out.push({
+				id: o.id,
+				key: fstr(o.fields, "key"),
+				format: fstr(o.fields, "format") || "shorttext",
+				name: fstr(o.fields, "name"),
+				hidden: o.fields["hidden"]?.boolValue === true,
+				readOnly: o.fields["readOnly"]?.boolValue === true,
+				maxCount: o.fields["maxCount"]?.intValue ?? 0,
+				options,
+			});
+		}
+		return out.filter((r) => r.key);
+	}
+
+	async fetchQuery(body: QueryBody): Promise<{ total: number; records: never[] }> {
+		await this.ensure();
+		return runQuery(this.states.values(), body) as { total: number; records: never[] };
+	}
+
+	async mutate(action: string, params: Record<string, unknown>): Promise<Record<string, unknown>> {
+		const out = await runMutation(
+			{
+				author: this.author,
+				changesFor: (id) => this.store.changesFor(id),
+				getObject: async (id) => {
+					await this.ensure();
+					return this.states.get(id) ?? null;
+				},
+				commit: async (change: ChangeJSON) => {
+					change.id = changeId(change);
+					const bytes = encodeChange(change);
+					// Round-trip through decode so the stored JSON matches
+					// relay-imported changes byte-for-byte.
+					const decoded = decodeChange(bytes) ?? change;
+					await this.store.addChanges([{ bytes, change: decoded }]);
+					this.dirty.add(change.objectId);
+					this.sync?.publish(bytes, change.id, change.objectId);
+					const cb = [...this.commitListeners];
+					for (const fn of cb) fn([change.objectId]);
+					return change.id;
+				},
+			},
+			action,
+			params,
+		);
+		return { ok: true, ...out };
+	}
+}
+
+export const backend = new WebBackend();

@@ -1,0 +1,84 @@
+/**
+ * Client-side reactive data store — replaces the SvelteKit server loads.
+ * Holds channels, object summaries, and relation defs; refreshed from the
+ * Odin backend and kept live via the /api/events SSE stream.
+ */
+
+import { fetchChannels, fetchObjects, fetchQuery, fetchRelations } from "$lib/api";
+import { backend } from "$lib/engine/backend";
+import type { ChannelJSON, ObjectSummary, RelationDefJSON } from "$lib/types";
+
+/** A type object (Anytype ObjectType analog). */
+export interface TypeDef {
+	id: string;
+	key: string;
+	name: string;
+	icon: string;
+	layout: string; // "page" | "task"
+	defaultTemplateId: string;
+}
+
+export const store = $state({
+	channels: [] as ChannelJSON[],
+	summaries: [] as ObjectSummary[],
+	relations: [] as RelationDefJSON[],
+	types: [] as TypeDef[],
+	loaded: false,
+});
+
+async function fetchTypes(): Promise<TypeDef[]> {
+	const res = await fetchQuery({ type: "type", limit: 100 });
+	const s = (f: Record<string, { stringValue?: string }>, k: string) => f[k]?.stringValue ?? "";
+	return res.records
+		.map((r) => ({
+			id: r.id,
+			key: s(r.fields, "key"),
+			name: s(r.fields, "name"),
+			icon: s(r.fields, "iconEmoji"),
+			layout: s(r.fields, "layout") || "page",
+			defaultTemplateId: s(r.fields, "default_template_id"),
+		}))
+		.filter((t) => t.key)
+		.sort((a, b) => a.name.localeCompare(b.name));
+}
+
+export async function refreshAll(): Promise<void> {
+	const [channels, summaries, relations, types] = await Promise.all([fetchChannels(), fetchObjects(), fetchRelations(), fetchTypes()]);
+	store.channels = channels;
+	store.summaries = summaries;
+	store.relations = relations;
+	store.types = types;
+	store.loaded = true;
+}
+
+/** Layout for a typeKey: the type object's layout, else legacy fallback. */
+export function layoutOf(typeKey: string): string {
+	return store.types.find((t) => t.key === typeKey)?.layout ?? (typeKey === "task" ? "task" : "page");
+}
+
+type ObjectListener = (objectId: string) => void;
+const objectListeners = new Set<ObjectListener>();
+
+/** Register a per-object SSE listener; returns an unsubscribe function. */
+export function onObjectEvent(fn: ObjectListener): () => void {
+	objectListeners.add(fn);
+	return () => objectListeners.delete(fn);
+}
+
+/** Connect the commit stream (idempotent) - backend events replace SSE. */
+let connected = false;
+
+export function connectEvents(): () => void {
+	if (connected) return () => {};
+	connected = true;
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	const off = backend.onCommit((ids) => {
+		clearTimeout(timer);
+		timer = setTimeout(() => void refreshAll(), 800);
+		for (const id of ids) for (const fn of objectListeners) fn(id);
+	});
+	return () => {
+		connected = false;
+		off();
+	};
+}
