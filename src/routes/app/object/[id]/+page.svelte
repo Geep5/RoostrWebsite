@@ -28,7 +28,22 @@
 		const id = page.params.id;
 		if (!id) return;
 		object = undefined;
-		void fetchObject(id).then((o) => {
+		void loadObject(id);
+	});
+
+	/**
+	 * Web replica: the object may not have synced yet (mid-backfill or a
+	 * link from another device) - a failed load leaves `object` unset and
+	 * the commit listener below retries when its changes arrive.
+	 */
+	async function loadObject(id: string) {
+		let o;
+		try {
+			o = await fetchObject(id);
+		} catch {
+			return; // retried on the next commit event for this id
+		}
+		{
 			if (page.params.id !== id) return;
 			// Agents have no page of their own — they're managed in channel
 			// settings (and deleting the object there once looked like
@@ -41,7 +56,14 @@
 				}
 			}
 			object = o;
-		});
+		}
+	}
+
+	// Retry a failed load once the replica learns about the object
+	// (summaries refresh after sync batches and boot).
+	$effect(() => {
+		const id = page.params.id;
+		if (!object && id && store.summaries.some((x) => x.id === id)) void loadObject(id);
 	});
 
 	async function refresh() {
@@ -204,7 +226,13 @@
 
 	onMount(() =>
 		onObjectEvent((objectId) => {
-			if (!object || objectId !== object.id) return;
+			// Not loaded yet (still syncing): retry when this object's
+			// changes land.
+			if (!object) {
+				if (objectId === page.params.id) void loadObject(objectId);
+				return;
+			}
+			if (objectId !== object.id) return;
 			// Skip refresh while the user is actively typing (own writes echo back).
 			if (editor && Date.now() - editor.lastEditAt() < 1200) return;
 			void refresh();

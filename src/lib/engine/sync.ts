@@ -182,33 +182,60 @@ export class RelaySync implements RelaySyncApi {
 
 	private async backfill(): Promise<void> {
 		const since = this.cursor + 1;
-		const collected: Event[] = [];
-		const seenIds = new Set<string>();
-		let until: number | undefined;
-		let page = 0;
-		for (;;) {
-			if (this.stopped) return;
-			const batch = await this.pool.querySync(this.relays, {
-				kinds: [CHANGE_KIND],
-				authors: [this.pk],
-				since,
-				until,
-				limit: PAGE_LIMIT,
-			});
-			const fresh = batch.filter((e) => !seenIds.has(e.id));
-			if (fresh.length === 0) break;
-			for (const e of fresh) seenIds.add(e.id);
-			collected.push(...fresh);
-			until = Math.min(...fresh.map((e) => e.created_at));
-			page++;
-			this.events.onStatus({
-				phase: "backfill",
-				imported: this.stats.imported,
-				detail: `page ${page}: ${collected.length} event(s) so far`,
-			});
-			if (batch.length < 100) break; // relays exhausted
-			await sleep(PAGE_SPACING_MS); // pace REQs — public relays rate-limit bursts
-		}
+		const byId = new Map<string, Event>();
+
+		// Per-relay backwards pagination. Merged multi-relay paging is gappy:
+		// each relay truncates to `limit` independently, so taking
+		// `until = min(merged page)` jumps below another relay's truncation
+		// point and permanently skips whatever that relay still held between
+		// the two stamps. Paging each relay by its own oldest-returned stamp
+		// (kept inclusive, deduped by event id) is gapless.
+		let pages = 0;
+		const pageRelay = async (relay: string): Promise<void> => {
+			const seenHere = new Set<string>();
+			let until: number | undefined;
+			for (;;) {
+				if (this.stopped) return;
+				let batch: Event[];
+				try {
+					batch = await this.pool.querySync([relay], {
+						kinds: [CHANGE_KIND],
+						authors: [this.pk],
+						since,
+						until,
+						limit: PAGE_LIMIT,
+					});
+				} catch (err) {
+					// One relay failing must not abort the others.
+					this.events.onStatus({ phase: "backfill", detail: `${relay}: ${String(err).slice(0, 80)}` });
+					return;
+				}
+				if (batch.length === 0) return;
+				let freshCount = 0;
+				for (const e of batch) {
+					if (seenHere.has(e.id)) continue;
+					seenHere.add(e.id);
+					freshCount++;
+					if (!byId.has(e.id)) byId.set(e.id, e);
+				}
+				// A page of nothing but already-seen boundary events means this
+				// relay is exhausted down to `since`.
+				if (freshCount === 0) return;
+				// `until` stays INCLUSIVE (no -1): boundary events re-arrive on
+				// the next page and dedup by id, so equal adjacent timestamps
+				// cannot fall through the crack.
+				until = Math.min(...batch.map((e) => e.created_at));
+				pages++;
+				this.events.onStatus({
+					phase: "backfill",
+					imported: this.stats.imported,
+					detail: `page ${pages} (${relay}): ${byId.size} event(s) so far`,
+				});
+				await sleep(PAGE_SPACING_MS); // pace REQs — public relays rate-limit bursts
+			}
+		};
+		await Promise.all(this.relays.map(pageRelay));
+		const collected = [...byId.values()];
 
 		// Ascending so multi-part chunk groups assemble in one pass and the
 		// cursor advances monotonically.

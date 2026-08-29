@@ -87,21 +87,38 @@ class WebBackend {
 		return () => this.commitListeners.delete(cb);
 	}
 
-	/** Recompute any dirty object states. */
+	/**
+	 * Recompute dirty object states. Boot path loads the persisted replay
+	 * cache and replays ONLY objects whose change count grew since it was
+	 * written - a warm boot does zero replay work.
+	 */
 	private async ensure(): Promise<void> {
 		if (this.allDirty) {
 			this.allDirty = false;
 			this.states.clear();
-			for (const id of await this.store.objectIds()) this.dirty.add(id);
+			const [counts, cached] = await Promise.all([this.store.changeCounts(), this.store.getStates<ObjectJSON>()]);
+			for (const [id, n] of counts) {
+				const hit = cached.get(id);
+				if (hit && hit.n === n) this.states.set(id, hit.state);
+				else this.dirty.add(id);
+			}
 		}
 		if (this.dirty.size === 0) return;
 		const ids = [...this.dirty];
 		this.dirty.clear();
 		for (const id of ids) {
-			const changes = await this.store.changesFor(id);
-			if (changes.length === 0) continue;
-			const obj = computeObject(changes);
-			if (obj) this.states.set(id, obj);
+			try {
+				const changes = await this.store.changesFor(id);
+				if (changes.length === 0) continue;
+				const obj = computeObject(changes);
+				if (obj) {
+					this.states.set(id, obj);
+					void this.store.putState(id, changes.length, obj);
+				}
+			} catch (err) {
+				// One malformed legacy object must never brick the vault.
+				console.warn(`[replica] replay failed for ${id}:`, err);
+			}
 		}
 	}
 

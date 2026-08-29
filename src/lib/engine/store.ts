@@ -6,6 +6,10 @@
  *            { objectId, bytes, json }, with an 'objectId' index.
  *   meta     keyed by string → cursor at 'cursor', published change ids
  *            as individual 'published:<id>' keys.
+ *   states   keyed by objectId → { n: change count, state: ObjectJSON } -
+ *            the replayed object, persisted so boots don't re-replay the
+ *            whole vault; invalidated per object when its change count
+ *            grows (changes are append-only and content-addressed).
  *
  * Runs on raw IndexedDB. Under bun (no global indexedDB) it lazily pulls
  * fake-indexeddb; the specifier goes through a variable so Vite never
@@ -15,9 +19,10 @@
 import type { ChangeJSON, ChangeStoreApi } from "./contracts";
 
 const DB_NAME = "roostr";
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 const CHANGES = "changes";
 const META = "meta";
+const STATES = "states";
 const CURSOR_KEY = "cursor";
 
 interface ChangeRow {
@@ -67,6 +72,7 @@ export class ChangeStore implements ChangeStoreApi {
 				store.createIndex("objectId", "objectId", { unique: false });
 			}
 			if (!db.objectStoreNames.contains(META)) db.createObjectStore(META);
+			if (!db.objectStoreNames.contains(STATES)) db.createObjectStore(STATES);
 		};
 		r.onsuccess = () => resolve(r.result);
 		r.onerror = () => reject(r.error);
@@ -123,6 +129,32 @@ export class ChangeStore implements ChangeStoreApi {
 		};
 		cursorReq.onerror = () => reject(cursorReq.error);
 		return promise;
+	}
+
+	/**
+	 * objectId -> change count. A full key-cursor walk pays one microtask
+	 * round-trip PER ROW (tens of seconds at 20k+ changes), so instead:
+	 * unique-key walk (one step per object) + a parallel count() per id.
+	 */
+	async changeCounts(): Promise<Map<string, number>> {
+		const ids = await this.objectIds();
+		const index = this.handle().transaction(CHANGES, "readonly").objectStore(CHANGES).index("objectId");
+		const counts = await Promise.all(ids.map((id) => req(index.count(id))));
+		return new Map(ids.map((id, i) => [id, counts[i]]));
+	}
+
+	async getStates<T>(): Promise<Map<string, { n: number; state: T }>> {
+		const store = this.handle().transaction(STATES, "readonly").objectStore(STATES);
+		const [keys, values] = await Promise.all([req(store.getAllKeys()), req(store.getAll())]);
+		const out = new Map<string, { n: number; state: T }>();
+		keys.forEach((k, i) => out.set(String(k), values[i] as { n: number; state: T }));
+		return out;
+	}
+
+	async putState<T>(objectId: string, n: number, state: T): Promise<void> {
+		const tx = this.handle().transaction(STATES, "readwrite");
+		tx.objectStore(STATES).put({ n, state }, objectId);
+		await txDone(tx);
 	}
 
 	async getCursor(): Promise<number> {
