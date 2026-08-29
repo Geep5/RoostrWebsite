@@ -232,7 +232,7 @@
 
 	// ── Roostr Web: key gate + relay replica lifecycle ──────────────
 	let authed = $state(false);
-	let sync = $state<SyncStatus>({ phase: "idle", imported: 0 });
+	let sync = $state<SyncStatus>({ phase: "idle", imported: 0, bootstrapped: false });
 	let disconnect: (() => void) | undefined;
 
 	async function boot() {
@@ -252,7 +252,10 @@
 	$effect(() => {
 		if (!authed) return;
 		if (!activeChannel.id && store.channels.length > 0) activeChannel.id = store.channels[0].id;
-		if (sync.phase === "live" && store.loaded && store.channels.length === 0) {
+		// A fresh key's empty vault gets a Personal channel - but ONLY once a
+		// complete history walk proves the vault really is empty (an
+		// interrupted or relay-degraded first sync must never fork one).
+		if (sync.phase === "live" && sync.bootstrapped && store.loaded && store.channels.length === 0) {
 			void channelApi.create("Personal").then(async ({ id }) => {
 				await refreshAll();
 				activeChannel.id = id;

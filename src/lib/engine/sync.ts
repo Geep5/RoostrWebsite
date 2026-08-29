@@ -137,8 +137,14 @@ export class RelaySync implements RelaySyncApi {
 		this.cursor = await this.store.getCursor();
 		this.events.onStatus({ phase: "backfill", imported: 0 });
 
+		// The incremental `since = cursor+1` shortcut is only sound once ONE
+		// full history walk has completed on this device: the cursor tracks
+		// the NEWEST imported event, so an interrupted or partially-failed
+		// first bootstrap would otherwise skip everything older, forever.
+		const bootstrapped = await this.store.getBootstrapped();
 		try {
-			await this.backfill();
+			const complete = await this.backfill(bootstrapped ? this.cursor + 1 : 1);
+			if (!bootstrapped && complete) await this.store.setBootstrapped();
 		} catch (err) {
 			this.events.onStatus({ phase: "error", detail: err instanceof Error ? err.message : String(err) });
 			// fall through to live anyway — partial backfill is still progress
@@ -180,9 +186,10 @@ export class RelaySync implements RelaySyncApi {
 
 	// ── Backfill ───────────────────────────────────────────────────
 
-	private async backfill(): Promise<void> {
-		const since = this.cursor + 1;
+	/** Returns true only when EVERY relay was walked to exhaustion. */
+	private async backfill(since: number): Promise<boolean> {
 		const byId = new Map<string, Event>();
+		let complete = true;
 
 		// Per-relay backwards pagination. Merged multi-relay paging is gappy:
 		// each relay truncates to `limit` independently, so taking
@@ -195,7 +202,10 @@ export class RelaySync implements RelaySyncApi {
 			const seenHere = new Set<string>();
 			let until: number | undefined;
 			for (;;) {
-				if (this.stopped) return;
+				if (this.stopped) {
+					complete = false;
+					return;
+				}
 				let batch: Event[];
 				try {
 					batch = await this.pool.querySync([relay], {
@@ -206,7 +216,9 @@ export class RelaySync implements RelaySyncApi {
 						limit: PAGE_LIMIT,
 					});
 				} catch (err) {
-					// One relay failing must not abort the others.
+					// One relay failing must not abort the others - but an
+					// errored walk is not a complete one.
+					complete = false;
 					this.events.onStatus({ phase: "backfill", detail: `${relay}: ${String(err).slice(0, 80)}` });
 					return;
 				}
@@ -248,6 +260,7 @@ export class RelaySync implements RelaySyncApi {
 		await this.importBatch(batch, /*immediateNotify=*/ true);
 		await this.persistCursor();
 		this.events.onStatus({ phase: "backfill", imported: this.stats.imported, detail: `backfill done: ${collected.length} event(s)` });
+		return complete;
 	}
 
 	// ── Event → change ─────────────────────────────────────────────

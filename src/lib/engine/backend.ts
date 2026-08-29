@@ -22,6 +22,8 @@ export interface SyncStatus {
 	phase: "idle" | "backfill" | "live" | "error";
 	imported: number;
 	detail?: string;
+	/** One full history walk has completed on this device. */
+	bootstrapped: boolean;
 }
 
 class WebBackend {
@@ -31,7 +33,7 @@ class WebBackend {
 	private dirty = new Set<string>();
 	private allDirty = true;
 	private commitListeners = new Set<(ids: string[]) => void>();
-	status: SyncStatus = { phase: "idle", imported: 0 };
+	status: SyncStatus = { phase: "idle", imported: 0, bootstrapped: false };
 	private statusListeners = new Set<(s: SyncStatus) => void>();
 	author = "";
 	private started = false;
@@ -51,8 +53,10 @@ class WebBackend {
 				for (const fn of cb) fn(ids);
 			},
 			onStatus: (s) => {
-				this.status = { phase: s.phase, imported: s.imported ?? this.status.imported, detail: s.detail };
-				for (const fn of this.statusListeners) fn(this.status);
+				void this.store.getBootstrapped().then((b) => {
+					this.status = { phase: s.phase, imported: s.imported ?? this.status.imported, detail: s.detail, bootstrapped: b };
+					for (const fn of this.statusListeners) fn(this.status);
+				});
 			},
 		});
 		void this.sync.start();
@@ -129,11 +133,14 @@ class WebBackend {
 		return obj;
 	}
 
+	/** The Odin server's GET /api/objects summary exclusions, verbatim. */
+	private static readonly HIDDEN_LIST_TYPES = new Set(["program", "typescript", "json", "proto", "relation", "channel"]);
+
 	async fetchObjects(): Promise<ObjectSummary[]> {
 		await this.ensure();
 		const out: ObjectSummary[] = [];
 		for (const o of this.states.values()) {
-			if (o.deleted) continue;
+			if (o.deleted || WebBackend.HIDDEN_LIST_TYPES.has(o.typeKey)) continue;
 			out.push({
 				id: o.id,
 				typeKey: o.typeKey,

@@ -306,6 +306,21 @@ export async function runMutation(
 			return {};
 		}
 
+		case "channel_create": {
+			const name = str("name");
+			if (!name) throw new Error("name required");
+			const id = uuid();
+			await commitOps(ctx, id, [
+				{ objectCreate: { typeKey: "channel" } },
+				{ fieldSet: { key: "name", value: { stringValue: name } } },
+				{ fieldSet: { key: "iconEmoji", value: { stringValue: str("icon") } } },
+				{ fieldSet: { key: "pinnedIds", value: { valuesValue: { items: [] } } } },
+				{ fieldSet: { key: "members", value: { valuesValue: { items: [] } } } },
+				{ fieldSet: { key: "keyId", value: { intValue: 1 } } },
+			]);
+			return { id, key_id: 1 };
+		}
+
 		default:
 			throw new Error(`unsupported action on Roostr Web: ${action}`);
 	}

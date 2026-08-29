@@ -157,6 +157,17 @@ export class ChangeStore implements ChangeStoreApi {
 		await txDone(tx);
 	}
 
+	async getBootstrapped(): Promise<boolean> {
+		const store = this.handle().transaction(META, "readonly").objectStore(META);
+		return (await req(store.get("bootstrapped"))) === true;
+	}
+
+	async setBootstrapped(): Promise<void> {
+		const tx = this.handle().transaction(META, "readwrite");
+		tx.objectStore(META).put(true, "bootstrapped");
+		await txDone(tx);
+	}
+
 	async getCursor(): Promise<number> {
 		const store = this.handle().transaction(META, "readonly").objectStore(META);
 		const value = await req(store.get(CURSOR_KEY));

@@ -112,6 +112,9 @@ export interface ChangeStoreApi {
 	/** Relay cursor (unix seconds of newest imported event). */
 	getCursor(): Promise<number>;
 	setCursor(v: number): Promise<void>;
+	/** True once one COMPLETE history walk finished on this device. */
+	getBootstrapped(): Promise<boolean>;
+	setBootstrapped(): Promise<void>;
 	/** Change ids already published to relays. */
 	isPublished(changeId: string): Promise<boolean>;
 	markPublished(changeId: string): Promise<void>;
