@@ -87,6 +87,7 @@ export interface QueryResultRowJSON {
 	createdAt: number;
 	updatedAt: number;
 	fields: Record<string, ValueJSON>;
+	deleted?: boolean;
 }
 
 export interface QueryApi {

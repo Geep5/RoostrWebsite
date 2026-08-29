@@ -565,6 +565,7 @@ export function runQuery(
 			createdAt: s.createdAt,
 			updatedAt: s.updatedAt,
 		};
+		if (s.deleted) row.deleted = true;
 		if (text !== "") {
 			const snippet = textSnippet(s, text);
 			if (snippet !== "") row.snippet = snippet;

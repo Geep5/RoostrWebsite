@@ -55,6 +55,7 @@ export const note = {
 	deleteField: (objectId: string, key: string) =>
 		mutate("delete_field", { object_id: objectId, key }),
 	del: (objectId: string) => mutate("delete", { object_id: objectId }),
+	vanish: (objectId: string) => mutate("vanish", { object_id: objectId }),
 };
 
 export const table = {
