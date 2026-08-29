@@ -1,6 +1,6 @@
 # fly launch is pre-configured: static Roostr Web behind Caddy.
-app = "roostr"
-primary_region = "sea"
+app = "getroostr"
+primary_region = "sjc"
 
 [build]
 	dockerfile = "Dockerfile"
