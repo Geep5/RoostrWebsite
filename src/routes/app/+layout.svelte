@@ -2,8 +2,8 @@
 	import { onMount } from "svelte";
 	import { goto } from "$app/navigation";
 	import { page } from "$app/state";
-	import { activeChannel } from "$lib/channel.svelte";
-	import { channel as channelApi, note, fetchObject } from "$lib/api";
+	import { activeSpace } from "$lib/space.svelte";
+	import { space as spaceApi, note, fetchObject } from "$lib/api";
 	import { objectIcon } from "$lib/icons";
 	import { store, refreshAll, connectEvents } from "$lib/data.svelte";
 	import { backend, type SyncStatus } from "$lib/engine/backend";
@@ -20,7 +20,7 @@
 	/** The channel unassigned (pre-channel) objects display under. */
 	const defaultChannelId = $derived(channels[0]?.id ?? "");
 
-	const current = $derived(channels.find((c) => c.id === activeChannel.id) ?? channels[0]);
+	const current = $derived(channels.find((c) => c.id === activeSpace.id) ?? channels[0]);
 
 	/** Header center (Anytype's .path): icon + name of what you're looking at; click opens search. */
 	const headerPath = $derived.by(() => {
@@ -42,10 +42,10 @@
 	const objectSummary = $derived(store.summaries.find((s) => s.id === objectId));
 
 	/** The channel whose pinnedIds owns this object (unassigned → default). */
-	const owningChannelOf = (channelId: string) => channels.find((c) => c.id === (channelId || defaultChannelId));
+	const owningSpaceOf = (channelId: string) => channels.find((c) => c.id === (channelId || defaultChannelId));
 	const isPinned = $derived.by(() => {
 		if (!objectSummary) return false;
-		return owningChannelOf(objectSummary.channelId)?.pinnedIds.includes(objectSummary.id) ?? false;
+		return owningSpaceOf(objectSummary.channelId)?.pinnedIds.includes(objectSummary.id) ?? false;
 	});
 
 	let showMore = $state(false);
@@ -53,7 +53,7 @@
 	// ── Mobile shell (Anytype iOS flow): Spaces list -> channel home -> object.
 	let isMobile = $state(false);
 	/** Mobile only: true when a channel card has been tapped open. */
-	let mobileChannelOpen = $state(false);
+	let mobileSpaceOpen = $state(false);
 	let mCollapsed = $state<Record<string, boolean>>({});
 
 	/** Channel-home recents card: newest 6 objects in the open channel. */
@@ -77,12 +77,12 @@
 
 	/** Mobile object back: to the object's channel home (the pinned-cards
 	 * frame), not history.back — one more tap reaches the channels list. */
-	function mobileBackToChannel() {
+	function mobileBackToSpace() {
 		if (objectSummary) {
-			const ch = owningChannelOf(objectSummary.channelId);
-			if (ch) selectChannel(ch.id);
+			const ch = owningSpaceOf(objectSummary.channelId);
+			if (ch) selectSpace(ch.id);
 		}
-		mobileChannelOpen = true;
+		mobileSpaceOpen = true;
 		void goto("/app");
 	}
 
@@ -100,7 +100,7 @@
 
 	/** Objects of a type in this channel, newest first (sidebar preview, capped). */
 	function typeObjects(typeKey: string) {
-		const ch = activeChannel.id || defaultChannelId;
+		const ch = activeSpace.id || defaultChannelId;
 		return store.summaries
 			.filter((s) => s.typeKey === typeKey && (s.channelId || defaultChannelId) === ch)
 			.sort((a, b) => b.updatedAt - a.updatedAt)
@@ -112,7 +112,7 @@
 	/** Sidebar create (Anytype's typeSuggest menu): pick a type, get an object. */
 	async function sidebarCreate(kind: string) {
 		showCreate = false;
-		const ch = activeChannel.id || defaultChannelId;
+		const ch = activeSpace.id || defaultChannelId;
 		if (kind === "collection") return void (await createCollection(ch));
 		if (kind === "query") return void (await createQuery(ch));
 		await createTyped(kind, ch);
@@ -121,13 +121,13 @@
 	const collections = $derived(
 		store.summaries.filter(
 			(s) => s.typeKey === "collection" && s.id !== objectId &&
-				(s.channelId || defaultChannelId) === ((objectSummary?.channelId ?? activeChannel.id) || defaultChannelId),
+				(s.channelId || defaultChannelId) === ((objectSummary?.channelId ?? activeSpace.id) || defaultChannelId),
 		),
 	);
 
 	async function togglePin() {
 		if (!objectSummary) return;
-		const ch = owningChannelOf(objectSummary.channelId);
+		const ch = owningSpaceOf(objectSummary.channelId);
 		if (!ch) return;
 		const next = isPinned ? ch.pinnedIds.filter((x) => x !== objectSummary.id) : [...ch.pinnedIds, objectSummary.id];
 		await note.setField(ch.id, "pinnedIds", { valuesValue: { items: next.map((id) => ({ stringValue: id })) } });
@@ -217,19 +217,19 @@
 			.slice(0, 8);
 	});
 
-	function selectChannel(id: string) {
-		activeChannel.id = id;
+	function selectSpace(id: string) {
+		activeSpace.id = id;
 		localStorage.setItem("glon.channel", id);
 		// Graph view is per-channel: switching channels swaps the graph in place.
 		if ((page.url.pathname as string) !== "/app/graph") void goto("/app");
 	}
 
-	async function newChannel() {
+	async function newSpace() {
 		const name = prompt("Space name:");
 		if (!name) return;
-		const { id } = await channelApi.create(name);
+		const { id } = await spaceApi.create(name);
 		await refreshAll();
-		selectChannel(id);
+		selectSpace(id);
 	}
 
 	/** Create a type object (Anytype: U.Object.createType); opens its page. */
@@ -299,8 +299,8 @@
 		disconnect = connectEvents();
 		await refreshAll();
 		const saved = localStorage.getItem("glon.channel");
-		if (saved && store.channels.some((c) => c.id === saved)) activeChannel.id = saved;
-		else if (store.channels.length > 0) activeChannel.id = store.channels[0].id;
+		if (saved && store.channels.some((c) => c.id === saved)) activeSpace.id = saved;
+		else if (store.channels.length > 0) activeSpace.id = store.channels[0].id;
 	}
 
 	// Channel selection settles as backfill fills the store; bootstrap a
@@ -308,14 +308,14 @@
 	// (a fresh key), never mid-backfill of an existing one.
 	$effect(() => {
 		if (!authed) return;
-		if (!activeChannel.id && store.channels.length > 0) activeChannel.id = store.channels[0].id;
+		if (!activeSpace.id && store.channels.length > 0) activeSpace.id = store.channels[0].id;
 		// A fresh key's empty vault gets a Personal channel - but ONLY once a
 		// complete history walk proves the vault really is empty (an
 		// interrupted or relay-degraded first sync must never fork one).
 		if (sync.phase === "live" && sync.bootstrapped && store.loaded && store.channels.length === 0) {
-			void channelApi.create("Personal").then(async ({ id }) => {
+			void spaceApi.create("Personal").then(async ({ id }) => {
 				await refreshAll();
-				activeChannel.id = id;
+				activeSpace.id = id;
 			});
 		}
 	});
@@ -342,7 +342,7 @@
 <div class="m-shell">
 	{#if objectId}
 		<header class="m-top">
-			<button class="m-btn" data-tip="Space home" onclick={() => mobileBackToChannel()}>‹</button>
+			<button class="m-btn" data-tip="Space home" onclick={() => mobileBackToSpace()}>‹</button>
 			<span class="m-obj">
 				{#if headerPath.icon === "graph"}
 					<span class="path-icon"><GraphIcon /></span>
@@ -387,7 +387,7 @@
 			{/if}
 		</header>
 		<main class="m-main">{@render children()}</main>
-	{:else if !mobileChannelOpen || !current}
+	{:else if !mobileSpaceOpen || !current}
 		<div class="m-screen">
 			<div class="m-head">
 				<span class="m-title">Spaces</span>
@@ -396,7 +396,7 @@
 			<div class="m-cards">
 				{#each channels as c (c.id)}
 					{@const latest = latestInChannel(c.id)}
-					<button class="m-card" onclick={() => { selectChannel(c.id); mobileChannelOpen = true; }}>
+					<button class="m-card" onclick={() => { selectSpace(c.id); mobileSpaceOpen = true; }}>
 						<span class="m-card-icon">
 							{#if c.icon?.startsWith("http")}
 								<img class="m-card-img" src={c.icon} alt="" />
@@ -413,7 +413,7 @@
 						{#if latest}<span class="m-card-side">{shortDate(latest.updatedAt)}</span>{/if}
 					</button>
 				{/each}
-				<button class="m-card add" onclick={() => void newChannel()}>＋ New space</button>
+				<button class="m-card add" onclick={() => void newSpace()}>＋ New space</button>
 			</div>
 			<div class="m-bottom">
 				<button class="m-search" onclick={() => (showSearch = true)}>⌕ Search</button>
@@ -423,7 +423,7 @@
 	{:else}
 		<div class="m-screen">
 			<div class="m-top">
-				<button class="m-btn" data-tip="Spaces" onclick={() => (mobileChannelOpen = false)}>‹</button>
+				<button class="m-btn" data-tip="Spaces" onclick={() => (mobileSpaceOpen = false)}>‹</button>
 				<span class="m-sync" class:ok={sync.phase === "live"} class:busy={sync.phase === "backfill"} data-tip={sync.phase === "live" ? `Synced · ${sync.imported} changes` : sync.phase === "backfill" ? "Syncing…" : "Not syncing"}><span class="m-sync-dot"></span></span>
 				<button class="m-btn" data-tip="Space settings" onclick={() => goto(`/app/object/${current.id}`)}>⋯</button>
 			</div>
@@ -520,7 +520,7 @@
 				class="space"
 				class:active={current?.id === c.id}
 				title="{c.name}{c.members.length ? ` · ${c.members.length} member(s)` : ''}"
-				onclick={() => selectChannel(c.id)}
+				onclick={() => selectSpace(c.id)}
 			>
 				{#if c.icon?.startsWith("http")}
 					<img class="rail-img" src={c.icon} alt={c.name} />
@@ -529,7 +529,7 @@
 				{/if}
 			</button>
 		{/each}
-		<button class="space add" title="New space" onclick={() => void newChannel()}>+</button>
+		<button class="space add" title="New space" onclick={() => void newSpace()}>+</button>
 		<div class="rail-spacer"></div>
 		{#if sync.phase !== "live"}
 			<span
@@ -543,8 +543,8 @@
 
 	<aside class="widgets">
 		{#if current}
-			<a class="channel-head" href="/app/object/{current.id}" title="Space settings">
-				<span class="channel-name">{current.name}</span>
+			<a class="space-head" href="/app/object/{current.id}" title="Space settings">
+				<span class="space-name">{current.name}</span>
 				<span class="gear">⚙</span>
 			</a>
 
@@ -937,7 +937,7 @@
 	}
 	/* Anytype spaceHead: 600-weight name, 6px radius, highlight hover,
 	   settings affordance revealed on hover. */
-	.channel-head {
+	.space-head {
 		display: flex;
 		align-items: center;
 		justify-content: space-between;
@@ -947,7 +947,7 @@
 		padding: 4px 6px;
 		border-radius: 6px;
 	}
-	.channel-head:hover {
+	.space-head:hover {
 		background: var(--hl-med);
 	}
 	.gear {
@@ -956,7 +956,7 @@
 		opacity: 0;
 		transition: opacity 0.15s;
 	}
-	.channel-head:hover .gear {
+	.space-head:hover .gear {
 		opacity: 1;
 	}
 	/* Anytype widget: each pinned object is its own card; the header is

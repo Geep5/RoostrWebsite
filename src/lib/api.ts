@@ -5,7 +5,7 @@
  * publish them to relays (the home daemon imports them like any device).
  */
 
-import type { ObjectJSON, ObjectSummary, ChannelJSON, RelationDefJSON, BlockJSON, ValueJSON } from "$lib/types";
+import type { ObjectJSON, ObjectSummary, SpaceJSON, RelationDefJSON, BlockJSON, ValueJSON } from "$lib/types";
 import { backend } from "$lib/engine/backend";
 import { loadKey, saveKey, authorIdFor } from "$lib/engine/keys";
 import { nip19 } from "nostr-tools";
@@ -16,7 +16,7 @@ export const API = "";
 
 export const fetchObject = (id: string): Promise<ObjectJSON> => backend.fetchObject(id);
 export const fetchObjects = (): Promise<ObjectSummary[]> => backend.fetchObjects();
-export const fetchChannels = (): Promise<ChannelJSON[]> => backend.fetchChannels();
+export const fetchChannels = (): Promise<SpaceJSON[]> => backend.fetchChannels();
 export const fetchRelations = (): Promise<RelationDefJSON[]> => backend.fetchRelations();
 
 export interface QueryResultRow {
@@ -70,7 +70,7 @@ export const table = {
 		mutate("table_col_remove", { object_id: objectId, table_id: tableId, column_id: columnId }),
 };
 
-export const channel = {
+export const space = {
 	create: (name: string, icon?: string) =>
 		mutate("channel_create", { name, icon }) as Promise<{ id: string; key_id: number }>,
 	memberAdd: (channelId: string, npub: string, role?: string) =>

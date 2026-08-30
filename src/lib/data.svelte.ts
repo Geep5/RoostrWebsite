@@ -6,7 +6,7 @@
 
 import { fetchChannels, fetchObjects, fetchQuery, fetchRelations } from "$lib/api";
 import { backend } from "$lib/engine/backend";
-import type { ChannelJSON, ObjectSummary, RelationDefJSON } from "$lib/types";
+import type { SpaceJSON, ObjectSummary, RelationDefJSON } from "$lib/types";
 
 /** A type object (Anytype ObjectType analog). */
 export interface TypeDef {
@@ -19,7 +19,7 @@ export interface TypeDef {
 }
 
 export const store = $state({
-	channels: [] as ChannelJSON[],
+	channels: [] as SpaceJSON[],
 	summaries: [] as ObjectSummary[],
 	relations: [] as RelationDefJSON[],
 	types: [] as TypeDef[],

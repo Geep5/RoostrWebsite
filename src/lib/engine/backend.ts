@@ -4,7 +4,7 @@
  * server. All state lives on-device; relays are the only network.
  */
 
-import type { ObjectJSON, ObjectSummary, ChannelJSON, RelationDefJSON, ValueJSON } from "$lib/types";
+import type { ObjectJSON, ObjectSummary, SpaceJSON, RelationDefJSON, ValueJSON } from "$lib/types";
 import type { ChangeJSON, QueryBody } from "./contracts";
 import { decodeChange, encodeChange, changeId } from "./proto";
 import { sha256 } from "@noble/hashes/sha2.js";
@@ -190,9 +190,9 @@ class WebBackend {
 		return out;
 	}
 
-	async fetchChannels(): Promise<ChannelJSON[]> {
+	async fetchChannels(): Promise<SpaceJSON[]> {
 		await this.ensure();
-		const out: ChannelJSON[] = [];
+		const out: SpaceJSON[] = [];
 		for (const o of this.states.values()) {
 			if (o.deleted || o.typeKey !== "channel") continue;
 			const members = (o.fields["members"]?.valuesValue?.items ?? [])
