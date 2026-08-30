@@ -429,12 +429,25 @@
 	.import-form input {
 		flex: 1;
 	}
+	.modal input {
+		background: var(--panel);
+		border: 1px solid var(--border);
+		border-radius: 6px;
+		color: var(--fg);
+		padding: 6px 9px;
+		font-size: 13px;
+		outline: none;
+	}
+	.modal input:focus {
+		border-color: var(--accent);
+		box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 40%, transparent);
+	}
 	.fallback {
 		color: var(--muted);
 		font-size: 11px;
 	}
 	.error {
-		color: #e8524a;
+		color: var(--red);
 	}
 	.code-form,
 	.keyrow-form {
@@ -505,9 +518,9 @@
 		font-size: 17px;
 	}
 	section {
-		background: var(--hl-light, rgba(255, 255, 255, 0.04));
+		background: var(--panel);
 		border: 1px solid var(--border);
-		border-radius: 12px;
+		border-radius: 10px;
 		padding: 14px 16px 16px;
 		margin-top: 14px;
 	}
@@ -579,7 +592,7 @@
 		letter-spacing: 0.06em;
 	}
 	.keylabel .secret {
-		color: #e8524a;
+		color: var(--red);
 		border: 1px solid rgba(232, 82, 74, 0.45);
 		border-radius: 999px;
 		font-size: 10px;
@@ -595,10 +608,10 @@
 		line-height: 1.5;
 	}
 	.desk-match {
-		color: #6fcf7f;
+		color: var(--green);
 	}
 	.desk-differ {
-		color: #f0b43c;
+		color: var(--orange);
 	}
 	.desk-offline {
 		color: var(--muted);

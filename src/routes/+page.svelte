@@ -251,7 +251,7 @@
 		margin: 0 0 22px;
 	}
 	.accent {
-		color: #ffa02f;
+		color: #0a84ff;
 	}
 	.sub {
 		max-width: 640px;
@@ -279,8 +279,8 @@
 		border-color: #4a4f5a;
 	}
 	.btn.primary {
-		background: #ffa02f;
-		border-color: #ffa02f;
+		background: #0a84ff;
+		border-color: #0a84ff;
 		color: #14100a;
 	}
 	.btn.primary:hover {
@@ -337,7 +337,7 @@
 		gap: 28px;
 	}
 	.step .n {
-		color: #ffa02f;
+		color: #0a84ff;
 		font-family: ui-monospace, monospace;
 		font-size: 13px;
 	}

@@ -103,10 +103,10 @@
 		text-align: center;
 	}
 	input:focus {
-		border-color: var(--accent, #ffa02f);
+		border-color: var(--accent, #0a84ff);
 	}
 	button {
-		background: var(--accent, #ffa02f);
+		background: var(--accent, #0a84ff);
 		color: #101216;
 		border: none;
 		border-radius: 10px;
@@ -119,7 +119,7 @@
 		opacity: 0.5;
 	}
 	.error {
-		color: #e8524a;
+		color: var(--red);
 		font-size: 13px;
 		margin: 0;
 	}

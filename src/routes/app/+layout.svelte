@@ -758,13 +758,18 @@
 
 <style>
 	:global(:root) {
-		--bg: #101216;
-		--panel: #1a1d23;
-		--hover: #23262e;
-		--border: #2b2f38;
-		--fg: #e8eaed;
-		--muted: #8b909b;
-		--accent: #ffa02f;
+		--bg: #1e1e20;
+		--panel: #2b2b2e;
+		--hover: #3a3a3e;
+		--border: #45454a;
+		--fg: #f5f5f7;
+		--muted: #98989d;
+		--accent: #0a84ff;
+		--green: #30d158;
+		--orange: #ff9f0a;
+		--red: #ff453a;
+		--indigo: #7d7aff;
+		--mark: rgb(10 132 255 / 0.4);
 		/* Anytype shape-highlight tokens (dark theme values). */
 		--hl-light: rgba(255, 255, 255, 0.03);
 		--hl-med: rgba(255, 255, 255, 0.05);
@@ -891,8 +896,8 @@
 		width: 36px;
 		height: 36px;
 		border-radius: 10px;
-		border: none;
-		background: var(--hl-med);
+		border: 1px solid var(--border);
+		background: var(--panel);
 		color: var(--fg);
 		font-size: 15px;
 		cursor: pointer;
@@ -1106,9 +1111,9 @@
 		gap: 6px;
 		background: none;
 		border: none;
-		font-size: 12px;
+		font-size: 11px;
+		font-weight: 600;
 		line-height: 18px;
-		font-weight: 500;
 		font-family: inherit;
 		color: var(--muted);
 		padding: 2px 8px 6px;
@@ -1135,10 +1140,10 @@
 		display: flex;
 		align-items: center;
 		gap: 6px;
-		height: 28px;
+		height: 26px;
 		padding: 0 8px;
 		border-radius: 6px;
-		font-size: 14px;
+		font-size: 13px;
 		line-height: 22px;
 		white-space: nowrap;
 		overflow: hidden;
@@ -1196,9 +1201,10 @@
 		top: calc(100% + 6px);
 		left: 50%;
 		transform: translateX(-50%);
-		background: var(--hover);
+		background: var(--panel);
 		color: var(--fg);
 		border: 1px solid var(--border);
+		box-shadow: 0 4px 14px rgb(0 0 0 / 0.25);
 		font-size: 11px;
 		font-weight: 400;
 		padding: 3px 8px;
@@ -1248,10 +1254,15 @@
 	}
 	.more-menu > button:hover,
 	.submenu > button:hover {
-		background: var(--hover);
+		background: var(--accent);
+		color: #fff;
 	}
 	.more-menu .danger {
-		color: #f55522;
+		color: var(--red);
+	}
+	.more-menu > button.danger:hover {
+		background: var(--red);
+		color: #fff;
 	}
 	.submenu {
 		display: flex;
@@ -1338,7 +1349,7 @@
 		animation: syncpulse 1.2s ease-in-out infinite;
 	}
 	.sync-dot.err {
-		background: #e8524a;
+		background: var(--red);
 		animation: none;
 	}
 	@keyframes syncpulse {
@@ -1378,7 +1389,7 @@
 		height: 36px;
 		border-radius: 50%;
 		background: var(--hover);
-		border: none;
+		border: 1px solid var(--border);
 		color: var(--fg);
 		font-size: 16px;
 		cursor: pointer;
@@ -1397,8 +1408,8 @@
 		align-items: center;
 		gap: 12px;
 		background: var(--panel);
-		border: none;
-		border-radius: 14px;
+		border: 1px solid var(--border);
+		border-radius: 10px;
 		padding: 14px;
 		color: var(--fg);
 		text-align: left;
@@ -1462,7 +1473,7 @@
 	.m-search {
 		flex: 1;
 		background: var(--panel);
-		border: none;
+		border: 1px solid var(--border);
 		border-radius: 999px;
 		color: var(--muted);
 		font-size: 15px;
@@ -1475,7 +1486,7 @@
 		height: 46px;
 		border-radius: 50%;
 		background: var(--panel);
-		border: none;
+		border: 1px solid var(--border);
 		color: var(--fg);
 		font-size: 22px;
 		cursor: pointer;
@@ -1503,7 +1514,7 @@
 		height: 40px;
 		border-radius: 50%;
 		background: var(--panel);
-		border: none;
+		border: 1px solid var(--border);
 		color: var(--fg);
 		font-size: 19px;
 		cursor: pointer;
@@ -1527,10 +1538,10 @@
 		background: var(--muted);
 	}
 	.m-sync.ok .m-sync-dot {
-		background: #6fcf7f;
+		background: var(--green);
 	}
 	.m-sync.busy .m-sync-dot {
-		background: #f0b43c;
+		background: var(--orange);
 		animation: sync-pulse 1.2s ease-in-out infinite;
 	}
 	@keyframes sync-pulse {
@@ -1608,7 +1619,8 @@
 	}
 	.m-wcard {
 		background: var(--panel);
-		border-radius: 14px;
+		border: 1px solid var(--border);
+		border-radius: 10px;
 		overflow: hidden;
 	}
 	.m-wcard-head {
@@ -1678,7 +1690,8 @@
 	}
 	.m-section-body {
 		background: var(--panel);
-		border-radius: 14px;
+		border: 1px solid var(--border);
+		border-radius: 10px;
 		padding: 4px 10px 8px;
 		margin-bottom: 6px;
 	}
