@@ -1519,6 +1519,8 @@
 		flex: none;
 	}
 	.m-sync-dot {
+		display: block;
+		flex: none;
 		width: 12px;
 		height: 12px;
 		border-radius: 50%;
