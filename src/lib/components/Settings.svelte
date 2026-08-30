@@ -4,6 +4,35 @@
 	import { exportAll } from "$lib/export";
 	import { ignoredWords, removeFromDictionary } from "$lib/spell";
 	import { loadKey, clearKey } from "$lib/engine/keys";
+	import { backend } from "$lib/engine/backend";
+
+	// Desktop sync check: compare this device's change-set fingerprint against
+	// the desktop daemon's (GET /api/sync/digest). Same digest = identical vault.
+	let deskUrl = $state(localStorage.getItem("glon.deskUrl") ?? "http://127.0.0.1:7333");
+	let deskState = $state<"idle" | "checking" | "match" | "differ" | "offline">("idle");
+	let deskDetail = $state("");
+
+	async function checkDesktop() {
+		deskState = "checking";
+		deskDetail = "";
+		localStorage.setItem("glon.deskUrl", deskUrl.trim());
+		try {
+			const res = await fetch(`${deskUrl.trim()}/api/sync/digest`);
+			if (!res.ok) throw new Error(`daemon ${res.status}`);
+			const remote = (await res.json()) as { digest: string; objects: number; changes: number };
+			const local = await backend.syncDigest();
+			if (local.digest === remote.digest) {
+				deskState = "match";
+				deskDetail = `identical — ${remote.objects} objects, ${remote.changes} changes`;
+			} else {
+				deskState = "differ";
+				deskDetail = `desktop ${remote.objects}/${remote.changes} · here ${local.objects}/${local.changes} (objects/changes) — ${local.changes < remote.changes ? "this device is behind" : local.changes > remote.changes ? "the desktop is behind" : "same size, different content"}`;
+			}
+		} catch {
+			deskState = "offline";
+			deskDetail = "desktop daemon unreachable — same network or Tailscale?";
+		}
+	}
 
 	let { onclose }: { onclose: () => void } = $props();
 
@@ -256,6 +285,23 @@
 						<button class="chip" onclick={() => void saveRelays([...relays, s])}>{s.replace("wss://", "")}</button>
 					{/each}
 				</div>
+			{/if}
+		</section>
+
+		<section>
+			<h3>Desktop sync check</h3>
+			<p class="hint">Compare this device's vault fingerprint against your desktop daemon's. Equal digests mean identical change sets.</p>
+			<form
+				onsubmit={(e) => {
+					e.preventDefault();
+					void checkDesktop();
+				}}
+			>
+				<input bind:value={deskUrl} placeholder="http://127.0.0.1:7333" />
+				<button type="submit" disabled={deskState === "checking"}>{deskState === "checking" ? "Checking…" : "Compare"}</button>
+			</form>
+			{#if deskState !== "idle"}
+				<p class="hint desk-{deskState}">{deskDetail}</p>
 			{/if}
 		</section>
 
@@ -547,6 +593,15 @@
 		font-size: 12px;
 		margin: 0 0 10px;
 		line-height: 1.5;
+	}
+	.desk-match {
+		color: #6fcf7f;
+	}
+	.desk-differ {
+		color: #f0b43c;
+	}
+	.desk-offline {
+		color: var(--muted);
 	}
 	.hint.none {
 		margin: 4px 0;

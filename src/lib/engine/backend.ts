@@ -7,6 +7,14 @@
 import type { ObjectJSON, ObjectSummary, ChannelJSON, RelationDefJSON, ValueJSON } from "$lib/types";
 import type { ChangeJSON, QueryBody } from "./contracts";
 import { decodeChange, encodeChange, changeId } from "./proto";
+import { sha256 } from "@noble/hashes/sha2.js";
+
+const HEX = "0123456789abcdef";
+const toHex = (b: Uint8Array): string => {
+	let out = "";
+	for (const x of b) out += HEX[x >> 4] + HEX[x & 15];
+	return out;
+};
 import { computeObject } from "./replay";
 import { runQuery } from "./query";
 import { ChangeStore } from "./store";
@@ -124,6 +132,34 @@ class WebBackend {
 				console.warn(`[replica] replay failed for ${id}:`, err);
 			}
 		}
+	}
+
+	/**
+	 * State fingerprint matching the desktop's GET /api/sync/digest:
+	 * sha256 over "<objectId>:<sorted change hex ids>\n" lines, objects sorted,
+	 * vanished objects excluded (read from the synced vanish ledger object).
+	 */
+	async syncDigest(): Promise<{ digest: string; objects: number; changes: number }> {
+		await this.ensure();
+		const vanished = new Set<string>();
+		try {
+			const ledger = await this.fetchObject("__vanished__");
+			for (const k of Object.keys(ledger.fields)) if (k.startsWith("vanished:")) vanished.add(k.slice("vanished:".length));
+		} catch {
+			/* no ledger on this device yet */
+		}
+		const ids = (await this.store.objectIds()).filter((id) => !vanished.has(id)).sort();
+		let text = "";
+		let changes = 0;
+		let objects = 0;
+		for (const oid of ids) {
+			const cids = (await this.store.changesFor(oid)).map((c) => c.id).sort();
+			if (cids.length === 0) continue;
+			text += `${oid}:${cids.join(",")}\n`;
+			changes += cids.length;
+			objects++;
+		}
+		return { digest: toHex(sha256(new TextEncoder().encode(text))), objects, changes };
 	}
 
 	async fetchObject(id: string): Promise<ObjectJSON> {
