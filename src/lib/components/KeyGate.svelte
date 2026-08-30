@@ -107,7 +107,7 @@
 	}
 	button {
 		background: var(--accent, #0a84ff);
-		color: #101216;
+		color: #fff;
 		border: none;
 		border-radius: 10px;
 		padding: 11px;
