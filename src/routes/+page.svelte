@@ -195,9 +195,9 @@
 <style>
 	:global(body) {
 		margin: 0;
-		background: #0c0e12;
-		color: #e6e8ec;
-		font-family: -apple-system, "Segoe UI", Inter, Roboto, sans-serif;
+		background: #1e1e20;
+		color: #f5f5f7;
+		font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", Inter, sans-serif;
 		-webkit-font-smoothing: antialiased;
 	}
 	:global(*) {
@@ -225,19 +225,19 @@
 		align-items: center;
 	}
 	.links a {
-		color: #9aa0ab;
+		color: #98989d;
 		text-decoration: none;
 		font-size: 14px;
 	}
 	.links a:hover {
-		color: #e6e8ec;
+		color: #f5f5f7;
 	}
 	.links .gh {
-		color: #0c0e12;
-		background: #e6e8ec;
-		padding: 7px 14px;
-		border-radius: 999px;
-		font-weight: 600;
+		color: #fff;
+		background: #0a84ff;
+		padding: 6px 14px;
+		border-radius: 6px;
+		font-weight: 500;
 	}
 
 	.hero {
@@ -256,7 +256,7 @@
 	.sub {
 		max-width: 640px;
 		margin: 0 auto 32px;
-		color: #9aa0ab;
+		color: #98989d;
 		font-size: 18px;
 		line-height: 1.6;
 	}
@@ -267,32 +267,34 @@
 		margin-bottom: 56px;
 	}
 	.btn {
-		padding: 12px 26px;
-		border-radius: 10px;
+		padding: 10px 24px;
+		border-radius: 8px;
 		text-decoration: none;
-		font-weight: 600;
+		font-weight: 500;
 		font-size: 15px;
-		color: #e6e8ec;
-		border: 1px solid #2a2e37;
+		color: #f5f5f7;
+		background: #2b2b2e;
+		border: 1px solid #45454a;
+		box-shadow: 0 0.5px 1px rgb(0 0 0 / 0.12);
 	}
 	.btn:hover {
-		border-color: #4a4f5a;
+		background: #3a3a3e;
 	}
 	.btn.primary {
 		background: #0a84ff;
 		border-color: #0a84ff;
-		color: #14100a;
+		color: #fff;
 	}
 	.btn.primary:hover {
-		background: #ffb254;
+		background: #3395ff;
 	}
 
 	.shot-wrap {
-		border: 1px solid #23262e;
-		border-radius: 14px;
+		border: 1px solid #45454a;
+		border-radius: 12px;
 		overflow: hidden;
-		box-shadow: 0 30px 80px rgba(0, 0, 0, 0.55);
-		background: #101216;
+		box-shadow: 0 18px 50px rgb(0 0 0 / 0.35);
+		background: #2b2b2e;
 	}
 	.shot {
 		width: 100%;
@@ -315,10 +317,10 @@
 		gap: 16px;
 	}
 	.card {
-		border: 1px solid #23262e;
-		border-radius: 14px;
+		border: 1px solid #45454a;
+		border-radius: 10px;
 		padding: 22px;
-		background: #101216;
+		background: #2b2b2e;
 	}
 	.card h3 {
 		margin: 12px 0 8px;
@@ -326,7 +328,7 @@
 	}
 	.card p {
 		margin: 0;
-		color: #9aa0ab;
+		color: #98989d;
 		font-size: 14px;
 		line-height: 1.6;
 	}
@@ -347,7 +349,7 @@
 	}
 	.step p {
 		margin: 0;
-		color: #9aa0ab;
+		color: #98989d;
 		font-size: 14.5px;
 		line-height: 1.65;
 	}
@@ -355,12 +357,12 @@
 		margin: 40px auto 0;
 		max-width: 720px;
 		text-align: center;
-		color: #6d727d;
+		color: #6e6e73;
 		font-size: 13px;
 		line-height: 1.7;
 	}
 	.fineprint code {
-		color: #9aa0ab;
+		color: #98989d;
 	}
 
 	.agents {
@@ -373,7 +375,7 @@
 		text-align: left;
 	}
 	.agents-copy p {
-		color: #9aa0ab;
+		color: #98989d;
 		line-height: 1.7;
 		font-size: 15.5px;
 	}
@@ -397,9 +399,10 @@
 		gap: 16px;
 	}
 	.stack-grid > div {
-		border: 1px solid #23262e;
-		border-radius: 14px;
+		border: 1px solid #45454a;
+		border-radius: 10px;
 		padding: 22px;
+		background: #2b2b2e;
 	}
 	.stack-grid h3 {
 		margin: 0 0 8px;
@@ -407,7 +410,7 @@
 	}
 	.stack-grid p {
 		margin: 0;
-		color: #9aa0ab;
+		color: #98989d;
 		font-size: 14px;
 		line-height: 1.6;
 	}
@@ -418,14 +421,14 @@
 		justify-content: space-between;
 		padding: 72px 0 40px;
 		margin-top: 88px;
-		border-top: 1px solid #1b1e24;
+		border-top: 1px solid #45454a;
 		font-size: 14px;
 	}
 	footer a {
-		color: #9aa0ab;
+		color: #98989d;
 	}
 	.muted {
-		color: #6d727d;
+		color: #6e6e73;
 	}
 	.logo {
 		width: 26px;
@@ -444,9 +447,9 @@
 		width: 40px;
 		height: 40px;
 		border-radius: 10px;
-		background: rgba(255, 255, 255, 0.05);
-		border: 1px solid rgba(255, 255, 255, 0.09);
-		color: #f5c84c;
+		background: #3a3a3e;
+		border: 1px solid #45454a;
+		color: #f5f5f7;
 	}
 	.f-icon .emoji {
 		font-size: 20px;
