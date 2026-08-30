@@ -35,6 +35,24 @@
 		},
 	];
 
+	import { onMount } from "svelte";
+
+	/** Scroll-trigger: animations start when their section approaches. */
+	let inview = $state<Record<string, boolean>>({});
+	onMount(() => {
+		const io = new IntersectionObserver(
+			(entries) => {
+				for (const e of entries) if (e.isIntersecting) inview[e.target.id] = true;
+			},
+			{ rootMargin: "0px 0px -15% 0px" },
+		);
+		for (const id of ["agents", "model"]) {
+			const el = document.getElementById(id);
+			if (el) io.observe(el);
+		}
+		return () => io.disconnect();
+	});
+
 	const steps = [
 		{
 			n: "01",
@@ -68,20 +86,20 @@
 	<nav>
 		<span class="brand"><img class="logo" src="/logo.png" alt="" /> Roostr</span>
 		<div class="links">
-			<a href="#features">Features</a>
-			<a href="#how">How it works</a>
 			<a href="#agents">Agents</a>
+			<a href="#model">The model</a>
+			<a href="#own">Own it</a>
 			<a href="/app" class="gh">Open app</a>
 			<a href="https://github.com/Geep5/Roostr">GitHub</a>
 		</div>
 	</nav>
 
 	<header class="hero">
-		<h1>Your notes. Your machines.<br /><span class="accent">Nobody's server.</span></h1>
+		<h1>Your work. Your agents.<br /><span class="accent">Nobody's platform.</span></h1>
 		<p class="sub">
-			Roostr is a local-first knowledge base with a block editor, live queries, a graph view, and
-			AI agents that live inside your notes — synced between your devices as end-to-end encrypted
-			Nostr events. No account. No backend. Your key is your identity.
+			Roostr is a decentralized home base — todos, CRM, projects, memory — where AI agents work
+			<em>with</em> you on the same objects you do. No account. No server. Your key is your
+			identity, your relays are yours to choose, and your agents live where your data does.
 		</p>
 		<div class="cta">
 			<a class="btn primary" href="/app">Open Roostr Web</a>
@@ -92,41 +110,86 @@
 		</div>
 	</header>
 
-	<section id="features">
-		<h2>Everything a second brain needs</h2>
-		<div class="grid">
-			{#each features as f (f.title)}
-				<div class="card">
-					<span class="f-icon">
-						{#if f.icon === "editor"}
-							<!-- The app's block drag handle. -->
-							<svg viewBox="0 0 2 12" width="8" height="26" fill="none"><path fill-rule="evenodd" clip-rule="evenodd" d="M0 1C0 0.447716 0.447715 0 1 0C1.55228 0 2 0.447716 2 1C2 1.55228 1.55228 2 1 2C0.447715 2 0 1.55228 0 1ZM0 6C0 5.44772 0.447715 5 1 5C1.55228 5 2 5.44772 2 6C2 6.55228 1.55228 7 1 7C0.447715 7 0 6.55228 0 6ZM1 10C0.447715 10 0 10.4477 0 11C0 11.5523 0.447715 12 1 12C1.55228 12 2 11.5523 2 11C2 10.4477 1.55228 10 1 10Z" fill="currentColor" /></svg>
-						{:else if f.icon === "table"}
-							<!-- The app's table layout icon. -->
-							<svg viewBox="0 0 56 56" width="30" height="30" fill="none"><rect x="11.5" y="13.5" width="33" height="29" rx="2.5" stroke="currentColor" /><path d="M23.5 13.5V42.5" stroke="currentColor" /><path d="M11 23H45" stroke="currentColor" /><path d="M11 33.5H45" stroke="currentColor" /></svg>
-						{:else if f.icon === "graph"}
-							<!-- The app's graph glyph. -->
-							<svg viewBox="0 0 16 16" width="26" height="26" fill="none"><path d="M4.5 11.5 8 5.5l3.5 6z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round" fill="none" /><circle cx="8" cy="4" r="2.1" fill="none" stroke="currentColor" stroke-width="1.3" /><circle cx="3.5" cy="12.5" r="2.1" fill="none" stroke="currentColor" stroke-width="1.3" /><circle cx="12.5" cy="12.5" r="2.1" fill="none" stroke="currentColor" stroke-width="1.3" /></svg>
-						{:else if f.icon === "agent"}
-							<span class="emoji">🤖</span>
-						{:else if f.icon === "sync"}
-							<!-- The app's sync/sort arrows. -->
-							<svg viewBox="0 0 20 20" width="26" height="26" fill="none"><path fill-rule="evenodd" clip-rule="evenodd" d="M10.705 9.02168C10.9784 9.32611 11.4216 9.32611 11.695 9.02168L13.25 7.29001V15.75H14.75V7.29001L16.305 9.02168C16.5784 9.32611 17.0216 9.32611 17.295 9.02168C17.5683 8.71726 17.5683 8.2237 17.295 7.91928L14 4.25L10.705 7.91928C10.4317 8.2237 10.4317 8.71726 10.705 9.02168ZM9.29497 10.9803C9.02161 10.6758 8.57839 10.6758 8.30503 10.9803L6.75 12.7119L6.75 4.25195L5.25 4.25195L5.25 12.7119L3.69498 10.9803C3.42161 10.6758 2.97839 10.6758 2.70503 10.9803C2.43166 11.2847 2.43166 11.7783 2.70503 12.0827L6 15.752L9.29497 12.0827C9.56834 11.7783 9.56834 11.2847 9.29497 10.9803Z" fill="currentColor" /></svg>
-						{:else if f.icon === "dag"}
-							<!-- The app's kanban/columns icon: parallel histories. -->
-							<svg viewBox="0 0 56 56" width="30" height="30" fill="none"><rect x="11.5" y="13.5" width="14" height="29" rx="2.5" stroke="currentColor" /><rect x="30.5" y="13.5" width="14" height="19" rx="2.5" stroke="currentColor" /></svg>
-						{/if}
-					</span>
-					<h3>{f.title}</h3>
-					<p>{f.body}</p>
-				</div>
-			{/each}
+
+	<section id="agents" class:inview={inview.agents}>
+		<h2>Agents are citizens, not features</h2>
+		<p class="section-sub">
+			Every space can host agents with their own chats, memory, and skills — a coordinator fronts
+			your device, specialists spawn for tasks, and they talk to each other. Their work lands as
+			objects you can see, edit, and own.
+		</p>
+		<div class="scene">
+			<div class="scene-chat">
+				<div class="sc-msg sc-1"><span class="sc-avatar you">Y</span><div><div class="sc-meta">You</div><div class="sc-text">Pull this week's signups into a CRM view</div></div></div>
+				<div class="sc-typing"><span class="sc-avatar g">G</span><span class="dots"><i></i><i></i><i></i></span></div>
+				<div class="sc-msg sc-2"><span class="sc-avatar g">G</span><div><div class="sc-meta">Gracie · coordinator</div><div class="sc-text">On it — Stats, grab the numbers</div></div></div>
+				<div class="sc-msg sc-3"><span class="sc-avatar st">S</span><div><div class="sc-meta">Stats · spawned specialist</div><div class="sc-text">3 new this week, 2 churned</div></div></div>
+				<div class="sc-msg sc-4"><span class="sc-avatar g">G</span><div><div class="sc-meta">Gracie</div><div class="sc-text">Built it — pinned to your space</div></div></div>
+			</div>
+			<div class="scene-rail">
+				<div class="rail-label">Personal</div>
+				<div class="rail-card">📊 CRM — this week<span class="rail-sub">query · type = Signup</span></div>
+			</div>
 		</div>
+		<p class="scene-cap">A real flow: you ask, the coordinator delegates to a spawned specialist, and the result becomes a first-class object — pinned, synced, yours.</p>
 	</section>
 
-	<section class="shots">
-		<div class="shot-wrap small">
-			<img class="shot" src="/shot-query.webp" alt="A live query: filters, sorts, layouts, and a New button that creates prefilled objects" />
+	<section id="model" class:inview={inview.model}>
+		<h2>One system, everything in it</h2>
+		<p class="section-sub">Notes, tasks, people, bookmarks, chats — the same kind of thing, wearing different shapes.</p>
+		<div class="model-grid">
+			<div class="m-panel">
+				<h3>Everything is an object</h3>
+				<div class="morph">
+					<div class="morph-card">
+						<span class="morph-icon"><span class="mi mi-note">📝</span><span class="mi mi-task">✅</span><span class="mi mi-bm">🔖</span></span>
+						<span class="morph-name">Sunday ride</span>
+						<span class="morph-check">✓</span>
+						<span class="morph-url">strava.com/…</span>
+					</div>
+					<div class="morph-badges"><span class="mb b1">note</span><span class="mb b2">task</span><span class="mb b3">bookmark</span></div>
+				</div>
+				<p>Same object — the type is just its shape. Retype it and the anatomy follows.</p>
+			</div>
+			<div class="m-panel">
+				<h3>Types bring properties</h3>
+				<div class="explode">
+					<div class="ex-layer l1"><span>Sunday ride</span><em>name</em></div>
+					<div class="ex-layer l2"><span>🚴</span><em>icon</em></div>
+					<div class="ex-layer l3"><span>In progress</span><em>status</em></div>
+					<div class="ex-layer l4"><span>Fri</span><em>due</em></div>
+					<div class="ex-layer l5"><span>→ You</span><em>assignee</em></div>
+				</div>
+				<p>Typed fields defined once on the type, valued per object — and shared across every type that wants them.</p>
+			</div>
+			<div class="m-panel">
+				<h3>Links are first-class</h3>
+				<svg class="bloom" viewBox="0 0 260 140">
+					<line class="bl e1" x1="60" y1="40" x2="130" y2="80" />
+					<line class="bl e2" x1="60" y1="40" x2="70" y2="110" />
+					<line class="bl e3" x1="130" y1="80" x2="200" y2="50" />
+					<line class="bl e4" x1="200" y1="50" x2="210" y2="110" />
+					<circle class="bn n1" cx="60" cy="40" r="9" />
+					<circle class="bn n2" cx="130" cy="80" r="9" />
+					<circle class="bn n3" cx="70" cy="110" r="9" />
+					<circle class="bn n4" cx="200" cy="50" r="9" />
+					<circle class="bn n5" cx="210" cy="110" r="9" />
+				</svg>
+				<p>Every link is a property — the graph view is just your links, visualized.</p>
+			</div>
+			<div class="m-panel">
+				<h3>Queries stay live</h3>
+				<div class="q-demo">
+					<div class="q-rule">type: Task · done: false</div>
+					<div class="q-grid">
+						<span class="q-chip">Buy basil</span>
+						<span class="q-chip q-moving">Ship sync fix <i class="q-check">✓</i></span>
+						<span class="q-chip q-new">Write release notes</span>
+					</div>
+					<div class="q-done">✓ Done — collection<span class="q-chip q-arrived">Ship sync fix</span></div>
+				</div>
+				<p>A collection is a pile you made. A query is a question that keeps asking itself — flip the data and membership moves on its own.</p>
+			</div>
 		</div>
 	</section>
 
@@ -149,21 +212,12 @@
 		</p>
 	</section>
 
-	<section id="agents" class="agents">
-		<div class="agents-copy">
-			<h2>An agent in every channel</h2>
-			<p>
-				Give a channel an agent and it becomes a collaborator: it reads and writes your objects,
-				pins durable facts and milestones to structured memory, loads skills you write as ordinary
-				notes, and compacts its own conversation so it never forgets the plot.
-			</p>
-			<p>
-				It runs on <em>your</em> hardware with <em>your</em> Claude plan or API key — sign in once
-				from Settings. Message it from any synced device; replies ride the relays home.
-			</p>
-		</div>
-		<div class="shot-wrap small">
-			<img class="shot" src="/shot-graph.webp" alt="Roostr's graph view: objects in a channel as a force-directed graph" />
+	<section id="own">
+		<h2>Nobody's platform, verifiably</h2>
+		<div class="own-grid">
+			<div class="card"><span class="f-icon">🔑</span><h3>Your key is the account</h3><p>There is no signup, no email, no recovery flow to social-engineer. Hold the key, hold the vault — on any device.</p></div>
+			<div class="card"><span class="f-icon">🔀</span><h3>Relays are swappable pipes</h3><p>Changes travel as end-to-end encrypted Nostr events. Relays store ciphertext only; swap them, add your own, or run offline and sync later.</p></div>
+			<div class="card"><span class="f-icon">🧾</span><h3>Proof, not vibes</h3><p>Every change is content-addressed and replayed on import. Two devices can compare a vault fingerprint and prove they hold identical state — and deletes that should be final actually are.</p></div>
 		</div>
 	</section>
 
@@ -311,11 +365,6 @@
 		text-align: center;
 	}
 
-	.grid {
-		display: grid;
-		grid-template-columns: repeat(auto-fit, minmax(290px, 1fr));
-		gap: 16px;
-	}
 	.card {
 		border: 1px solid #45454a;
 		border-radius: 10px;
@@ -365,33 +414,6 @@
 		color: #98989d;
 	}
 
-	.agents {
-		display: grid;
-		grid-template-columns: 1fr 1fr;
-		gap: 44px;
-		align-items: center;
-	}
-	.agents h2 {
-		text-align: left;
-	}
-	.agents-copy p {
-		color: #98989d;
-		line-height: 1.7;
-		font-size: 15.5px;
-	}
-	.agents-copy em {
-		color: #e6e8ec;
-		font-style: normal;
-		font-weight: 600;
-	}
-	.shot-wrap.small {
-		box-shadow: 0 20px 50px rgba(0, 0, 0, 0.45);
-	}
-	@media (max-width: 800px) {
-		.agents {
-			grid-template-columns: 1fr;
-		}
-	}
 
 	.stack-grid {
 		display: grid;
@@ -451,12 +473,205 @@
 		border: 1px solid #45454a;
 		color: #f5f5f7;
 	}
-	.f-icon .emoji {
-		font-size: 20px;
+	.section-sub {
+		max-width: 640px;
+		margin: 0 auto 40px;
+		text-align: center;
+		color: #98989d;
+		font-size: 16px;
+		line-height: 1.6;
 	}
-	.shots {
+
+	/* ── Agents scene: scripted chat, plays on scroll into view ──── */
+	.scene {
+		display: grid;
+		grid-template-columns: 1.6fr 1fr;
+		gap: 18px;
+		max-width: 860px;
+		margin: 0 auto;
+	}
+	.scene-chat {
+		background: #2b2b2e;
+		border: 1px solid #45454a;
+		border-radius: 12px;
+		padding: 18px;
 		display: flex;
+		flex-direction: column;
+		gap: 12px;
+		min-height: 260px;
+	}
+	.sc-msg {
+		display: flex;
+		gap: 10px;
+		opacity: 0;
+		transform: translateY(8px);
+	}
+	.sc-avatar {
+		width: 26px;
+		height: 26px;
+		border-radius: 50%;
+		flex: none;
+		display: flex;
+		align-items: center;
 		justify-content: center;
-		margin: -10px 0 30px;
+		font-size: 11px;
+		font-weight: 600;
+		color: #fff;
+	}
+	.sc-avatar.you { background: #5e5ce6; }
+	.sc-avatar.g { background: #0a84ff; }
+	.sc-avatar.st { background: #7d7aff; }
+	.sc-meta { font-size: 11px; color: #98989d; margin-bottom: 2px; }
+	.sc-text { font-size: 14px; line-height: 1.45; }
+	.sc-typing { display: flex; align-items: center; gap: 10px; opacity: 0; }
+	.sc-typing .dots { display: inline-flex; gap: 4px; }
+	.sc-typing i { width: 6px; height: 6px; border-radius: 50%; background: #98989d; animation: dot-b 1s infinite; }
+	.sc-typing i:nth-child(2) { animation-delay: 0.15s; }
+	.sc-typing i:nth-child(3) { animation-delay: 0.3s; }
+	@keyframes dot-b { 50% { opacity: 0.25; transform: translateY(-2px); } }
+	#agents.inview .sc-1 { animation: sc-in 0.5s 0.4s both; }
+	#agents.inview .sc-typing { animation: sc-in 0.4s 1.1s both, sc-out 0.3s 2.4s forwards; }
+	#agents.inview .sc-2 { animation: sc-in 0.5s 2.6s both; }
+	#agents.inview .sc-3 { animation: sc-in 0.5s 4.2s both; }
+	#agents.inview .sc-4 { animation: sc-in 0.5s 5.6s both; }
+	@keyframes sc-in { to { opacity: 1; transform: none; } }
+	@keyframes sc-out { to { opacity: 0; height: 0; margin: -12px 0 0; } }
+	.scene-rail {
+		background: #2b2b2e;
+		border: 1px solid #45454a;
+		border-radius: 12px;
+		padding: 14px;
+		display: flex;
+		flex-direction: column;
+		gap: 10px;
+	}
+	.rail-label { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; color: #98989d; }
+	.rail-card {
+		background: #3a3a3e;
+		border: 1px solid #45454a;
+		border-radius: 10px;
+		padding: 12px;
+		font-size: 14px;
+		font-weight: 600;
+		opacity: 0;
+		transform: translateX(-40px) scale(0.92);
+	}
+	.rail-sub { display: block; font-size: 11px; font-weight: 400; color: #98989d; margin-top: 3px; }
+	#agents.inview .rail-card { animation: rail-in 0.55s 6.6s cubic-bezier(0.2, 0.9, 0.3, 1.2) both; }
+	@keyframes rail-in { to { opacity: 1; transform: none; } }
+	.scene-cap { max-width: 640px; margin: 18px auto 0; text-align: center; color: #98989d; font-size: 13px; line-height: 1.6; }
+
+	/* ── The model panels ────────────────────────────────────────── */
+	.model-grid {
+		display: grid;
+		grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
+		gap: 16px;
+	}
+	.m-panel {
+		background: #2b2b2e;
+		border: 1px solid #45454a;
+		border-radius: 12px;
+		padding: 20px;
+	}
+	.m-panel h3 { margin: 0 0 14px; font-size: 16px; }
+	.m-panel p { margin: 14px 0 0; color: #98989d; font-size: 13.5px; line-height: 1.6; }
+
+	/* morph: note -> task -> bookmark */
+	.morph-card {
+		position: relative;
+		background: #3a3a3e;
+		border: 1px solid #45454a;
+		border-radius: 10px;
+		padding: 14px;
+		display: flex;
+		align-items: center;
+		gap: 10px;
+		height: 24px;
+	}
+	.morph-name { font-weight: 600; }
+	.morph-icon { position: relative; width: 22px; height: 22px; }
+	.mi { position: absolute; inset: 0; opacity: 0; }
+	.morph-check { margin-left: auto; width: 18px; height: 18px; border-radius: 4px; border: 1px solid #45454a; background: #2b2b2e; color: #fff; font-size: 11px; display: flex; align-items: center; justify-content: center; opacity: 0; }
+	.morph-url { font-size: 11px; color: #98989d; opacity: 0; }
+	.morph-badges { display: flex; gap: 8px; justify-content: center; margin-top: 10px; }
+	.mb { font-size: 11px; padding: 3px 10px; border-radius: 999px; border: 1px solid #45454a; color: #98989d; transition: all 0.3s; }
+	#model.inview .mi-note { animation: mi 9s 0.3s infinite; }
+	#model.inview .mi-task { animation: mi 9s 3.3s infinite; }
+	#model.inview .mi-bm { animation: mi 9s 6.3s infinite; }
+	@keyframes mi { 0% { opacity: 0; } 4%, 32% { opacity: 1; } 36%, 100% { opacity: 0; } }
+	#model.inview .b1 { animation: mb 9s 0.3s infinite; }
+	#model.inview .b2 { animation: mb 9s 3.3s infinite; }
+	#model.inview .b3 { animation: mb 9s 6.3s infinite; }
+	@keyframes mb { 0% { border-color: #45454a; color: #98989d; } 4%, 32% { border-color: #0a84ff; color: #0a84ff; } 36%, 100% { border-color: #45454a; color: #98989d; } }
+	#model.inview .morph-check { animation: mcheck 9s infinite; }
+	@keyframes mcheck { 33%, 60% { opacity: 1; } 0%, 30%, 63%, 100% { opacity: 0; } }
+	#model.inview .morph-url { animation: murl 9s infinite; }
+	@keyframes murl { 66%, 93% { opacity: 1; } 0%, 63%, 96%, 100% { opacity: 0; } }
+
+	/* exploded properties */
+	.explode { display: flex; flex-direction: column; gap: 6px; }
+	.ex-layer {
+		display: flex;
+		justify-content: space-between;
+		align-items: center;
+		background: #3a3a3e;
+		border: 1px solid #45454a;
+		border-radius: 8px;
+		padding: 8px 12px;
+		font-size: 13px;
+		opacity: 0;
+		transform: translateY(10px);
+	}
+	.ex-layer em { font-style: normal; font-size: 11px; color: #98989d; font-family: ui-monospace, monospace; }
+	#model.inview .l1 { animation: sc-in 0.4s 0.4s both; }
+	#model.inview .l2 { animation: sc-in 0.4s 0.65s both; }
+	#model.inview .l3 { animation: sc-in 0.4s 0.9s both; }
+	#model.inview .l4 { animation: sc-in 0.4s 1.15s both; }
+	#model.inview .l5 { animation: sc-in 0.4s 1.4s both; }
+
+	/* graph bloom */
+	.bloom { width: 100%; height: 160px; }
+	.bn { fill: #3a3a3e; stroke: #45454a; stroke-width: 1.5; opacity: 0; }
+	.bl { stroke: #45454a; stroke-width: 1.5; stroke-dasharray: 200; stroke-dashoffset: 200; }
+	.bn.n4, .bn.n2 { stroke: #0a84ff; }
+	#model.inview .n1 { animation: sc-in 0.4s 0.3s both; }
+	#model.inview .e1 { animation: draw 0.6s 0.6s both; }
+	#model.inview .n2 { animation: sc-in 0.4s 0.8s both; }
+	#model.inview .e2 { animation: draw 0.6s 0.9s both; }
+	#model.inview .n3 { animation: sc-in 0.4s 1.1s both; }
+	#model.inview .e3 { animation: draw 0.6s 1.2s both; }
+	#model.inview .n4 { animation: sc-in 0.4s 1.5s both; }
+	#model.inview .e4 { animation: draw 0.6s 1.8s both; }
+	#model.inview .n5 { animation: sc-in 0.4s 2s both; }
+	@keyframes draw { to { stroke-dashoffset: 0; } }
+
+	/* live query */
+	.q-demo { display: flex; flex-direction: column; gap: 10px; }
+	.q-rule { align-self: flex-start; font-size: 11px; font-family: ui-monospace, monospace; background: #3a3a3e; border: 1px solid #0a84ff; color: #0a84ff; border-radius: 999px; padding: 3px 10px; }
+	.q-grid { display: flex; flex-direction: column; gap: 6px; min-height: 96px; }
+	.q-chip { display: flex; align-items: center; justify-content: space-between; background: #3a3a3e; border: 1px solid #45454a; border-radius: 8px; padding: 7px 11px; font-size: 13px; }
+	.q-check { font-style: normal; width: 16px; height: 16px; border: 1px solid #45454a; border-radius: 4px; font-size: 10px; display: inline-flex; align-items: center; justify-content: center; color: transparent; }
+	.q-done { font-size: 12px; color: #98989d; display: flex; align-items: center; gap: 8px; min-height: 34px; }
+	.q-arrived { opacity: 0; }
+	#model.inview .q-moving { animation: qmove 6s 1s infinite; }
+	#model.inview .q-moving .q-check { animation: qcheck 6s 1s infinite; }
+	#model.inview .q-arrived { animation: qarrive 6s 1s infinite; }
+	#model.inview .q-new { animation: qnew 6s 1s infinite; }
+	@keyframes qcheck { 0%, 18% { background: transparent; color: transparent; } 24%, 100% { background: #0a84ff; border-color: #0a84ff; color: #fff; } }
+	@keyframes qmove { 0%, 24% { opacity: 1; transform: none; } 34%, 88% { opacity: 0; transform: translateY(6px); } 94%, 100% { opacity: 1; transform: none; } }
+	@keyframes qarrive { 0%, 28% { opacity: 0; } 36%, 88% { opacity: 1; } 96%, 100% { opacity: 0; } }
+	@keyframes qnew { 0%, 40% { opacity: 0; transform: translateY(-6px); } 48%, 88% { opacity: 1; transform: none; } 96%, 100% { opacity: 0; } }
+
+	/* own it */
+	.own-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 16px; }
+
+	@media (max-width: 800px) {
+		.scene { grid-template-columns: 1fr; }
+		.model-grid { grid-template-columns: 1fr; }
+	}
+	@media (prefers-reduced-motion: reduce) {
+		.sc-msg, .sc-typing, .rail-card, .ex-layer, .bn { opacity: 1 !important; transform: none !important; animation: none !important; }
+		.bl { stroke-dashoffset: 0 !important; animation: none !important; }
+		.mi-note, .b1 { opacity: 1 !important; }
 	}
 </style>
