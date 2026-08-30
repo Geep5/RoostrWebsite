@@ -171,6 +171,26 @@ export async function runMutation(
 			return {};
 		}
 
+		// Real deletion: record object ids in the synced vanish ledger
+		// (object __vanished__, fields vanished:<id>) and tombstone locally.
+		// Devices enforce the ledger on load; the desktop purges the files.
+		case "vanish": {
+			const ids: string[] = [];
+			const single = str("object_id");
+			if (single) ids.push(single);
+			const arr = params["object_ids"];
+			if (Array.isArray(arr)) for (const v of arr) if (typeof v === "string") ids.push(v);
+			if (ids.length === 0) throw new Error("object_id or object_ids required");
+			if (ids.includes("__vanished__")) throw new Error("the vanish ledger cannot be vanished");
+			for (const id of ids) {
+				await commitOps(ctx, id, [{ objectDelete: {} }]);
+				await commitOps(ctx, "__vanished__", [
+					{ fieldSet: { key: `vanished:${id}`, value: { boolValue: true } } },
+				]);
+			}
+			return { vanished: ids.length };
+		}
+
 		case "table_create": {
 			const objectId = str("object_id");
 			const rows = Math.max(1, num("rows") ?? 3);
