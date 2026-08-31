@@ -11,3 +11,5 @@ declare global {
 }
 
 export {};
+
+declare const __BUILD_STAMP__: string;

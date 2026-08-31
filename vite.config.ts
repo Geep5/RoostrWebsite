@@ -3,6 +3,10 @@ import { sveltekit } from '@sveltejs/kit/vite';
 import { defineConfig } from 'vite';
 
 export default defineConfig({
+	define: {
+		// Visible in Settings - answers "which build is this phone running?"
+		__BUILD_STAMP__: JSON.stringify(new Date().toISOString().slice(0, 16).replace("T", " ") + " UTC"),
+	},
 	plugins: [
 		sveltekit({
 			compilerOptions: {

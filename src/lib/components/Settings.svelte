@@ -504,6 +504,7 @@
 				</div>
 			{/if}
 		</section>
+		<p class="build-stamp">Build {__BUILD_STAMP__}</p>
 	</div>
 </div>
 
@@ -884,5 +885,12 @@
 		.modal::-webkit-scrollbar {
 			display: none;
 		}
+	}
+	.build-stamp {
+		margin: 14px 2px 0;
+		font-size: 11px;
+		color: var(--muted);
+		opacity: 0.7;
+		text-align: center;
 	}
 </style>
