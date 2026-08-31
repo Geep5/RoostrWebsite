@@ -94,6 +94,44 @@
 		npub = loadKey()?.npub ?? "";
 	}
 
+
+	// ── Profile picture (kind 0, engine-signed) ──────────────────────
+	import { cachedProfile, fetchProfile, saveProfile, imageToAvatar } from "$lib/engine/profile";
+	let profilePicture = $state("");
+	let avatarBusy = $state(false);
+	let avatarState = $state("");
+	let avatarFileEl = $state<HTMLInputElement>();
+
+	profilePicture = cachedProfile().picture ?? "";
+	void fetchProfile().then((p) => (profilePicture = p.picture ?? ""));
+
+	async function pickAvatar(e: Event) {
+		const file = (e.currentTarget as HTMLInputElement).files?.[0];
+		if (!file) return;
+		avatarBusy = true;
+		avatarState = "saving…";
+		try {
+			const p = await saveProfile({ picture: await imageToAvatar(file) });
+			profilePicture = p.picture ?? "";
+			avatarState = "saved";
+		} catch {
+			avatarState = "failed";
+		} finally {
+			avatarBusy = false;
+			setTimeout(() => (avatarState = ""), 2000);
+		}
+	}
+
+	async function removeAvatar() {
+		avatarBusy = true;
+		try {
+			const p = await saveProfile({ picture: "" });
+			profilePicture = p.picture ?? "";
+		} finally {
+			avatarBusy = false;
+		}
+	}
+
 	onMount(() => {
 		void load();
 	});
@@ -205,6 +243,23 @@
 			<button class="x" onclick={onclose}>×</button>
 		</header>
 
+		<section>
+			<h3>Profile</h3>
+			<p class="hint">Your avatar - shown on the Spaces screen and synced to every device holding this key.</p>
+			<div class="profile-row">
+				{#if profilePicture}
+					<img class="profile-avatar" src={profilePicture} alt="" />
+				{:else}
+					<span class="profile-avatar placeholder">⚙</span>
+				{/if}
+				<input type="file" accept="image/*" bind:this={avatarFileEl} onchange={(e) => void pickAvatar(e)} hidden />
+				<button class="action" disabled={avatarBusy} onclick={() => avatarFileEl?.click()}>{profilePicture ? "Change picture" : "Upload picture"}</button>
+				{#if profilePicture}
+					<button disabled={avatarBusy} onclick={() => void removeAvatar()}>Remove</button>
+				{/if}
+				{#if avatarState}<span class="hint">{avatarState}</span>{/if}
+			</div>
+		</section>
 		<section>
 			<h3>Nostr identity</h3>
 			<p class="hint">
@@ -724,5 +779,25 @@
 	.chip:hover {
 		color: var(--fg);
 		border-color: var(--accent);
+	}
+	.profile-row {
+		display: flex;
+		align-items: center;
+		gap: 12px;
+	}
+	.profile-avatar {
+		width: 56px;
+		height: 56px;
+		border-radius: 50%;
+		object-fit: cover;
+		flex: none;
+	}
+	.profile-avatar.placeholder {
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		background: var(--hover);
+		border: 1px solid var(--border);
+		font-size: 22px;
 	}
 </style>
