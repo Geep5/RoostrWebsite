@@ -18,7 +18,9 @@ const toHex = (b: Uint8Array): string => {
 import { computeObject } from "./replay";
 import { runQuery } from "./query";
 import { ChangeStore } from "./store";
-import { RelaySync, DEFAULT_RELAYS } from "./sync";
+import { RelaySync, DEFAULT_RELAYS, npubToHex, type SharedSpaceInfo } from "./sync";
+import { spaceKeyAll } from "./spacekeys";
+import { getPublicKey } from "nostr-tools";
 import { loadKey, authorIdFor } from "./keys";
 import { runMutation } from "./mutate";
 
@@ -59,6 +61,8 @@ class WebBackend {
 				for (const id of ids) this.dirty.add(id);
 				const cb = [...this.commitListeners];
 				for (const fn of cb) fn(ids);
+				// A synced commit on a space object can change members/keys.
+				if (ids.some((id) => this.states.get(id)?.typeKey === "channel")) void this.refreshShared();
 			},
 			onStatus: (s) => {
 				void this.store.getBootstrapped().then((b) => {
@@ -66,8 +70,80 @@ class WebBackend {
 					for (const fn of this.statusListeners) fn(this.status);
 				});
 			},
+		}, {
+			spaceOf: (objectId) => {
+				const o = this.states.get(objectId);
+				if (!o) return "";
+				return o.typeKey === "channel" ? o.id : (o.fields["channel"]?.stringValue ?? "");
+			},
 		});
-		void this.sync.start();
+		await this.refreshShared();
+		void this.sync.start().then(() => this.refreshShared());
+	}
+
+	/**
+	 * Shared-space reconcile: build the shared view from local space keys +
+	 * member fields, hand it to the sync layer, publish the relay
+	 * write-allowlist for owned spaces, and (re)queue a space's whole
+	 * history under its key the first time it becomes shared (or its key
+	 * rotates) - that republish is what makes joiners see the space.
+	 */
+	private async refreshShared(): Promise<void> {
+		if (!this.sync) return;
+		await this.ensure();
+		const key = loadKey();
+		if (!key) return;
+		const myPk = getPublicKey(key.sk);
+		const infos: SharedSpaceInfo[] = [];
+		for (const [spaceId, entry] of Object.entries(spaceKeyAll())) {
+			if (!entry.key || entry.key.length !== 64) continue;
+			const stateObj = this.states.get(spaceId);
+			const writers = new Set<string>([entry.owner ?? myPk]);
+			let memberCount = 0;
+			const items = stateObj?.fields["members"]?.valuesValue?.items ?? [];
+			for (const item of items) {
+				const entries = (item as { mapValue?: { entries?: Record<string, { stringValue?: string }> } }).mapValue?.entries ?? {};
+				const npub = entries["npub"]?.stringValue ?? "";
+				const role = entries["role"]?.stringValue ?? "writer";
+				const hex = npubToHex(npub);
+				if (hex) {
+					memberCount++;
+					if (role !== "viewer") writers.add(hex);
+				}
+			}
+			if (memberCount === 0 && !entry.owner) continue;
+			infos.push({ spaceId, keyHex: entry.key, keyId: entry.keyId ?? 1, writers: [...writers], owner: entry.owner });
+		}
+		this.sync.setSharedSpaces(infos);
+
+		const owned = infos.filter((i) => !i.owner || i.owner === myPk);
+		if (owned.length > 0) {
+			await this.sync.publishAllowlist([...new Set(owned.flatMap((i) => i.writers))]);
+		}
+
+		// History republish markers.
+		let markers: Record<string, number> = {};
+		try {
+			markers = JSON.parse(localStorage.getItem("roostr-shared-queued") ?? "{}") as Record<string, number>;
+		} catch {
+			/* fresh */
+		}
+		for (const info of infos) {
+			if (markers[info.spaceId] === info.keyId) continue;
+			markers[info.spaceId] = info.keyId;
+			let queued = 0;
+			for (const [objectId, state] of this.states) {
+				const space = state.typeKey === "channel" ? state.id : (state.fields["channel"]?.stringValue ?? "");
+				if (space !== info.spaceId) continue;
+				const changes = await this.store.changesFor(objectId);
+				for (const change of changes) {
+					this.sync.publish(encodeChange(change), change.id, objectId);
+					queued++;
+				}
+			}
+			if (queued > 0) console.log(`[backend] space ${info.spaceId.slice(0, 8)} shared (key #${info.keyId}): queued ${queued} change(s)`);
+		}
+		localStorage.setItem("roostr-shared-queued", JSON.stringify(markers));
 	}
 
 	stop(): void {

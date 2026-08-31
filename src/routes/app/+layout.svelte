@@ -9,6 +9,8 @@
 	import { backend, type SyncStatus } from "$lib/engine/backend";
 	import { loadKey } from "$lib/engine/keys";
 	import KeyGate from "$lib/components/KeyGate.svelte";
+	import { myNpub } from "$lib/engine/sync";
+	import { inviteUrl } from "$lib/invite";
 	import GraphIcon from "$lib/components/GraphIcon.svelte";
 	import PinnedWidget from "$lib/components/PinnedWidget.svelte";
 	import { creatableTypes, typeGlyph, createTyped, createCollection, createQuery } from "$lib/create";
@@ -171,6 +173,27 @@
 		await note.del(objectId);
 		await refreshAll();
 		await goto("/app");
+	}
+
+	/** Copy a universal invite link deep-linking to this object; the
+	 * space key rides in the URL fragment, so the link grants access. */
+	async function copyObjectLink() {
+		const ch = objectSummary ? owningSpaceOf(objectSummary.channelId) : undefined;
+		if (!objectSummary || !ch) return;
+		const payload = await spaceApi.invitePayload(ch.id, "");
+		await navigator.clipboard.writeText(
+			inviteUrl({
+				v: 1,
+				t: "space-invite",
+				space: ch.id,
+				name: (typeof payload.name === "string" && payload.name) || ch.name || undefined,
+				owner: myNpub() ?? "",
+				relays: backend.relays(),
+				key: typeof payload.key === "string" ? payload.key : "",
+				keyId: typeof payload.key_id === "number" ? payload.key_id : 1,
+				object: objectSummary.id,
+			}),
+		);
 	}
 
 	/** Pinned objects of the current channel, in pinned order. */
@@ -378,6 +401,9 @@
 								</div>
 							{/if}
 							<button onclick={() => { showMore = false; void duplicateObject(); }}>⧉ Duplicate</button>
+							{#if owningSpaceOf(objectSummary.channelId)}
+								<button onclick={() => { showMore = false; void copyObjectLink(); }}>🔗 Copy link</button>
+							{/if}
 							<div class="menu-sep"></div>
 							<button class="danger" onclick={() => { showMore = false; void moveToBin(); }}>🗑 Move to bin</button>
 						</div>
@@ -724,6 +750,9 @@
 									</div>
 								{/if}
 								<button onclick={() => { showMore = false; void duplicateObject(); }}>⧉ Duplicate</button>
+								{#if owningSpaceOf(objectSummary.channelId)}
+									<button onclick={() => { showMore = false; void copyObjectLink(); }}>🔗 Copy link</button>
+								{/if}
 								<div class="menu-sep"></div>
 								<button class="danger" onclick={() => { showMore = false; void moveToBin(); }}>🗑 Move to bin</button>
 							</div>

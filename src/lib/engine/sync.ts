@@ -18,15 +18,82 @@
  * publishOnce loop.
  */
 
-import { SimplePool, finalizeEvent, getPublicKey, nip44, type Event } from "nostr-tools";
+import { SimplePool, finalizeEvent, getPublicKey, nip19, nip44, type Event } from "nostr-tools";
 import { sha256 } from "@noble/hashes/sha2.js";
-import { bytesToHex } from "@noble/hashes/utils.js";
+import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
 import type { ChangeJSON, ChangeStoreApi, RelaySyncApi, SyncEvents } from "./contracts";
 import { proto } from "./proto";
+import { loadKey } from "./keys";
+import { spaceKeyImport } from "./spacekeys";
 
 export const DEFAULT_RELAYS = ["wss://roostr-relay.fly.dev"];
 
 const CHANGE_KIND = 1078;
+const ALLOWLIST_KIND = 30100;
+const ALLOWLIST_D = "roostr-allowlist";
+
+// ── Shared spaces ────────────────────────────────────────────────────
+//
+// Wire-compatible with the desktop daemon: a shared space syncs under
+// its 32-byte space key as the NIP-44 conversation key; tags are
+// blinded (spaceKey, objectId) plus a space-stream tag blinded
+// (spaceKey, "space:"+spaceId) so a joiner pulls the whole space with
+// one #h filter. Writers = owner + non-viewer members; anything else
+// is dropped on receipt.
+
+export interface SharedSpaceInfo {
+	spaceId: string;
+	keyHex: string;
+	keyId: number;
+	/** hex pubkeys allowed to author events. */
+	writers: string[];
+	owner?: string;
+}
+
+interface SharedSpace extends SharedSpaceInfo {
+	convKey: Uint8Array;
+	spaceTag: string;
+	writerSet: Set<string>;
+}
+
+function utf8(s: string): Uint8Array {
+	return new TextEncoder().encode(s);
+}
+
+export function blindShared(keyHex: string, id: string): string {
+	const a = utf8(keyHex);
+	const b = utf8(id);
+	const buf = new Uint8Array(a.length + b.length);
+	buf.set(a);
+	buf.set(b, a.length);
+	return bytesToHex(sha256(buf)).slice(0, 16);
+}
+
+export function npubToHex(npub: string): string | null {
+	try {
+		const d = nip19.decode(npub.trim());
+		if (d.type === "npub") return d.data as string;
+	} catch {
+		/* not bech32 */
+	}
+	const t = npub.trim().toLowerCase();
+	return /^[0-9a-f]{64}$/.test(t) ? t : null;
+}
+
+/** This device's npub, or null before key setup. */
+export function myNpub(): string | null {
+	const key = loadKey();
+	return key ? nip19.npubEncode(getPublicKey(key.sk)) : null;
+}
+
+/** Accept an invite link: store the space key; the next app boot (or
+ * shared-space refresh) backfills the space from the relays. */
+export function importSpaceInvite(inv: { space: string; owner: string; key: string; keyId: number }): boolean {
+	const ownerHex = npubToHex(inv.owner);
+	if (!ownerHex || !/^[0-9a-f]{64}$/.test(inv.key) || !inv.space) return false;
+	spaceKeyImport(inv.space, inv.key, inv.keyId || 1, ownerHex);
+	return true;
+}
 const PUBLISH_SPACING_MS = 120;
 const PAGE_SPACING_MS = 400;
 const PAGE_LIMIT = 500;
@@ -59,6 +126,8 @@ export interface RelaySyncOptions {
 	decode?: (bytes: Uint8Array) => ChangeJSON | null;
 	/** Debug hook: every raw relay event before decrypt. */
 	onRawEvent?: (event: Event) => void;
+	/** objectId -> owning space id ("" = personal). Channels own themselves. */
+	spaceOf?: (objectId: string) => string;
 }
 
 export interface SyncStats {
@@ -75,6 +144,7 @@ interface PublishItem {
 	b64: string;
 	attempts: number;
 	notBefore: number;
+	space?: SharedSpace;
 }
 
 export class RelaySync implements RelaySyncApi {
@@ -85,6 +155,9 @@ export class RelaySync implements RelaySyncApi {
 	private readonly conversationKey: Uint8Array;
 	private decode: ((bytes: Uint8Array) => ChangeJSON | null) | null;
 	private readonly onRawEvent?: (event: Event) => void;
+	private readonly spaceOf: (objectId: string) => string;
+	private sharedSpaces = new Map<string, SharedSpace>();
+	private spaceSub: { close(): void } | null = null;
 
 	private cursor = 0;
 	private stopped = false;
@@ -114,6 +187,98 @@ export class RelaySync implements RelaySyncApi {
 		this.conversationKey = nip44.getConversationKey(sk, this.pk);
 		this.decode = options.decode ?? null;
 		this.onRawEvent = options.onRawEvent;
+		this.spaceOf = options.spaceOf ?? (() => "");
+	}
+
+	/** Replace the shared-space view. New spaces get a full backfill of
+	 * their stream tag plus a live subscription. */
+	setSharedSpaces(infos: SharedSpaceInfo[]): void {
+		const prevTags = new Set([...this.sharedSpaces.values()].map((sp) => sp.spaceTag));
+		const next = new Map<string, SharedSpace>();
+		for (const info of infos) {
+			if (!/^[0-9a-f]{64}$/.test(info.keyHex)) continue;
+			next.set(info.spaceId, {
+				...info,
+				convKey: hexToBytes(info.keyHex),
+				spaceTag: blindShared(info.keyHex, `space:${info.spaceId}`),
+				writerSet: new Set(info.writers),
+			});
+		}
+		this.sharedSpaces = next;
+		const tags = [...next.values()].map((sp) => sp.spaceTag);
+		const fresh = tags.filter((t) => !prevTags.has(t));
+		if (this.stopped || !this.sub) return; // start() wires subscriptions itself
+		try {
+			this.spaceSub?.close();
+		} catch {
+			/* already closed */
+		}
+		this.spaceSub = null;
+		if (tags.length > 0) {
+			this.spaceSub = this.pool.subscribeMany(this.relays, { kinds: [CHANGE_KIND], "#h": tags, since: this.cursor + 1 }, {
+				onevent: (event) => {
+					this.liveChain = this.liveChain.then(() => this.handleLiveEvent(event)).catch(() => {});
+				},
+			});
+		}
+		if (fresh.length > 0) void this.backfillTags(fresh);
+	}
+
+	/** Owner duty: publish the relay write-allowlist. */
+	async publishAllowlist(writers: string[]): Promise<void> {
+		const others = writers.filter((w) => w !== this.pk);
+		try {
+			const event = finalizeEvent(
+				{
+					kind: ALLOWLIST_KIND,
+					created_at: Math.floor(Date.now() / 1000),
+					tags: [["d", ALLOWLIST_D], ...others.map((w) => ["p", w])],
+					content: "",
+				},
+				this.sk,
+			);
+			await Promise.any(this.pool.publish(this.relays, event));
+		} catch {
+			/* retried on next refresh */
+		}
+	}
+
+	/** Full walk of specific #h tags (joining a space mid-session). */
+	private async backfillTags(tags: string[]): Promise<void> {
+		const byId = new Map<string, Event>();
+		await Promise.all(
+			this.relays.map(async (relay) => {
+				let until: number | undefined;
+				for (;;) {
+					if (this.stopped) return;
+					let batch: Event[];
+					try {
+						batch = await this.pool.querySync([relay], { kinds: [CHANGE_KIND], "#h": tags, until, limit: PAGE_LIMIT });
+					} catch {
+						return;
+					}
+					if (batch.length === 0) return;
+					let fresh = 0;
+					for (const e of batch) {
+						if (!byId.has(e.id)) {
+							byId.set(e.id, e);
+							fresh++;
+						}
+					}
+					if (fresh === 0) return;
+					until = Math.min(...batch.map((e) => e.created_at));
+					await sleep(PAGE_SPACING_MS);
+				}
+			}),
+		);
+		const collected = [...byId.values()].sort((a, b) => a.created_at - b.created_at);
+		const batch: Array<{ bytes: Uint8Array; change: ChangeJSON; space?: SharedSpace }> = [];
+		for (const event of collected) {
+			const item = await this.eventToChange(event);
+			if (item) batch.push(item);
+		}
+		await this.importBatch(batch, true);
+		await this.persistCursor();
 	}
 
 	/** Blinded object tag: sha256(sk || objectId) hex prefix, as the daemon. */
@@ -160,6 +325,14 @@ export class RelaySync implements RelaySyncApi {
 				},
 			},
 		);
+		const spaceTags = [...this.sharedSpaces.values()].map((sp) => sp.spaceTag);
+		if (spaceTags.length > 0) {
+			this.spaceSub = this.pool.subscribeMany(this.relays, { kinds: [CHANGE_KIND], "#h": spaceTags, since: this.cursor + 1 }, {
+				onevent: (event) => {
+					this.liveChain = this.liveChain.then(() => this.handleLiveEvent(event)).catch(() => {});
+				},
+			});
+		}
 		this.events.onStatus({ phase: "live", imported: this.stats.imported });
 	}
 
@@ -173,6 +346,12 @@ export class RelaySync implements RelaySyncApi {
 			/* already closed */
 		}
 		this.sub = null;
+		try {
+			this.spaceSub?.close();
+		} catch {
+			/* already closed */
+		}
+		this.spaceSub = null;
 		if (this.notifyTimer) {
 			clearTimeout(this.notifyTimer);
 			this.notifyTimer = null;
@@ -208,13 +387,14 @@ export class RelaySync implements RelaySyncApi {
 				}
 				let batch: Event[];
 				try {
-					batch = await this.pool.querySync([relay], {
-						kinds: [CHANGE_KIND],
-						authors: [this.pk],
-						since,
-						until,
-						limit: PAGE_LIMIT,
-					});
+					const spaceTags = [...this.sharedSpaces.values()].map((sp) => sp.spaceTag);
+					const pages = await Promise.all([
+						this.pool.querySync([relay], { kinds: [CHANGE_KIND], authors: [this.pk], since, until, limit: PAGE_LIMIT }),
+						spaceTags.length > 0
+							? this.pool.querySync([relay], { kinds: [CHANGE_KIND], "#h": spaceTags, since, until, limit: PAGE_LIMIT })
+							: Promise.resolve([] as Event[]),
+					]);
+					batch = [...pages[0], ...pages[1]];
 				} catch (err) {
 					// One relay failing must not abort the others - but an
 					// errored walk is not a complete one.
@@ -267,18 +447,33 @@ export class RelaySync implements RelaySyncApi {
 
 	/** Decrypt one relay event; returns decoded change bytes when a full
 	 * change (possibly reassembled from chunks) becomes available. */
-	private async eventToChange(event: Event): Promise<{ bytes: Uint8Array; change: ChangeJSON } | null> {
+	private async eventToChange(event: Event): Promise<{ bytes: Uint8Array; change: ChangeJSON; space?: SharedSpace } | null> {
 		this.stats.events++;
 		this.onRawEvent?.(event);
 		const hTag = event.tags.find((t) => t[0] === "h")?.[1];
 		if (hTag) this.stats.blindedTags.add(hTag);
 
-		let part: string;
+		let part: string | null = null;
+		let space: SharedSpace | undefined;
 		try {
 			part = nip44.decrypt(event.content, this.conversationKey);
 		} catch {
-			this.stats.decryptFailures++;
-			return null;
+			for (const sp of this.sharedSpaces.values()) {
+				try {
+					part = nip44.decrypt(event.content, sp.convKey);
+					// Writer gate: viewers (and leaked keys) can produce valid
+					// ciphertext - only allowed writers get applied.
+					if (!sp.writerSet.has(event.pubkey)) return null;
+					space = sp;
+					break;
+				} catch {
+					/* next key */
+				}
+			}
+			if (part === null) {
+				this.stats.decryptFailures++;
+				return null;
+			}
 		}
 		if (event.created_at > this.cursor) this.cursor = event.created_at;
 
@@ -315,15 +510,17 @@ export class RelaySync implements RelaySyncApi {
 			this.stats.decodeFailures++;
 			return null;
 		}
-		return { bytes, change };
+		return { bytes, change, space };
 	}
 
-	private async importBatch(batch: Array<{ bytes: Uint8Array; change: ChangeJSON }>, immediateNotify = false): Promise<void> {
+	private async importBatch(batch: Array<{ bytes: Uint8Array; change: ChangeJSON; space?: SharedSpace }>, immediateNotify = false): Promise<void> {
 		if (batch.length > 0) {
 			const added = await this.store.addChanges(batch);
 			this.stats.imported += added;
 			// Anything the relays hold must never be echoed back.
-			for (const item of batch) await this.store.markPublished(item.change.id);
+			for (const item of batch) {
+				await this.store.markPublished(item.space ? `${item.space.spaceId}/${item.space.keyId}/${item.change.id}` : item.change.id);
+			}
 			for (const item of batch) this.pendingObjects.add(item.change.objectId);
 		}
 		if (immediateNotify) this.flushObjectNotify();
@@ -364,9 +561,11 @@ export class RelaySync implements RelaySyncApi {
 	// ── Publish ────────────────────────────────────────────────────
 
 	publish(bytes: Uint8Array, changeId: string, objectId: string): void {
-		if (this.queued.has(changeId)) return;
-		this.queued.add(changeId);
-		this.queue.push({ objectId, changeId, b64: bytesToB64(bytes), attempts: 0, notBefore: 0 });
+		const space = this.sharedSpaces.get(this.spaceOf(objectId));
+		const key = space ? `${space.spaceId}/${space.keyId}/${changeId}` : changeId;
+		if (this.queued.has(key)) return;
+		this.queued.add(key);
+		this.queue.push({ objectId, changeId, b64: bytesToB64(bytes), attempts: 0, notBefore: 0, space });
 		if (!this.queueRunning) {
 			this.queueRunning = true;
 			void this.runPublishQueue();
@@ -386,13 +585,14 @@ export class RelaySync implements RelaySyncApi {
 				continue;
 			}
 			const [item] = this.queue.splice(idx, 1);
-			if (await this.store.isPublished(item.changeId)) {
-				this.queued.delete(item.changeId);
+			const key = item.space ? `${item.space.spaceId}/${item.space.keyId}/${item.changeId}` : item.changeId;
+			if (await this.store.isPublished(key)) {
+				this.queued.delete(key);
 				continue;
 			}
 			if (await this.publishOnce(item)) {
-				await this.store.markPublished(item.changeId);
-				this.queued.delete(item.changeId);
+				await this.store.markPublished(key);
+				this.queued.delete(key);
 			} else {
 				item.attempts++;
 				item.notBefore = Date.now() + Math.min(300_000, 2000 * 2 ** item.attempts);
@@ -411,14 +611,16 @@ export class RelaySync implements RelaySyncApi {
 		const gid = parts.length > 1 ? bytesToHex(sha256(new TextEncoder().encode(item.b64))).slice(0, 16) : "";
 		try {
 			for (let i = 0; i < parts.length; i++) {
-				const tags: string[][] = [["h", this.blind(item.objectId)]];
+				const tags: string[][] = item.space
+					? [["h", blindShared(item.space.keyHex, item.objectId)], ["h", item.space.spaceTag]]
+					: [["h", this.blind(item.objectId)]];
 				if (gid) tags.push(["c", gid, String(i), String(parts.length)]);
 				const event = finalizeEvent(
 					{
 						kind: CHANGE_KIND,
 						created_at: Math.floor(Date.now() / 1000),
 						tags,
-						content: nip44.encrypt(parts[i], this.conversationKey),
+						content: nip44.encrypt(parts[i], item.space ? item.space.convKey : this.conversationKey),
 					},
 					this.sk,
 				);

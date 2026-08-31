@@ -1,11 +1,14 @@
 <script lang="ts">
 	import type { ObjectJSON, SpaceJSON } from "$lib/types";
 	import { space as spaceApi, fetchQuery, note } from "$lib/api";
+	import { inviteUrl } from "$lib/invite";
 	import { objectIcon } from "$lib/icons";
 	import { onMount } from "svelte";
 	import { goto } from "$app/navigation";
 	import { store, refreshAll } from "$lib/data.svelte";
 	import { activeSpace } from "$lib/space.svelte";
+	import { myNpub } from "$lib/engine/sync";
+	import { backend } from "$lib/engine/backend";
 
 	let confirmDelete = $state(false);
 	let deleting = $state(false);
@@ -60,6 +63,7 @@
 
 	onMount(() => {
 		void loadBin();
+		void loadIdentity();
 	});
 
 	/** Empty bin: vanish every deleted object in this space at once. */
@@ -100,6 +104,33 @@
 	let npubDraft = $state("");
 	let invite = $state<string>("");
 	let confirmRemove = $state("");
+
+	// ── Invite link: the space key rides in the URL fragment ──────
+	let ownerNpub = $state("");
+	let copiedInvite = $state(false);
+
+	function loadIdentity() {
+		ownerNpub = myNpub() ?? "";
+	}
+
+	async function copyInviteLink() {
+		if (!ownerNpub) return;
+		const payload = await spaceApi.invitePayload(object.id, "");
+		await navigator.clipboard.writeText(
+			inviteUrl({
+				v: 1,
+				t: "space-invite",
+				space: object.id,
+				name: (typeof payload.name === "string" && payload.name) || object.fields["name"]?.stringValue || undefined,
+				owner: ownerNpub,
+				relays: backend.relays(),
+				key: typeof payload.key === "string" ? payload.key : "",
+				keyId: typeof payload.key_id === "number" ? payload.key_id : 1,
+			}),
+		);
+		copiedInvite = true;
+		setTimeout(() => (copiedInvite = false), 1500);
+	}
 
 	async function addMember() {
 		const npub = npubDraft.trim();
@@ -158,7 +189,14 @@
 	>
 		<input bind:value={npubDraft} placeholder="npub1… of the person to invite" />
 		<button type="submit">Add member</button>
+		<button
+			type="button"
+			disabled={!ownerNpub}
+			title={ownerNpub ? "Copy a universal link that grants access to this space" : "No key on this device yet"}
+			onclick={() => void copyInviteLink()}>{copiedInvite ? "Copied ✓" : "Copy invite link"}</button
+		>
 	</form>
+	<p class="hint">Anyone with this link can read the space. Rotate the key to revoke.</p>
 
 	{#if invite}
 		<div class="invite">

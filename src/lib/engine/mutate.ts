@@ -10,14 +10,15 @@
 
 import type { ChangeJSON, OpJSON, BlockWire } from "./contracts";
 import type { ValueJSON, BlockJSON } from "$lib/types";
+import { spaceKeyGet, spaceKeyRotate, spaceKeyEnsure } from "./spacekeys";
 
 export interface MutateCtx {
 	/** This device's author id: hex(sha256(privkey_hex))[0..16]. */
 	author: string;
 	/** All known changes for the object (for heads); [] for new objects. */
 	changesFor(objectId: string): Promise<ChangeJSON[]>;
-	/** Latest computed state (for table shapes / chat meta reads). */
-	getObject(objectId: string): Promise<{ blocks: BlockJSON[] } | null>;
+	/** Latest computed state (for table shapes / chat meta / field reads). */
+	getObject(objectId: string): Promise<{ blocks: BlockJSON[]; fields?: Record<string, ValueJSON> } | null>;
 	/** Encode + id + persist + publish. */
 	commit(change: ChangeJSON): Promise<string>;
 }
@@ -338,7 +339,52 @@ export async function runMutation(
 				{ fieldSet: { key: "members", value: { valuesValue: { items: [] } } } },
 				{ fieldSet: { key: "keyId", value: { intValue: 1 } } },
 			]);
+			spaceKeyEnsure(id);
 			return { id, key_id: 1 };
+		}
+
+		// Ports of the Odin daemon's channel member ops (mutate.odin):
+		// members is a list of {npub, role} maps on the channel object.
+		case "channel_member_add": {
+			const channelId = str("channel_id");
+			const npub = str("npub");
+			if (!channelId || !npub) throw new Error("channel_id and npub required");
+			const role = str("role") || "writer";
+			const obj = await ctx.getObject(channelId);
+			const items = obj?.fields?.["members"]?.valuesValue?.items ?? [];
+			if (!items.some((i) => i.mapValue?.entries?.["npub"]?.stringValue === npub)) {
+				const entry: ValueJSON = { mapValue: { entries: { npub: { stringValue: npub }, role: { stringValue: role } } } };
+				await commitOps(ctx, channelId, [
+					{ fieldSet: { key: "members", value: { valuesValue: { items: [...items, entry] } } } },
+				]);
+			}
+			return {};
+		}
+
+		// Removal rotates the space key so the removed member loses future access.
+		case "channel_member_remove": {
+			const channelId = str("channel_id");
+			const npub = str("npub");
+			if (!channelId || !npub) throw new Error("channel_id and npub required");
+			const obj = await ctx.getObject(channelId);
+			const items = obj?.fields?.["members"]?.valuesValue?.items ?? [];
+			const kept = items.filter((i) => i.mapValue?.entries?.["npub"]?.stringValue !== npub);
+			const { keyId } = spaceKeyRotate(channelId);
+			await commitOps(ctx, channelId, [
+				{ fieldSet: { key: "members", value: { valuesValue: { items: kept } } } },
+				{ fieldSet: { key: "keyId", value: { intValue: keyId } } },
+			]);
+			return { key_id: keyId };
+		}
+
+		case "channel_invite_payload": {
+			const channelId = str("channel_id");
+			if (!channelId) throw new Error("channel_id required");
+			const entry = spaceKeyGet(channelId);
+			if (!entry) throw new Error("no local key for channel");
+			const obj = await ctx.getObject(channelId);
+			const name = obj?.fields?.["name"]?.stringValue ?? "";
+			return { payload: { channel_id: channelId, name, key: entry.key, key_id: entry.keyId } };
 		}
 
 		default:
