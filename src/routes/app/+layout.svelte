@@ -467,6 +467,7 @@
 				{/each}
 				<button class="m-card add" onclick={() => void newSpace()}>＋ New space</button>
 			</div>
+			<p class="m-build">Build {__BUILD_STAMP__}</p>
 			<div class="m-bottom">
 				<button class="m-search" onclick={() => (showSearch = true)}>⌕ Search</button>
 				<button class="m-compose" data-tip="New object" onclick={() => (showCreate = !showCreate)}>＋</button>
@@ -1872,5 +1873,12 @@
 		display: inline-flex;
 		vertical-align: -2px;
 		margin-right: 2px;
+	}
+	.m-build {
+		margin: 0 0 4px;
+		text-align: center;
+		font-size: 10px;
+		color: var(--muted);
+		opacity: 0.6;
 	}
 </style>
