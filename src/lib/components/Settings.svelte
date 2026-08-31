@@ -877,4 +877,12 @@
 			display: none;
 		}
 	}
+	@media (max-width: 720px) {
+		.modal {
+			scrollbar-width: none;
+		}
+		.modal::-webkit-scrollbar {
+			display: none;
+		}
+	}
 </style>
