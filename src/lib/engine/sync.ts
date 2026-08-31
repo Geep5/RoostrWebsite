@@ -24,7 +24,7 @@ import { bytesToHex } from "@noble/hashes/utils.js";
 import type { ChangeJSON, ChangeStoreApi, RelaySyncApi, SyncEvents } from "./contracts";
 import { proto } from "./proto";
 
-export const DEFAULT_RELAYS = ["wss://relay.damus.io", "wss://nos.lol", "wss://relay.nostr.band"];
+export const DEFAULT_RELAYS = ["wss://roostr-relay.fly.dev"];
 
 const CHANGE_KIND = 1078;
 const PUBLISH_SPACING_MS = 120;
