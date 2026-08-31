@@ -453,7 +453,7 @@
 		<div class="m-screen">
 			<div class="m-top">
 				<button class="m-btn" data-tip="Spaces" onclick={() => (mobileSpaceOpen = false)}>‹</button>
-				<span class="m-sync" class:ok={sync.phase === "live"} class:busy={sync.phase === "backfill"} data-tip={sync.phase === "live" ? `Synced · ${sync.imported} changes` : sync.phase === "backfill" ? "Syncing…" : "Not syncing"}><span class="m-sync-dot"></span></span>
+				<span class="m-top-spacer"></span>
 				<button class="m-btn" data-tip="Space settings" onclick={() => goto(`/app/object/${current.id}`)}>⋯</button>
 			</div>
 			<div class="m-ch-head">
@@ -1549,6 +1549,9 @@
 		color: var(--fg);
 		font-size: 19px;
 		cursor: pointer;
+	}
+	.m-top-spacer {
+		flex: 1;
 	}
 	.m-sync {
 		width: 40px;
