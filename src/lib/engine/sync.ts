@@ -151,7 +151,7 @@ export class RelaySync implements RelaySyncApi {
 	readonly stats: SyncStats = { events: 0, decryptFailures: 0, decodeFailures: 0, imported: 0, blindedTags: new Set() };
 
 	private readonly pk: string;
-	private readonly pool = new SimplePool();
+	private pool = new SimplePool();
 	private readonly conversationKey: Uint8Array;
 	private decode: ((bytes: Uint8Array) => ChangeJSON | null) | null;
 	private readonly onRawEvent?: (event: Event) => void;
@@ -162,6 +162,8 @@ export class RelaySync implements RelaySyncApi {
 	private cursor = 0;
 	private stopped = false;
 	private sub: { close(): void } | null = null;
+	private watchdogTimer: ReturnType<typeof setInterval> | null = null;
+	private watchdogBusy = false;
 
 	/** Reassembly buffer for chunked changes: gid → parts. */
 	private readonly chunkGroups = new Map<string, { total: number; parts: Map<number, string> }>();
@@ -316,6 +318,22 @@ export class RelaySync implements RelaySyncApi {
 		}
 
 		if (this.stopped) return;
+		this.subscribeLive();
+		this.watchdogTimer = setInterval(() => void this.watchdog(), 60_000);
+		this.events.onStatus({ phase: "live", imported: this.stats.imported });
+	}
+
+	private subscribeLive(): void {
+		try {
+			this.sub?.close();
+		} catch {
+			/* gone */
+		}
+		try {
+			this.spaceSub?.close();
+		} catch {
+			/* gone */
+		}
 		this.sub = this.pool.subscribeMany(
 			this.relays,
 			{ kinds: [CHANGE_KIND], authors: [this.pk], since: this.cursor + 1 },
@@ -326,18 +344,88 @@ export class RelaySync implements RelaySyncApi {
 			},
 		);
 		const spaceTags = [...this.sharedSpaces.values()].map((sp) => sp.spaceTag);
-		if (spaceTags.length > 0) {
-			this.spaceSub = this.pool.subscribeMany(this.relays, { kinds: [CHANGE_KIND], "#h": spaceTags, since: this.cursor + 1 }, {
-				onevent: (event) => {
-					this.liveChain = this.liveChain.then(() => this.handleLiveEvent(event)).catch(() => {});
-				},
-			});
+		this.spaceSub = spaceTags.length > 0
+			? this.pool.subscribeMany(this.relays, { kinds: [CHANGE_KIND], "#h": spaceTags, since: this.cursor + 1 }, {
+					onevent: (event) => {
+						this.liveChain = this.liveChain.then(() => this.handleLiveEvent(event)).catch(() => {});
+					},
+				})
+			: null;
+	}
+
+	/**
+	 * Deafness watchdog: subscriptions do not survive socket drops and
+	 * nostr-tools reports nothing when they die - the dot would stay
+	 * green forever. Compare the relay's head against our cursor; when
+	 * we are behind (or the relay stops answering), surface an honest
+	 * "catching up" status, recover, and go live again.
+	 */
+	private async watchdog(): Promise<void> {
+		if (this.stopped || this.watchdogBusy) return;
+		this.watchdogBusy = true;
+		try {
+			const spaceTags = [...this.sharedSpaces.values()].map((sp) => sp.spaceTag);
+			const query = Promise.all([
+				this.pool.querySync(this.relays, { kinds: [CHANGE_KIND], authors: [this.pk], limit: 1 }),
+				spaceTags.length > 0
+					? this.pool.querySync(this.relays, { kinds: [CHANGE_KIND], "#h": spaceTags, limit: 1 })
+					: Promise.resolve([] as Event[]),
+			]);
+			const res = await Promise.race([query, new Promise<null>((r) => setTimeout(() => r(null), 15_000))]);
+			if (this.stopped) return;
+			if (res === null) {
+				this.events.onStatus({ phase: "backfill", imported: this.stats.imported, detail: "relay unresponsive - reconnecting" });
+				try {
+					this.pool.close(this.relays);
+				} catch {
+					/* closed */
+				}
+				this.pool = new SimplePool();
+				await this.catchupSince(this.cursor + 1);
+				this.subscribeLive();
+				this.events.onStatus({ phase: "live", imported: this.stats.imported });
+				return;
+			}
+			const head = [...res[0], ...res[1]].reduce((max, e) => Math.max(max, e.created_at), 0);
+			if (head > this.cursor) {
+				this.events.onStatus({ phase: "backfill", imported: this.stats.imported, detail: "catching up" });
+				await this.catchupSince(this.cursor + 1);
+				this.subscribeLive();
+				this.events.onStatus({ phase: "live", imported: this.stats.imported });
+			}
+		} finally {
+			this.watchdogBusy = false;
 		}
-		this.events.onStatus({ phase: "live", imported: this.stats.imported });
+	}
+
+	private async catchupSince(since: number): Promise<void> {
+		const spaceTags = [...this.sharedSpaces.values()].map((sp) => sp.spaceTag);
+		const byId = new Map<string, Event>();
+		const filters: Array<Parameters<SimplePool["querySync"]>[1]> = [{ kinds: [CHANGE_KIND], authors: [this.pk], since }];
+		if (spaceTags.length > 0) filters.push({ kinds: [CHANGE_KIND], "#h": spaceTags, since });
+		for (const filter of filters) {
+			try {
+				for (const e of await this.pool.querySync(this.relays, filter)) byId.set(e.id, e);
+			} catch {
+				/* next watchdog tick retries */
+			}
+		}
+		const events = [...byId.values()].sort((a, b) => a.created_at - b.created_at);
+		const batch: Array<{ bytes: Uint8Array; change: ChangeJSON; space?: SharedSpace }> = [];
+		for (const event of events) {
+			const item = await this.eventToChange(event);
+			if (item) batch.push(item);
+		}
+		await this.importBatch(batch, true);
+		await this.persistCursor();
 	}
 
 	stop(): void {
 		this.stopped = true;
+		if (this.watchdogTimer) {
+			clearInterval(this.watchdogTimer);
+			this.watchdogTimer = null;
+		}
 		// nostr-tools can race an in-flight REQ against connection teardown;
 		// swallow so a stop() never throws into the caller.
 		try {

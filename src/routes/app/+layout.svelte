@@ -363,7 +363,10 @@
 
 {#if isMobile}
 <div class="m-shell">
-	{#if objectId}
+	{#if page.url.pathname.startsWith("/app/chat/")}
+		<!-- Full-screen chat page: brings its own header and keyboard fit. -->
+		{@render children()}
+	{:else if objectId}
 		<header class="m-top">
 			<button class="m-btn" data-tip="Space home" onclick={() => mobileBackToSpace()}>‹</button>
 			<span class="m-obj">
