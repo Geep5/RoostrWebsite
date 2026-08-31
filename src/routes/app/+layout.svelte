@@ -703,7 +703,6 @@
 				<span class="path-name">{headerPath.name}</span>
 			</button>
 			<div class="header-side right">
-				<a class="hbtn" data-tip="All objects" href="/app">▦</a>
 				<a class="hbtn" data-tip="Graph" href={objectId ? `/graph?focus=${objectId}` : "/app/graph"}><GraphIcon size={16} /></a>
 				{#if objectSummary}
 					<div class="more-wrap">
