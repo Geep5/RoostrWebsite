@@ -368,7 +368,7 @@
 		{@render children()}
 	{:else if objectId}
 		<header class="m-top">
-			<button class="m-btn" data-tip="Space home" onclick={() => mobileBackToSpace()}>‹</button>
+			<button class="m-btn" data-tip="Space home" aria-label="Space home" onclick={() => mobileBackToSpace()}><svg style="width:20px;height:20px" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M14.5 6L9 12l5.5 6" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
 			<span class="m-obj">
 				{#if headerPath.icon === "graph"}
 					<span class="path-icon"><GraphIcon /></span>
@@ -452,7 +452,7 @@
 	{:else}
 		<div class="m-screen">
 			<div class="m-top">
-				<button class="m-btn" data-tip="Spaces" onclick={() => (mobileSpaceOpen = false)}>‹</button>
+				<button class="m-btn" data-tip="Spaces" aria-label="Spaces" onclick={() => (mobileSpaceOpen = false)}><svg style="width:20px;height:20px" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M14.5 6L9 12l5.5 6" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
 				<span class="m-top-spacer"></span>
 				<button class="m-btn" data-tip="Space settings" onclick={() => goto(`/app/object/${current.id}`)}>⋯</button>
 			</div>
@@ -718,8 +718,8 @@
 	<div class="main-col">
 		<header>
 			<div class="header-side left">
-				<button class="hbtn" data-tip="Back" onclick={() => history.back()}>‹</button>
-				<button class="hbtn" data-tip="Forward" onclick={() => history.forward()}>›</button>
+				<button class="hbtn" data-tip="Back" aria-label="Back" onclick={() => history.back()}><svg style="width:16px;height:16px" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M14.5 6L9 12l5.5 6" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+				<button class="hbtn" data-tip="Forward" aria-label="Forward" onclick={() => history.forward()}><svg style="width:16px;height:16px" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M9.5 6L15 12l-5.5 6" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
 			</div>
 			<button class="path" data-tip="Search (⌘K)" onclick={() => (showSearch = true)}>
 				{#if headerPath.icon === "graph"}
