@@ -66,10 +66,13 @@
 	}
 
 	// Retry a failed load once the replica learns about the object
-	// (summaries refresh after sync batches and boot).
+	// (summaries refresh after sync batches and boot). store.loaded also
+	// retriggers: channels/types/templates are hidden list types that
+	// NEVER appear in summaries, so a boot-race failure on their pages
+	// would otherwise spin "Loading" forever.
 	$effect(() => {
 		const id = page.params.id;
-		if (!object && id && store.summaries.some((x) => x.id === id)) void loadObject(id);
+		if (!object && id && (store.loaded || store.summaries.some((x) => x.id === id))) void loadObject(id);
 	});
 
 	async function refresh() {
