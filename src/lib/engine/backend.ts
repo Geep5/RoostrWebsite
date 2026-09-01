@@ -28,6 +28,10 @@ function fstr(fields: Record<string, ValueJSON> | undefined, k: string): string 
 	return fields?.[k]?.stringValue ?? "";
 }
 
+/** The synced vanish ledger object and its field prefix (src/vanish.odin). */
+const VANISH_LOG_ID = "__vanished__";
+const VANISH_FIELD = "vanished:";
+
 export interface SyncStatus {
 	phase: "idle" | "backfill" | "live" | "error";
 	imported: number;
@@ -40,6 +44,8 @@ class WebBackend {
 	private store = new ChangeStore();
 	private sync: RelaySync | null = null;
 	private states = new Map<string, ObjectJSON>();
+	/** Object ids the synced ledger says are gone; rebuilt when it commits. */
+	private vanished = new Set<string>();
 	private dirty = new Set<string>();
 	private allDirty = true;
 	private commitListeners = new Set<(ids: string[]) => void>();
@@ -194,8 +200,10 @@ class WebBackend {
 	 * written - a warm boot does zero replay work.
 	 */
 	private async ensure(): Promise<void> {
+		let rebuilt = false;
 		if (this.allDirty) {
 			this.allDirty = false;
+			rebuilt = true;
 			this.states.clear();
 			const [counts, cached] = await Promise.all([this.store.changeCounts(), this.store.getStates<ObjectJSON>()]);
 			for (const [id, n] of counts) {
@@ -204,7 +212,6 @@ class WebBackend {
 				else this.dirty.add(id);
 			}
 		}
-		if (this.dirty.size === 0) return;
 		const ids = [...this.dirty];
 		this.dirty.clear();
 		for (const id of ids) {
@@ -221,6 +228,34 @@ class WebBackend {
 				console.warn(`[replica] replay failed for ${id}:`, err);
 			}
 		}
+		this.enforceVanished(rebuilt, ids);
+	}
+
+	/**
+	 * The ledger wins over whatever replayed. A relay copy of a vanished
+	 * object can arrive ahead of — or entirely without — the delete change
+	 * that tombstones it, since NIP-09 is advisory and a peer may republish
+	 * after the deletion was requested. Mirrors enforce_vanished_locked()
+	 * in the desktop's store.odin, which is why the two agree on what
+	 * exists.
+	 */
+	private enforceVanished(rebuilt: boolean, touched: string[]): void {
+		const ledgerChanged = touched.includes(VANISH_LOG_ID);
+		if (rebuilt || ledgerChanged) {
+			this.vanished = new Set<string>();
+			const ledger = this.states.get(VANISH_LOG_ID);
+			if (ledger) {
+				for (const k of Object.keys(ledger.fields)) {
+					if (k.startsWith(VANISH_FIELD)) this.vanished.add(k.slice(VANISH_FIELD.length));
+				}
+			}
+		}
+		if (this.vanished.size === 0) return;
+		// Ledger (re)loaded: sweep everything it names — O(vanished), boot
+		// only. Otherwise just the objects that were replayed can have come
+		// back, so the steady-state cost is the size of that batch.
+		if (rebuilt || ledgerChanged) for (const id of this.vanished) this.states.delete(id);
+		else for (const id of touched) if (this.vanished.has(id)) this.states.delete(id);
 	}
 
 	/**
@@ -230,14 +265,8 @@ class WebBackend {
 	 */
 	async syncDigest(): Promise<{ digest: string; objects: number; changes: number }> {
 		await this.ensure();
-		const vanished = new Set<string>();
-		try {
-			const ledger = await this.fetchObject("__vanished__");
-			for (const k of Object.keys(ledger.fields)) if (k.startsWith("vanished:")) vanished.add(k.slice("vanished:".length));
-		} catch {
-			/* no ledger on this device yet */
-		}
-		const ids = (await this.store.objectIds()).filter((id) => !vanished.has(id)).sort();
+		// ensure() keeps this.vanished in step with the ledger.
+		const ids = (await this.store.objectIds()).filter((id) => !this.vanished.has(id)).sort();
 		let text = "";
 		let changes = 0;
 		let objects = 0;
