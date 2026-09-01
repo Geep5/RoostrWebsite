@@ -299,7 +299,11 @@ class WebBackend {
 				keyId: o.fields["keyId"]?.intValue ?? 1,
 			});
 		}
-		out.sort((a, b) => a.name.localeCompare(b.name));
+		// Creation order, oldest first: the first channel is the stable
+		// default space owning unassigned legacy objects (name order let
+		// any new early-alphabet space steal them).
+		const created = new Map(out.map((sp) => [sp.id, this.states.get(sp.id)?.createdAt ?? 0]));
+		out.sort((a, b) => (created.get(a.id)! - created.get(b.id)!) || a.id.localeCompare(b.id));
 		return out;
 	}
 
