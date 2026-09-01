@@ -79,6 +79,11 @@ export class ChangeStore implements ChangeStoreApi {
 		this.db = await promise;
 	}
 
+	close(): void {
+		this.db?.close();
+		this.db = null;
+	}
+
 	private handle(): IDBDatabase {
 		if (!this.db) throw new Error("ChangeStore not open — call open() first");
 		return this.db;
@@ -190,4 +195,15 @@ export class ChangeStore implements ChangeStoreApi {
 		tx.objectStore(META).put(true, `published:${changeId}`);
 		await txDone(tx);
 	}
+}
+
+/** Drop the whole replica database (logout / identity switch). */
+export async function destroyDatabase(name: string = DB_NAME): Promise<void> {
+	const factory = await idbFactory();
+	await new Promise<void>((resolve) => {
+		const req = factory.deleteDatabase(name);
+		// blocked still completes once our closed connection is reaped -
+		// and a reload follows immediately either way.
+		req.onsuccess = req.onerror = req.onblocked = () => resolve();
+	});
 }

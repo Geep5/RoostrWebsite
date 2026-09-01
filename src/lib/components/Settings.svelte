@@ -3,7 +3,7 @@
 	import { settings } from "$lib/api";
 	import { exportAll } from "$lib/export";
 	import { ignoredWords, removeFromDictionary } from "$lib/spell";
-	import { loadKey, clearKey } from "$lib/engine/keys";
+	import { loadKey } from "$lib/engine/keys";
 	import { backend } from "$lib/engine/backend";
 
 	// Desktop sync check: compare this device's change-set fingerprint against
@@ -44,6 +44,7 @@
 	let copied = $state("");
 	let saveState = $state("");
 	let importing = $state(false);
+	let confirmLogout = $state(false);
 	let importDraft = $state("");
 	let importError = $state("");
 
@@ -320,11 +321,18 @@
 				<button class="action subtle" onclick={() => (importing = true)}>Sign in with existing key…</button>
 				<button
 					class="action subtle"
+					class:danger={confirmLogout}
 					onclick={() => {
-						clearKey();
-						location.href = "/app";
-					}}>Sign out on this device</button
+						if (!confirmLogout) {
+							confirmLogout = true;
+							return;
+						}
+						void settings.logout();
+					}}>{confirmLogout ? "Erase local copy & sign out?" : "Log out on this device"}</button
 				>
+				{#if confirmLogout}
+					<p class="hint">Removes this device's key and its local replica. Your encrypted history stays on your relays — log in with any nsec afterwards.</p>
+				{/if}
 			{:else}
 				<p class="hint">
 					<b>Replaces this device's identity.</b> Paste the nsec from your other device — after the
@@ -892,5 +900,9 @@
 		color: var(--muted);
 		opacity: 0.7;
 		text-align: center;
+	}
+	.action.danger {
+		color: #f55522;
+		border-color: rgb(245 85 34 / 0.4);
 	}
 </style>

@@ -7,7 +7,7 @@
 
 import type { ObjectJSON, ObjectSummary, SpaceJSON, RelationDefJSON, BlockJSON, ValueJSON } from "$lib/types";
 import { backend } from "$lib/engine/backend";
-import { loadKey, saveKey, authorIdFor } from "$lib/engine/keys";
+import { loadKey, saveKey, authorIdFor, clearKey } from "$lib/engine/keys";
 import { nip19 } from "nostr-tools";
 import { bytesToHex } from "@noble/hashes/utils.js";
 
@@ -96,9 +96,20 @@ export const settings = {
 		return { hasKey: !!key, relays: backend.relays(), authorId: key ? authorIdFor(key) : "" };
 	},
 	importKey: async (key: string) => {
+		// The old identity's replica must not leak into the new one.
+		await backend.logout();
+		localStorage.removeItem("roostr-space-keys");
+		localStorage.removeItem("roostr-profile");
 		saveKey(key.trim());
 		location.reload(); // fresh identity: restart the replica from zero
 		return {};
+	},
+	logout: async () => {
+		await backend.logout();
+		localStorage.removeItem("roostr-space-keys");
+		localStorage.removeItem("roostr-profile");
+		clearKey();
+		location.href = "/app";
 	},
 	exportKey: async (): Promise<{ nsec: string; hex: string }> => {
 		const key = loadKey();

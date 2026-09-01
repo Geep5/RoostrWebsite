@@ -17,7 +17,7 @@ const toHex = (b: Uint8Array): string => {
 };
 import { computeObject } from "./replay";
 import { runQuery } from "./query";
-import { ChangeStore } from "./store";
+import { ChangeStore, destroyDatabase } from "./store";
 import { RelaySync, DEFAULT_RELAYS, npubToHex, type SharedSpaceInfo } from "./sync";
 import { spaceKeyAll } from "./spacekeys";
 import { getPublicKey } from "nostr-tools";
@@ -144,6 +144,15 @@ class WebBackend {
 			if (queued > 0) console.log(`[backend] space ${info.spaceId.slice(0, 8)} shared (key #${info.keyId}): queued ${queued} change(s)`);
 		}
 		localStorage.setItem("roostr-shared-queued", JSON.stringify(markers));
+	}
+
+	/** Log out: stop sync and destroy the local replica. The relays keep
+	 *  the encrypted history; a different key must never see this data. */
+	async logout(): Promise<void> {
+		this.stop();
+		this.store.close();
+		await destroyDatabase();
+		localStorage.removeItem("roostr-shared-queued");
 	}
 
 	stop(): void {
