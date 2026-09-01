@@ -108,7 +108,7 @@ export async function runMutation(
 			const id = uuid();
 			const ops: OpJSON[] = [
 				{ objectCreate: { typeKey } },
-				{ fieldSet: { key: "name", value: { stringValue: str("name") || "Untitled" } } },
+				{ fieldSet: { key: "name", value: { stringValue: str("name") } } },
 			];
 			const fields = params["fields"] as Record<string, ValueJSON> | undefined;
 			if (fields) for (const [k, v] of Object.entries(fields)) ops.push({ fieldSet: { key: k, value: v } });
