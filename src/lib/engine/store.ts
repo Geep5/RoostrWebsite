@@ -77,6 +77,15 @@ export class ChangeStore implements ChangeStoreApi {
 		r.onsuccess = () => resolve(r.result);
 		r.onerror = () => reject(r.error);
 		this.db = await promise;
+		// A logout in ANY tab deletes this database; a connection that
+		// doesn't yield here blocks that delete forever - and every later
+		// open() queues behind the pending delete. Yield and reload: the
+		// identity changed under this tab, so it must re-gate anyway.
+		this.db.onversionchange = () => {
+			this.db?.close();
+			this.db = null;
+			if (typeof location !== "undefined") location.reload();
+		};
 	}
 
 	close(): void {
