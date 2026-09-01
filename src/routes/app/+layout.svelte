@@ -756,7 +756,7 @@
 				<span class="path-name">{headerPath.name}</span>
 			</button>
 			<div class="header-side right">
-				<a class="hbtn" data-tip="Graph" href={objectId ? `/graph?focus=${objectId}` : "/app/graph"}><GraphIcon size={16} /></a>
+				<a class="hbtn" data-tip="Graph" href={objectId ? `/app/graph?focus=${objectId}` : "/app/graph"}><GraphIcon size={16} /></a>
 				{#if objectSummary}
 					<div class="more-wrap">
 						<button class="hbtn" data-tip="More" onclick={() => { showMore = !showMore; showCollections = false; }}>⋯</button>
