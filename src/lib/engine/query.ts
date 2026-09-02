@@ -502,6 +502,12 @@ export function runQuery(
 	outer: for (const s of byId.values()) {
 		if (s.deleted && !includeDeleted) continue;
 		if (typeEq !== "" && s.typeKey !== typeEq) continue;
+		// The vanish ledger is bookkeeping, not content: a singleton whose
+		// fields are one key per deleted object. Already absent from
+		// fetchObjects, but an untyped query returned it, so any query-driven
+		// list showed a nameless row that opened an empty object page. Asking
+		// for it by type still works.
+		if (typeEq === "" && s.typeKey === "vanish_log") continue;
 		for (const f of filters) {
 			if (!matchesFilter(s, f, now)) continue outer;
 		}
