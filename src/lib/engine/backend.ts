@@ -170,11 +170,9 @@ class WebBackend {
 	relays(): string[] {
 		try {
 			const v = JSON.parse(localStorage.getItem("roostr-relays") ?? "null") as string[] | null;
-			// Migration: the public bootstrap relays are retired; anyone still
-			// carrying them moves to the self-hosted set.
-			const retired = new Set(["wss://relay.damus.io", "wss://nos.lol", "wss://relay.nostr.band"]);
-			const kept = (v ?? []).filter((r) => !retired.has(r));
-			return kept.length ? kept : [...DEFAULT_RELAYS];
+			// Never-configured devices get the default; a stored list (even
+			// empty) is the user's choice - Settings toggles public relays.
+			return v === null ? [...DEFAULT_RELAYS] : v;
 		} catch {
 			return [...DEFAULT_RELAYS];
 		}
