@@ -9,6 +9,17 @@ import { backend } from "$lib/engine/backend";
 import type { SpaceJSON, ObjectSummary, RelationDefJSON } from "$lib/types";
 
 /** A type object (Anytype ObjectType analog). */
+/**
+ * Agents are space infrastructure, so `agent` sits in the server's
+ * HIDDEN_LIST_TYPES and never appears in `summaries` — but a discussion still
+ * has to name the one that replied. Carried separately for that.
+ */
+export interface AgentRef {
+	id: string;
+	name: string;
+	icon: string;
+}
+
 export interface TypeDef {
 	id: string;
 	key: string;
@@ -23,6 +34,7 @@ export const store = $state({
 	summaries: [] as ObjectSummary[],
 	relations: [] as RelationDefJSON[],
 	types: [] as TypeDef[],
+	agents: [] as AgentRef[],
 	loaded: false,
 });
 
@@ -42,12 +54,28 @@ async function fetchTypes(): Promise<TypeDef[]> {
 		.sort((a, b) => a.name.localeCompare(b.name));
 }
 
+async function fetchAgents(): Promise<AgentRef[]> {
+	const res = await fetchQuery({ type: "agent", limit: 200 });
+	return res.records.map((r) => ({
+		id: r.id,
+		name: r.fields["name"]?.stringValue ?? "",
+		icon: r.fields["iconEmoji"]?.stringValue ?? "",
+	}));
+}
+
 export async function refreshAll(): Promise<void> {
-	const [channels, summaries, relations, types] = await Promise.all([fetchChannels(), fetchObjects(), fetchRelations(), fetchTypes()]);
+	const [channels, summaries, relations, types, agents] = await Promise.all([
+		fetchChannels(),
+		fetchObjects(),
+		fetchRelations(),
+		fetchTypes(),
+		fetchAgents(),
+	]);
 	store.channels = channels;
 	store.summaries = summaries;
 	store.relations = relations;
 	store.types = types;
+	store.agents = agents;
 	store.loaded = true;
 }
 
