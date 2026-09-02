@@ -81,8 +81,18 @@
 	}
 
 	let nameDraft = $state("");
+	let titleEl = $state<HTMLInputElement>();
+	let nameDraftFor = "";
 	$effect(() => {
-		nameDraft = object ? fieldStr(object.fields, "name") : "";
+		const id = object?.id ?? "";
+		const name = object ? fieldStr(object.fields, "name") : "";
+		// Refreshes (template writes, SSE echoes) must not clobber live
+		// typing: adopt server state only when switching objects or when
+		// the title isn't being edited.
+		if (id !== nameDraftFor || document.activeElement !== titleEl) {
+			nameDraftFor = id;
+			nameDraft = name;
+		}
 	});
 
 	async function saveName() {
@@ -293,6 +303,7 @@
 				class="title"
 				placeholder="Untitled"
 				bind:value={nameDraft}
+				bind:this={titleEl}
 				onblur={() => void saveName()}
 				onkeydown={(e) => {
 					if (e.key === "Enter") e.currentTarget.blur();
