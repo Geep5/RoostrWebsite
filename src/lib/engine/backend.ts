@@ -326,6 +326,13 @@ class WebBackend {
 				pinnedIds: (o.fields["pinnedIds"]?.valuesValue?.items ?? []).map((i) => i.stringValue ?? "").filter(Boolean),
 				members,
 				keyId: o.fields["keyId"]?.intValue ?? 1,
+				createdAt: o.createdAt,
+				// Display order for the rail, set by drag-reorder. Absent means
+				// "use createdAt", so both live in one number space and an
+				// unordered vault needs no migration. Deliberately does NOT
+				// affect the sort below: this list's order is the protocol's
+				// (oldest first) and the UI layers the user's on top.
+				order: o.fields["order"]?.floatValue ?? o.fields["order"]?.intValue,
 			});
 		}
 		// Creation order, oldest first: the first channel is the stable
