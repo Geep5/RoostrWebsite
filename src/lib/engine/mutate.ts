@@ -94,6 +94,9 @@ function cellOps(rowId: string, colIds: string[]): OpJSON[] {
 }
 
 /** Run one mutate action; returns the response extra (e.g. {id}). */
+/** Root block every message thread hangs under (chat + object discussions). */
+const DISCUSSION_ID = "__discussion__";
+
 export async function runMutation(
 	ctx: MutateCtx,
 	action: string,
@@ -119,9 +122,25 @@ export async function runMutation(
 		case "block_add": {
 			const objectId = str("object_id");
 			const block = blockWire((params["block"] ?? {}) as Partial<BlockJSON>);
-			await commitOps(ctx, objectId, [
-				{ blockAdd: { block, targetId: str("target_id"), position: num("position") ?? 0 } },
-			]);
+			const targetId = str("target_id");
+			// An unknown insert target degrades to a root block rather than
+			// being lost, so adding into a discussion that does not exist yet
+			// silently orphans the block: present in the object, absent from
+			// the thread. chat_post has always guarded this with an idempotent
+			// root add (replay skips it once the id exists); do the same here.
+			const ops: OpJSON[] = targetId === DISCUSSION_ID
+				? [
+						{
+							blockAdd: {
+								block: { id: DISCUSSION_ID, childrenIds: [], content: { custom: { contentType: "discussion", meta: {} } } },
+								targetId: "",
+								position: 0,
+							},
+						},
+					]
+				: [];
+			ops.push({ blockAdd: { block, targetId, position: num("position") ?? 0 } });
+			await commitOps(ctx, objectId, ops);
 			return {};
 		}
 
@@ -277,7 +296,7 @@ export async function runMutation(
 			await commitOps(ctx, objectId, [
 				{
 					blockAdd: {
-						block: { id: "__discussion__", childrenIds: [], content: { custom: { contentType: "discussion", meta: {} } } },
+						block: { id: DISCUSSION_ID, childrenIds: [], content: { custom: { contentType: "discussion", meta: {} } } },
 						targetId: "",
 						position: 0,
 					},
@@ -285,7 +304,7 @@ export async function runMutation(
 				{
 					blockAdd: {
 						block: { id: mid, childrenIds: [], content: { custom: { contentType: "chat", meta } } },
-						targetId: "__discussion__",
+						targetId: DISCUSSION_ID,
 						position: POS_INNER,
 					},
 				},
