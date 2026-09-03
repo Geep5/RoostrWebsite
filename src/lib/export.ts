@@ -7,14 +7,15 @@
  * machine.
  */
 
-import { fetchObject, fetchQuery } from "$lib/api";
+import { fetchObject, fetchAllQuery } from "$lib/api";
 import type { BlockJSON, ObjectJSON, ValueJSON } from "$lib/types";
 import { Style } from "$lib/types";
 
 async function fetchAllObjects(): Promise<ObjectJSON[]> {
-	const res = await fetchQuery({ limit: 5000 });
+	// An export is a backup: a cap here silently ships an incomplete one.
+	const records = await fetchAllQuery({});
 	const out: ObjectJSON[] = [];
-	for (const r of res.records) {
+	for (const r of records) {
 		try {
 			out.push(await fetchObject(r.id));
 		} catch {
