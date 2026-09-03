@@ -18,6 +18,8 @@ export interface AgentRef {
 	id: string;
 	name: string;
 	icon: string;
+	/** "configurator" marks the agent that rewrites other agents' config. */
+	role: string;
 }
 
 export interface TypeDef {
@@ -60,6 +62,7 @@ async function fetchAgents(): Promise<AgentRef[]> {
 		id: r.id,
 		name: r.fields["name"]?.stringValue ?? "",
 		icon: r.fields["iconEmoji"]?.stringValue ?? "",
+		role: r.fields["role"]?.stringValue ?? "",
 	}));
 }
 
