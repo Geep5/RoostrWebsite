@@ -364,6 +364,7 @@ class WebBackend {
 				key: fstr(o.fields, "key"),
 				format: fstr(o.fields, "format") || "shorttext",
 				name: fstr(o.fields, "name"),
+				iconEmoji: fstr(o.fields, "iconEmoji"),
 				hidden: o.fields["hidden"]?.boolValue === true,
 				readOnly: o.fields["readOnly"]?.boolValue === true,
 				maxCount: o.fields["maxCount"]?.intValue ?? 0,
