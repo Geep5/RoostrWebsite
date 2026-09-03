@@ -50,9 +50,9 @@
 
 	async function loadBin() {
 		// Deleted objects of this space (query rows carry `deleted`).
-		const res = await fetchQuery({ includeDeleted: true, limit: 500 });
+		const res = await fetchQuery({ includeDeleted: true, filters: [{ key: "channel", condition: "equal", value: object.id }], limit: 500 });
 		bin = res.records
-			.filter((r) => (r as { deleted?: boolean }).deleted && (r.fields["channel"]?.stringValue ?? "") === object.id)
+			.filter((r) => (r as { deleted?: boolean }).deleted)
 			.map((r) => ({
 				id: r.id,
 				name: r.fields["name"]?.stringValue || "Untitled",
