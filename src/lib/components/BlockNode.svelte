@@ -494,7 +494,7 @@
 				{:else if linkStyle === "card"}
 					<!-- Anytype linkCard (link.scss:170): bordered 8px card,
 					     16px padding, name row + small secondary type row. -->
-					<a class="link-card" href="/object/{target.id}">
+					<a class="link-card" href="/app/object/{target.id}">
 						<span class="card-name">
 							<span class="link-icon">{objectIcon(target.icon, target.typeKey)}</span>
 							<span class="link-name">{target.name || "Untitled"}</span>
@@ -502,7 +502,7 @@
 						<span class="card-type">{typeName}</span>
 					</a>
 				{:else}
-					<a class="link-body" href="/object/{target.id}">
+					<a class="link-body" href="/app/object/{target.id}">
 						<span class="link-icon">{objectIcon(target.icon, target.typeKey)}</span>
 						<span class="link-name">{target.name || "Untitled"}</span>
 					</a>

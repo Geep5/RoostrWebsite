@@ -231,7 +231,7 @@
 			channel: { stringValue: channelId },
 			agent: { stringValue: a.id },
 		});
-		await goto(`/object/${id}`);
+		await goto(`/app/object/${id}`);
 	}
 
 	/** Dropping the owner returns it to the unassigned pool. It does not
