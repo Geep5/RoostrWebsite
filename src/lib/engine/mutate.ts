@@ -97,6 +97,69 @@ function cellOps(rowId: string, colIds: string[]): OpJSON[] {
 /** Root block every message thread hangs under (chat + object discussions). */
 const DISCUSSION_ID = "__discussion__";
 
+// ── Space default definitions ────────────────────────────────────
+//
+// There are no global definitions: every space owns its OWN copies of
+// the default relations and types (ids deterministic per key+space so
+// devices converge). Mirrors the Odin daemon's catalog exactly.
+
+const SPACE_DEFAULT_RELATIONS = [
+	{ key: "name", format: "shorttext", name: "Name", emoji: "✏️", hidden: false, readOnly: false, maxCount: 0 },
+	{ key: "description", format: "longtext", name: "Description", emoji: "📝", hidden: false, readOnly: false, maxCount: 0 },
+	{ key: "iconEmoji", format: "emoji", name: "Icon", emoji: "🖼️", hidden: true, readOnly: false, maxCount: 0 },
+	{ key: "createdDate", format: "date", name: "Created date", emoji: "📅", hidden: false, readOnly: true, maxCount: 0 },
+	{ key: "modifiedDate", format: "date", name: "Modified date", emoji: "🗓️", hidden: false, readOnly: true, maxCount: 0 },
+	{ key: "dueDate", format: "date", name: "Due date", emoji: "⏰", hidden: false, readOnly: false, maxCount: 0 },
+	{ key: "tag", format: "tag", name: "Tag", emoji: "🏷️", hidden: false, readOnly: false, maxCount: 0 },
+	{ key: "status", format: "status", name: "Status", emoji: "🚦", hidden: false, readOnly: false, maxCount: 1 },
+	{ key: "done", format: "checkbox", name: "Done", emoji: "✅", hidden: false, readOnly: false, maxCount: 0 },
+	{ key: "url", format: "url", name: "URL", emoji: "🔗", hidden: false, readOnly: false, maxCount: 0 },
+	{ key: "email", format: "email", name: "Email", emoji: "✉️", hidden: false, readOnly: false, maxCount: 0 },
+	{ key: "phone", format: "phone", name: "Phone", emoji: "📞", hidden: false, readOnly: false, maxCount: 0 },
+	{ key: "featuredRelations", format: "relations", name: "Featured relations", emoji: "⭐", hidden: true, readOnly: false, maxCount: 0 },
+	{ key: "setOf", format: "object", name: "Set of", emoji: "🗂️", hidden: true, readOnly: false, maxCount: 0 },
+] as const;
+
+const SPACE_DEFAULT_TYPES = [
+	{ key: "page", name: "Page", emoji: "📄", layout: "page" },
+	{ key: "note", name: "Note", emoji: "📝", layout: "page" },
+	{ key: "task", name: "Task", emoji: "✅", layout: "task" },
+	{ key: "person", name: "Human", emoji: "👤", layout: "page" },
+	{ key: "project", name: "Project", emoji: "🔨", layout: "page" },
+	{ key: "bookmark", name: "Bookmark", emoji: "🔖", layout: "page" },
+	{ key: "chat", name: "Chat", emoji: "💬", layout: "chat" },
+] as const;
+
+async function seedSpaceDefs(ctx: MutateCtx, spaceId: string): Promise<void> {
+	const prefix = spaceId.slice(0, 8);
+	for (const r of SPACE_DEFAULT_RELATIONS) {
+		await commitOps(ctx, `bundled-rel-${r.key}-${prefix}`, [
+			{ objectCreate: { typeKey: "relation" } },
+			{ fieldSet: { key: "channel", value: { stringValue: spaceId } } },
+			{ fieldSet: { key: "key", value: { stringValue: r.key } } },
+			{ fieldSet: { key: "format", value: { stringValue: r.format } } },
+			{ fieldSet: { key: "name", value: { stringValue: r.name } } },
+			{ fieldSet: { key: "iconEmoji", value: { stringValue: r.emoji } } },
+			{ fieldSet: { key: "hidden", value: { boolValue: r.hidden } } },
+			{ fieldSet: { key: "readOnly", value: { boolValue: r.readOnly } } },
+			{ fieldSet: { key: "maxCount", value: { intValue: r.maxCount } } },
+			{ fieldSet: { key: "bundled", value: { boolValue: true } } },
+			{ fieldSet: { key: "options", value: { valuesValue: { items: [] } } } },
+		]);
+	}
+	for (const t of SPACE_DEFAULT_TYPES) {
+		await commitOps(ctx, `bundled-type-${t.key}-${prefix}`, [
+			{ objectCreate: { typeKey: "type" } },
+			{ fieldSet: { key: "channel", value: { stringValue: spaceId } } },
+			{ fieldSet: { key: "key", value: { stringValue: t.key } } },
+			{ fieldSet: { key: "name", value: { stringValue: t.name } } },
+			{ fieldSet: { key: "iconEmoji", value: { stringValue: t.emoji } } },
+			{ fieldSet: { key: "layout", value: { stringValue: t.layout } } },
+			{ fieldSet: { key: "bundled", value: { boolValue: true } } },
+		]);
+	}
+}
+
 export async function runMutation(
 	ctx: MutateCtx,
 	action: string,
@@ -359,6 +422,7 @@ export async function runMutation(
 				{ fieldSet: { key: "keyId", value: { intValue: 1 } } },
 			]);
 			spaceKeyEnsure(id);
+			await seedSpaceDefs(ctx, id);
 			return { id, key_id: 1 };
 		}
 
