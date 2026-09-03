@@ -546,9 +546,16 @@ export function runQuery(
 		});
 	}
 
-	// Paging.
+	// Paging. The full match count is what callers page against; a page
+	// length would leave a truncated read indistinguishable from a complete one.
+	const matched = out.length;
 	const [offset, hasOffset] = jsonInt(body, "offset");
 	const [limit, hasLimit] = jsonInt(body, "limit");
+	// A page is only meaningful over a total order. Sorted queries tiebreak
+	// on id above; an unsorted one is in Map insertion order, which a
+	// concurrent write can shift — so consecutive pages could repeat or
+	// skip a record. Order by id when paging, and only then.
+	if (sorts.length === 0 && (hasOffset || hasLimit)) out.sort((a, b) => compareStrings(a.id, b.id));
 	let start = hasOffset ? offset : 0;
 	if (start > out.length) start = out.length;
 	let end = hasLimit ? start + limit : out.length;
@@ -579,5 +586,5 @@ export function runQuery(
 		return row;
 	});
 
-	return { total: records.length, records };
+	return { total: matched, records };
 }
