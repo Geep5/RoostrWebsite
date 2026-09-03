@@ -14,7 +14,7 @@
 	import GraphIcon from "$lib/components/GraphIcon.svelte";
 	import PinnedWidget from "$lib/components/PinnedWidget.svelte";
 	import { creatableTypes, typeGlyph, createTyped, createCollection, createQuery, seedSpaceDefaults } from "$lib/create";
-	import { CREATABLE_FORMATS, RESERVED_KEYS, createRelation, formatGlyph } from "$lib/relations";
+	import { CREATABLE_FORMATS, RESERVED_KEYS, createRelation, formatGlyph, spaceRelations } from "$lib/relations";
 	import type { SpaceJSON } from "$lib/types";
 
 	let { children }: { children: import("svelte").Snippet } = $props();
@@ -408,10 +408,13 @@
 
 	/** Create a type object (Anytype: U.Object.createType); opens its page. */
 	const sidebarProps = $derived(
-		store.relations
+		spaceRelations(store.relations, activeSpace.id || defaultChannelId)
 			.filter((r) => !r.hidden && !RESERVED_KEYS[r.key])
 			.toSorted((a, b) => (a.name || a.key).localeCompare(b.name || b.key)),
 	);
+
+	/** Spaces are self-contained: bundled types plus this space's own. */
+	const sidebarTypes = $derived(store.types.filter((t) => !t.space || t.space === (activeSpace.id || defaultChannelId)));
 
 	async function newProperty() {
 		const name = prompt("Property name:");
@@ -435,6 +438,7 @@
 			return;
 		}
 		const { id } = await note.create(name.trim(), "type", {
+			channel: { stringValue: activeSpace.id || defaultChannelId },
 			key: { stringValue: key },
 			layout: { stringValue: "page" },
 		});
@@ -751,7 +755,7 @@
 					</div>
 					{#if !mCollapsed["__types"]}
 						<div class="m-section-body">
-							{#each store.types as t (t.id)}
+							{#each sidebarTypes as t (t.id)}
 								<a class="m-row" href="/app/object/{t.id}">
 									<span class="obj-icon">{t.icon || typeGlyph(t.key)}</span>{t.name || t.key}
 								</a>
@@ -960,7 +964,7 @@
 				</div>
 				{#if !sectionCollapsed["types"]}
 					<div class="section-body">
-						{#each store.types as t (t.id)}
+						{#each sidebarTypes as t (t.id)}
 							{@const objs = typeObjects(t.key)}
 							<div class="type-row" class:current={page.url.pathname === `/app/object/${t.id}`}>
 								<button

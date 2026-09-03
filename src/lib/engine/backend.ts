@@ -365,6 +365,7 @@ class WebBackend {
 				format: fstr(o.fields, "format") || "shorttext",
 				name: fstr(o.fields, "name"),
 				iconEmoji: fstr(o.fields, "iconEmoji"),
+				space: fstr(o.fields, "channel"),
 				hidden: o.fields["hidden"]?.boolValue === true,
 				readOnly: o.fields["readOnly"]?.boolValue === true,
 				maxCount: o.fields["maxCount"]?.intValue ?? 0,
