@@ -413,6 +413,16 @@ class WebBackend {
 					}
 					return out;
 				},
+				objectsWithField: async (key, channel) => {
+					await this.ensure();
+					const out: string[] = [];
+					for (const [id, state] of this.states) {
+						if (state.deleted || !(key in state.fields)) continue;
+						if ((state.fields["channel"]?.stringValue ?? "") !== channel) continue;
+						out.push(id);
+					}
+					return out;
+				},
 				commit: async (change: ChangeJSON) => {
 					change.id = changeId(change);
 					const bytes = encodeChange(change);
