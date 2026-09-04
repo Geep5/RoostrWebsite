@@ -470,16 +470,6 @@ export async function runMutation(
 			return { key_id: keyId };
 		}
 
-		case "channel_invite_payload": {
-			const channelId = str("channel_id");
-			if (!channelId) throw new Error("channel_id required");
-			const entry = spaceKeyGet(channelId);
-			if (!entry) throw new Error("no local key for channel");
-			const obj = await ctx.getObject(channelId);
-			const name = obj?.fields?.["name"]?.stringValue ?? "";
-			return { payload: { channel_id: channelId, name, key: entry.key, key_id: entry.keyId } };
-		}
-
 		default:
 			throw new Error(`unsupported action on Roostr Web: ${action}`);
 	}

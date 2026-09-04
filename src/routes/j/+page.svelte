@@ -1,22 +1,23 @@
 <script lang="ts">
 	/**
-	 * Universal invite landing: getroostr.fly.dev/j#r1.<blob>. The space
-	 * key lives in the URL fragment — it never reaches a server. Accepting
-	 * imports the key on this device and the space syncs into /app.
+	 * Public join landing: getroostr.fly.dev/j#r2.<blob>. The link carries
+	 * NO key - it only names a space and its owner. "Request to join"
+	 * gift-wraps your npub to the owner (NIP-59); they approve in space
+	 * settings, and the space key arrives gift-wrapped back to you.
 	 * Engine imports are dynamic so this page never throws on load.
 	 */
 	import { onMount } from "svelte";
-	import { decodeInvite, type SpaceInvite } from "$lib/invite";
+	import { decodeJoinLink, type SpaceJoinLink } from "$lib/invite";
 
 	let checked = $state(false);
-	let inv = $state<SpaceInvite | null>(null);
+	let link = $state<SpaceJoinLink | null>(null);
 	let hasKey = $state(false);
 	let busy = $state(false);
-	let accepted = $state(false);
+	let sent = $state(false);
 	let error = $state("");
 
 	onMount(async () => {
-		inv = decodeInvite(location.hash.slice(1));
+		link = decodeJoinLink(location.hash.slice(1));
 		try {
 			const sync = await import("$lib/engine/sync");
 			hasKey = !!sync.myNpub();
@@ -26,22 +27,20 @@
 		checked = true;
 	});
 
-	async function accept() {
-		if (!inv || busy) return;
+	async function request() {
+		if (!link || busy) return;
 		busy = true;
 		error = "";
 		try {
 			const sync = await import("$lib/engine/sync");
-			await sync.importSpaceInvite(inv);
-			accepted = true;
+			await sync.sendJoinRequest(link);
+			sent = true;
 		} catch (err) {
 			error = err instanceof Error ? err.message : String(err);
 		} finally {
 			busy = false;
 		}
 	}
-
-	const appLink = $derived(inv?.object ? `/app/object/${inv.object}` : "/app");
 </script>
 
 <svelte:head>
@@ -57,26 +56,30 @@
 	<main>
 		<div class="card">
 			{#if !checked}
-				<p class="muted">Reading invite…</p>
-			{:else if !inv}
-				<h1>Invalid invite</h1>
-				<p class="muted">This invite link is invalid or truncated.</p>
-			{:else if accepted}
-				<h1>Invite accepted</h1>
-				<p class="muted">Syncing the space — it will appear in your app as changes arrive from the relays.</p>
-				<a class="btn primary" href={appLink}>Open Roostr Web</a>
-			{:else}
-				<h1>Join {inv.name || "a shared space"}</h1>
+				<p class="muted">Reading link…</p>
+			{:else if !link}
+				<h1>Invalid link</h1>
+				<p class="muted">This join link is invalid or truncated.</p>
+			{:else if sent}
+				<h1>Request sent</h1>
 				<p class="muted">
-					You've been invited to a Roostr space{inv.owner ? " by" : ""}
-					{#if inv.owner}<code class="npub" title={inv.owner}>{inv.owner.slice(0, 20)}…</code>{/if}
+					The owner of {link.name || "the space"} will see your request in their space settings.
+					Once they approve, the space key is delivered to you and the space appears in your app.
 				</p>
-				{#if inv.relays.length > 0}
-					<p class="relays">via {inv.relays.join(", ")}</p>
+				<a class="btn primary" href="/app">Open Roostr Web</a>
+			{:else}
+				<h1>Request to join {link.name || "a shared space"}</h1>
+				<p class="muted">
+					A Roostr space{link.owner ? " owned by" : ""}
+					{#if link.owner}<code class="npub" title={link.owner}>{link.owner.slice(0, 20)}…</code>{/if}
+				</p>
+				{#if link.relays.length > 0}
+					<p class="relays">via {link.relays.join(", ")}</p>
 				{/if}
+				<p class="muted">This link grants nothing by itself — the owner approves each request.</p>
 				{#if hasKey}
-					<button class="btn primary" disabled={busy} onclick={() => void accept()}>
-						{busy ? "Accepting…" : "Accept invite"}
+					<button class="btn primary" disabled={busy} onclick={() => void request()}>
+						{busy ? "Sending…" : "Request to join"}
 					</button>
 				{:else}
 					<p class="muted">Set up your key in the app first, then reopen this link.</p>

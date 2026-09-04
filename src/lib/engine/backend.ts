@@ -77,6 +77,7 @@ class WebBackend {
 				});
 			},
 		}, {
+			onSpaceKey: () => void this.refreshShared(),
 			spaceOf: (objectId) => {
 				const o = this.states.get(objectId);
 				if (!o) return "";
@@ -101,11 +102,13 @@ class WebBackend {
 		if (!key) return;
 		const myPk = getPublicKey(key.sk);
 		const infos: SharedSpaceInfo[] = [];
+		const memberHexesBySpace = new Map<string, string[]>();
+		const nameBySpace = new Map<string, string>();
 		for (const [spaceId, entry] of Object.entries(spaceKeyAll())) {
 			if (!entry.key || entry.key.length !== 64) continue;
 			const stateObj = this.states.get(spaceId);
 			const writers = new Set<string>([entry.owner ?? myPk]);
-			let memberCount = 0;
+			const memberHexes: string[] = [];
 			const items = stateObj?.fields["members"]?.valuesValue?.items ?? [];
 			for (const item of items) {
 				const entries = (item as { mapValue?: { entries?: Record<string, { stringValue?: string }> } }).mapValue?.entries ?? {};
@@ -113,14 +116,25 @@ class WebBackend {
 				const role = entries["role"]?.stringValue ?? "writer";
 				const hex = npubToHex(npub);
 				if (hex) {
-					memberCount++;
+					memberHexes.push(hex);
 					if (role !== "viewer") writers.add(hex);
 				}
 			}
-			if (memberCount === 0 && !entry.owner) continue;
+			if (memberHexes.length === 0 && !entry.owner) continue;
+			memberHexesBySpace.set(spaceId, memberHexes);
+			nameBySpace.set(spaceId, stateObj?.fields["name"]?.stringValue ?? "");
 			infos.push({ spaceId, keyHex: entry.key, keyId: entry.keyId ?? 1, writers: [...writers], owner: entry.owner });
 		}
 		this.sync.setSharedSpaces(infos);
+
+		// Owner duty: every member holds the current key - gift-wrap it to
+		// anyone that hasn't received this keyId yet (adds and rotations).
+		for (const info of infos) {
+			if (info.owner && info.owner !== myPk) continue;
+			const members = memberHexesBySpace.get(info.spaceId) ?? [];
+			if (members.length === 0) continue;
+			void this.sync.sendInviteWraps(info.spaceId, info.keyHex, info.keyId, nameBySpace.get(info.spaceId) ?? "", members);
+		}
 
 		const owned = infos.filter((i) => !i.owner || i.owner === myPk);
 		if (owned.length > 0) {

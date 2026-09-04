@@ -1,13 +1,13 @@
 <script lang="ts">
 	import type { ObjectJSON, SpaceJSON } from "$lib/types";
 	import { space as spaceApi, note, fetchAllQuery } from "$lib/api";
-	import { inviteUrl } from "$lib/invite";
+	import { joinUrl } from "$lib/invite";
 	import { objectIcon } from "$lib/icons";
 	import { onMount } from "svelte";
 	import { goto } from "$app/navigation";
 	import { store, refreshAll } from "$lib/data.svelte";
 	import { activeSpace } from "$lib/space.svelte";
-	import { myNpub } from "$lib/engine/sync";
+	import { myNpub, listJoinRequests, clearJoinRequest, type JoinRequest } from "$lib/engine/sync";
 	import { backend } from "$lib/engine/backend";
 
 	let confirmDelete = $state(false);
@@ -113,34 +113,51 @@
 	const deletePhrase = $derived(spaceName || "delete");
 	const deleteArmed = $derived(deleteDraft.trim().toLowerCase() === deletePhrase.toLowerCase());
 	let npubDraft = $state("");
-	let invite = $state<string>("");
 	let confirmRemove = $state("");
 
-	// ── Invite link: the space key rides in the URL fragment ──────
+	// ── Join links + requests: the link carries NO key - it only lets
+	// someone knock. Requests land here (gift-wrapped to the owner) and
+	// wait for explicit approval, which delivers the key to that npub. ──
 	let ownerNpub = $state("");
-	let copiedInvite = $state(false);
+	let copiedJoin = $state(false);
+	let joinRequests = $state<JoinRequest[]>([]);
 
 	function loadIdentity() {
 		ownerNpub = myNpub() ?? "";
+		loadJoinRequests();
 	}
 
-	async function copyInviteLink() {
+	function loadJoinRequests() {
+		joinRequests = listJoinRequests().filter((r) => r.space === object.id);
+	}
+
+	async function copyJoinLink() {
 		if (!ownerNpub) return;
-		const payload = await spaceApi.invitePayload(object.id, "");
 		await navigator.clipboard.writeText(
-			inviteUrl({
-				v: 1,
-				t: "space-invite",
+			joinUrl({
+				v: 2,
+				t: "space-join",
 				space: object.id,
-				name: (typeof payload.name === "string" && payload.name) || object.fields["name"]?.stringValue || undefined,
+				name: object.fields["name"]?.stringValue || undefined,
 				owner: ownerNpub,
 				relays: backend.relays(),
-				key: typeof payload.key === "string" ? payload.key : "",
-				keyId: typeof payload.key_id === "number" ? payload.key_id : 1,
 			}),
 		);
-		copiedInvite = true;
-		setTimeout(() => (copiedInvite = false), 1500);
+		copiedJoin = true;
+		setTimeout(() => (copiedJoin = false), 1500);
+	}
+
+	async function approveRequest(r: JoinRequest) {
+		await spaceApi.memberAdd(object.id, r.requesterNpub);
+		clearJoinRequest(r.key);
+		loadJoinRequests();
+		await onchanged();
+		await invalidateAll();
+	}
+
+	function denyRequest(r: JoinRequest) {
+		clearJoinRequest(r.key);
+		loadJoinRequests();
 	}
 
 	async function addMember() {
@@ -163,10 +180,6 @@
 		await invalidateAll();
 	}
 
-	async function showInvite(npub: string) {
-		const payload = await spaceApi.invitePayload(object.id, npub);
-		invite = JSON.stringify(payload, null, 2);
-	}
 </script>
 
 <!-- Escape cancels the typed-confirmation modals, matching every other
@@ -179,16 +192,15 @@
 
 	<h3>Members</h3>
 	<p class="hint">
-		Everyone holding this space's key can read and write every object in it. Invites are delivered as a
-		NIP-59 gift wrap of the space key to the member's npub (ships with /nostr-sync); removing a member
-		rotates the key.
+		Everyone holding this space's key can read and write every object in it. Adding an npub gift-wraps
+		the space key to it over your relays (NIP-59) — nothing to copy, their device just receives the
+		space. Removing a member rotates the key.
 	</p>
 
 	{#each members as m (m.npub)}
 		<div class="member">
 			<span class="npub" title={m.npub}>{m.npub.slice(0, 20)}…</span>
 			<span class="role">{m.role}</span>
-			<button onclick={() => void showInvite(m.npub)}>Invite payload</button>
 			<button class="danger" onclick={() => void removeMember(m.npub)}>{confirmRemove === m.npub ? "Confirm: rotate key" : "Remove"}</button>
 		</div>
 	{/each}
@@ -208,20 +220,30 @@
 		<button
 			type="button"
 			disabled={!ownerNpub}
-			title={ownerNpub ? "Copy a universal link that grants access to this space" : "No key on this device yet"}
-			onclick={() => void copyInviteLink()}>{copiedInvite ? "Copied ✓" : "Copy invite link"}</button
+			title={ownerNpub ? "Copy a public link that lets anyone REQUEST to join — you approve each request here" : "No key on this device yet"}
+			onclick={() => void copyJoinLink()}>{copiedJoin ? "Copied ✓" : "Copy join link"}</button
 		>
 	</form>
-	<p class="hint">Anyone with this link can read the space. Rotate the key to revoke.</p>
+	<p class="hint">The join link carries no key — it only lets someone knock. You approve each request below.</p>
 
-	{#if invite}
-		<div class="invite">
-			<div class="invite-head">
-				Invite rumor (gift-wrapped + published by /nostr-sync in Phase 4)
-				<button onclick={() => (invite = "")}>×</button>
+	{#if joinRequests.length > 0}
+		<h3>Join requests</h3>
+		{#each joinRequests as r (r.key)}
+			<div class="member joinreq">
+				{#if r.picture}
+					<img class="req-avatar" src={r.picture} alt="" referrerpolicy="no-referrer" />
+				{:else}
+					<span class="req-avatar req-glyph">👤</span>
+				{/if}
+				<span class="req-id">
+					<span class="req-name">{r.name || r.requesterNpub.slice(0, 20) + "…"}</span>
+					{#if r.name}<span class="npub req-npub" title={r.requesterNpub}>{r.requesterNpub.slice(0, 20)}…</span>{/if}
+				</span>
+				<span class="role">{new Date(r.at).toLocaleDateString()}</span>
+				<button onclick={() => void approveRequest(r)}>Approve</button>
+				<button class="danger" onclick={() => denyRequest(r)}>Deny</button>
 			</div>
-			<pre>{invite}</pre>
-		</div>
+		{/each}
 	{/if}
 
 	<div class="keyrow">
@@ -472,29 +494,44 @@
 		font-size: 13px;
 		width: 340px;
 	}
-	.invite {
-		border: 1px solid var(--border);
-		border-radius: 10px;
-		overflow: hidden;
-	}
-	.invite-head {
-		display: flex;
-		justify-content: space-between;
-		align-items: center;
-		padding: 6px 10px;
-		font-size: 12px;
-		color: var(--muted);
-		border-bottom: 1px solid var(--border);
-	}
-	pre {
-		margin: 0;
-		padding: 10px;
-		font-size: 11px;
-		overflow-x: auto;
-	}
 	.keyrow {
 		display: flex;
 		align-items: center;
 		gap: 10px;
+	}
+	.joinreq {
+		align-items: center;
+	}
+	.req-avatar {
+		width: 28px;
+		height: 28px;
+		border-radius: 50%;
+		object-fit: cover;
+		flex: none;
+	}
+	.req-glyph {
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		background: var(--hover, #2a2a2a);
+		font-size: 14px;
+	}
+	.req-id {
+		flex: 1;
+		min-width: 0;
+		display: flex;
+		flex-direction: column;
+		gap: 1px;
+	}
+	.req-name {
+		font-size: 13px;
+		font-weight: 500;
+		overflow: hidden;
+		white-space: nowrap;
+		text-overflow: ellipsis;
+	}
+	.req-npub {
+		font-size: 11px;
+		color: var(--muted);
 	}
 </style>

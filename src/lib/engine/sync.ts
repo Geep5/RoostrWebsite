@@ -19,6 +19,7 @@
  */
 
 import { SimplePool, finalizeEvent, getPublicKey, nip19, nip44, type Event } from "nostr-tools";
+import { unwrapEvent, wrapEvent } from "nostr-tools/nip59";
 import { sha256 } from "@noble/hashes/sha2.js";
 import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
 import type { ChangeJSON, ChangeStoreApi, RelaySyncApi, SyncEvents } from "./contracts";
@@ -31,6 +32,74 @@ export const DEFAULT_RELAYS = ["wss://roostr-relay.fly.dev"];
 const CHANGE_KIND = 1078;
 const ALLOWLIST_KIND = 30100;
 const ALLOWLIST_D = "roostr-allowlist";
+/** NIP-59 gift wrap: space-key invites and join requests, addressed by npub. */
+const WRAP_KIND = 1059;
+const INVITE_RUMOR_KIND = 24891;
+const JOINREQ_RUMOR_KIND = 24892;
+/** Gift wraps randomize created_at up to ~2 days back; look back further. */
+const WRAP_LOOKBACK_S = 3 * 86_400;
+
+// ── Join requests (this device is a space admin) ─────────────────────
+
+export interface JoinRequest {
+	/** "spaceId/requesterHex" - stable dedupe key. */
+	key: string;
+	space: string;
+	spaceName: string;
+	requester: string;
+	requesterNpub: string;
+	/** kind-0 profile at request time, when the relays had one. */
+	name?: string;
+	picture?: string;
+	at: number;
+}
+
+const JOINREQ_STORAGE = "roostr-join-requests";
+
+export function listJoinRequests(): JoinRequest[] {
+	if (typeof localStorage === "undefined") return [];
+	try {
+		return (JSON.parse(localStorage.getItem(JOINREQ_STORAGE) ?? "[]") as JoinRequest[]) ?? [];
+	} catch {
+		return [];
+	}
+}
+
+function writeJoinRequests(requests: JoinRequest[]): void {
+	localStorage.setItem(JOINREQ_STORAGE, JSON.stringify(requests));
+	window.dispatchEvent(new CustomEvent("roostr-join-requests"));
+}
+
+export function clearJoinRequest(key: string): void {
+	writeJoinRequests(listJoinRequests().filter((r) => r.key !== key));
+}
+
+function recordJoinRequest(r: Omit<JoinRequest, "key">): void {
+	const key = `${r.space}/${r.requester}`;
+	const rest = listJoinRequests().filter((x) => x.key !== key);
+	rest.push({ ...r, key });
+	writeJoinRequests(rest);
+}
+
+/** Send a join request to a space owner - used by the public /j page. */
+export async function sendJoinRequest(link: { space: string; owner: string; relays: string[] }): Promise<void> {
+	const key = loadKey();
+	if (!key) throw new Error("no local identity - open the app once first");
+	const ownerHex = npubToHex(link.owner);
+	if (!ownerHex) throw new Error("bad owner key in the link");
+	const relays = link.relays.length > 0 ? link.relays : DEFAULT_RELAYS;
+	const pool = new SimplePool();
+	try {
+		const wrap = wrapEvent(
+			{ kind: JOINREQ_RUMOR_KIND, tags: [], content: JSON.stringify({ t: "join-request", space: link.space }) },
+			key.sk,
+			ownerHex,
+		);
+		await Promise.any(pool.publish(relays, wrap));
+	} finally {
+		pool.close(relays);
+	}
+}
 
 // ── Shared spaces ────────────────────────────────────────────────────
 //
@@ -124,6 +193,8 @@ function bytesToB64(bytes: Uint8Array): string {
 export interface RelaySyncOptions {
 	/** Override change decoding (tests / proto not yet loaded). */
 	decode?: (bytes: Uint8Array) => ChangeJSON | null;
+	/** A gift-wrapped space key arrived and was imported. */
+	onSpaceKey?: () => void;
 	/** Debug hook: every raw relay event before decrypt. */
 	onRawEvent?: (event: Event) => void;
 	/** objectId -> owning space id ("" = personal). Channels own themselves. */
@@ -155,6 +226,8 @@ export class RelaySync implements RelaySyncApi {
 	private readonly conversationKey: Uint8Array;
 	private decode: ((bytes: Uint8Array) => ChangeJSON | null) | null;
 	private readonly onRawEvent?: (event: Event) => void;
+	private readonly onSpaceKey?: () => void;
+	private wrapSub: { close(): void } | null = null;
 	private readonly spaceOf: (objectId: string) => string;
 	private sharedSpaces = new Map<string, SharedSpace>();
 	private spaceSub: { close(): void } | null = null;
@@ -189,6 +262,7 @@ export class RelaySync implements RelaySyncApi {
 		this.conversationKey = nip44.getConversationKey(sk, this.pk);
 		this.decode = options.decode ?? null;
 		this.onRawEvent = options.onRawEvent;
+		this.onSpaceKey = options.onSpaceKey;
 		this.spaceOf = options.spaceOf ?? (() => "");
 	}
 
@@ -299,6 +373,90 @@ export class RelaySync implements RelaySyncApi {
 		return this.decode;
 	}
 
+	// ── Gift wraps: key invites in, join requests in, key invites out ──
+
+	private wrapsSeen(): Set<string> {
+		try {
+			return new Set(JSON.parse(localStorage.getItem("roostr-wraps-seen") ?? "[]") as string[]);
+		} catch {
+			return new Set();
+		}
+	}
+
+	private async handleWrap(event: Event): Promise<void> {
+		const seen = this.wrapsSeen();
+		if (seen.has(event.id)) return;
+		seen.add(event.id);
+		localStorage.setItem("roostr-wraps-seen", JSON.stringify([...seen].slice(-2000)));
+		try {
+			const rumor = unwrapEvent(event, this.sk);
+			if (rumor.kind === INVITE_RUMOR_KIND) {
+				const p = JSON.parse(rumor.content) as { t?: string; space?: string; name?: string; key?: string; keyId?: number };
+				if (p.t !== "space-invite" || !p.space || !/^[0-9a-f]{64}$/.test(p.key ?? "")) return;
+				spaceKeyImport(p.space, p.key!, typeof p.keyId === "number" && p.keyId > 0 ? p.keyId : 1, rumor.pubkey);
+				this.onSpaceKey?.();
+			} else if (rumor.kind === JOINREQ_RUMOR_KIND) {
+				const p = JSON.parse(rumor.content) as { t?: string; space?: string };
+				if (p.t !== "join-request" || !p.space) return;
+				// Only the administrator of the space collects requests.
+				const space = this.sharedSpaces.get(p.space);
+				if (!space || (space.owner && space.owner !== this.pk)) return;
+				// The requester's public kind-0 profile, so the owner can put a
+				// face to the knock before approving.
+				let profile: { name?: string; picture?: string } = {};
+				try {
+					const events = await this.pool.querySync(this.relays, { kinds: [0], authors: [rumor.pubkey], limit: 3 });
+					events.sort((a, b) => b.created_at - a.created_at);
+					if (events[0]) {
+						const meta = JSON.parse(events[0].content) as { name?: string; display_name?: string; picture?: string };
+						profile = { name: meta.display_name || meta.name, picture: meta.picture };
+					}
+				} catch {
+					/* no profile on our relays - npub alone */
+				}
+				recordJoinRequest({
+					space: p.space,
+					spaceName: "",
+					requester: rumor.pubkey,
+					requesterNpub: nip19.npubEncode(rumor.pubkey),
+					name: profile.name,
+					picture: profile.picture,
+					at: Date.now(),
+				});
+			}
+		} catch {
+			/* not ours / garbled */
+		}
+	}
+
+	/** Owner duty: gift-wrap the current space key to every member that
+	 * hasn't received this keyId yet. Idempotent per (member, keyId). */
+	async sendInviteWraps(spaceId: string, keyHex: string, keyId: number, name: string, memberHexes: string[]): Promise<void> {
+		let sent: Record<string, number> = {};
+		try {
+			sent = JSON.parse(localStorage.getItem("roostr-invites-sent") ?? "{}") as Record<string, number>;
+		} catch {
+			/* fresh */
+		}
+		for (const hex of memberHexes) {
+			if (hex === this.pk) continue;
+			const k = `${spaceId}/${hex}`;
+			if (sent[k] === keyId) continue;
+			try {
+				const wrap = wrapEvent(
+					{ kind: INVITE_RUMOR_KIND, tags: [], content: JSON.stringify({ t: "space-invite", space: spaceId, name, key: keyHex, keyId }) },
+					this.sk,
+					hex,
+				);
+				await Promise.any(this.pool.publish(this.relays, wrap));
+				sent[k] = keyId;
+				localStorage.setItem("roostr-invites-sent", JSON.stringify(sent));
+			} catch {
+				/* relay refused; retried on next reconcile */
+			}
+		}
+	}
+
 	async start(): Promise<void> {
 		await this.store.open();
 		this.cursor = await this.store.getCursor();
@@ -318,6 +476,15 @@ export class RelaySync implements RelaySyncApi {
 		}
 
 		if (this.stopped) return;
+		// Gift wraps addressed to us: created_at is randomized, so no
+		// cursor - the seen-set dedupes.
+		try {
+			const wraps = await this.pool.querySync(this.relays, { kinds: [WRAP_KIND], "#p": [this.pk] });
+			wraps.sort((a, b) => a.created_at - b.created_at);
+			for (const w of wraps) await this.handleWrap(w);
+		} catch {
+			/* relay unreachable; live sub catches up */
+		}
 		this.subscribeLive();
 		this.watchdogTimer = setInterval(() => void this.watchdog(), 60_000);
 		this.events.onStatus({ phase: "live", imported: this.stats.imported });
@@ -351,6 +518,16 @@ export class RelaySync implements RelaySyncApi {
 					},
 				})
 			: null;
+		try {
+			this.wrapSub?.close();
+		} catch {
+			/* gone */
+		}
+		this.wrapSub = this.pool.subscribeMany(this.relays, { kinds: [WRAP_KIND], "#p": [this.pk], since: Math.floor(Date.now() / 1000) - WRAP_LOOKBACK_S }, {
+			onevent: (event) => {
+				this.liveChain = this.liveChain.then(() => this.handleWrap(event)).catch(() => {});
+			},
+		});
 	}
 
 	/**
@@ -418,6 +595,15 @@ export class RelaySync implements RelaySyncApi {
 		}
 		await this.importBatch(batch, true);
 		await this.persistCursor();
+		// Gift wraps have randomized created_at: re-query on every catchup;
+		// the seen-set dedupes. Recovers knocks lost to dropped sockets.
+		try {
+			const wraps = await this.pool.querySync(this.relays, { kinds: [WRAP_KIND], "#p": [this.pk] });
+			wraps.sort((a, b) => a.created_at - b.created_at);
+			for (const w of wraps) await this.handleWrap(w);
+		} catch {
+			/* next watchdog tick */
+		}
 	}
 
 	stop(): void {
