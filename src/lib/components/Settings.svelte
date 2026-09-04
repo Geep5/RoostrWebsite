@@ -7,34 +7,6 @@
 	import { loadKey } from "$lib/engine/keys";
 	import { backend } from "$lib/engine/backend";
 
-	// ── Skills ──────────────────────────────────────────────────────
-	//
-	// The global set is hardcoded: the device capabilities installed by
-	// the machine that runs the harness, marked `scope: global`. They are
-	// listed here read-only because installing one needs that machine.
-	// Every other skill belongs to one agent, set in its prompt panel;
-	// the ones with no owner yet are still listed to everyone.
-	interface GlobalSkill {
-		id: string;
-		name: string;
-		description: string;
-		/** Hardcoded device capability, not assignable to an agent. */
-		global: boolean;
-	}
-	let globalSkills = $state<GlobalSkill[]>([]);
-
-	async function loadGlobalSkills() {
-		const records = await fetchAllQuery({ type: "skill" });
-		globalSkills = records
-			.filter((r) => !(r.fields["agent"]?.stringValue ?? ""))
-			.map((r) => ({
-				id: r.id,
-				name: r.fields["name"]?.stringValue || "Untitled",
-				description: r.fields["description"]?.stringValue ?? "",
-				global: r.fields["scope"]?.stringValue === "global",
-			}));
-	}
-
 	// Desktop sync check: compare this device's change-set fingerprint against
 	// the desktop daemon's (GET /api/sync/digest). Same digest = identical vault.
 	let deskUrl = $state(localStorage.getItem("glon.deskUrl") ?? "http://127.0.0.1:7333");
@@ -163,7 +135,6 @@
 	}
 
 	onMount(() => {
-		void loadGlobalSkills();
 		void load();
 	});
 
@@ -559,26 +530,6 @@
 			{/if}
 		</section>
 
-		<section>
-			<h3>Skills</h3>
-			<p class="hint">
-				Every agent lists these and reads the body on demand. The global ones are device
-				capabilities, installed and toggled on the machine that runs the harness. Any other skill
-				belongs to a single agent, assigned in its prompt panel under space settings.
-			</p>
-			{#each globalSkills as g (g.id)}
-				<div class="gskill">
-					<button
-						class="skill-name"
-						onclick={() => {
-							onclose();
-							void goto(`/app/object/${g.id}`);
-						}}>{g.name}</button>
-					<span class="fallback">{g.description || "no description — agents pick skills by it"}</span>
-					{#if g.global}<span class="fallback">global</span>{/if}
-				</div>
-			{/each}
-		</section>
 		<p class="build-stamp">Build {__BUILD_STAMP__}</p>
 	</div>
 </div>
