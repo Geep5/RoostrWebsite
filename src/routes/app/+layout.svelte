@@ -1360,6 +1360,15 @@
 		color: var(--muted);
 		background: none;
 		font-size: 17px;
+		/* The avatar IS the button: no border ring, no inset - a clean
+		   circle clipping the image. */
+		border: none;
+		padding: 0;
+		border-radius: 50%;
+		overflow: hidden;
+		display: flex;
+		align-items: center;
+		justify-content: center;
 	}
 	.space.settings:hover {
 		color: var(--fg);
