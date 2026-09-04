@@ -599,6 +599,8 @@ export function computeObject(changes: ChangeJSON[]): ObjectJSON | null {
 			if (op.objectCreate) {
 				typeKey = op.objectCreate.typeKey ?? "";
 				createdAt = change.timestamp;
+				// A create AFTER a delete is a revival (restore-from-bin).
+				deleted = false;
 			} else if (op.fieldSet) {
 				fields.set(op.fieldSet.key, op.fieldSet.value as ValueWire);
 			} else if (op.fieldDelete) {

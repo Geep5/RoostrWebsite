@@ -443,6 +443,17 @@ export async function runMutation(
 			return {};
 		}
 
+		case "restore": {
+			const objectId = str("object_id");
+			if (!objectId) throw new Error("object_id required");
+			const target = await ctx.getObject(objectId);
+			if (!target?.typeKey) throw new Error("unknown object");
+			// Revival = re-create under the object's own type; replay clears
+			// the tombstone, everything else is untouched.
+			await commitOps(ctx, objectId, [{ objectCreate: { typeKey: target.typeKey } }]);
+			return {};
+		}
+
 		case "set_type": {
 			const objectId = str("object_id");
 			const typeKey = str("type_key");
