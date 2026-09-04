@@ -409,6 +409,16 @@ export async function runMutation(
 			return {};
 		}
 
+		case "set_type": {
+			const objectId = str("object_id");
+			const typeKey = str("type_key");
+			if (!objectId || !typeKey) throw new Error("object_id and type_key required");
+			// Replay treats a later objectCreate as "set typeKey" - blocks
+			// and fields survive a retype.
+			await commitOps(ctx, objectId, [{ objectCreate: { typeKey } }]);
+			return {};
+		}
+
 		case "channel_create": {
 			const name = str("name");
 			if (!name) throw new Error("name required");
