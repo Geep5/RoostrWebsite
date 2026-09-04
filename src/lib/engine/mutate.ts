@@ -18,7 +18,9 @@ export interface MutateCtx {
 	/** All known changes for the object (for heads); [] for new objects. */
 	changesFor(objectId: string): Promise<ChangeJSON[]>;
 	/** Latest computed state (for table shapes / chat meta / field reads). */
-	getObject(objectId: string): Promise<{ blocks: BlockJSON[]; fields?: Record<string, ValueJSON> } | null>;
+	getObject(objectId: string): Promise<{ blocks: BlockJSON[]; fields?: Record<string, ValueJSON>; typeKey?: string } | null>;
+	/** Live (non-deleted) instance ids of a type in one space. */
+	instancesOf(typeKey: string, channel: string): Promise<string[]>;
 	/** Encode + id + persist + publish. */
 	commit(change: ChangeJSON): Promise<string>;
 }
@@ -250,7 +252,16 @@ export async function runMutation(
 		}
 
 		case "delete": {
-			await commitOps(ctx, str("object_id"), [{ objectDelete: {} }]);
+			const objectId = str("object_id");
+			const target = await ctx.getObject(objectId);
+			await commitOps(ctx, objectId, [{ objectDelete: {} }]);
+			// A type definition takes its instances with it: a type IS the
+			// meaning of its objects. Retype first (⋯ → Change type) to keep one.
+			if (target?.typeKey === "type") {
+				const key = target.fields?.["key"]?.stringValue ?? "";
+				const ch = target.fields?.["channel"]?.stringValue ?? "";
+				if (key) for (const iid of await ctx.instancesOf(key, ch)) await commitOps(ctx, iid, [{ objectDelete: {} }]);
+			}
 			return {};
 		}
 
@@ -265,6 +276,15 @@ export async function runMutation(
 			if (Array.isArray(arr)) for (const v of arr) if (typeof v === "string") ids.push(v);
 			if (ids.length === 0) throw new Error("object_id or object_ids required");
 			if (ids.includes("__vanished__")) throw new Error("the vanish ledger cannot be vanished");
+			// Type definitions take their instances into the void too.
+			for (const id of [...ids]) {
+				const target = await ctx.getObject(id);
+				if (target?.typeKey === "type") {
+					const key = target.fields?.["key"]?.stringValue ?? "";
+					const ch = target.fields?.["channel"]?.stringValue ?? "";
+					if (key) for (const iid of await ctx.instancesOf(key, ch)) if (!ids.includes(iid)) ids.push(iid);
+				}
+			}
 			for (const id of ids) {
 				await commitOps(ctx, id, [{ objectDelete: {} }]);
 				await commitOps(ctx, "__vanished__", [

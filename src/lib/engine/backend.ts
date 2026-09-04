@@ -403,6 +403,16 @@ class WebBackend {
 					await this.ensure();
 					return this.states.get(id) ?? null;
 				},
+				instancesOf: async (typeKey, channel) => {
+					await this.ensure();
+					const out: string[] = [];
+					for (const [id, state] of this.states) {
+						if (state.deleted || state.typeKey !== typeKey) continue;
+						if ((state.fields["channel"]?.stringValue ?? "") !== channel) continue;
+						out.push(id);
+					}
+					return out;
+				},
 				commit: async (change: ChangeJSON) => {
 					change.id = changeId(change);
 					const bytes = encodeChange(change);
