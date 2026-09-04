@@ -14,6 +14,7 @@ const CACHE = "roostr-profile";
 export interface Profile {
 	picture?: string;
 	name?: string;
+	display_name?: string;
 	[key: string]: unknown;
 }
 
