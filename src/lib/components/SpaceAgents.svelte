@@ -3,9 +3,9 @@
 	 * Agents section of space settings. Agents are space infrastructure
 	 * (like members), not objects OF the space — they're hidden from every
 	 * object surface and managed only here. You TALK to an agent through its
-	 * chat or any object's discussion; you MANAGE it here. Presence comes
-	 * from the synced heartbeat fields; "runs here" is this machine's
-	 * harness roster.
+	 * chat or any object's discussion; you MANAGE it here. Presence is live
+	 * from this machine's harness — an agent it serves is present, with no
+	 * heartbeat to age out; "runs here" is the same machine's roster.
 	 */
 	import { onMount } from "svelte";
 	import EmojiPicker from "./EmojiPicker.svelte";
@@ -50,6 +50,22 @@
 
 	let agents = $state<AgentRow[]>([]);
 	let roster = $state<string[] | null>(null); // null = no local daemon
+	/**
+	 * Presence, live from this machine's harness rather than from synced
+	 * fields. An agent listed here IS running here, so there is nothing to
+	 * age out. Agents served by another machine are simply absent - the old
+	 * heartbeat fields are read as a fallback so a machine still running the
+	 * previous harness keeps showing up.
+	 */
+	interface PresenceRow {
+		id: string;
+		state: "idle" | "working" | "error";
+		detail: string;
+		ts: number;
+	}
+	let presence = $state<Record<string, PresenceRow>>({});
+	let presenceHost = $state("");
+
 	let now = $state(Date.now());
 	let assigning = $state(""); // agent id whose responsibility editor is open
 	let avatarPick = $state(""); // agent id whose avatar picker is open
@@ -134,11 +150,9 @@
 
 	// ── System prompt ───────────────────────────────────────────────
 	//
-	// Editing rides the object graph, so this works from any device the vault
-	// syncs to — no harness reachable from here. The serving agent re-reads
-	// its own object every tool iteration, so an edit lands on its next
-	// iteration with no restart. The editor is disabled mid-turn as a
-	// courtesy, not a lock.
+	// The agent re-reads its own object every tool iteration, so an edit here
+	// lands on the next iteration with no restart. The editor is disabled
+	// mid-turn as a courtesy, not a lock.
 	let promptOpen = $state("");
 	let promptDraft = $state<Record<string, string>>({});
 	let promptSaved = $state("");
@@ -350,20 +364,25 @@
 	async function loadRoster() {
 		try {
 			const res = await fetch(`${HARNESS}/agents`);
-			roster = ((await res.json()) as { roster: string[] }).roster;
+			const body = (await res.json()) as { roster: string[]; host?: string; presence?: PresenceRow[] };
+			roster = body.roster;
+			presenceHost = body.host ?? "";
+			presence = Object.fromEntries((body.presence ?? []).map((p) => [p.id, p]));
 		} catch {
 			roster = null;
+			presence = {};
+			presenceHost = "";
 		}
 	}
 
 	// ── Provider readiness ───────────────────────────────────────────
 	//
-	// "Run here" only means anything if the harness on this machine can
-	// authenticate the agent's model, so the button reflects its
+	// "Run here" only means anything if this machine can actually
+	// authenticate the agent's model, so the button reflects the harness's
 	// credential state rather than letting the first turn discover it.
 	interface ProviderStatus {
 		mode: string;
-		ready?: boolean;
+		ready: boolean;
 		expires?: number;
 	}
 	let auth = $state<{ anthropic: ProviderStatus; kimi: ProviderStatus } | null>(null);
@@ -377,23 +396,20 @@
 		}
 	}
 
-	/** Which credential a model needs — mirrors the harness's callLLM dispatch. */
+	/** Which credential a model needs — mirrors callLLM's dispatch. */
 	function provider(model: string): "anthropic" | "kimi" | "none" {
 		if (model === "mock") return "none";
 		return model.startsWith("kimi") ? "kimi" : "anthropic";
 	}
 
-	/** Empty when the agent can run there; otherwise why it can't. */
+	/** Empty when the agent can run here; otherwise why it can't. */
 	function authBlock(model: string): string {
 		const need = provider(model);
 		if (need === "none" || auth === null) return "";
 		const p = auth[need];
-		// This app ships separately from the harness, so only an explicit
-		// `ready: false` warns — an older daemon that omits the field must
-		// not be reported as broken.
-		if (p?.ready !== false) return "";
+		if (p.ready) return "";
 		const label = need === "anthropic" ? "Claude" : "Kimi";
-		if (p.mode === "none") return `No ${label} credentials on that machine`;
+		if (p.mode === "none") return `No ${label} credentials on this machine`;
 		if (p.mode === "claude_code") return "Claude Code login expired";
 		return `${label} credentials expired`;
 	}
@@ -401,13 +417,18 @@
 	onMount(() => {
 		void loadRoster();
 		void loadAuth();
-		// The same tick that ages the presence labels re-checks credentials,
-		// so an expiry that lands while this page is open shows up.
-		const t = setInterval(() => {
+		// Presence is a cheap in-memory read on the local harness, so poll it
+		// briskly enough to show a turn starting; credentials are slower to
+		// check and only need to catch an expiry that lands while this is open.
+		const fast = setInterval(() => {
 			now = Date.now();
-			void loadAuth();
-		}, 15_000);
-		return () => clearInterval(t);
+			void loadRoster();
+		}, 3_000);
+		const slow = setInterval(() => void loadAuth(), 15_000);
+		return () => {
+			clearInterval(fast);
+			clearInterval(slow);
+		};
 	});
 
 	$effect(() => {
@@ -481,7 +502,8 @@
 </p>
 
 {#each spaceAgents as a (a.id)}
-	{@const online = a.seenAt > 0 && now - a.seenAt < ONLINE_MS}
+	{@const here = presence[a.id]}
+	{@const online = here !== undefined || (a.seenAt > 0 && now - a.seenAt < ONLINE_MS)}
 	{@const runsHere = roster?.includes(a.id) ?? false}
 	{@const blocked = roster === null ? "" : authBlock(a.model)}
 	<div class="agent-wrap">
@@ -493,7 +515,7 @@
 			</button>
 			<span class="name">{a.name}</span>
 			<span class="meta">
-				{#if online}{a.host || "online"} · {ago(a.seenAt)}{:else if a.seenAt > 0}last seen {ago(a.seenAt)}{:else}never ran{/if}
+				{#if here}{presenceHost || "here"}{#if here.state !== "idle"} · {here.state}{/if}{:else if online}{a.host || "online"} · {ago(a.seenAt)}{:else if a.seenAt > 0}last seen {ago(a.seenAt)}{:else}not running here{/if}
 			</span>
 			<button class="resp" class:unset={a.types.length === 0 && agents.length > 1} onclick={() => (assigning = assigning === a.id ? "" : a.id)}>
 				{describe(a)}
@@ -517,17 +539,17 @@
 		{#if blocked}
 			<p class="auth-warn">
 				⚠ {blocked}. {runsHere
-					? "This agent runs there but its turns will fail"
-					: "Running it there will fail"} until you sign in under Settings → Agent.
+					? "This agent runs here but its turns will fail"
+					: "Running it here will fail"} until you sign in under Settings → Agent.
 			</p>
 		{/if}
 		{#if promptOpen === a.id}
-			{@const working = a.turnState === "working"}
+			{@const working = (here?.state ?? a.turnState) === "working"}
 			{@const draft = promptDraft[a.id] ?? a.system}
 			<div class="prompt">
 				<p class="hint">
 					The agent rebuilds its prompt from this object every tool iteration, so an edit lands on
-					its next iteration — nothing to restart, and it reaches whichever machine serves it.
+					its next iteration — nothing to restart.
 				</p>
 				<textarea
 					rows="8"
@@ -548,7 +570,7 @@
 				<div class="own-skills">
 					{#each ownSkills[a.id] ?? [] as k (k.id)}
 						<div class="own-skill">
-							<a href={`/object/${k.id}`}>{k.name}</a>
+							<a href={`/app/object/${k.id}`}>{k.name}</a>
 							<span class="sk-desc">{k.description || "no description — this agent picks skills by it"}</span>
 							<button class="subtle nowrap" title="Return it to the unassigned pool" onclick={() => void unassignSkill(k.id)}>Unassign</button>
 						</div>
@@ -796,7 +818,7 @@
 		border-color: var(--accent);
 		color: var(--accent);
 	}
-	/* After .active so a warned agent that already runs there reads as a
+	/* After .active so a warned agent that already runs here reads as a
 	   warning, not as healthy. */
 	button.warn {
 		border-color: var(--orange);
