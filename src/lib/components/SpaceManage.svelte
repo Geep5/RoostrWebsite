@@ -1,11 +1,12 @@
 <script lang="ts">
 	import type { ObjectJSON, SpaceJSON } from "$lib/types";
 	import { space as spaceApi, note, fetchAllQuery } from "$lib/api";
+	import CheckboxIcon from "./CheckboxIcon.svelte";
 	import { joinUrl } from "$lib/invite";
 	import { objectIcon } from "$lib/icons";
 	import { onMount } from "svelte";
 	import { goto } from "$app/navigation";
-	import { store, refreshAll } from "$lib/data.svelte";
+	import { layoutOf, store, refreshAll } from "$lib/data.svelte";
 	import { activeSpace } from "$lib/space.svelte";
 	import { myNpub, listJoinRequests, clearJoinRequest, type JoinRequest } from "$lib/engine/sync";
 	import { backend } from "$lib/engine/backend";
@@ -46,6 +47,7 @@
 		name: string;
 		typeKey: string;
 		icon: string;
+		done: boolean;
 	}
 	let bin = $state<BinRow[] | null>(null);
 	let binBusy = $state("");
@@ -66,6 +68,7 @@
 				name: r.fields["name"]?.stringValue || "Untitled",
 				typeKey: r.typeKey,
 				icon: r.fields["iconEmoji"]?.stringValue ?? "",
+				done: r.fields["done"]?.boolValue === true,
 			}));
 	}
 
@@ -283,7 +286,11 @@
 		<div class="bin">
 			{#each bin as b (b.id)}
 				<div class="bin-row">
-					<span class="obj-icon">{objectIcon(b.icon, b.typeKey)}</span>
+					{#if layoutOf(b.typeKey) === "task"}
+						<span class="bin-check" class:on={b.done}><CheckboxIcon checked={b.done} size={16} /></span>
+					{:else}
+						<span class="obj-icon">{objectIcon(b.icon, b.typeKey)}</span>
+					{/if}
 					<span class="bin-name">{b.name}</span>
 					<button disabled={binBusy === b.id} onclick={() => void restoreObject(b.id)}>Restore</button>
 					<button class="danger" disabled={binBusy === b.id} onclick={() => void vanishObject(b.id, b.name)}>Delete forever</button>
@@ -546,5 +553,15 @@
 	.req-npub {
 		font-size: 11px;
 		color: var(--muted);
+	}
+	/* Binned tasks keep their checkbox face - display-only, the bin is
+	   frozen; Restore first to toggle. */
+	.bin-check {
+		display: inline-flex;
+		color: var(--muted);
+		flex: none;
+	}
+	.bin-check.on {
+		color: var(--accent);
 	}
 </style>
