@@ -635,6 +635,11 @@
 			{:else if objectSummary}
 				<div class="m-actions">
 				<span class="m-sync" class:ok={sync.phase === "live"} class:busy={sync.phase === "backfill"} data-tip={sync.phase === "live" ? `Synced · ${sync.imported} changes` : sync.phase === "backfill" ? "Syncing…" : "Not syncing"}><span class="m-sync-dot"></span></span>
+				{#if discussionUI.available}
+					<button class="m-btn disc-chip" class:active={discussionUI.open} data-tip="Conversations" onclick={() => (discussionUI.open = !discussionUI.open)}>
+						💬{#if discussionUI.convCount > 1}<span class="disc-n">{discussionUI.convCount}</span>{:else if discussionUI.count > 0}<span class="disc-n">{discussionUI.count}</span>{/if}
+					</button>
+				{/if}
 				<div class="more-wrap">
 					<button class="m-btn" data-tip="More" onclick={() => { showMore = !showMore; showCollections = false; }}>⋯</button>
 					{#if showMore}
