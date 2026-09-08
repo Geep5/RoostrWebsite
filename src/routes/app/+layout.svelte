@@ -39,7 +39,7 @@
 			return { icon: "▨", name: "…" };
 		}
 		if (path === "/app/graph") return { icon: "graph", name: `Graph — ${current?.name ?? ""}` };
-		return { icon: "◍", name: current?.name ?? "glon" };
+		return { icon: current?.icon || "◍", name: current?.name ?? "glon" };
 	});
 
 	// ── Header toolbar (Anytype header/main/object.tsx) ───────────
