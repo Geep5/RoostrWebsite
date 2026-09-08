@@ -1938,7 +1938,9 @@
 	}
 	.tab-x {
 		flex: none;
-		display: none;
+		/* Always in the layout - hover only reveals it. display:none here
+		   made every tab grow on hover and shove its neighbors. */
+		visibility: hidden;
 		background: none;
 		border: none;
 		color: var(--muted);
@@ -1950,7 +1952,7 @@
 	}
 	.tab.active .tab-x,
 	.tab:hover .tab-x {
-		display: block;
+		visibility: visible;
 	}
 	.tab-x:hover {
 		background: var(--hover);
