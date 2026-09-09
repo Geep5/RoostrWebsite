@@ -8,8 +8,15 @@
 	import { goto } from "$app/navigation";
 	import { layoutOf, store, refreshAll } from "$lib/data.svelte";
 	import { activeSpace } from "$lib/space.svelte";
-	import { myNpub, listJoinRequests, clearJoinRequest, type JoinRequest } from "$lib/engine/sync";
-	import { backend } from "$lib/engine/backend";
+	import { myNpub, listJoinRequests, clearJoinRequest, type JoinRequest } from "$lib/client-identity";
+	import { backend } from "$lib/client-backend";
+	import { harnessFetch, pairedSession, onPairingChange } from "$lib/local-transport";
+	import PairGate from "./PairGate.svelte";
+
+	let paired = $state(false);
+	let harnessError = $state("");
+	let machineDataError = $state("");
+	let identityError = $state("");
 
 	let confirmDelete = $state(false);
 	let deleting = $state(false);
@@ -74,8 +81,8 @@
 
 	onMount(() => {
 		void loadBin();
-		void loadIdentity();
-		void loadServing();
+		refreshPairing();
+		return onPairingChange(refreshPairing);
 	});
 
 	async function restoreObject(id: string) {
@@ -171,15 +178,37 @@
 				paths: parseMap(r.fields["paths"]?.stringValue),
 				pathsStatus: parseMap(r.fields["paths_status"]?.stringValue),
 			}));
-		} catch {
-			machines = [];
+			machineDataError = "";
+		} catch (error) {
+			machineDataError = error instanceof Error ? error.message : "Saved machine information is unavailable.";
+		}
+		if (!pairedSession()) {
+			thisMachine = null;
+			return;
 		}
 		try {
-			const res = await fetch("http://127.0.0.1:7334/machine");
-			if (res.ok) thisMachine = (await res.json()) as { id: string; host: string };
-		} catch {
+			const res = await harnessFetch("/machine");
+			if (!res.ok) throw new Error(`Cannot identify this machine (HTTP ${res.status}).`);
+			const machine = (await res.json()) as { id: string; host: string };
+			if (!pairedSession()) return;
+			thisMachine = machine;
+			harnessError = "";
+		} catch (error) {
 			thisMachine = null;
+			harnessError = error instanceof Error ? error.message : "The paired harness is unreachable.";
 		}
+	}
+
+	function refreshPairing() {
+		paired = !!pairedSession();
+		thisMachine = null;
+		bindSeeded = false;
+		bindPath = "";
+		bindResult = "";
+		bindError = "";
+		harnessError = "";
+		void loadServing();
+		void loadIdentity();
 	}
 
 	// ── Project: repo identity is synced truth; the checkout path is a
@@ -189,6 +218,7 @@
 	let bindPath = $state("");
 	let bindBusy = $state(false);
 	let bindResult = $state("");
+	let bindError = $state("");
 	let bindSeeded = false;
 	let repoSeeded = false;
 	const myRow = $derived(machines.find((m) => m.machine_id === thisMachine?.id));
@@ -211,28 +241,38 @@
 	}
 
 	async function bindWorkspace(path: string) {
+		if (!pairedSession() || !servedHere) {
+			bindError = "Pair with the machine serving this space before changing its checkout.";
+			return;
+		}
 		bindBusy = true;
 		bindResult = "";
+		bindError = "";
 		try {
-			const res = await fetch("http://127.0.0.1:7334/workspace", {
+			const res = await harnessFetch("/workspace", {
 				method: "POST",
 				headers: { "Content-Type": "application/json" },
 				body: JSON.stringify({ space: object.id, path }),
 			});
 			const out = (await res.json()) as { status?: string; error?: string };
-			bindResult = out.status ?? out.error ?? "";
+			if (!res.ok || out.error) throw new Error(out.error || `Workspace binding failed (HTTP ${res.status}).`);
+			if (!out.status) throw new Error("The harness did not return a workspace binding status.");
+			bindResult = out.status;
 			if (!path) bindPath = "";
 			// The harness wrote the machine object; re-read once it lands.
 			setTimeout(() => void loadServing(), 900);
-		} catch {
-			bindResult = "harness unreachable";
+		} catch (error) {
+			bindError = error instanceof Error ? error.message : "The paired harness is unreachable.";
 		} finally {
 			bindBusy = false;
 		}
 	}
 
 	async function takeOverServing() {
-		if (!thisMachine) return;
+		if (!pairedSession() || !thisMachine) {
+			harnessError = "Pair with the native app before serving this space from this machine.";
+			return;
+		}
 		const noCheckout =
 			repoUrl.trim() && !machines.find((m) => m.machine_id === thisMachine?.id)?.paths[object.id]
 				? " This machine has no checkout of the project yet - bind a path after taking over."
@@ -242,13 +282,19 @@
 		await onchanged();
 	}
 
-	function loadIdentity() {
+	async function loadIdentity() {
 		ownerNpub = myNpub() ?? "";
-		loadJoinRequests();
+		await loadJoinRequests();
 	}
 
-	function loadJoinRequests() {
-		joinRequests = listJoinRequests().filter((r) => r.space === object.id);
+	async function loadJoinRequests() {
+		try {
+			joinRequests = (await listJoinRequests()).filter((r) => r.space === object.id);
+			identityError = "";
+		} catch (error) {
+			joinRequests = [];
+			identityError = error instanceof Error ? error.message : "Join requests are unavailable.";
+		}
 	}
 
 	async function copyJoinLink() {
@@ -268,16 +314,24 @@
 	}
 
 	async function approveRequest(r: JoinRequest) {
-		await spaceApi.memberAdd(object.id, r.requesterNpub);
-		clearJoinRequest(r.key);
-		loadJoinRequests();
-		await onchanged();
-		await invalidateAll();
+		try {
+			await spaceApi.memberAdd(object.id, r.requesterNpub);
+			await clearJoinRequest(r.key);
+			await loadJoinRequests();
+			await onchanged();
+			await invalidateAll();
+		} catch (error) {
+			identityError = error instanceof Error ? error.message : "Could not approve the join request.";
+		}
 	}
 
-	function denyRequest(r: JoinRequest) {
-		clearJoinRequest(r.key);
-		loadJoinRequests();
+	async function denyRequest(r: JoinRequest) {
+		try {
+			await clearJoinRequest(r.key);
+			await loadJoinRequests();
+		} catch (error) {
+			identityError = error instanceof Error ? error.message : "Could not deny the join request.";
+		}
 	}
 
 	async function addMember() {
@@ -315,6 +369,14 @@
 		One machine serves a space: it minds the agents, mints new ones, and answers. The claim is synced
 		data — if this machine breaks, take over from any other; it stands down when it syncs.
 	</p>
+	{#if !paired}
+		<PairGate compact onready={refreshPairing} />
+		<p class="hint">Pair to identify this machine, take over serving, or bind a local checkout. Browser space controls remain available.</p>
+	{/if}
+	{#if harnessError || machineDataError}
+		<p class="hint" role="alert">{harnessError || machineDataError}</p>
+		<button onclick={() => void loadServing()}>Retry machine status</button>
+	{/if}
 	<div class="serving-row">
 		<span class="serving-name">🖥️ {servedByName}{servedHere ? " (this machine)" : ""}</span>
 		{#if thisMachine && !servedHere}
@@ -367,6 +429,7 @@
 	{#if bindResult}
 		<p class="hint">{bindResult === "ok" ? "Bound and verified." : bindResult === "unbound" ? "Unbound." : `Bound with warning: ${bindResult}`}</p>
 	{/if}
+	{#if bindError}<p class="hint" role="alert">{bindError}</p>{/if}
 	{#if !servedHere}
 		<p class="hint">The checkout path is set from the machine serving this space.</p>
 	{/if}
@@ -406,6 +469,10 @@
 		>
 	</form>
 	<p class="hint">The join link carries no key — it only lets someone knock. You approve each request below.</p>
+	{#if identityError}
+		<p class="hint" role="alert">{identityError}</p>
+		<button onclick={() => void loadIdentity()}>Retry join requests</button>
+	{/if}
 
 	{#if joinRequests.length > 0}
 		<h3>Join requests</h3>
@@ -422,7 +489,7 @@
 				</span>
 				<span class="role">{new Date(r.at).toLocaleDateString()}</span>
 				<button onclick={() => void approveRequest(r)}>Approve</button>
-				<button class="danger" onclick={() => denyRequest(r)}>Deny</button>
+				<button class="danger" onclick={() => void denyRequest(r)}>Deny</button>
 			</div>
 		{/each}
 	{/if}

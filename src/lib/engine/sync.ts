@@ -18,18 +18,21 @@
  * publishOnce loop.
  */
 
-import { SimplePool, finalizeEvent, getPublicKey, nip19, nip44, type Event } from "nostr-tools";
+import { SimplePool, finalizeEvent, getPublicKey, nip19, nip44, verifyEvent, type Event } from "nostr-tools";
 import { unwrapEvent, wrapEvent } from "nostr-tools/nip59";
 import { sha256 } from "@noble/hashes/sha2.js";
 import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
-import type { ChangeJSON, ChangeStoreApi, RelaySyncApi, SyncEvents } from "./contracts";
+import type { ChangeJSON, ChangeStoreApi, PendingPublish, RelaySyncApi, SharedProvenance, SyncEvents } from "./contracts";
+import type { ObjectJSON } from "$lib/types";
+import { computeObject } from "./replay";
 import { proto } from "./proto";
 import { loadKey } from "./keys";
-import { spaceKeyImport } from "./spacekeys";
+import { spaceKeyGet, spaceKeyImport } from "./spacekeys";
 
 export const DEFAULT_RELAYS = ["wss://roostr-relay.fly.dev"];
 
 const CHANGE_KIND = 1078;
+const EMPTY_CHANGE_ID_FIELD = new Uint8Array([0x0a, 0x00]);
 const ALLOWLIST_KIND = 30100;
 const ALLOWLIST_D = "roostr-allowlist";
 /** NIP-59 gift wrap: space-key invites and join requests, addressed by npub. */
@@ -125,6 +128,83 @@ interface SharedSpace extends SharedSpaceInfo {
 	writerSet: Set<string>;
 }
 
+const OWNER_FIELDS: Record<string, true> = { members: true, owner: true, keyId: true, key: true, keys: true, served_by: true, machine: true, machine_id: true, machineId: true, bound_object: true };
+const CONTROL_TYPES: Record<string, true> = { machine: true, agent: true, program: true, typescript: true, skill: true, peer: true };
+
+function sameValue(a: unknown, b: unknown): boolean {
+	if (a === b) return true;
+	if (!a || !b || typeof a !== "object" || typeof b !== "object") return false;
+	if (Array.isArray(a) !== Array.isArray(b)) return false;
+	const left = a as Record<string, unknown>, right = b as Record<string, unknown>;
+	const keys = Object.keys(left);
+	return keys.length === Object.keys(right).length && keys.every((k) => Object.hasOwn(right, k) && sameValue(left[k], right[k]));
+}
+
+/** Pure authority gate. Existing scope and privileges never come from the candidate. */
+export function authorizeSharedChange(change: ChangeJSON, provenance: SharedProvenance, space: SharedSpaceInfo,
+	localPk: string, trustedSpace: ObjectJSON | null, existing: ObjectJSON | null): boolean {
+	if (provenance.spaceId !== space.spaceId || provenance.keyId !== space.keyId) return false;
+	const owner = provenance.signer === (space.owner || localPk);
+	if (trustedSpace && (trustedSpace.typeKey !== "channel" || trustedSpace.id !== space.spaceId || trustedSpace.deleted)) return false;
+	if (!owner) {
+		const members = trustedSpace?.fields.members?.valuesValue?.items ?? [];
+		if (!members.some((m) => m.mapValue?.entries?.role?.stringValue === "writer" &&
+			npubToHex(m.mapValue?.entries?.npub?.stringValue ?? "") === provenance.signer)) return false;
+	}
+	if (!change.objectId || change.objectId === "__vanished__") return false;
+	if (existing) {
+		const scope = existing.typeKey === "channel" ? existing.id : existing.fields.channel?.stringValue;
+		if (scope !== space.spaceId || existing.typeKey === "vanish_log") return false;
+		if (!owner && Object.hasOwn(CONTROL_TYPES, existing.typeKey)) return false;
+	}
+	let type = existing?.typeKey ?? "";
+	let scoped = !!existing;
+	if (change.snapshot != null) {
+		const snap = change.snapshot as { id?: string; typeKey?: string; fields?: Record<string, unknown>; deleted?: boolean };
+		if (typeof snap !== "object" || Array.isArray(snap) || snap.id !== change.objectId || !snap.typeKey) return false;
+		if (existing && snap.typeKey !== existing.typeKey) return false;
+		type = snap.typeKey;
+		const state = computeObject([{ ...change, ops: [] }]);
+		if (!state) return false;
+		scoped = type === "channel" ? change.objectId === space.spaceId : state.fields.channel?.stringValue === space.spaceId;
+		if (type === "channel" && Object.hasOwn(state.fields, "channel")) return false;
+		if (!scoped) return false;
+		if (!owner) {
+			if (type === "channel" && (!existing || !!snap.deleted !== !!existing.deleted)) return false;
+			for (const key of Object.keys(OWNER_FIELDS)) if (!sameValue(state.fields[key], existing?.fields[key])) return false;
+		}
+	}
+	for (const op of change.ops) {
+		if (Object.keys(op).length !== 1) return false;
+		if (op.objectCreate) {
+			if (!op.objectCreate.typeKey || (type && op.objectCreate.typeKey !== type)) return false;
+			type = op.objectCreate.typeKey;
+			if (type === "channel") {
+				if (!owner || change.objectId !== space.spaceId) return false;
+				scoped = true;
+			}
+		}
+		if (op.fieldSet || op.fieldDelete) {
+			const key = op.fieldSet?.key ?? op.fieldDelete!.key;
+			if (!owner && Object.hasOwn(OWNER_FIELDS, key)) return false;
+			if (key === "channel") {
+				if (change.objectId === space.spaceId || !op.fieldSet || op.fieldSet.value.stringValue !== space.spaceId) return false;
+				scoped = true;
+			}
+		}
+		if (op.objectDelete && type === "channel" && !owner) return false;
+	}
+	return scoped && !!type && type !== "vanish_log" && (owner || !Object.hasOwn(CONTROL_TYPES, type)) &&
+		(type !== "channel" || change.objectId === space.spaceId);
+}
+
+interface ImportItem {
+	bytes: Uint8Array;
+	change: ChangeJSON;
+	provenance?: SharedProvenance;
+	chunkKey?: string;
+}
+
 function utf8(s: string): Uint8Array {
 	return new TextEncoder().encode(s);
 }
@@ -160,12 +240,17 @@ export function myNpub(): string | null {
 export function importSpaceInvite(inv: { space: string; owner: string; key: string; keyId: number }): boolean {
 	const ownerHex = npubToHex(inv.owner);
 	if (!ownerHex || !/^[0-9a-f]{64}$/.test(inv.key) || !inv.space) return false;
+	if (!Number.isSafeInteger(inv.keyId) || inv.keyId < 1) return false;
+	const previous = spaceKeyGet(inv.space);
+	const local = loadKey();
+	if (previous && (previous.owner || local?.pk) !== ownerHex) return false;
 	spaceKeyImport(inv.space, inv.key, inv.keyId || 1, ownerHex);
 	return true;
 }
 const PUBLISH_SPACING_MS = 120;
 const PAGE_SPACING_MS = 400;
-const PAGE_LIMIT = 500;
+// Keep full-sized 40k-character encrypted chunks inside the 8 MiB relay budget.
+const PAGE_LIMIT = 128;
 const CHUNK_CHARS = 40_000;
 const NOTIFY_DEBOUNCE_MS = 100;
 
@@ -216,6 +301,7 @@ interface PublishItem {
 	attempts: number;
 	notBefore: number;
 	space?: SharedSpace;
+	pending: PendingPublish;
 }
 
 export class RelaySync implements RelaySyncApi {
@@ -239,7 +325,22 @@ export class RelaySync implements RelaySyncApi {
 	private watchdogBusy = false;
 
 	/** Reassembly buffer for chunked changes: gid → parts. */
-	private readonly chunkGroups = new Map<string, { total: number; parts: Map<number, string> }>();
+	private readonly chunkGroups = new Map<string, { total: number; parts: Map<number, string>; bytes: number; expires: number; at: number }>();
+	// Metadata survives buffer expiry/limits; unlike ciphertext, its cardinality
+	// follows unresolved changes. Successful group keys suppress replay suffixes.
+	private readonly replayGroups = new Map<string, number>();
+	private readonly importedChunkGroups = new Set<string>();
+	private readonly importingChunkGroups = new Set<string>();
+	private replayGroupsLoaded: Promise<void> | null = null;
+	private chunkBytes = 0;
+	private importChain: Promise<void> = Promise.resolve();
+	private historyComplete = false;
+	private discardedChunkFloor = Infinity;
+	private replayFaultGeneration = 0;
+	private activeLiveEvents = 0;
+	private activeImports = 0;
+	private cursorChain: Promise<void> = Promise.resolve();
+	private backfillChain: Promise<boolean> = Promise.resolve(false);
 
 	private readonly queue: PublishItem[] = [];
 	private readonly queued = new Set<string>();
@@ -297,7 +398,7 @@ export class RelaySync implements RelaySyncApi {
 				},
 			});
 		}
-		if (fresh.length > 0) void this.backfillTags(fresh);
+		if (fresh.length > 0) void this.backfill(1).catch((err) => this.events.onStatus({ phase: "error", detail: String(err) }));
 	}
 
 	/** Owner duty: publish the relay write-allowlist. */
@@ -319,43 +420,6 @@ export class RelaySync implements RelaySyncApi {
 		}
 	}
 
-	/** Full walk of specific #h tags (joining a space mid-session). */
-	private async backfillTags(tags: string[]): Promise<void> {
-		const byId = new Map<string, Event>();
-		await Promise.all(
-			this.relays.map(async (relay) => {
-				let until: number | undefined;
-				for (;;) {
-					if (this.stopped) return;
-					let batch: Event[];
-					try {
-						batch = await this.pool.querySync([relay], { kinds: [CHANGE_KIND], "#h": tags, until, limit: PAGE_LIMIT });
-					} catch {
-						return;
-					}
-					if (batch.length === 0) return;
-					let fresh = 0;
-					for (const e of batch) {
-						if (!byId.has(e.id)) {
-							byId.set(e.id, e);
-							fresh++;
-						}
-					}
-					if (fresh === 0) return;
-					until = Math.min(...batch.map((e) => e.created_at));
-					await sleep(PAGE_SPACING_MS);
-				}
-			}),
-		);
-		const collected = [...byId.values()].sort((a, b) => a.created_at - b.created_at);
-		const batch: Array<{ bytes: Uint8Array; change: ChangeJSON; space?: SharedSpace }> = [];
-		for (const event of collected) {
-			const item = await this.eventToChange(event);
-			if (item) batch.push(item);
-		}
-		await this.importBatch(batch, true);
-		await this.persistCursor();
-	}
 
 	/** Blinded object tag: sha256(sk || objectId) hex prefix, as the daemon. */
 	private blind(objectId: string): string {
@@ -393,6 +457,9 @@ export class RelaySync implements RelaySyncApi {
 			if (rumor.kind === INVITE_RUMOR_KIND) {
 				const p = JSON.parse(rumor.content) as { t?: string; space?: string; name?: string; key?: string; keyId?: number };
 				if (p.t !== "space-invite" || !p.space || !/^[0-9a-f]{64}$/.test(p.key ?? "")) return;
+				if (!Number.isSafeInteger(p.keyId) || p.keyId! < 1) return;
+				const previous = spaceKeyGet(p.space);
+				if (previous && rumor.pubkey !== (previous.owner || this.pk)) return;
 				spaceKeyImport(p.space, p.key!, typeof p.keyId === "number" && p.keyId > 0 ? p.keyId : 1, rumor.pubkey);
 				this.onSpaceKey?.();
 			} else if (rumor.kind === JOINREQ_RUMOR_KIND) {
@@ -460,6 +527,7 @@ export class RelaySync implements RelaySyncApi {
 	async start(): Promise<void> {
 		await this.store.open();
 		this.cursor = await this.store.getCursor();
+		for (const pending of await this.store.pendingPublishes()) this.enqueue(pending);
 		this.events.onStatus({ phase: "backfill", imported: 0 });
 
 		// The incremental `since = cursor+1` shortcut is only sound once ONE
@@ -487,7 +555,7 @@ export class RelaySync implements RelaySyncApi {
 		}
 		this.subscribeLive();
 		this.watchdogTimer = setInterval(() => void this.watchdog(), 60_000);
-		this.events.onStatus({ phase: "live", imported: this.stats.imported });
+		this.events.onStatus({ phase: this.historyComplete ? "live" : "backfill", imported: this.stats.imported });
 	}
 
 	private subscribeLive(): void {
@@ -541,6 +609,13 @@ export class RelaySync implements RelaySyncApi {
 		if (this.stopped || this.watchdogBusy) return;
 		this.watchdogBusy = true;
 		try {
+			if (!this.historyComplete || this.chunkGroups.size > 0 || this.discardedChunkFloor !== Infinity) {
+				const complete = await this.backfill(await this.store.getBootstrapped() ? await this.store.getCursor() : 1);
+				if (complete) await this.store.setBootstrapped();
+				this.subscribeLive();
+				this.events.onStatus({ phase: complete ? "live" : "backfill", imported: this.stats.imported });
+				return;
+			}
 			const spaceTags = [...this.sharedSpaces.values()].map((sp) => sp.spaceTag);
 			const query = Promise.all([
 				this.pool.querySync(this.relays, { kinds: [CHANGE_KIND], authors: [this.pk], limit: 1 }),
@@ -560,7 +635,7 @@ export class RelaySync implements RelaySyncApi {
 				this.pool = new SimplePool();
 				await this.catchupSince(this.cursor + 1);
 				this.subscribeLive();
-				this.events.onStatus({ phase: "live", imported: this.stats.imported });
+				this.events.onStatus({ phase: this.historyComplete ? "live" : "backfill", imported: this.stats.imported });
 				return;
 			}
 			const head = [...res[0], ...res[1]].reduce((max, e) => Math.max(max, e.created_at), 0);
@@ -568,33 +643,18 @@ export class RelaySync implements RelaySyncApi {
 				this.events.onStatus({ phase: "backfill", imported: this.stats.imported, detail: "catching up" });
 				await this.catchupSince(this.cursor + 1);
 				this.subscribeLive();
-				this.events.onStatus({ phase: "live", imported: this.stats.imported });
+				this.events.onStatus({ phase: this.historyComplete ? "live" : "backfill", imported: this.stats.imported });
 			}
+		} catch (err) {
+			this.historyComplete = false;
+			this.events.onStatus({ phase: "error", detail: String(err) });
 		} finally {
 			this.watchdogBusy = false;
 		}
 	}
 
 	private async catchupSince(since: number): Promise<void> {
-		const spaceTags = [...this.sharedSpaces.values()].map((sp) => sp.spaceTag);
-		const byId = new Map<string, Event>();
-		const filters: Array<Parameters<SimplePool["querySync"]>[1]> = [{ kinds: [CHANGE_KIND], authors: [this.pk], since }];
-		if (spaceTags.length > 0) filters.push({ kinds: [CHANGE_KIND], "#h": spaceTags, since });
-		for (const filter of filters) {
-			try {
-				for (const e of await this.pool.querySync(this.relays, filter)) byId.set(e.id, e);
-			} catch {
-				/* next watchdog tick retries */
-			}
-		}
-		const events = [...byId.values()].sort((a, b) => a.created_at - b.created_at);
-		const batch: Array<{ bytes: Uint8Array; change: ChangeJSON; space?: SharedSpace }> = [];
-		for (const event of events) {
-			const item = await this.eventToChange(event);
-			if (item) batch.push(item);
-		}
-		await this.importBatch(batch, true);
-		await this.persistCursor();
+		await this.backfill(since);
 		// Gift wraps have randomized created_at: re-query on every catchup;
 		// the seen-set dedupes. Recovers knocks lost to dropped sockets.
 		try {
@@ -608,6 +668,8 @@ export class RelaySync implements RelaySyncApi {
 
 	stop(): void {
 		this.stopped = true;
+		this.chunkGroups.clear();
+		this.chunkBytes = 0;
 		if (this.watchdogTimer) {
 			clearInterval(this.watchdogTimer);
 			this.watchdogTimer = null;
@@ -640,90 +702,108 @@ export class RelaySync implements RelaySyncApi {
 	// ── Backfill ───────────────────────────────────────────────────
 
 	/** Returns true only when EVERY relay was walked to exhaustion. */
-	private async backfill(since: number): Promise<boolean> {
-		const byId = new Map<string, Event>();
-		let complete = true;
-
-		// Per-relay backwards pagination. Merged multi-relay paging is gappy:
-		// each relay truncates to `limit` independently, so taking
-		// `until = min(merged page)` jumps below another relay's truncation
-		// point and permanently skips whatever that relay still held between
-		// the two stamps. Paging each relay by its own oldest-returned stamp
-		// (kept inclusive, deduped by event id) is gapless.
-		let pages = 0;
-		const pageRelay = async (relay: string): Promise<void> => {
-			const seenHere = new Set<string>();
-			let until: number | undefined;
-			for (;;) {
-				if (this.stopped) {
-					complete = false;
-					return;
-				}
-				let batch: Event[];
-				try {
-					const spaceTags = [...this.sharedSpaces.values()].map((sp) => sp.spaceTag);
-					const pages = await Promise.all([
-						this.pool.querySync([relay], { kinds: [CHANGE_KIND], authors: [this.pk], since, until, limit: PAGE_LIMIT }),
-						spaceTags.length > 0
-							? this.pool.querySync([relay], { kinds: [CHANGE_KIND], "#h": spaceTags, since, until, limit: PAGE_LIMIT })
-							: Promise.resolve([] as Event[]),
-					]);
-					batch = [...pages[0], ...pages[1]];
-				} catch (err) {
-					// One relay failing must not abort the others - but an
-					// errored walk is not a complete one.
-					complete = false;
-					this.events.onStatus({ phase: "backfill", detail: `${relay}: ${String(err).slice(0, 80)}` });
-					return;
-				}
-				if (batch.length === 0) return;
-				let freshCount = 0;
-				for (const e of batch) {
-					if (seenHere.has(e.id)) continue;
-					seenHere.add(e.id);
-					freshCount++;
-					if (!byId.has(e.id)) byId.set(e.id, e);
-				}
-				// A page of nothing but already-seen boundary events means this
-				// relay is exhausted down to `since`.
-				if (freshCount === 0) return;
-				// `until` stays INCLUSIVE (no -1): boundary events re-arrive on
-				// the next page and dedup by id, so equal adjacent timestamps
-				// cannot fall through the crack.
-				until = Math.min(...batch.map((e) => e.created_at));
-				pages++;
-				this.events.onStatus({
-					phase: "backfill",
-					imported: this.stats.imported,
-					detail: `page ${pages} (${relay}): ${byId.size} event(s) so far`,
-				});
-				await sleep(PAGE_SPACING_MS); // pace REQs — public relays rate-limit bursts
+	private backfill(since: number): Promise<boolean> {
+		const run = this.backfillChain.then(async () => {
+			try {
+				return await this.walkHistory(since);
+			} catch (err) {
+				this.recordReplayFault(1);
+				await this.persistCursor();
+				throw err;
 			}
-		};
-		await Promise.all(this.relays.map(pageRelay));
-		const collected = [...byId.values()];
+		});
+		this.backfillChain = run.catch(() => false);
+		return run;
+	}
 
-		// Ascending so multi-part chunk groups assemble in one pass and the
-		// cursor advances monotonically.
-		collected.sort((a, b) => a.created_at - b.created_at);
-		const batch: Array<{ bytes: Uint8Array; change: ChangeJSON }> = [];
-		for (const event of collected) {
+	private async walkHistory(since: number): Promise<boolean> {
+		this.historyComplete = false;
+		await this.loadReplayGroups();
+		// An unresolved group may be missing fragments older than any observed
+		// part. Only actual repair scans need full history; healthy live assembly
+		// removes the identity without making the ordinary cursor sticky.
+		since = Math.min(this.replayGroups.size > 0 ? 0 : since, this.discardedChunkFloor);
+		// The persisted cursor is also the durable replay floor. Keep this
+		// obligation until a covering scan imports every page without new faults.
+		this.discardedChunkFloor = Math.min(this.discardedChunkFloor, since);
+		const checkpoint = this.replayFaultGeneration;
+		await this.persistCursor();
+		const byId = new Map<string, Event>();
+		let complete = this.relays.length > 0;
+		const filters: Array<Parameters<SimplePool["querySync"]>[1]> = [{ kinds: [CHANGE_KIND], authors: [this.pk], since }];
+		for (const sp of this.sharedSpaces.values()) filters.push({ kinds: [CHANGE_KIND], "#h": [sp.spaceTag], since });
+		await Promise.all(this.relays.flatMap((relay) => filters.map(async (filter) => {
+			let until: number | undefined;
+			try {
+				for (;;) {
+					if (this.stopped) { complete = false; return; }
+					const page = await this.queryRelayPage(relay, { ...filter, until, limit: PAGE_LIMIT });
+					for (const event of page) byId.set(event.id, event);
+					if (page.length < PAGE_LIMIT) return;
+					const oldest = Math.min(...page.map((e) => e.created_at));
+					if (until !== undefined && oldest >= until) throw new Error("saturated same-timestamp history page");
+					until = oldest;
+					await sleep(PAGE_SPACING_MS);
+				}
+			} catch (err) {
+				complete = false;
+				this.events.onStatus({ phase: "backfill", detail: `${relay}: ${String(err).slice(0, 100)}` });
+			}
+		})));
+		const batch: ImportItem[] = [];
+		for (const event of [...byId.values()].sort((a, b) => a.created_at - b.created_at || a.id.localeCompare(b.id))) {
 			const item = await this.eventToChange(event);
 			if (item) batch.push(item);
 		}
-		await this.importBatch(batch, /*immediateNotify=*/ true);
+		await this.importBatch(batch, true);
+		this.historyComplete = complete && !this.stopped && this.replayGroups.size === 0 &&
+			this.activeLiveEvents === 0 && this.activeImports === 0 &&
+			this.replayFaultGeneration === checkpoint && since <= this.discardedChunkFloor;
+		if (this.historyComplete) this.discardedChunkFloor = Infinity;
+		else this.recordReplayFault(since);
+		const repaired = this.historyComplete;
 		await this.persistCursor();
-		this.events.onStatus({ phase: "backfill", imported: this.stats.imported, detail: `backfill done: ${collected.length} event(s)` });
-		return complete;
+		// IndexedDB persistence yields to live handlers. Restore the obligation
+		// if a new group or fault appeared while committing the repaired cursor.
+		if (repaired && (!this.historyComplete || this.stopped || this.replayGroups.size > 0 ||
+			this.activeLiveEvents > 0 || this.activeImports > 0 || this.replayFaultGeneration !== checkpoint)) {
+			this.recordReplayFault(since);
+			await this.persistCursor();
+		}
+		return this.historyComplete;
+	}
+
+	/** querySync treats timeout/closed as empty success; only real EOSE proves exhaustion. */
+	private async queryRelayPage(url: string, filter: Parameters<SimplePool["querySync"]>[1]): Promise<Event[]> {
+		const relay = await this.pool.ensureRelay(url, { connectionTimeout: 15_000 });
+		const done = Promise.withResolvers<Event[]>();
+		const events: Event[] = [];
+		const sub = relay.prepareSubscription([filter], {
+			eoseTimeout: 60_000,
+			onevent: (event) => events.push(event),
+			oneose: () => done.resolve(events),
+			onclose: (reason) => done.reject(new Error(reason)),
+		});
+		const timer = setTimeout(() => done.reject(new Error("history EOSE timeout")), 15_000);
+		try {
+			sub.fire();
+			return await done.promise;
+		} finally {
+			clearTimeout(timer);
+			sub.oneose = undefined;
+			sub.receivedEose(); // Cancel nostr-tools' synthetic EOSE timer.
+			sub.close();
+		}
 	}
 
 	// ── Event → change ─────────────────────────────────────────────
 
 	/** Decrypt one relay event; returns decoded change bytes when a full
 	 * change (possibly reassembled from chunks) becomes available. */
-	private async eventToChange(event: Event): Promise<{ bytes: Uint8Array; change: ChangeJSON; space?: SharedSpace } | null> {
+	private async eventToChange(event: Event): Promise<ImportItem | null> {
 		this.stats.events++;
 		this.onRawEvent?.(event);
+		if (event.kind !== CHANGE_KIND || !verifyEvent(event)) return null;
 		const hTag = event.tags.find((t) => t[0] === "h")?.[1];
 		if (hTag) this.stats.blindedTags.add(hTag);
 
@@ -731,13 +811,12 @@ export class RelaySync implements RelaySyncApi {
 		let space: SharedSpace | undefined;
 		try {
 			part = nip44.decrypt(event.content, this.conversationKey);
+			if (event.pubkey !== this.pk) return null;
 		} catch {
 			for (const sp of this.sharedSpaces.values()) {
 				try {
+				if (!event.tags.some((tag) => tag[0] === "h" && tag[1] === sp.spaceTag)) continue;
 					part = nip44.decrypt(event.content, sp.convKey);
-					// Writer gate: viewers (and leaked keys) can produce valid
-					// ciphertext - only allowed writers get applied.
-					if (!sp.writerSet.has(event.pubkey)) return null;
 					space = sp;
 					break;
 				} catch {
@@ -749,26 +828,65 @@ export class RelaySync implements RelaySyncApi {
 				return null;
 			}
 		}
+		if (part.length > CHUNK_CHARS || !/^[A-Za-z0-9+/]*={0,2}$/.test(part)) return null;
+		if (event.tags.filter((t) => t[0] === "c").length > 1) return null;
 		if (event.created_at > this.cursor) this.cursor = event.created_at;
 
 		const chunkTag = event.tags.find((t) => t[0] === "c");
 		let full: string;
+		let replayAt = event.created_at;
+		let chunkKey: string | undefined;
 		if (!chunkTag) {
 			full = part;
 		} else {
 			const [, gid, idxStr, totalStr] = chunkTag;
-			const total = parseInt(totalStr, 10);
-			if (!gid || !Number.isFinite(total) || total < 2 || total > 64) return null;
-			let group = this.chunkGroups.get(gid);
-			if (!group) {
-				group = { total, parts: new Map() };
-				this.chunkGroups.set(gid, group);
+			const total = Number(totalStr), index = Number(idxStr);
+			if (!/^[0-9a-f]{16}$/.test(gid ?? "") || !/^[0-9]+$/.test(totalStr ?? "") || !/^[0-9]+$/.test(idxStr ?? "") ||
+				!Number.isInteger(total) || total < 2 || total > 64 || !Number.isInteger(index) || index < 0 || index >= total || part.length > CHUNK_CHARS) return null;
+			const now = Date.now();
+			for (const [key, group] of this.chunkGroups) if (group.expires <= now) {
+				this.recordReplayFault(group.at);
+				this.chunkBytes -= group.bytes;
+				this.chunkGroups.delete(key);
 			}
-			group.parts.set(parseInt(idxStr, 10), part);
+			const key = JSON.stringify([event.pubkey, space?.spaceId ?? "", space?.keyId ?? 0, gid]);
+			if (this.importedChunkGroups.has(key) || this.importingChunkGroups.has(key)) return null;
+			this.replayGroups.set(key, Math.min(this.replayGroups.get(key) ?? Infinity, event.created_at));
+			chunkKey = key;
+			let group = this.chunkGroups.get(key);
+			if (group && (group.total !== total || (group.parts.has(index) && group.parts.get(index) !== part))) {
+				this.recordReplayFault(Math.min(group.at, event.created_at));
+				this.chunkBytes -= group.bytes;
+				this.chunkGroups.delete(key);
+				return null;
+			}
+			if (!group) {
+				if (this.chunkGroups.size >= 128) {
+					this.recordReplayFault(event.created_at);
+					return null;
+				}
+				group = { total, parts: new Map(), bytes: 0, expires: now + 300_000, at: this.replayGroups.get(key)! };
+				this.chunkGroups.set(key, group);
+			}
+			group.at = Math.min(group.at, event.created_at);
+			if (!group.parts.has(index)) {
+				if (this.chunkBytes + part.length > 16 * 1024 * 1024) {
+					this.recordReplayFault(group.at);
+					return null;
+				}
+				group.parts.set(index, part);
+				group.bytes += part.length;
+				this.chunkBytes += part.length;
+			}
 			if (group.parts.size !== group.total) return null;
-			this.chunkGroups.delete(gid);
-			full = "";
-			for (let i = 0; i < group.total; i++) full += group.parts.get(i) ?? "";
+			replayAt = group.at;
+			this.chunkGroups.delete(key);
+			this.chunkBytes -= group.bytes;
+			full = Array.from({ length: group.total }, (_, i) => group!.parts.get(i)!).join("");
+			if (bytesToHex(sha256(utf8(full))).slice(0, 16) !== gid) {
+				this.recordReplayFault(group.at);
+				return null;
+			}
 		}
 
 		let bytes: Uint8Array;
@@ -776,39 +894,99 @@ export class RelaySync implements RelaySyncApi {
 			bytes = b64ToBytes(full);
 		} catch {
 			this.stats.decodeFailures++;
+			this.recordReplayFault(replayAt);
 			return null;
 		}
 		const decode = await this.getDecode();
 		const change = decode(bytes);
-		if (!change) {
+		// The content address covers the received wire representation, not a
+		// canonical re-encoding that can drop legacy explicit default fields.
+		const rawId = bytes.length >= 34 && bytes[0] === 0x0a && bytes[1] === 0x20
+			? bytesToHex(sha256.create().update(EMPTY_CHANGE_ID_FIELD).update(bytes.subarray(34)).digest())
+			: null;
+		if (!change || change.id !== rawId) {
 			this.stats.decodeFailures++;
+			this.recordReplayFault(replayAt);
 			return null;
 		}
-		return { bytes, change, space };
+		if (chunkKey) this.importingChunkGroups.add(chunkKey);
+		return { bytes, change, chunkKey, provenance: space ? { spaceId: space.spaceId, keyId: space.keyId, signer: event.pubkey } : undefined };
 	}
 
-	private async importBatch(batch: Array<{ bytes: Uint8Array; change: ChangeJSON; space?: SharedSpace }>, immediateNotify = false): Promise<void> {
-		if (batch.length > 0) {
-			const added = await this.store.addChanges(batch);
-			this.stats.imported += added;
-			// Anything the relays hold must never be echoed back.
+	private importBatch(batch: ImportItem[], immediateNotify = false): Promise<void> {
+		this.activeImports++;
+		const run = this.importChain.then(async () => {
 			for (const item of batch) {
-				await this.store.markPublished(item.space ? `${item.space.spaceId}/${item.space.keyId}/${item.change.id}` : item.change.id);
+				if (item.provenance) {
+					const p = item.provenance;
+					const space = this.sharedSpaces.get(p.spaceId);
+					if (!space) continue;
+					const trustedSpace = computeObject(await this.store.changesFor(p.spaceId));
+					const existing = computeObject(await this.store.changesFor(item.change.objectId));
+					if (!authorizeSharedChange(item.change, p, space, this.pk, trustedSpace, existing)) continue;
+				}
+				this.stats.imported += await this.store.addChanges([item]);
+				const p = item.provenance;
+				await this.store.markPublished(p ? `${p.spaceId}/${p.keyId}/${item.change.id}` : item.change.id);
+				if (item.chunkKey) {
+					this.importedChunkGroups.add(item.chunkKey);
+					this.replayGroups.delete(item.chunkKey);
+				}
+				this.pendingObjects.add(item.change.objectId);
 			}
-			for (const item of batch) this.pendingObjects.add(item.change.objectId);
-		}
-		if (immediateNotify) this.flushObjectNotify();
-		else this.scheduleObjectNotify();
+			if (immediateNotify) this.flushObjectNotify();
+			else this.scheduleObjectNotify();
+		}).catch(async (err) => {
+			this.recordReplayFault(1);
+			await this.persistCursor();
+			throw err;
+		}).finally(() => {
+			for (const item of batch) if (item.chunkKey) this.importingChunkGroups.delete(item.chunkKey);
+			this.activeImports--;
+		});
+		this.importChain = run.catch(() => {});
+		return run;
 	}
 
-	private async persistCursor(): Promise<void> {
-		if (this.cursor > (await this.store.getCursor())) await this.store.setCursor(this.cursor);
+	private recordReplayFault(at: number): void {
+		this.replayFaultGeneration++;
+		this.discardedChunkFloor = Math.min(this.discardedChunkFloor, at);
+		this.historyComplete = false;
+	}
+
+	private loadReplayGroups(): Promise<void> {
+		return this.replayGroupsLoaded ??= this.store.getReplayGroups().then((groups) => {
+			for (const [key, at] of groups) {
+				if (!this.importedChunkGroups.has(key)) this.replayGroups.set(key, Math.min(this.replayGroups.get(key) ?? Infinity, at));
+			}
+		});
+	}
+
+	private persistCursor(): Promise<void> {
+		const run = this.cursorChain.then(async () => {
+			await this.loadReplayGroups();
+			const saved = await this.store.getCursor();
+			const floor = Math.min(this.discardedChunkFloor, ...this.replayGroups.values());
+			const next = Math.min(this.cursor, floor === Infinity ? Infinity : Math.max(0, floor - 1));
+			const advance = next < saved || (this.historyComplete && this.activeLiveEvents === 0 && this.activeImports === 0 && next > saved);
+			await this.store.setCursor(advance ? next : saved, [...this.replayGroups]);
+		});
+		this.cursorChain = run.catch(() => {});
+		return run;
 	}
 
 	private async handleLiveEvent(event: Event): Promise<void> {
-		const item = await this.eventToChange(event);
-		if (item) await this.importBatch([item]);
-		await this.persistCursor();
+		this.activeLiveEvents++;
+		try {
+			const item = await this.eventToChange(event);
+			if (item) await this.importBatch([item]);
+		} catch (err) {
+			this.recordReplayFault(1);
+			throw err;
+		} finally {
+			this.activeLiveEvents--;
+			await this.persistCursor();
+		}
 	}
 
 	// ── Object-change notification batching ────────────────────────
@@ -834,12 +1012,25 @@ export class RelaySync implements RelaySyncApi {
 
 	// ── Publish ────────────────────────────────────────────────────
 
-	publish(bytes: Uint8Array, changeId: string, objectId: string): void {
+	async publish(bytes: Uint8Array, changeId: string, objectId: string): Promise<void> {
+		const pending: PendingPublish[] = [{ key: changeId, changeId, objectId, bytes }];
 		const space = this.sharedSpaces.get(this.spaceOf(objectId));
-		const key = space ? `${space.spaceId}/${space.keyId}/${changeId}` : changeId;
-		if (this.queued.has(key)) return;
-		this.queued.add(key);
-		this.queue.push({ objectId, changeId, b64: bytesToB64(bytes), attempts: 0, notBefore: 0, space });
+		if (space) pending.push({ key: `${space.spaceId}/${space.keyId}/${changeId}`, changeId, objectId, bytes, spaceId: space.spaceId, keyId: space.keyId });
+		for (const item of pending) {
+			if (this.queued.has(item.key) || await this.store.isPublished(item.key)) continue;
+			const saved = await this.store.getPending(item.key);
+			if (!saved) await this.store.savePending(item);
+			this.enqueue(saved ?? item);
+		}
+	}
+
+	private enqueue(pending: PendingPublish): void {
+		if (this.stopped || this.queued.has(pending.key)) return;
+		const space = pending.spaceId ? this.sharedSpaces.get(pending.spaceId) : undefined;
+		// A rotated key cannot recreate old ciphertext; retain the obligation for export.
+		if (pending.spaceId && (!space || space.keyId !== pending.keyId) && !pending.events) return;
+		this.queued.add(pending.key);
+		this.queue.push({ objectId: pending.objectId, changeId: pending.changeId, b64: bytesToB64(pending.bytes), attempts: 0, notBefore: 0, space, pending });
 		if (!this.queueRunning) {
 			this.queueRunning = true;
 			void this.runPublishQueue();
@@ -859,15 +1050,17 @@ export class RelaySync implements RelaySyncApi {
 				continue;
 			}
 			const [item] = this.queue.splice(idx, 1);
-			const key = item.space ? `${item.space.spaceId}/${item.space.keyId}/${item.changeId}` : item.changeId;
-			if (await this.store.isPublished(key)) {
-				this.queued.delete(key);
-				continue;
-			}
-			if (await this.publishOnce(item)) {
+			const key = item.pending.key;
+			try {
+				if (await this.store.isPublished(key)) {
+					await this.store.markPublished(key);
+					this.queued.delete(key);
+					continue;
+				}
+				if (!await this.publishOnce(item)) throw new Error("publication pending");
 				await this.store.markPublished(key);
 				this.queued.delete(key);
-			} else {
+			} catch {
 				item.attempts++;
 				item.notBefore = Date.now() + Math.min(300_000, 2000 * 2 ** item.attempts);
 				this.queue.push(item);
@@ -878,28 +1071,26 @@ export class RelaySync implements RelaySyncApi {
 	}
 
 	private async publishOnce(item: PublishItem): Promise<boolean> {
-		const parts: string[] = [];
-		for (let i = 0; i < item.b64.length; i += CHUNK_CHARS) parts.push(item.b64.slice(i, i + CHUNK_CHARS));
-		// Content-derived group id: retries republish identical parts and
-		// receivers dedupe naturally.
-		const gid = parts.length > 1 ? bytesToHex(sha256(new TextEncoder().encode(item.b64))).slice(0, 16) : "";
 		try {
-			for (let i = 0; i < parts.length; i++) {
-				const tags: string[][] = item.space
-					? [["h", blindShared(item.space.keyHex, item.objectId)], ["h", item.space.spaceTag]]
-					: [["h", this.blind(item.objectId)]];
-				if (gid) tags.push(["c", gid, String(i), String(parts.length)]);
-				const event = finalizeEvent(
-					{
-						kind: CHANGE_KIND,
-						created_at: Math.floor(Date.now() / 1000),
-						tags,
-						content: nip44.encrypt(parts[i], item.space ? item.space.convKey : this.conversationKey),
-					},
-					this.sk,
-				);
+			if (!item.pending.events) {
+				const parts: string[] = [];
+				for (let i = 0; i < item.b64.length; i += CHUNK_CHARS) parts.push(item.b64.slice(i, i + CHUNK_CHARS));
+				if (parts.length > 64) throw new Error("change exceeds chunk limit");
+				const gid = parts.length > 1 ? bytesToHex(sha256(utf8(item.b64))).slice(0, 16) : "";
+				item.pending.events = parts.map((part, i) => {
+					const tags: string[][] = item.space
+						? [["h", blindShared(item.space.keyHex, item.objectId)], ["h", item.space.spaceTag]]
+						: [["h", this.blind(item.objectId)]];
+					if (gid) tags.push(["c", gid, String(i), String(parts.length)]);
+					return finalizeEvent({ kind: CHANGE_KIND, created_at: Math.floor(Date.now() / 1000), tags,
+						content: nip44.encrypt(part, item.space ? item.space.convKey : this.conversationKey) }, this.sk);
+				});
+			}
+			// Persist BEFORE sending, including after any failed IndexedDB attempt.
+			await this.store.savePending(item.pending);
+			for (const event of item.pending.events) {
 				await Promise.any(this.pool.publish(this.relays, event));
-				if (parts.length > 1 && i < parts.length - 1) await sleep(PUBLISH_SPACING_MS);
+				if (item.pending.events.length > 1) await sleep(PUBLISH_SPACING_MS);
 			}
 			return true;
 		} catch (err) {

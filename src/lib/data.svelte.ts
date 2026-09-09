@@ -5,7 +5,7 @@
  */
 
 import { fetchChannels, fetchObjects, fetchQuery, fetchRelations, fetchAllQuery } from "$lib/api";
-import { backend } from "$lib/engine/backend";
+import { backend } from "$lib/client-backend";
 import type { SpaceJSON, ObjectSummary, RelationDefJSON } from "$lib/types";
 
 /** A type object (Anytype ObjectType analog). */
@@ -115,6 +115,7 @@ export function connectEvents(): () => void {
 	});
 	return () => {
 		connected = false;
+		clearTimeout(timer);
 		off();
 	};
 }

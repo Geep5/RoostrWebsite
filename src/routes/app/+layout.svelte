@@ -8,10 +8,12 @@
 	import { layoutOf, discussionUI, store, refreshAll, connectEvents } from "$lib/data.svelte";
 	import { tabs, HOME_PATH } from "$lib/tabs.svelte";
 	import CheckboxIcon from "$lib/components/CheckboxIcon.svelte";
-	import { backend, type SyncStatus } from "$lib/engine/backend";
+	import { backend, isLocalBackend, type SyncStatus } from "$lib/client-backend";
+	import { pairedSession, onPairingChange } from "$lib/local-transport";
+	import PairGate from "$lib/components/PairGate.svelte";
 	import { loadKey } from "$lib/engine/keys";
 	import KeyGate from "$lib/components/KeyGate.svelte";
-	import { myNpub } from "$lib/engine/sync";
+	import { myNpub } from "$lib/client-identity";
 	import GraphIcon from "$lib/components/GraphIcon.svelte";
 	import PinnedWidget from "$lib/components/PinnedWidget.svelte";
 	import { creatableTypes, typeGlyph, createTyped, createCollection, createQuery, seedSpaceDefaults } from "$lib/create";
@@ -60,10 +62,11 @@
 	let isMobile = $state(false);
 
 	// Profile avatar for the Spaces header (cache-first, relay refresh).
-	import { cachedProfile, fetchProfile } from "$lib/engine/profile";
+	import { cachedProfile, fetchProfile } from "$lib/client-profile";
 	let profilePic = $state("");
 	let profileName = $state("");
 	$effect(() => {
+		if (!authed) { profilePic = ""; profileName = ""; return; }
 		const cached = cachedProfile();
 		profilePic = cached.picture ?? "";
 		profileName = cached.display_name || cached.name || "";
@@ -607,16 +610,33 @@
 	let authed = $state(false);
 	let sync = $state<SyncStatus>({ phase: "idle", imported: 0, bootstrapped: false });
 	let disconnect: (() => void) | undefined;
+	let bootError = $state("");
+	let booting = $state(false);
+	let hasBrowserIdentity = $state(false);
+	let offStatus: (() => void) | undefined;
 
 	async function boot() {
-		authed = true;
-		backend.onStatus((s) => (sync = s));
-		await backend.start();
-		disconnect = connectEvents();
-		await refreshAll();
-		const saved = localStorage.getItem("glon.channel");
-		if (saved && store.channels.some((c) => c.id === saved)) activeSpace.id = saved;
-		else if (store.channels.length > 0) activeSpace.id = store.channels[0].id;
+		if (booting) return;
+		hasBrowserIdentity = !isLocalBackend && !!loadKey();
+		booting = true;
+		bootError = "";
+		try {
+			disconnect?.();
+			offStatus?.();
+			offStatus = backend.onStatus((s) => (sync = s));
+			await backend.start();
+			disconnect = connectEvents();
+			await refreshAll();
+			if (isLocalBackend && !pairedSession()) return;
+			const saved = localStorage.getItem("glon.channel");
+			if (saved && store.channels.some((c) => c.id === saved)) activeSpace.id = saved;
+			else if (store.channels.length > 0) activeSpace.id = store.channels[0].id;
+			authed = true;
+		} catch (error) {
+			bootError = error instanceof Error ? error.message : String(error);
+			disconnect?.();
+			backend.stop();
+		} finally { booting = false; }
 	}
 
 	// Channel selection settles as backfill fills the store; bootstrap a
@@ -643,17 +663,38 @@
 		const applyMq = () => (isMobile = mq.matches);
 		applyMq();
 		mq.addEventListener("change", applyMq);
-		if (loadKey()) void boot();
+		if (isLocalBackend ? pairedSession() : loadKey()) void boot();
+		const offPairing = onPairingChange(() => {
+			if (!isLocalBackend || pairedSession()) return;
+			authed = false;
+			bootError = "Pairing expired or was removed. Enter a fresh terminal code to reconnect.";
+			disconnect?.();
+			backend.stop();
+			store.channels = []; store.summaries = []; store.relations = []; store.types = []; store.agents = []; store.loaded = false;
+			activeSpace.id = "";
+		});
 		return () => {
 			mq.removeEventListener("change", applyMq);
 			disconnect?.();
+			offPairing();
+			offStatus?.();
+			backend.stop();
 		};
 	});
 </script>
 
 {#if !authed}
-	<KeyGate onready={() => void boot()} />
-{/if}
+	{#if booting}
+		<p role="status" style="text-align:center">Opening your vault…</p>
+	{:else if isLocalBackend}
+		<PairGate onready={() => void boot()} />
+	{:else if hasBrowserIdentity}
+		<div style="text-align:center;padding:48px"><p>Your identity and local changes remain on this device.</p><button onclick={() => void boot()}>Retry opening vault</button></div>
+	{:else}
+		<KeyGate onready={() => void boot()} />
+	{/if}
+	{#if bootError}<p role="alert" style="text-align:center">{bootError}</p>{/if}
+{:else}
 
 {#if isMobile}
 <div class="m-shell">
@@ -1311,6 +1352,7 @@
 	{#await import("$lib/components/SearchModal.svelte") then { default: SearchModal }}
 		<SearchModal onclose={() => (showSearch = false)} />
 	{/await}
+{/if}
 {/if}
 
 <svelte:window onkeydown={onGlobalKeydown} />

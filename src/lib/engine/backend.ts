@@ -5,8 +5,9 @@
  */
 
 import type { ObjectJSON, ObjectSummary, SpaceJSON, RelationDefJSON, ValueJSON } from "$lib/types";
-import type { ChangeJSON, QueryBody } from "./contracts";
+import type { ChangeJSON, PendingPublish, QueryBody } from "./contracts";
 import { decodeChange, encodeChange, changeId } from "./proto";
+import { initCore } from "./core";
 import { sha256 } from "@noble/hashes/sha2.js";
 
 const HEX = "0123456789abcdef";
@@ -53,11 +54,15 @@ class WebBackend {
 	private statusListeners = new Set<(s: SyncStatus) => void>();
 	author = "";
 	private started = false;
+	private loggingOut = false;
+	private mutations = 0;
+	private sharedRefreshes = 0;
 
 	async start(): Promise<void> {
 		if (this.started) return;
 		const key = loadKey();
 		if (!key) throw new Error("no key");
+		await initCore();
 		this.started = true;
 		this.author = authorIdFor(key);
 		await this.store.open();
@@ -96,7 +101,9 @@ class WebBackend {
 	 * rotates) - that republish is what makes joiners see the space.
 	 */
 	private async refreshShared(): Promise<void> {
-		if (!this.sync) return;
+		if (!this.sync || this.loggingOut) return;
+		this.sharedRefreshes++;
+		try {
 		await this.ensure();
 		const key = loadKey();
 		if (!key) return;
@@ -113,11 +120,11 @@ class WebBackend {
 			for (const item of items) {
 				const entries = (item as { mapValue?: { entries?: Record<string, { stringValue?: string }> } }).mapValue?.entries ?? {};
 				const npub = entries["npub"]?.stringValue ?? "";
-				const role = entries["role"]?.stringValue ?? "writer";
+				const role = entries["role"]?.stringValue;
 				const hex = npubToHex(npub);
 				if (hex) {
 					memberHexes.push(hex);
-					if (role !== "viewer") writers.add(hex);
+					if (role === "writer") writers.add(hex);
 				}
 			}
 			if (memberHexes.length === 0 && !entry.owner) continue;
@@ -141,38 +148,45 @@ class WebBackend {
 			await this.sync.publishAllowlist([...new Set(owned.flatMap((i) => i.writers))]);
 		}
 
-		// History republish markers.
-		let markers: Record<string, number> = {};
-		try {
-			markers = JSON.parse(localStorage.getItem("roostr-shared-queued") ?? "{}") as Record<string, number>;
-		} catch {
-			/* fresh */
-		}
+		// Publication acknowledgements, not enqueue markers, determine durability.
 		for (const info of infos) {
-			if (markers[info.spaceId] === info.keyId) continue;
-			markers[info.spaceId] = info.keyId;
 			let queued = 0;
 			for (const [objectId, state] of this.states) {
 				const space = state.typeKey === "channel" ? state.id : (state.fields["channel"]?.stringValue ?? "");
 				if (space !== info.spaceId) continue;
-				const changes = await this.store.changesFor(objectId);
-				for (const change of changes) {
-					this.sync.publish(encodeChange(change), change.id, objectId);
+				const changes = await this.store.rawChangesFor(objectId);
+				for (const { bytes, change } of changes) {
+					if (await this.store.isPublished(`${info.spaceId}/${info.keyId}/${change.id}`)) continue;
+					// Existing IDs address original wire bytes, not a canonical re-encoding.
+					await this.sync.publish(bytes, change.id, objectId);
 					queued++;
 				}
 			}
 			if (queued > 0) console.log(`[backend] space ${info.spaceId.slice(0, 8)} shared (key #${info.keyId}): queued ${queued} change(s)`);
 		}
-		localStorage.setItem("roostr-shared-queued", JSON.stringify(markers));
+		} finally {
+			this.sharedRefreshes--;
+		}
 	}
 
 	/** Log out: stop sync and destroy the local replica. The relays keep
 	 *  the encrypted history; a different key must never see this data. */
-	async logout(): Promise<void> {
-		this.stop();
-		this.store.close();
-		await destroyDatabase();
-		localStorage.removeItem("roostr-shared-queued");
+	async logout(exportPending?: (items: PendingPublish[]) => Promise<void>): Promise<void> {
+		if (this.loggingOut || this.mutations > 0 || this.sharedRefreshes > 0) throw new Error("Wait for the current save before logging out");
+		this.loggingOut = true;
+		try {
+			const pending = await this.store.pendingPublishes();
+			if (pending.length > 0) {
+				if (!exportPending) throw new Error("Unpublished changes remain on this device. Connect to a relay or explicitly export them before logging out.");
+				await exportPending(pending);
+			}
+			this.stop();
+			this.store.close();
+			await destroyDatabase();
+			localStorage.removeItem("roostr-shared-queued");
+		} finally {
+			this.loggingOut = false;
+		}
 	}
 
 	stop(): void {
@@ -396,8 +410,15 @@ class WebBackend {
 	}
 
 	async mutate(action: string, params: Record<string, unknown>): Promise<Record<string, unknown>> {
+		if (this.loggingOut) throw new Error("Logout in progress");
+		this.mutations++;
+		try {
 		const out = await runMutation(
 			{
+				allObjects: async () => {
+					await this.ensure();
+					return [...this.states.values()];
+				},
 				author: this.author,
 				changesFor: (id) => this.store.changesFor(id),
 				getObject: async (id) => {
@@ -430,9 +451,10 @@ class WebBackend {
 					// Round-trip through decode so the stored JSON matches
 					// relay-imported changes byte-for-byte.
 					const decoded = decodeChange(bytes) ?? change;
-					await this.store.addChanges([{ bytes, change: decoded }]);
+					await this.store.addLocalChange(bytes, decoded);
 					this.dirty.add(change.objectId);
-					this.sync?.publish(bytes, change.id, change.objectId);
+					await this.ensure();
+					await this.sync?.publish(bytes, change.id, change.objectId);
 					const cb = [...this.commitListeners];
 					for (const fn of cb) fn([change.objectId]);
 					return change.id;
@@ -442,6 +464,9 @@ class WebBackend {
 			params,
 		);
 		return { ok: true, ...out };
+		} finally {
+			this.mutations--;
+		}
 	}
 }
 

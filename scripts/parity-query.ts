@@ -9,14 +9,17 @@
 
 import { runQuery } from "../src/lib/engine/query";
 import type { ObjectJSON } from "../src/lib/types";
+import { initCore } from "../src/lib/engine/core";
+import { API as BASE, apiFetch } from "../../glonOdin/harness/src/api";
 
-const BASE = "http://127.0.0.1:7333";
+await initCore({ wasmBytes: await Bun.file(new URL("../static/engine.wasm", import.meta.url)).arrayBuffer() });
+
 const SET_ID = "3b0763f9-6b2c-4933-8b38-6576a07e821f"; // "note query" (setOf: note)
 
 // ── Fetch all states ─────────────────────────────────────────────────
 
 async function fetchStates(): Promise<ObjectJSON[]> {
-	const manifest = (await (await fetch(`${BASE}/api/changes`)).json()) as Record<string, unknown>;
+	const manifest = (await (await apiFetch(`${BASE}/api/changes`)).json()) as Record<string, unknown>;
 	const ids = Object.keys(manifest);
 	const out: ObjectJSON[] = [];
 	const CONC = 32;
@@ -24,7 +27,7 @@ async function fetchStates(): Promise<ObjectJSON[]> {
 		const batch = ids.slice(i, i + CONC);
 		const objs = await Promise.all(
 			batch.map(async (id) => {
-				const res = await fetch(`${BASE}/api/objects/${id}`);
+				const res = await apiFetch(`${BASE}/api/objects/${id}`);
 				if (!res.ok) return null;
 				return (await res.json()) as ObjectJSON;
 			}),
@@ -162,7 +165,7 @@ console.log(`fetched ${states.length} object states`);
 let pass = 0;
 let fail = 0;
 for (const c of CASES) {
-	const res = await fetch(`${BASE}/api/query`, { method: "POST", body: JSON.stringify(c.body) });
+	const res = await apiFetch(`${BASE}/api/query`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(c.body) });
 	const server = (await res.json()) as QueryResult;
 	const local = runQuery(states, c.body) as unknown as QueryResult;
 	const sNorm = normalize(server, c.unordered === true);

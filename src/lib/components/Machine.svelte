@@ -8,10 +8,13 @@
 	import { onMount } from "svelte";
 	import { fetchAllQuery } from "$lib/api";
 	import { goto } from "$app/navigation";
+	import { harnessFetch, pairedSession, onPairingChange } from "$lib/local-transport";
+	import PairGate from "./PairGate.svelte";
 
 	let { onclose }: { onclose: () => void } = $props();
 
-	const HARNESS = "http://127.0.0.1:7334";
+	let paired = $state(false);
+	let harnessError = $state("");
 
 	interface SkillRow {
 		key: string;
@@ -49,31 +52,31 @@
 	let skillPoll: ReturnType<typeof setInterval> | undefined;
 
 	async function loadSkills() {
+		if (!pairedSession()) return;
 		try {
-			const res = await fetch(`${HARNESS}/skills`);
+			const res = await harnessFetch("/skills");
+			if (!res.ok) throw new Error(`Cannot load integrations (HTTP ${res.status}).`);
 			const out = (await res.json()) as { skills: SkillRow[]; holdups?: Holdup[] };
+			if (!pairedSession()) return;
 			skillRows = out.skills;
 			holdups = (out.holdups ?? []).sort((a, b) => b.updatedAt - a.updatedAt);
-			await loadGlobalSkills();
+			harnessError = "";
 			const busy = skillRows.some((s) => s.phase === "installing" || s.phase === "uninstalling");
 			if (busy && !skillPoll) skillPoll = setInterval(() => void loadSkills(), 2000);
 			if (!busy && skillPoll) {
 				clearInterval(skillPoll);
 				skillPoll = undefined;
 			}
-		} catch {
+		} catch (error) {
 			skillRows = null;
-			await loadGlobalSkills();
+			harnessError = error instanceof Error ? error.message : "The paired harness is unreachable.";
+			if (skillPoll) clearInterval(skillPoll);
+			skillPoll = undefined;
 		}
 	}
 
 	async function clearHoldup(id: string) {
-		try {
-			await fetch(`${HARNESS}/skills/holdup-clear`, { method: "POST", body: JSON.stringify({ id }) });
-		} catch {
-			/* daemon offline */
-		}
-		await loadSkills();
+		await changeSkill("/skills/holdup-clear", { id });
 	}
 
 	function ago(ts: number): string {
@@ -111,47 +114,80 @@
 
 	async function resetSkillPrompt(key: string) {
 		skillResetConfirm = "";
-		await fetch(`${HARNESS}/skills/prompt-reset`, { method: "POST", body: JSON.stringify({ key }) });
-		delete skillPromptDraft[key];
-		await loadSkills();
+		if (await changeSkill("/skills/prompt-reset", { key })) delete skillPromptDraft[key];
 	}
 
 	async function saveSkillPrompt(key: string) {
 		const text = (skillPromptDraft[key] ?? "").trim();
-		await fetch(`${HARNESS}/skills/prompt`, { method: "POST", body: JSON.stringify({ key, text }) });
-		skillPromptSaved = key;
-		setTimeout(() => (skillPromptSaved = ""), 1500);
-		await loadSkills();
+		if (await changeSkill("/skills/prompt", { key, text })) {
+			skillPromptSaved = key;
+			setTimeout(() => (skillPromptSaved = ""), 1500);
+		}
 	}
 
 	async function skillOp(key: string, op: "enable" | "disable" | "recheck" | "uninstall") {
 		skillConfirm = "";
+		await changeSkill(`/skills/${op}`, { key });
+	}
+
+	async function changeSkill(path: string, body: Record<string, string>): Promise<boolean> {
 		try {
-			await fetch(`${HARNESS}/skills/${op}`, { method: "POST", body: JSON.stringify({ key }) });
-		} catch {
-			/* daemon offline; reload shows it */
+			const res = await harnessFetch(path, {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify(body),
+			});
+			if (!res.ok) throw new Error(`Harness operation failed (HTTP ${res.status}).`);
+			await loadSkills();
+			return true;
+		} catch (error) {
+			harnessError = error instanceof Error ? error.message : "The paired harness is unreachable.";
+			return false;
 		}
-		await loadSkills();
 	}
 
 	// ── Spaces this machine serves (served_by on channel objects) ──
-	let servedSpaces = $state<Array<{ id: string; name: string }>>([]);
+	let servedSpaces = $state<Array<{ id: string; name: string }> | null>(null);
 	async function loadServedSpaces() {
+		if (!pairedSession()) return;
 		try {
-			const me = (await (await fetch(`${HARNESS}/machine`)).json()) as { id: string };
+			const res = await harnessFetch("/machine");
+			if (!res.ok) throw new Error(`Cannot identify this machine (HTTP ${res.status}).`);
+			const me = (await res.json()) as { id: string };
 			const chans = await fetchAllQuery({ type: "channel" });
+			if (!pairedSession()) return;
 			servedSpaces = chans
 				.filter((c) => (c.fields["served_by"]?.stringValue ?? "") === me.id)
 				.map((c) => ({ id: c.id, name: c.fields["name"]?.stringValue || "Untitled" }));
-		} catch {
-			servedSpaces = [];
+		} catch (error) {
+			servedSpaces = null;
+			harnessError = error instanceof Error ? error.message : "The paired harness is unreachable.";
 		}
 	}
 
-	onMount(() => {
+	function refreshPairing() {
+		paired = !!pairedSession();
+		if (!paired) {
+			skillRows = null;
+			holdups = [];
+			servedSpaces = null;
+			harnessError = "";
+			if (skillPoll) clearInterval(skillPoll);
+			skillPoll = undefined;
+			return;
+		}
 		void loadSkills();
 		void loadServedSpaces();
+	}
+
+	onMount(() => {
+		refreshPairing();
+		void loadGlobalSkills().catch((error) => {
+			harnessError = error instanceof Error ? error.message : "Cannot load saved skills.";
+		});
+		const unsubscribe = onPairingChange(refreshPairing);
 		return () => {
+			unsubscribe();
 			if (skillPoll) clearInterval(skillPoll);
 		};
 	});
@@ -163,11 +199,19 @@
 			<h2><span class="cog">🖥️</span> This machine</h2>
 			<button class="x" onclick={onclose}>×</button>
 		</header>
+		{#if !paired}
+			<PairGate compact onready={refreshPairing} />
+			<p class="hint">Pair with your native app to manage this machine. Saved skills remain available in browser mode.</p>
+		{/if}
+		{#if harnessError}<p class="hint" role="alert">{harnessError} Check that the paired native app and harness are running.</p>{/if}
+		{#if paired && (skillRows === null || servedSpaces === null)}
+			<button class="subtle-btn" onclick={refreshPairing}>Retry harness connection</button>
+		{/if}
 
 		<section>
 			<h3>Holdups</h3>
 			{#if skillRows === null}
-				<p class="hint">Agent daemon is offline — holdups live on the machine that runs it.</p>
+				<p class="hint">{paired ? "Machine holdups are unavailable until the harness responds." : "Pair to view machine holdups."}</p>
 			{:else if holdups.length === 0}
 				<p class="hint">Nothing held up — no agent has been blocked on a machine capability.</p>
 			{:else}
@@ -190,7 +234,9 @@
 
 		<section>
 			<h3>Serving</h3>
-			{#if servedSpaces.length === 0}
+			{#if servedSpaces === null}
+				<p class="hint">{paired ? "Serving status is unavailable until the harness responds." : "Pair to identify this machine and its served spaces."}</p>
+			{:else if servedSpaces.length === 0}
 				<p class="hint">This machine serves no spaces — take over from any space's settings.</p>
 			{:else}
 				<p class="hint">Spaces whose agents run here. Transfer from the space's settings on another machine.</p>
@@ -203,7 +249,7 @@
 		<section>
 			<h3>Integrations</h3>
 			{#if skillRows === null}
-				<p class="hint">Agent daemon is offline — integrations are managed on the machine that runs it.</p>
+				<p class="hint">{paired ? "Machine integrations are unavailable until the harness responds." : "Pair to manage machine integrations."}</p>
 			{:else}
 				<p class="hint">
 					Device-local capabilities, brokered by the harness: every agent can use an enabled one

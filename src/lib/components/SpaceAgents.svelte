@@ -14,10 +14,15 @@
 	import { fetchQuery, note, chat, fetchAllQuery } from "$lib/api";
 	import { store } from "$lib/data.svelte";
 	import { typeGlyph } from "$lib/create";
+	import { harnessFetch, pairedSession, onPairingChange } from "$lib/local-transport";
+	import PairGate from "./PairGate.svelte";
 
 	let { channelId }: { channelId: string } = $props();
 
-	const HARNESS = "http://127.0.0.1:7334";
+	let paired = $state(false);
+	let rosterError = $state("");
+	let authError = $state("");
+	let actionError = $state("");
 
 	interface SystemPart {
 		label: string;
@@ -198,6 +203,10 @@
 	].join("\n\n");
 
 	async function addConfigurator() {
+		if (!pairedSession()) {
+			actionError = "Pair with the native app before creating a configurator that runs here.";
+			return;
+		}
 		addingConfig = true;
 		try {
 			const { id } = await note.create("Config", "agent", {
@@ -209,6 +218,8 @@
 			});
 			await toggle(id, true); // useless unless something serves it
 			await load();
+		} catch (error) {
+			actionError = error instanceof Error ? error.message : "Cannot create the configurator.";
 		} finally {
 			addingConfig = false;
 		}
@@ -375,11 +386,17 @@
 	}
 
 	async function loadRoster() {
+		if (!pairedSession()) return;
 		try {
-			const res = await fetch(`${HARNESS}/agents`);
-			roster = ((await res.json()) as { roster: string[] }).roster;
-		} catch {
+			const res = await harnessFetch("/agents");
+			if (!res.ok) throw new Error(`Agent roster unavailable (HTTP ${res.status}).`);
+			const out = (await res.json()) as { roster: string[] };
+			if (!pairedSession()) return;
+			roster = out.roster;
+			rosterError = "";
+		} catch (error) {
 			roster = null;
+			rosterError = error instanceof Error ? error.message : "The paired harness is unreachable.";
 		}
 	}
 
@@ -396,11 +413,17 @@
 	let auth = $state<{ anthropic: ProviderStatus; kimi: ProviderStatus } | null>(null);
 
 	async function loadAuth() {
+		if (!pairedSession()) return;
 		try {
-			const res = await fetch(`${HARNESS}/auth/status`);
-			auth = (await res.json()) as { anthropic: ProviderStatus; kimi: ProviderStatus };
-		} catch {
+			const res = await harnessFetch("/auth/status");
+			if (!res.ok) throw new Error(`Provider status unavailable (HTTP ${res.status}).`);
+			const out = (await res.json()) as { anthropic: ProviderStatus; kimi: ProviderStatus };
+			if (!pairedSession()) return;
+			auth = out;
+			authError = "";
+		} catch (error) {
 			auth = null;
+			authError = error instanceof Error ? error.message : "Provider readiness is unavailable while the harness is offline.";
 		}
 	}
 
@@ -413,7 +436,8 @@
 	/** Empty when the agent can run here; otherwise why it can't. */
 	function authBlock(model: string): string {
 		const need = provider(model);
-		if (need === "none" || auth === null) return "";
+		if (need === "none") return "";
+		if (auth === null) return "Provider readiness is unavailable";
 		const p = auth[need];
 		if (p.ready) return "";
 		const label = need === "anthropic" ? "Claude" : "Kimi";
@@ -422,16 +446,31 @@
 		return `${label} credentials expired`;
 	}
 
-	onMount(() => {
+	function refreshPairing() {
+		paired = !!pairedSession();
+		if (!paired) {
+			roster = null;
+			auth = null;
+			rosterError = "";
+			authError = "";
+			return;
+		}
 		void loadRoster();
 		void loadAuth();
-		// Ages the "active 3m ago" labels and catches a credential expiry that
-		// lands while this page is open. Claims change too rarely to poll for.
+	}
+
+	onMount(() => {
+		refreshPairing();
+		const unsubscribe = onPairingChange(refreshPairing);
+		// Ages activity labels and refreshes local readiness only when paired.
 		const t = setInterval(() => {
 			now = Date.now();
 			void loadAuth();
 		}, 15_000);
-		return () => clearInterval(t);
+		return () => {
+			unsubscribe();
+			clearInterval(t);
+		};
 	});
 
 	$effect(() => {
@@ -439,9 +478,21 @@
 		void load();
 	});
 
-	async function toggle(id: string, enabled: boolean) {
-		await fetch(`${HARNESS}/agents/toggle`, { method: "POST", body: JSON.stringify({ id, enabled }) });
-		await loadRoster();
+	async function toggle(id: string, enabled: boolean): Promise<boolean> {
+		actionError = "";
+		try {
+			const res = await harnessFetch("/agents/toggle", {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({ id, enabled }),
+			});
+			if (!res.ok) throw new Error(`Cannot change the agent roster (HTTP ${res.status}).`);
+			await loadRoster();
+			return true;
+		} catch (error) {
+			actionError = error instanceof Error ? error.message : "The paired harness is unreachable.";
+			return false;
+		}
 	}
 
 	async function openChat(id: string) {
@@ -467,7 +518,7 @@
 			return;
 		}
 		confirmRemove = "";
-		if (roster?.includes(a.id)) await toggle(a.id, false);
+		if (roster?.includes(a.id) && !(await toggle(a.id, false))) return;
 		const chats = await fetchQuery({
 			filters: [
 				{ key: "type", condition: "equal", value: "chat" },
@@ -487,6 +538,15 @@
 	Agents serve this space: one holistic chat each, reachable from any object's discussion. Enable an
 	agent on the machine whose harness should run it.
 </p>
+{#if !paired}
+	<PairGate compact onready={refreshPairing} />
+	<p class="hint">Saved agents and their prompts are available in browser mode. Pair to run agents or inspect this machine's provider readiness.</p>
+{/if}
+{#if rosterError || authError}
+	<p class="hint" role="status">{rosterError || authError} Check that the paired native app and harness are running.</p>
+	{#if paired}<button onclick={refreshPairing}>Retry harness connection</button>{/if}
+{/if}
+{#if actionError}<p class="auth-warn" role="alert">{actionError}</p>{/if}
 
 {#each spaceAgents as a (a.id)}
 	{@const runsHere = roster?.includes(a.id) ?? false}

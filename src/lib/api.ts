@@ -6,13 +6,13 @@
  */
 
 import type { ObjectJSON, ObjectSummary, SpaceJSON, RelationDefJSON, BlockJSON, ValueJSON } from "$lib/types";
-import { backend } from "$lib/engine/backend";
+import { backend, isLocalBackend } from "$lib/client-backend";
+import { localJSON } from "$lib/local-transport";
 import { loadKey, saveKey, authorIdFor, clearKey } from "$lib/engine/keys";
 import { nip19 } from "nostr-tools";
 import { bytesToHex } from "@noble/hashes/utils.js";
 
-/** Desktop-era base URL; unused on web but kept for API-shape parity. */
-export const API = "";
+/** Reads and mutations use the explicitly selected platform backend. */
 
 export const fetchObject = (id: string): Promise<ObjectJSON> => backend.fetchObject(id);
 export const fetchObjects = (): Promise<ObjectSummary[]> => backend.fetchObjects();
@@ -114,10 +114,12 @@ export interface NostrSettings {
 
 export const settings = {
 	fetch: async (): Promise<NostrSettings> => {
+		if (isLocalBackend) return localJSON<NostrSettings>("/api/settings");
 		const key = loadKey();
 		return { hasKey: !!key, relays: backend.relays(), authorId: key ? authorIdFor(key) : "" };
 	},
 	importKey: async (key: string) => {
+		if (isLocalBackend) throw new Error("Change the daemon identity explicitly in its terminal. Browser pairing cannot import private keys into the daemon.");
 		// The old identity's replica must not leak into the new one.
 		await backend.logout();
 		localStorage.removeItem("roostr-space-keys");
@@ -128,18 +130,20 @@ export const settings = {
 	},
 	logout: async () => {
 		await backend.logout();
+		if (isLocalBackend) { location.href = "/app"; return; }
 		localStorage.removeItem("roostr-space-keys");
 		localStorage.removeItem("roostr-profile");
 		clearKey();
 		location.href = "/app";
 	},
 	exportKey: async (): Promise<{ nsec: string; hex: string }> => {
+		if (isLocalBackend) throw new Error("Run ./glon-odin key-export explicitly in the daemon terminal to back up its identity.");
 		const key = loadKey();
 		if (!key) throw new Error("no key");
 		return { nsec: nip19.nsecEncode(key.sk), hex: bytesToHex(key.sk) };
 	},
 	setRelays: async (relays: string[]) => {
-		backend.setRelays(relays);
+		await backend.setRelays(relays);
 		return { relays };
 	},
 };

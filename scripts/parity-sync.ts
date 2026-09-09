@@ -8,12 +8,14 @@
  *   bun run scripts/parity-sync.ts
  */
 
-import { sha256 } from "@noble/hashes/sha2.js";
-import { bytesToHex } from "@noble/hashes/utils.js";
 import { parseKey, authorIdFor } from "../src/lib/engine/keys";
 import { ChangeStore } from "../src/lib/engine/store";
 import { RelaySync, DEFAULT_RELAYS } from "../src/lib/engine/sync";
 import type { ChangeJSON } from "../src/lib/engine/contracts";
+import { initCore } from "../src/lib/engine/core";
+import { proto } from "../src/lib/engine/proto";
+
+await initCore({ wasmBytes: await Bun.file(new URL("../static/engine.wasm", import.meta.url)).arrayBuffer() });
 
 const QUIET_MS = 5_000;
 const MAX_EVENTS = 300;
@@ -26,26 +28,13 @@ const key = parseKey(identity.privkey);
 if (!key) throw new Error("privkey did not parse");
 console.log(`identity ${key.pk.slice(0, 8)}… (${key.npub.slice(0, 14)}…) authorId=${authorIdFor(key)}`);
 
-// ── Decode: real proto.ts if loadable, else byte-passthrough stub ─
-let decodeLabel = "proto.ts";
+// ── Shared Odin codec (failure is fatal; never substitute a stub) ──
 const firstBytes: number[] = [];
-let realDecode: ((bytes: Uint8Array) => ChangeJSON | null) | null = null;
-try {
-	// Runtime-conditional on purpose: proto.ts imports
-	// "$lib/engine-proto.proto?raw", which bun cannot resolve outside Vite;
-	// may also not exist yet (written by a sibling agent).
-	const mod = (await import("../src/lib/engine/proto")) as { proto: { decodeChange(b: Uint8Array): ChangeJSON | null } };
-	realDecode = (b) => mod.proto.decodeChange(b);
-} catch {
-	decodeLabel = "STUB (byte-passthrough; proto.ts not bun-loadable — verifying decrypt+dedup+cursor only)";
-}
 const decode = (bytes: Uint8Array): ChangeJSON | null => {
 	if (bytes.length > 0) firstBytes.push(bytes[0]);
-	if (realDecode) return realDecode(bytes);
-	const hex = bytesToHex(sha256(bytes));
-	return { id: hex, objectId: `stub:${hex.slice(0, 16)}`, parentIds: [], ops: [], timestamp: 0, author: "" };
+	return proto.decodeChange(bytes);
 };
-console.log(`decode: ${decodeLabel}`);
+console.log("decode: shared Odin WASM");
 
 // ── Store + sync (fresh fake-indexeddb each run) ─────────────────
 const store = new ChangeStore();

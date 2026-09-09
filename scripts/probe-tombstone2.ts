@@ -3,6 +3,9 @@ import { sha256 } from "@noble/hashes/sha2.js";
 import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
 import { readFileSync } from "node:fs";
 import { proto } from "../src/lib/engine/proto";
+import { initCore } from "../src/lib/engine/core";
+
+await initCore({ wasmBytes: readFileSync(new URL("../static/engine.wasm", import.meta.url)) });
 
 const sk = hexToBytes(JSON.parse(readFileSync(process.env.HOME + "/.glon/nostr.json", "utf8")).privkey);
 const pk = getPublicKey(sk);

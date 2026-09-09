@@ -1,24 +1,24 @@
 <script lang="ts">
 	import { onMount } from "svelte";
-	import { fetchQuery, settings, fetchAllQuery } from "$lib/api";
-	import { goto } from "$app/navigation";
+	import { settings } from "$lib/api";
 	import { exportAll } from "$lib/export";
 	import { ignoredWords, removeFromDictionary } from "$lib/spell";
-	import { loadKey } from "$lib/engine/keys";
-	import { backend } from "$lib/engine/backend";
+	import { backend, isLocalBackend } from "$lib/client-backend";
+	import { myNpub } from "$lib/client-identity";
+	import { localFetch, harnessFetch, pairedSession, unpairLocal, onPairingChange } from "$lib/local-transport";
+	import PairGate from "$lib/components/PairGate.svelte";
 
-	// Desktop sync check: compare this device's change-set fingerprint against
-	// the desktop daemon's (GET /api/sync/digest). Same digest = identical vault.
-	let deskUrl = $state(localStorage.getItem("glon.deskUrl") ?? "http://127.0.0.1:7333");
+	// Compare only with the explicitly paired local daemon.
+	let paired = $state(pairedSession() !== null);
+	let settingsError = $state("");
 	let deskState = $state<"idle" | "checking" | "match" | "differ" | "offline">("idle");
 	let deskDetail = $state("");
 
 	async function checkDesktop() {
 		deskState = "checking";
 		deskDetail = "";
-		localStorage.setItem("glon.deskUrl", deskUrl.trim());
 		try {
-			const res = await fetch(`${deskUrl.trim()}/api/sync/digest`);
+			const res = await localFetch("/api/sync/digest");
 			if (!res.ok) throw new Error(`daemon ${res.status}`);
 			const remote = (await res.json()) as { digest: string; objects: number; changes: number };
 			const local = await backend.syncDigest();
@@ -29,9 +29,9 @@
 				deskState = "differ";
 				deskDetail = `desktop ${remote.objects}/${remote.changes} · here ${local.objects}/${local.changes} (objects/changes) — ${local.changes < remote.changes ? "this device is behind" : local.changes > remote.changes ? "the desktop is behind" : "same size, different content"}`;
 			}
-		} catch {
+		} catch (err) {
 			deskState = "offline";
-			deskDetail = "desktop daemon unreachable — same network or Tailscale?";
+			deskDetail = err instanceof Error ? err.message : String(err);
 		}
 	}
 
@@ -49,6 +49,24 @@
 	let importDraft = $state("");
 	let importError = $state("");
 
+	async function doLogout() {
+		settingsError = "";
+		try {
+			await settings.logout();
+		} catch (err) {
+			settingsError = err instanceof Error ? err.message : String(err);
+			confirmLogout = false;
+		}
+	}
+
+	function disconnectLocal() {
+		if (isLocalBackend) {
+			void doLogout();
+		} else {
+			unpairLocal();
+		}
+	}
+
 	async function importKey() {
 		importError = "";
 		try {
@@ -63,9 +81,7 @@
 		}
 	}
 
-	// Agent credentials: managed by the harness daemon's localhost auth
-	// endpoint (it owns auth.json and the OAuth exchange).
-	const HARNESS = "http://127.0.0.1:7334";
+	// Credentials stay with the explicitly paired harness.
 	interface ProviderStatus {
 		mode: "plan" | "api_key" | "env" | "claude_code" | "none";
 		masked?: string;
@@ -80,32 +96,51 @@
 	let loginError = $state("");
 
 	async function loadAgentAuth() {
+		loginError = "";
+		if (!pairedSession()) {
+			agentAuth = null;
+			return;
+		}
 		try {
-			const res = await fetch(`${HARNESS}/auth/status`);
+			const res = await harnessFetch("/auth/status");
+			if (!res.ok) throw new Error(`Agent credentials: ${res.status}`);
 			agentAuth = (await res.json()) as { anthropic: ProviderStatus; kimi: ProviderStatus };
-		} catch {
-			agentAuth = null; // daemon offline
+		} catch (err) {
+			agentAuth = null;
+			loginError = err instanceof Error ? err.message : String(err);
 		}
 	}
 
 	async function load() {
-		const s = await settings.fetch();
-		relays = s.relays;
+		settingsError = "";
+		try {
+			const s = await settings.fetch();
+			relays = s.relays;
+			npub = myNpub() ?? "";
+		} catch (err) {
+			settingsError = err instanceof Error ? err.message : String(err);
+		}
 		await loadAgentAuth();
-		// Public identity derives locally from the on-device key.
-		npub = loadKey()?.npub ?? "";
 	}
 
 
 	// ── Profile picture (kind 0, engine-signed) ──────────────────────
-	import { cachedProfile, fetchProfile, saveProfile, imageToAvatar } from "$lib/engine/profile";
+	import { cachedProfile, fetchProfile, saveProfile, imageToAvatar } from "$lib/client-profile";
 	let profilePicture = $state("");
 	let avatarBusy = $state(false);
 	let avatarState = $state("");
 	let avatarFileEl = $state<HTMLInputElement>();
 
 	profilePicture = cachedProfile().picture ?? "";
-	void fetchProfile().then((p) => (profilePicture = p.picture ?? ""));
+	async function loadProfile() {
+		avatarState = "";
+		try {
+			profilePicture = (await fetchProfile()).picture ?? "";
+		} catch (err) {
+			avatarState = err instanceof Error ? err.message : String(err);
+		}
+	}
+	void loadProfile();
 
 	async function pickAvatar(e: Event) {
 		const file = (e.currentTarget as HTMLInputElement).files?.[0];
@@ -116,11 +151,10 @@
 			const p = await saveProfile({ picture: await imageToAvatar(file) });
 			profilePicture = p.picture ?? "";
 			avatarState = "saved";
-		} catch {
-			avatarState = "failed";
+		} catch (err) {
+			avatarState = err instanceof Error ? err.message : String(err);
 		} finally {
 			avatarBusy = false;
-			setTimeout(() => (avatarState = ""), 2000);
 		}
 	}
 
@@ -129,6 +163,9 @@
 		try {
 			const p = await saveProfile({ picture: "" });
 			profilePicture = p.picture ?? "";
+			avatarState = "saved";
+		} catch (err) {
+			avatarState = err instanceof Error ? err.message : String(err);
 		} finally {
 			avatarBusy = false;
 		}
@@ -136,6 +173,16 @@
 
 	onMount(() => {
 		void load();
+		return onPairingChange(() => {
+			paired = pairedSession() !== null;
+			if (!paired) {
+				agentAuth = null;
+				anthropicDraft = "";
+				kimiDraft = "";
+				loginCode = "";
+				loginPending = false;
+			}
+		});
 	});
 
 	function flashSaved(label: string) {
@@ -144,44 +191,58 @@
 	}
 
 	async function saveAgentKey(provider: "anthropic" | "kimi", key: string) {
-		await fetch(`${HARNESS}/auth/key`, { method: "POST", body: JSON.stringify({ provider, key: key.trim() }) });
-		anthropicDraft = "";
-		kimiDraft = "";
-		await loadAgentAuth();
-		flashSaved(key.trim() ? "Saved" : "Cleared");
+		loginError = "";
+		try {
+			const res = await harnessFetch("/auth/key", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ provider, key: key.trim() }) });
+			if (!res.ok) throw new Error(`Credential update failed: ${res.status}`);
+			anthropicDraft = "";
+			kimiDraft = "";
+			await loadAgentAuth();
+			flashSaved(key.trim() ? "Saved" : "Cleared");
+		} catch (err) {
+			loginError = err instanceof Error ? err.message : String(err);
+		}
 	}
 
 	/** Plan sign-in: open claude.ai authorize page, then paste the code back. */
 	async function startLogin() {
 		loginError = "";
-		const res = await fetch(`${HARNESS}/auth/anthropic/start`, { method: "POST" });
-		const out = (await res.json()) as { authUrl?: string; error?: string };
-		if (!out.authUrl) {
-			loginError = out.error ?? "could not start login";
-			return;
+		try {
+			const res = await harnessFetch("/auth/anthropic/start", { method: "POST" });
+			const out = (await res.json()) as { authUrl?: string; error?: string };
+			if (!res.ok || !out.authUrl) throw new Error(out.error ?? "Could not start login");
+			loginPending = true;
+			window.open(out.authUrl, "_blank", "noopener");
+		} catch (err) {
+			loginError = err instanceof Error ? err.message : String(err);
 		}
-		loginPending = true;
-		window.open(out.authUrl, "_blank", "noopener");
 	}
 
 	async function finishLogin() {
 		loginError = "";
-		const res = await fetch(`${HARNESS}/auth/anthropic/finish`, { method: "POST", body: JSON.stringify({ code: loginCode.trim() }) });
-		const out = (await res.json()) as { ok?: boolean; error?: string };
-		if (!out.ok) {
-			loginError = out.error ?? "exchange failed";
-			return;
+		try {
+			const res = await harnessFetch("/auth/anthropic/finish", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ code: loginCode.trim() }) });
+			const out = (await res.json()) as { ok?: boolean; error?: string };
+			if (!res.ok || !out.ok) throw new Error(out.error ?? "Exchange failed");
+			loginPending = false;
+			loginCode = "";
+			await loadAgentAuth();
+			flashSaved("Signed in");
+		} catch (err) {
+			loginError = err instanceof Error ? err.message : String(err);
 		}
-		loginPending = false;
-		loginCode = "";
-		await loadAgentAuth();
-		flashSaved("Signed in");
 	}
 
 	async function reveal() {
-		const out = await settings.exportKey();
-		nsec = out.nsec;
-		revealed = true;
+		if (isLocalBackend) return;
+		settingsError = "";
+		try {
+			const out = await settings.exportKey();
+			nsec = out.nsec;
+			revealed = true;
+		} catch (err) {
+			settingsError = err instanceof Error ? err.message : String(err);
+		}
 	}
 
 	async function copy(text: string, label: string) {
@@ -191,10 +252,15 @@
 	}
 
 	async function saveRelays(next: string[]) {
-		const out = await settings.setRelays(next);
-		relays = out.relays;
-		saveState = "Saved";
-		setTimeout(() => (saveState = ""), 1500);
+		settingsError = "";
+		try {
+			const out = await settings.setRelays(next);
+			relays = out.relays;
+			saveState = "Saved";
+			setTimeout(() => (saveState = ""), 1500);
+		} catch (err) {
+			settingsError = err instanceof Error ? err.message : String(err);
+		}
 	}
 
 	function addRelay() {
@@ -289,6 +355,18 @@
 		</header>
 
 		<section>
+			<h3>Local pairing</h3>
+			<p class="hint">{isLocalBackend ? "Native mode — your identity and data stay with the local daemon." : "Browser mode — your local browser vault works without a daemon. Pairing enables local services without switching vaults."}</p>
+			{#if paired}
+				<p class="hint">Explicitly paired with this computer's local services.</p>
+				<button class="action subtle" onclick={disconnectLocal}>Unpair local services</button>
+			{:else}
+				<PairGate compact onready={() => { paired = pairedSession() !== null; void load(); if (isLocalBackend) void loadProfile(); }} />
+			{/if}
+			{#if settingsError}<p class="hint error" role="alert">{settingsError}</p>{/if}
+		</section>
+
+		<section>
 			<h3>Profile</h3>
 			<p class="hint">Your avatar - shown on the Spaces screen and synced to every device holding this key.</p>
 			<div class="profile-row">
@@ -318,7 +396,9 @@
 					<button onclick={() => void copy(npub, "npub")}>{copied === "npub" ? "Copied" : "Copy"}</button>
 				</div>
 			{/if}
-			{#if !revealed}
+			{#if isLocalBackend}
+				<p class="hint">Back up the native private key only from the operator's terminal on this computer: <code>./glon-odin key-export</code> (run from the native installation directory). Keep the output secret; this browser cannot request or reveal it.</p>
+			{:else if !revealed}
 				<button class="action" onclick={() => void reveal()}>Reveal private key</button>
 			{:else}
 				<div class="keylabel">Private key <span class="enc">nsec</span> <span class="secret">secret</span></div>
@@ -330,7 +410,11 @@
 				<button class="action subtle" onclick={() => { revealed = false; nsec = ""; }}>Hide</button>
 			{/if}
 			{#if !importing}
-				<button class="action subtle" onclick={() => (importing = true)}>Sign in with existing key…</button>
+				{#if !isLocalBackend}
+					<button class="action subtle" onclick={() => (importing = true)}>Sign in with existing key…</button>
+				{:else}
+					<p class="hint">Changing the native identity requires the local operator; never paste its private key into this browser.</p>
+				{/if}
 				<button
 					class="action subtle"
 					class:danger={confirmLogout}
@@ -339,11 +423,11 @@
 							confirmLogout = true;
 							return;
 						}
-						void settings.logout();
-					}}>{confirmLogout ? "Erase local copy & sign out?" : "Log out on this device"}</button
+						void doLogout();
+					}}>{isLocalBackend ? (confirmLogout ? "Disconnect this browser?" : "Unpair this browser") : (confirmLogout ? "Erase local copy & sign out?" : "Log out on this device")}</button
 				>
 				{#if confirmLogout}
-					<p class="hint">Removes this device's key and its local replica. Your encrypted history stays on your relays — log in with any nsec afterwards.</p>
+					<p class="hint">{isLocalBackend ? "Disconnects this browser only. The native key, local data, and running daemon are not erased." : "Removes this device's key and its local replica only after pending changes are published. Your encrypted history stays on your relays — log in with any nsec afterwards."}</p>
 				{/if}
 			{:else}
 				<p class="hint">
@@ -402,15 +486,14 @@
 
 		<section>
 			<h3>Desktop sync check</h3>
-			<p class="hint">Compare this device's vault fingerprint against your desktop daemon's. Equal digests mean identical change sets.</p>
+			<p class="hint">Compare the active vault fingerprint with the explicitly paired local daemon. Equal digests mean identical change sets; in native mode both refer to that daemon.</p>
 			<form
 				onsubmit={(e) => {
 					e.preventDefault();
 					void checkDesktop();
 				}}
 			>
-				<input bind:value={deskUrl} placeholder="http://127.0.0.1:7333" />
-				<button type="submit" disabled={deskState === "checking"}>{deskState === "checking" ? "Checking…" : "Compare"}</button>
+				<button type="submit" disabled={!paired || deskState === "checking"}>{deskState === "checking" ? "Checking…" : "Compare"}</button>
 			</form>
 			{#if deskState !== "idle"}
 				<p class="hint desk-{deskState}">{deskDetail}</p>
@@ -455,9 +538,9 @@
 				<p class="hint">Checking agent daemon…</p>
 			{:else if agentAuth === null}
 				<p class="hint">
-					Agents run on your desktop Roostr and answer over the relays — manage
-					their credentials there. Chat with them from any object's discussion here.
+					{paired ? "The paired agent daemon is unavailable. Start the local harness to manage credentials." : "Pair local services above to manage agent credentials. Browser data and relay chat remain available without pairing."}
 				</p>
+				{#if paired}<button class="action subtle" onclick={() => void loadAgentAuth()}>Retry agent connection</button>{/if}
 			{:else}
 				<p class="hint">
 					Sign in with your Claude <b>Pro/Max plan</b> (recommended) or paste an API key.
@@ -495,9 +578,6 @@
 				{#if loginPending}
 					<p class="hint">A claude.ai tab opened — approve access, copy the code it shows, and paste it above.</p>
 				{/if}
-				{#if loginError}
-					<p class="hint error">{loginError}</p>
-				{/if}
 				{#if agentAuth.anthropic.mode !== "plan" && agentAuth.anthropic.mode !== "api_key" && !loginPending}
 					<form
 						class="keyrow-form"
@@ -528,6 +608,7 @@
 					{/if}
 				</div>
 			{/if}
+			{#if loginError}<p class="hint error" role="alert">{loginError}</p>{/if}
 		</section>
 
 		<p class="build-stamp">Build {__BUILD_STAMP__}</p>

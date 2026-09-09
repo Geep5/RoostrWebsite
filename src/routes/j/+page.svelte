@@ -8,6 +8,9 @@
 	 */
 	import { onMount } from "svelte";
 	import { decodeJoinLink, type SpaceJoinLink } from "$lib/invite";
+	import { isLocalBackend } from "$lib/client-backend";
+	import { pairedSession, onPairingChange } from "$lib/local-transport";
+	import PairGate from "$lib/components/PairGate.svelte";
 
 	let checked = $state(false);
 	let link = $state<SpaceJoinLink | null>(null);
@@ -16,24 +19,26 @@
 	let sent = $state(false);
 	let error = $state("");
 
-	onMount(async () => {
+	onMount(() => {
 		link = decodeJoinLink(location.hash.slice(1));
-		try {
-			const sync = await import("$lib/engine/sync");
-			hasKey = !!sync.myNpub();
-		} catch {
-			hasKey = false;
-		}
-		checked = true;
+		void refreshIdentity();
+		return onPairingChange(() => { if (isLocalBackend) hasKey = !!pairedSession(); });
 	});
+	async function refreshIdentity() {
+		try {
+			const identity = await import("$lib/client-identity");
+			hasKey = isLocalBackend ? !!pairedSession() : !!identity.myNpub();
+		} catch { hasKey = false; }
+		checked = true;
+	}
 
 	async function request() {
 		if (!link || busy) return;
 		busy = true;
 		error = "";
 		try {
-			const sync = await import("$lib/engine/sync");
-			await sync.sendJoinRequest(link);
+			const identity = await import("$lib/client-identity");
+			await identity.sendJoinRequest(link);
 			sent = true;
 		} catch (err) {
 			error = err instanceof Error ? err.message : String(err);
@@ -81,6 +86,8 @@
 					<button class="btn primary" disabled={busy} onclick={() => void request()}>
 						{busy ? "Sending…" : "Request to join"}
 					</button>
+				{:else if isLocalBackend}
+					<PairGate compact onready={() => void refreshIdentity()} />
 				{:else}
 					<p class="muted">Set up your key in the app first, then reopen this link.</p>
 					<a class="btn primary" href="/app">Open Roostr Web</a>

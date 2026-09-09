@@ -14,6 +14,9 @@ import { hexToBytes } from "@noble/hashes/utils.js";
 import { proto } from "../src/lib/engine/proto";
 import { ChangeStore } from "../src/lib/engine/store";
 import { RelaySync, DEFAULT_RELAYS } from "../src/lib/engine/sync";
+import { initCore } from "../src/lib/engine/core";
+
+await initCore({ wasmBytes: await Bun.file(new URL("../static/engine.wasm", import.meta.url)).arrayBuffer() });
 
 const OBJECT_ID = "5579a9b8-701f-413e-a659-673119d56f43";
 const EXPECTED_PREFIXES = ["809d78b8", "df512097"];

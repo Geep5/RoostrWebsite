@@ -13,6 +13,9 @@
 	import { store } from "$lib/data.svelte";
 	import EmojiPicker from "./EmojiPicker.svelte";
 	import { renderMarkdown } from "$lib/markdown";
+	import { onMount } from "svelte";
+	import { harnessFetch, pairedSession, onPairingChange } from "$lib/local-transport";
+	import PairGate from "./PairGate.svelte";
 
 	let {
 		object,
@@ -127,16 +130,37 @@
 	let replyTo = $state("");
 	let pickerFor = $state("");
 	let me = $state("");
+	let identityError = $state("");
+
+	async function loadIdentity() {
+		try {
+			const result = await settings.fetch();
+			me = result.authorId;
+			identityError = "";
+		} catch (error) {
+			me = "";
+			identityError = error instanceof Error ? error.message : "Discussion identity is unavailable while offline.";
+		}
+	}
 
 	$effect(() => {
-		void settings.fetch().then((s) => (me = s.authorId));
+		void paired;
+		void loadIdentity();
 	});
 
 	// ── Agent presence ─────────────────────────────────────────────
-	// The harness reports live turn state on its localhost surface;
+	// The paired harness reports live turn state on its authenticated surface;
 	// while the discussion is open we poll it so the user sees the
 	// agent composing (typing dots) or failing (warning row).
-	const HARNESS = "http://127.0.0.1:7334";
+	let paired = $state(false);
+	let presenceError = $state("");
+	function refreshPairing() {
+		paired = !!pairedSession();
+	}
+	onMount(() => {
+		refreshPairing();
+		return onPairingChange(refreshPairing);
+	});
 	interface AgentPresence {
 		id: string;
 		name: string;
@@ -148,18 +172,26 @@
 	}
 	let presence = $state<AgentPresence[]>([]);
 	$effect(() => {
-		if (!isOpen) {
+		if (!isOpen || !paired) {
 			presence = [];
+			presenceError = "";
 			return;
 		}
 		let gone = false;
 		const tick = async () => {
 			try {
-				const res = await fetch(`${HARNESS}/agent/status`);
+				const res = await harnessFetch("/agent/status");
+				if (!res.ok) throw new Error(`Agent status unavailable (HTTP ${res.status}).`);
 				const body = (await res.json()) as { agents?: AgentPresence[] };
-				if (!gone) presence = body.agents ?? [];
-			} catch {
-				if (!gone) presence = [];
+				if (!gone && pairedSession()) {
+					presence = body.agents ?? [];
+					presenceError = "";
+				}
+			} catch (error) {
+				if (!gone) {
+					presence = [];
+					presenceError = error instanceof Error ? error.message : "The paired harness is unreachable.";
+				}
 			}
 		};
 		void tick();
@@ -251,6 +283,19 @@
 				<span class="head-title">Discussion</span>
 				<button class="collapse" title="Collapse" onclick={() => (open = false)}>×</button>
 			</div>
+		{/if}
+		{#if identityError}
+			<p class="presence error" role="status">Cannot load your discussion identity: {identityError}</p>
+			<button onclick={() => void loadIdentity()}>Retry discussion identity</button>
+		{/if}
+		{#if !paired}
+			<details>
+				<summary>Live agent status requires pairing with the native app</summary>
+				<PairGate compact onready={refreshPairing} />
+				<p>Discussion history and comments remain available without the local harness.</p>
+			</details>
+		{:else if presenceError}
+			<p class="presence error" role="status">{presenceError} Check that the paired native app and harness are running. Discussion remains available.</p>
 		{/if}
 		<div class="messages" bind:this={messagesEl}>
 			{#each messages as m (m.id)}

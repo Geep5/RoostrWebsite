@@ -16,7 +16,7 @@
  * bundles the dev dependency.
  */
 
-import type { ChangeJSON, ChangeStoreApi } from "./contracts";
+import type { ChangeJSON, ChangeStoreApi, PendingPublish } from "./contracts";
 
 const DB_NAME = "roostr";
 const DB_VERSION = 2;
@@ -121,10 +121,39 @@ export class ChangeStore implements ChangeStoreApi {
 		return fresh.length;
 	}
 
+	async addLocalChange(bytes: Uint8Array, change: ChangeJSON): Promise<void> {
+		const tx = this.handle().transaction([CHANGES, META], "readwrite");
+		tx.objectStore(CHANGES).put({ objectId: change.objectId, bytes, json: change } satisfies ChangeRow, change.id);
+		tx.objectStore(META).put({ key: change.id, changeId: change.id, objectId: change.objectId, bytes } satisfies PendingPublish, `pending:${change.id}`);
+		await txDone(tx);
+	}
+
+	async pendingPublishes(): Promise<PendingPublish[]> {
+		const store = this.handle().transaction(META, "readonly").objectStore(META);
+		const [keys, values] = await Promise.all([req(store.getAllKeys()), req(store.getAll())]);
+		return values.filter((_, i) => String(keys[i]).startsWith("pending:")) as PendingPublish[];
+	}
+
+	async getPending(key: string): Promise<PendingPublish | undefined> {
+		return await req(this.handle().transaction(META, "readonly").objectStore(META).get(`pending:${key}`)) as PendingPublish | undefined;
+	}
+
+	async savePending(item: PendingPublish): Promise<void> {
+		const tx = this.handle().transaction(META, "readwrite");
+		tx.objectStore(META).put(item, `pending:${item.key}`);
+		await txDone(tx);
+	}
+
 	async changesFor(objectId: string): Promise<ChangeJSON[]> {
 		const store = this.handle().transaction(CHANGES, "readonly").objectStore(CHANGES);
 		const rows = (await req(store.index("objectId").getAll(objectId))) as ChangeRow[];
 		return rows.map((r) => r.json);
+	}
+
+	async rawChangesFor(objectId: string): Promise<Array<{ bytes: Uint8Array; change: ChangeJSON }>> {
+		const store = this.handle().transaction(CHANGES, "readonly").objectStore(CHANGES);
+		const rows = (await req(store.index("objectId").getAll(objectId))) as ChangeRow[];
+		return rows.map((row) => ({ bytes: row.bytes, change: row.json }));
 	}
 
 	async objectIds(): Promise<string[]> {
@@ -188,10 +217,16 @@ export class ChangeStore implements ChangeStoreApi {
 		return typeof value === "number" ? value : 0;
 	}
 
-	async setCursor(v: number): Promise<void> {
+	async setCursor(v: number, replayGroups?: Array<[string, number]>): Promise<void> {
 		const tx = this.handle().transaction(META, "readwrite");
 		tx.objectStore(META).put(v, CURSOR_KEY);
+		if (replayGroups) tx.objectStore(META).put(replayGroups, "replay-groups");
 		await txDone(tx);
+	}
+
+	async getReplayGroups(): Promise<Array<[string, number]>> {
+		const store = this.handle().transaction(META, "readonly").objectStore(META);
+		return (await req(store.get("replay-groups"))) ?? [];
 	}
 
 	async isPublished(changeId: string): Promise<boolean> {
@@ -202,6 +237,7 @@ export class ChangeStore implements ChangeStoreApi {
 	async markPublished(changeId: string): Promise<void> {
 		const tx = this.handle().transaction(META, "readwrite");
 		tx.objectStore(META).put(true, `published:${changeId}`);
+		tx.objectStore(META).delete(`pending:${changeId}`);
 		await txDone(tx);
 	}
 }

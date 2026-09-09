@@ -7,17 +7,18 @@
  * cached in IndexedDB, replayed to object states, queried locally.
  *
  * Modules implementing these contracts:
- *   proto.ts   - Change encode/decode (protobufjs over engine-proto.proto)
- *   replay.ts  - change list -> ObjectJSON (parity with the Odin server)
- *   query.ts   - /api/query semantics (parity with src/query.odin)
+ *   proto.ts   - Change encode/decode and hashing via the portable Odin core
+ *   replay.ts  - portable Odin core change replay -> ObjectJSON
+ *   query.ts   - portable Odin core /api/query semantics
  *   store.ts   - IndexedDB change cache + replayed-state memo
  *   sync.ts    - relay backfill/live/publish (schema of harness nostrsync.ts)
  *   keys.ts    - nsec handling, on-device storage
- *   mutate.ts  - /api/mutate actions as local Change builders + publish
+ *   mutate.ts  - portable Odin core mutation plans + platform persistence
  *   backend.ts - ties it together behind the app's api.ts surface
  */
 
 import type { ObjectJSON, ValueJSON } from "$lib/types";
+import type { Event } from "nostr-tools";
 
 // ── proto.ts ──────────────────────────────────────────────────────
 
@@ -102,17 +103,45 @@ export interface QueryApi {
 
 // ── store.ts ──────────────────────────────────────────────────────
 
+/** Authenticated transport context, never inferred from the inner author. */
+export interface SharedProvenance {
+	spaceId: string;
+	keyId: number;
+	signer: string;
+}
+
+export interface PendingPublish {
+	key: string;
+	objectId: string;
+	changeId: string;
+	bytes: Uint8Array;
+	spaceId?: string;
+	keyId?: number;
+	/** Exact signed ciphertext retained across retries and reloads. */
+	events?: Event[];
+}
+
 export interface ChangeStoreApi {
 	open(): Promise<void>;
 	/** Add raw changes (idempotent by content address). Returns # new. */
 	addChanges(changes: Array<{ bytes: Uint8Array; change: ChangeJSON }>): Promise<number>;
+	/** Atomically save a local change and its personal publication obligation. */
+	addLocalChange(bytes: Uint8Array, change: ChangeJSON): Promise<void>;
+	pendingPublishes(): Promise<PendingPublish[]>;
+	getPending(key: string): Promise<PendingPublish | undefined>;
+	savePending(item: PendingPublish): Promise<void>;
 	/** All decoded changes for one object. */
 	changesFor(objectId: string): Promise<ChangeJSON[]>;
+	/** Exact stored protobuf bytes with decoded metadata, without re-encoding. */
+	rawChangesFor(objectId: string): Promise<Array<{ bytes: Uint8Array; change: ChangeJSON }>>;
 	/** Every known object id. */
 	objectIds(): Promise<string[]>;
 	/** Relay cursor (unix seconds of newest imported event). */
 	getCursor(): Promise<number>;
-	setCursor(v: number): Promise<void>;
+	/** Atomically save recovery identities with the cursor when supplied. */
+	setCursor(v: number, replayGroups?: Array<[string, number]>): Promise<void>;
+	/** Unresolved canonical chunk group keys and earliest event timestamps. */
+	getReplayGroups(): Promise<Array<[string, number]>>;
 	/** True once one COMPLETE history walk finished on this device. */
 	getBootstrapped(): Promise<boolean>;
 	setBootstrapped(): Promise<void>;
@@ -134,7 +163,7 @@ export interface RelaySyncApi {
 	start(): Promise<void>;
 	stop(): void;
 	/** Encrypt + publish one change (paced, retried). */
-	publish(bytes: Uint8Array, changeId: string, objectId: string): void;
+	publish(bytes: Uint8Array, changeId: string, objectId: string): Promise<void>;
 }
 
 // ── keys.ts ───────────────────────────────────────────────────────

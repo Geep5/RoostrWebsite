@@ -13,9 +13,12 @@ import { homedir } from "node:os";
 import { sha256 } from "@noble/hashes/sha2.js";
 import { decodeChange, changeId } from "../src/lib/engine/proto";
 import { computeObject } from "../src/lib/engine/replay";
+import { initCore } from "../src/lib/engine/core";
+import { API as SERVER, apiFetch } from "../../glonOdin/harness/src/api";
 
-const SERVER = "http://127.0.0.1:7333";
-const CHANGES_DIR = join(homedir(), ".glon", "changes");
+await initCore({ wasmBytes: readFileSync(new URL("../static/engine.wasm", import.meta.url)) });
+
+const CHANGES_DIR = join(process.env.GLON_DATA ?? join(homedir(), ".glon"), "changes");
 
 // ── Canonical form for comparison ───────────────────────────────────
 // Sort object keys recursively. No other normalization: the engine is
@@ -143,7 +146,14 @@ for (const objectId of objectDirs) {
 		continue;
 	}
 
-	const mine = computeObject(changes);
+	let mine;
+	try {
+		mine = computeObject(changes);
+	} catch (error) {
+		parityFail++;
+		failures.push(`${objectId}: replay rejected: ${error instanceof Error ? error.message : String(error)}`);
+		continue;
+	}
 	if (!mine) {
 		parityFail++;
 		failures.push(`${objectId}: computeObject returned null`);
@@ -153,7 +163,7 @@ for (const objectId of objectDirs) {
 
 	let server: unknown;
 	try {
-		const res = await fetch(`${SERVER}/api/objects/${objectId}`);
+		const res = await apiFetch(`${SERVER}/api/objects/${objectId}`);
 		if (!res.ok) {
 			fetchFail++;
 			failures.push(`${objectId}: server ${res.status}`);
