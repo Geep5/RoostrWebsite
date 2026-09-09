@@ -1,4 +1,11 @@
-/** Explicit, origin-bound pairing; localhost is never treated as trusted. */
+/**
+ * Explicit, origin-bound pairing; localhost is never treated as trusted.
+ * The session lives in localStorage: one pairing per browser origin,
+ * surviving tab closes and browser restarts ("pair once"). It still expires
+ * after 24 hours and dies with the daemon's in-memory session table on a
+ * daemon restart; origin binding and the 0600 service-token anchor are
+ * unchanged.
+ */
 export interface PairedSession { token: string; expiresAt: number; role: "ui" }
 const SESSION_KEY = "roostr-local-pairing";
 const listeners = new Set<() => void>();
@@ -14,12 +21,17 @@ function scheduleExpiry(expiresAt: number): void {
 	expiryTimer = setTimeout(() => unpairLocal(), Math.max(0, expiresAt - Date.now()));
 }
 export function pairedSession(): PairedSession | null {
-	if (typeof sessionStorage === "undefined") return null;
+	if (typeof localStorage === "undefined") return null;
 	try {
-		const value = JSON.parse(sessionStorage.getItem(SESSION_KEY) ?? "null") as PairedSession | null;
+		const value = JSON.parse(localStorage.getItem(SESSION_KEY) ?? "null") as PairedSession | null;
 		if (!value || !/^[a-f0-9]{64}$/i.test(value.token) || value.role !== "ui" || !Number.isFinite(value.expiresAt) || value.expiresAt <= Date.now()) return null;
 		return value;
 	} catch { return null; }
+}
+if (typeof window !== "undefined") {
+	window.addEventListener("storage", (e) => {
+		if (e.key === SESSION_KEY) notify();
+	});
 }
 export function onPairingChange(callback: () => void): () => void {
 	listeners.add(callback);
@@ -29,7 +41,7 @@ export function onPairingChange(callback: () => void): () => void {
 }
 export function unpairLocal(): void {
 	clearTimeout(expiryTimer);
-	if (typeof sessionStorage !== "undefined") sessionStorage.removeItem(SESSION_KEY);
+	if (typeof localStorage !== "undefined") localStorage.removeItem(SESSION_KEY);
 	notify();
 }
 export async function pairLocal(code: string): Promise<void> {
@@ -42,7 +54,7 @@ export async function pairLocal(code: string): Promise<void> {
 	const value = await response.json();
 	const expiresAt = value.expiresAt;
 	if (!/^[a-f0-9]{64}$/i.test(value.token ?? "") || value.role !== "ui" || !Number.isFinite(expiresAt) || expiresAt <= Date.now()) throw new PairingError("The daemon returned an invalid pairing session.");
-	sessionStorage.setItem(SESSION_KEY, JSON.stringify({ token: value.token, expiresAt, role: "ui" }));
+	localStorage.setItem(SESSION_KEY, JSON.stringify({ token: value.token, expiresAt, role: "ui" }));
 	scheduleExpiry(expiresAt);
 	notify();
 }
