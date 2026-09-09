@@ -476,6 +476,61 @@
 		if (i >= 0) object.blocks.splice(i, 1);
 	}
 
+	function parentIdOf(rid: string): string {
+		for (const b of object.blocks) if (b.childrenIds.includes(rid)) return b.id;
+		return "";
+	}
+
+	/**
+	 * Anytype onTabBlock's shift branch: the block becomes the sibling directly
+	 * below its parent, keeping its own style and caret. Enter on an empty
+	 * nested list item runs the very same move - editor/page.tsx onEnterBlock:
+	 * `if (parent?.isTextList()) { onTabBlock(e, range, true); }` - so both
+	 * paths share this one implementation.
+	 */
+	async function outdentBlock(rid: string, caretAt: number, liveText: string, liveMarks: ReturnType<typeof fromDom>["marks"]): Promise<boolean> {
+		const parentId = parentIdOf(rid);
+		if (!parentId || parentId === "__content__") return false;
+		const cur = byId.get(rid);
+		if (!cur) return false;
+		cancelPending(rid);
+		lastLocalEdit = Date.now();
+		flushSync(() => {
+			if (cur.content.text) {
+				cur.content.text.text = liveText;
+				cur.content.text.marks = liveMarks;
+			}
+			localDetach(rid);
+			// Root ordering is blocks-array order: place after the parent.
+			const i = object.blocks.findIndex((b) => b.id === rid);
+			const [me] = object.blocks.splice(i, 1);
+			const pIdx = object.blocks.findIndex((b) => b.id === parentId);
+			object.blocks.splice(pIdx + 1, 0, me);
+			const gp = object.blocks.find((b) => b.childrenIds.includes(parentId));
+			if (gp) gp.childrenIds.splice(gp.childrenIds.indexOf(parentId) + 1, 0, rid);
+		});
+		focusSync(rid, caretAt);
+		await persist(async () => {
+			await note.blockUpdate(object.id, rid, contentFor(rid, liveText, liveMarks));
+			await note.blockMove(object.id, rid, parentId, Pos.BOTTOM);
+		});
+		return true;
+	}
+
+	/** Anytype blockCreate: an empty text block above/below, caret in it. */
+	async function addSibling(rid: string, pos: number, style: number) {
+		const nid = crypto.randomUUID();
+		cancelPending(rid);
+		lastLocalEdit = Date.now();
+		flushSync(() => {
+			const nb: BlockJSON = { id: nid, childrenIds: [], content: { text: { text: "", style } } };
+			if (pos === Pos.TOP) localInsertBefore(nb, rid);
+			else localInsertAfter(nb, rid);
+		});
+		focusSync(nid, 0, rid);
+		await persist(() => note.blockAdd(object.id, { id: nid, childrenIds: [], content: { text: { text: "", style } } }, rid, pos));
+	}
+
 	/** Synchronous caret move with async rescue. */
 	function focusSync(bid: string, offset: number, fallbackId = "") {
 		const target = blockEl(bid);
@@ -590,12 +645,24 @@
 			const at = sel?.from ?? text.length;
 			const curStyle = byId.get(id)?.content.text?.style ?? Style.PARAGRAPH;
 			if (await convertToDivider(text)) return;
-			const isList = curStyle === Style.BULLET || curStyle === Style.NUMBERED || curStyle === Style.CHECKBOX;
-			const isQuoteish = curStyle === Style.QUOTE || curStyle === Style.CALLOUT;
+			// Anytype model/block.ts isTextList covers toggles too.
+			const LIST: number[] = [Style.BULLET, Style.NUMBERED, Style.CHECKBOX, Style.TOGGLE];
+			const isList = LIST.includes(curStyle);
+			const isQuote = curStyle === Style.QUOTE;
+			const isCallout = curStyle === Style.CALLOUT;
+			const isHeader = curStyle === Style.HEADER1 || curStyle === Style.HEADER2 || curStyle === Style.HEADER3;
+			const canToggle = curStyle === Style.TOGGLE;
+			const isOpen = canToggle && isToggleOpen(object.id, id);
+			const kids = byId.get(id)?.childrenIds ?? [];
+			const atEnd = at === text.length;
+			const parentStyle = byId.get(parentIdOf(id))?.content.text?.style;
 
-			// Anytype editor/page.tsx onEnterBlock: Enter on an EMPTY list/quote/
-			// callout block exits the list — the block turns into a paragraph.
-			if (text.length === 0 && (isList || isQuoteish)) {
+			// Anytype onEnterBlock `replace`: Enter on an EMPTY list/quote/
+			// callout item. Nested under another list item it OUTDENTS and keeps
+			// its own style (onTabBlock shift); anywhere else it turns into a
+			// paragraph in place.
+			if (!text.length && (isList || isQuote || isCallout)) {
+				if (parentStyle !== undefined && LIST.includes(parentStyle) && (await outdentBlock(id, 0, "", []))) return;
 				const curText = byId.get(id)!.content.text!;
 				cancelPending(id);
 				lastLocalEdit = Date.now();
@@ -610,87 +677,115 @@
 				return;
 			}
 
-			// Anytype blockSplit style rules: lists continue their style in the
-			// new block; quote/callout continue only when splitting mid-text;
-			// headers and everything else yield a paragraph.
-			let newStyle: number = Style.PARAGRAPH;
-			if (isList) newStyle = curStyle;
-			else if (isQuoteish && at < text.length) newStyle = curStyle;
-
-			// Anytype onEnterBlock canToggle rules: Enter at the end of a block
-			// whose children are on screen creates the first INNER child, so the
-			// new line appears directly below the one you were on. A sibling
-			// would land under the whole subtree instead - you arrive past the
-			// children, which reads as being dropped two lines down with a
-			// blank one in between whenever a child is empty. A closed toggle
-			// hides its children, so that keeps the plain sibling below.
-			const openToggle = curStyle === Style.TOGGLE && isToggleOpen(object.id, id);
-			const hasKids = (byId.get(id)?.childrenIds.length ?? 0) > 0;
-			if (at === text.length && (openToggle || (hasKids && curStyle !== Style.TOGGLE))) {
-				const innerId = crypto.randomUUID();
-				cancelPending(id);
-				lastLocalEdit = Date.now();
-				// Optimistic: state + caret move NOW, the write catches up -
-				// otherwise everything typed during the round trip lands in
-				// the old block (Anytype applies model-side first too).
-				const inner: BlockJSON = { id: innerId, childrenIds: [], content: { text: { text: "", style: newStyle } } };
-				flushSync(() => {
-					object.blocks.push(inner);
-					byId.get(id)!.childrenIds.unshift(innerId);
-				});
-				focusSync(innerId, 0, id);
-				await persist(() => note.blockAdd(object.id, { id: innerId, childrenIds: [], content: { text: { text: "", style: newStyle } } }, id, Pos.INNER_FIRST));
+			// A CLOSED toggle hides its children, so Enter never splits it: at
+			// the end it takes an empty paragraph below, and at the start (with
+			// children) one above. A callout at the end does the same.
+			if ((canToggle && !isOpen && atEnd) || (isCallout && atEnd)) {
+				await addSibling(id, Pos.BOTTOM, Style.PARAGRAPH);
 				return;
 			}
+			if (canToggle && !isOpen && kids.length > 0 && at === 0) {
+				await addSibling(id, Pos.TOP, Style.PARAGRAPH);
+				return;
+			}
+
+			// An empty paragraph inside a toggle/callout/quote escapes its
+			// parent rather than splitting (Anytype moves it below the parent).
+			if (curStyle === Style.PARAGRAPH && !text.length && parentStyle !== undefined) {
+				const nested = parentStyle === Style.TOGGLE || parentStyle === Style.CALLOUT || parentStyle === Style.QUOTE;
+				if (nested && (await outdentBlock(id, 0, "", []))) return;
+			}
+
+			// ── blockSplit (Anytype editor/page.tsx:2872) ─────────────
+			// style: a list continues at any caret but offset 0, where only a
+			// checkbox continues; headers, code and open toggles always yield a
+			// paragraph; quote/callout continue only when splitting mid-text.
+			let newStyle: number = Style.PARAGRAPH;
+			let mode: number = Pos.BOTTOM;
+			if (isList || (!isHeader && !atEnd)) {
+				newStyle = curStyle === Style.CHECKBOX && at === 0 ? curStyle : at > 0 ? curStyle : Style.PARAGRAPH;
+				mode = at > 0 ? Pos.BOTTOM : Pos.TOP;
+			}
+			if (isHeader) {
+				newStyle = Style.PARAGRAPH;
+				mode = at > 0 ? Pos.BOTTOM : Pos.TOP;
+			}
+			if (isOpen) {
+				newStyle = Style.PARAGRAPH;
+				mode = Pos.INNER_FIRST;
+			}
+			// `if (!isToggle && !isOpen && childrenIds.length) mode = Top` -
+			// a block with visible children splits UPWARD: the head moves into
+			// a new block above and this one keeps the tail, its children and
+			// the caret. That is what puts the new line between your text and
+			// its children instead of below the whole subtree.
+			if (!canToggle && kids.length > 0) mode = Pos.TOP;
+			if ((isCallout || isQuote) && !atEnd) newStyle = curStyle;
 
 			const newId = crypto.randomUUID();
 			cancelPending(id);
 			lastLocalEdit = Date.now();
+			const head = text.slice(0, at);
+			const tail = text.slice(at);
+			const headMarks = marks.filter((m) => m.from < at).map((m) => ({ ...m, to: Math.min(m.to, at) }));
+			const tailMarks = marks.filter((m) => m.to > at).map((m) => ({ ...m, from: Math.max(0, m.from - at), to: m.to - at }));
+			const cur = byId.get(id)!;
+			// The half that carries the text carries the tick with it; a half
+			// that comes out empty is a fresh unchecked line.
+			const checked = cur.content.text?.checked ?? false;
+			const color = cur.content.text?.color ?? "";
 
-			// Cursor at start of a non-empty block: Anytype splits mode=Top — an
-			// empty block appears above, the current block keeps its text/style
-			// (checkboxes spawn a fresh unchecked checkbox, others a paragraph).
-			if (at === 0 && text.length > 0) {
-				const aboveStyle = curStyle === Style.CHECKBOX ? Style.CHECKBOX : Style.PARAGRAPH;
-				const above: BlockJSON = { id: newId, childrenIds: [], content: { text: { text: "", style: aboveStyle } } };
-				flushSync(() => localInsertBefore(above, id));
+			// Optimistic everywhere: state + caret move in THIS tick inside
+			// flushSync, so the very next keystroke already finds the caret in
+			// the right block; the writes follow and one refresh reconciles.
+			if (mode === Pos.TOP) {
+				const above = { id: newId, childrenIds: [], content: { text: { text: head, style: newStyle, marks: headMarks, checked: !!head.length && checked } } };
+				flushSync(() => {
+					if (cur.content.text) {
+						cur.content.text.text = tail;
+						cur.content.text.marks = tailMarks;
+						cur.content.text.checked = !!tail.length && checked;
+					}
+					localInsertBefore({ ...above } as BlockJSON, id);
+				});
+				// This block's own DOM changed (it lost the head), so rewrite it
+				// BEFORE focusing - the caret lands at offset 0 either way.
+				if (el) {
+					const tailHtml = toHtml(tail, tailMarks);
+					if (el.innerHTML !== tailHtml) el.innerHTML = tailHtml;
+				}
 				focusSync(id, 0);
-				await persist(() => note.blockAdd(object.id, { id: newId, childrenIds: [], content: { text: { text: "", style: aboveStyle } } }, id, Pos.TOP));
+				await persist(async () => {
+					await note.blockAdd(object.id, above as BlockJSON, id, Pos.TOP);
+					await note.blockUpdate(object.id, id, { text: { text: tail, marks: tailMarks, style: curStyle, checked: !!tail.length && checked, color } });
+				});
 				return;
 			}
 
-			const headMarks = marks.filter((m) => m.from < at).map((m) => ({ ...m, to: Math.min(m.to, at) }));
-			const tailMarks = marks.filter((m) => m.to > at).map((m) => ({ ...m, from: Math.max(0, m.from - at), to: m.to - at }));
-			const tail: BlockJSON = { id: newId, childrenIds: [], content: { text: { text: text.slice(at), style: newStyle, marks: tailMarks } } };
-			// Optimistic: split the state and move the caret SYNCHRONOUSLY -
-			// the daemon round trip used to own the caret, so keystrokes
-			// typed right after Enter landed in the old line ("first items" /
-			// "econd"). Writes follow; refresh reconciles the same ids.
-			const cur = byId.get(id)!;
-			// flushSync renders the new block in THIS tick so the very next
-			// keystroke already finds the caret in it.
+			const born = { id: newId, childrenIds: [], content: { text: { text: tail, style: newStyle, marks: tailMarks, checked: !!tail.length && checked } } };
 			flushSync(() => {
 				if (cur.content.text) {
-					cur.content.text.text = text.slice(0, at);
+					cur.content.text.text = head;
 					cur.content.text.marks = headMarks;
+					cur.content.text.checked = !!head.length && checked;
 				}
-				localInsertAfter(tail, id);
+				if (mode === Pos.INNER_FIRST) {
+					object.blocks.push({ ...born } as BlockJSON);
+					cur.childrenIds.unshift(newId);
+				} else {
+					localInsertAfter({ ...born } as BlockJSON, id);
+				}
 			});
 			// Focus BEFORE touching the old element's DOM: rewriting the
 			// focused element destroys the live selection.
 			focusSync(newId, 0, id);
 			if (el) {
-				const headHtml = toHtml(text.slice(0, at), headMarks);
+				const headHtml = toHtml(head, headMarks);
 				if (el.innerHTML !== headHtml) el.innerHTML = headHtml;
 			}
 			await persist(async () => {
-				await note.blockUpdate(object.id, id, contentFor(id, text.slice(0, at), headMarks));
-				await note.blockAdd(
-					object.id,
-					{ id: newId, childrenIds: [], content: { text: { text: text.slice(at), style: newStyle, marks: tailMarks } } },
-					id,
-					Pos.BOTTOM,
-				);
+				await note.blockUpdate(object.id, id, { text: { text: head, marks: headMarks, style: curStyle, checked: !!head.length && checked, color } });
+				await note.blockAdd(object.id, born as BlockJSON, id, mode === Pos.INNER_FIRST ? Pos.INNER_FIRST : Pos.BOTTOM);
 			});
 			return;
 		}
@@ -758,65 +853,59 @@
 			// state + the trailing write. (cancelPending here used to throw
 			// away everything typed since the last save - Tab wiped text.)
 			const { text: liveText, marks: liveMarks } = fromDom(el);
+			// Outdent: become the sibling right below the parent - the same move
+			// Enter performs on an empty nested list item.
+			if (e.shiftKey) {
+				await outdentBlock(id, at, liveText, liveMarks);
+				return;
+			}
+			// Indent: append under the sibling directly above.
 			const curBlock = byId.get(id)!;
+			const parentId = parentIdOf(id);
+			const siblings = parentId ? (byId.get(parentId)?.childrenIds ?? []) : rootIds;
+			const idx = siblings.indexOf(id);
+			if (idx <= 0) return;
+			const prevId = siblings[idx - 1];
 			cancelPending(id);
 			lastLocalEdit = Date.now();
-			const parentOf = new Map<string, string>();
-			for (const b of object.blocks) for (const c of b.childrenIds) parentOf.set(c, b.id);
-			const parentId = parentOf.get(id);
-			let targetId = "";
-			let pos = 0;
-			if (e.shiftKey) {
-				// Outdent: become the sibling right below the parent.
-				if (!parentId || parentId === "__content__") return;
-				targetId = parentId;
-				pos = Pos.BOTTOM;
-				flushSync(() => {
-					if (curBlock.content.text) {
-						curBlock.content.text.text = liveText;
-						curBlock.content.text.marks = liveMarks;
-					}
-					localDetach(id);
-					// Root ordering is blocks-array order: place after the parent.
-					const i = object.blocks.findIndex((b) => b.id === id);
-					const [me] = object.blocks.splice(i, 1);
-					const pIdx = object.blocks.findIndex((b) => b.id === parentId);
-					object.blocks.splice(pIdx + 1, 0, me);
-					const gp = object.blocks.find((b) => b.childrenIds.includes(parentId));
-					if (gp) gp.childrenIds.splice(gp.childrenIds.indexOf(parentId) + 1, 0, id);
-				});
-			} else {
-				// Indent: append under the sibling directly above.
-				const siblings = parentId ? (byId.get(parentId)?.childrenIds ?? []) : rootIds;
-				const idx = siblings.indexOf(id);
-				if (idx <= 0) return;
-				const prevId = siblings[idx - 1];
-				targetId = prevId;
-				pos = Pos.INNER;
-				flushSync(() => {
-					if (curBlock.content.text) {
-						curBlock.content.text.text = liveText;
-						curBlock.content.text.marks = liveMarks;
-					}
-					localDetach(id);
-					byId.get(prevId)!.childrenIds.push(id);
-				});
-				// Tucking under a closed toggle would make the block vanish.
-				if (byId.get(prevId)?.content.text?.style === Style.TOGGLE) setToggleOpen(object.id, prevId, true);
-			}
+			flushSync(() => {
+				if (curBlock.content.text) {
+					curBlock.content.text.text = liveText;
+					curBlock.content.text.marks = liveMarks;
+				}
+				localDetach(id);
+				byId.get(prevId)!.childrenIds.push(id);
+			});
+			// Tucking under a closed toggle would make the block vanish.
+			if (byId.get(prevId)?.content.text?.style === Style.TOGGLE) setToggleOpen(object.id, prevId, true);
 			focusSync(id, at);
 			await persist(async () => {
 				await note.blockUpdate(object.id, id, contentFor(id, liveText, liveMarks));
-				await note.blockMove(object.id, id, targetId, pos);
+				await note.blockMove(object.id, id, prevId, Pos.INNER);
 			});
 			return;
 		}
 
 		if (e.key === "/") {
-			// Open at the caret; the "/" lands in the block and is stripped on
-			// apply. Position is read after the character is inserted.
+			// Anytype block/text.tsx canOpenMenuAdd: the menu opens only when the
+			// "/" starts the line, or the character before it is a space, newline,
+			// "(", "[", '"' or "'". A slash inside a word - a date like 9/4, or
+			// "and/or" - is plain text.
+			//
+			//   isAllowedMenu && (!range.from || (range.from == 1) ||
+			//     [' ','\n','(','[','"',"'"].includes(twoSymbolBefore))
+			//
+			// We armed on every "/", and an armed menu owns Enter (it forwards to
+			// confirm), so Return on a line holding a slash did nothing at all -
+			// it closed a menu you could not see. Keydown fires before the "/"
+			// lands, so the caret offset here is where the "/" will sit.
 			const sel = selectionOffsets(el);
 			const start = sel?.from ?? 0;
+			const { text: pre } = fromDom(el);
+			const before = start > 0 ? pre[start - 1] : "";
+			const style = byId.get(id)?.content.text?.style ?? Style.PARAGRAPH;
+			const opens = style !== Style.CODE && (start === 0 || [" ", "\n", "(", "[", '"', "'"].includes(before));
+			if (!opens) return;
 			requestAnimationFrame(() => {
 				const winSel = window.getSelection();
 				const r = winSel && winSel.rangeCount > 0 ? winSel.getRangeAt(0).getBoundingClientRect() : null;
@@ -1146,6 +1235,177 @@
 		await refresh();
 	}
 
+	// ── Drag targeting (Anytype drag/provider.tsx) ─────────────────
+	// Anytype never asks "which element is under the pointer". At drag start a
+	// single provider snapshots every drop target's rect, then resolves the
+	// pointer against that cache: 100px of horizontal slop (OFFSET), each
+	// block's own paddings folded into its box so the gap between two rows
+	// always belongs to one of them, a tall always-reachable strip under the
+	// document (#blockLast), and a sticky last-valid-target for the drop.
+	// Per-element dragover - what we had - leaves dead strips everywhere: the
+	// margins, the handle rail, past the right edge, between rows, below the
+	// last block. That is why some rows simply refused to move.
+	const DRAG_OFFSET = 100; // provider.tsx:11 OFFSET
+	const DRAG_COL_BAND = 12; // J.Size.blockMenu / 4
+	const DRAG_LAST_MIN = 150; // J.Size.lastBlock
+	const DRAG_EDGE = 20; // scrollOnMove BORDER
+	const DRAG_STEP = 10; // scrollOnMove MAX_STEP
+	const DRAG_SPEED = 100; // scrollOnMove SPEED_DIV
+	/** canDropMiddle = block.canHaveChildren() (block/index.tsx:975). */
+	const DROP_INNER: number[] = [Style.PARAGRAPH, Style.BULLET, Style.NUMBERED, Style.CHECKBOX, Style.TOGGLE, Style.CALLOUT, Style.QUOTE];
+
+	type DropRect = { id: string; x: number; y: number; w: number; h: number; inner: boolean; bot?: boolean; docEnd?: boolean };
+	let dragRects: DropRect[] = [];
+	let dropHint = $state<{ id: string; position: number; bot?: boolean } | null>(null);
+	let lastValidDrop: { id: string; position: number } | null = null;
+	let dragPoint = { x: 0, y: 0 };
+	let dragScrollTimer: ReturnType<typeof setTimeout> | null = null;
+
+	function dragScroller(): { scrollBy(x: number, y: number): void } {
+		let el = editorEl?.parentElement ?? null;
+		while (el) {
+			const cs = getComputedStyle(el);
+			if (/(auto|scroll)/.test(cs.overflowY) && el.scrollHeight > el.clientHeight) return el;
+			el = el.parentElement;
+		}
+		return window;
+	}
+
+	/** provider.tsx initData/getNodeRect: snapshot every target once. */
+	function buildDragRects() {
+		dragRects = [];
+		if (!editorEl) return;
+		const rows: DropRect[] = [];
+		// targetBot strips first: they own the gap under a subtree, and a hit
+		// there means "after this whole block" rather than inside its last child.
+		for (const el of editorEl.querySelectorAll<HTMLElement>("[data-drop-bot]")) {
+			const bid = el.getAttribute("data-drop-bot") ?? "";
+			const r = el.getBoundingClientRect();
+			if (bid && r.height) rows.push({ id: bid, x: r.left, y: r.top, w: r.width, h: r.height, inner: false, bot: true });
+		}
+		for (const el of editorEl.querySelectorAll<HTMLElement>("[data-block]")) {
+			const bid = el.getAttribute("data-block") ?? "";
+			if (!bid || bid === "__discussion__") continue;
+			const r = el.getBoundingClientRect();
+			if (!r.height) continue;
+			const cs = getComputedStyle(el);
+			const padTop = parseInt(cs.paddingTop) || 0;
+			const padBot = parseInt(cs.paddingBottom) || 0;
+			// Their DropTarget covers the content only - the CSS insets it past
+			// the 48px menu column - so measure from the gutter's right edge.
+			const gutter = el.querySelector<HTMLElement>(":scope > .gutter");
+			const left = gutter ? gutter.getBoundingClientRect().right : r.left;
+			const style = byId.get(bid)?.content.text?.style;
+			rows.push({
+				id: bid,
+				x: left,
+				y: r.top - padTop - 2,
+				w: Math.max(1, r.right - left),
+				h: r.height + padTop + padBot + 2,
+				inner: style !== undefined && DROP_INNER.includes(style),
+			});
+		}
+		const host = editorEl.getBoundingClientRect();
+		const bottom = rows.length ? Math.max(...rows.map((r) => r.y + r.h)) : host.top;
+		const lastRoot = rootIds[rootIds.length - 1];
+		if (lastRoot) {
+			rows.push({ id: lastRoot, x: host.left, y: bottom, w: Math.max(1, host.width), h: Math.max(DRAG_LAST_MIN, host.bottom - bottom), inner: false, docEnd: true });
+		}
+		dragRects = rows;
+	}
+
+	/** provider.tsx checkNodes: hit-test the cache, then the band math. */
+	function resolveDrop(cx: number, cy: number): { id: string; position: number; bot?: boolean } | null {
+		for (const r of dragRects) {
+			if (cx < r.x - DRAG_OFFSET || cx > r.x + r.w + DRAG_OFFSET) continue;
+			if (cy < r.y || cy > r.y + r.h) continue;
+			if (dropForbidden(r.id)) continue;
+			// The doc-end strip lands after the last root block, and lights that
+			// row's bottom edge - a targetBot strip lights itself instead.
+			if (r.docEnd) return { id: r.id, position: Pos.BOTTOM };
+			if (r.bot) return { id: r.id, position: Pos.BOTTOM, bot: true };
+			let position: number;
+			if (cx <= r.x - DRAG_COL_BAND) position = Pos.LEFT;
+			else if (cx > r.x + r.w) position = Pos.RIGHT;
+			else if (cy <= r.y + r.h * 0.3) position = Pos.TOP;
+			else if (cy >= r.y + r.h * 0.7) position = Pos.BOTTOM;
+			else position = Pos.INNER_FIRST;
+			// recalcPositionY: a block that cannot hold children splits 50/50.
+			if (position === Pos.INNER_FIRST && !r.inner) position = cy <= r.y + r.h * 0.5 ? Pos.TOP : Pos.BOTTOM;
+			return { id: r.id, position };
+		}
+		return null;
+	}
+
+	/** checkParentIds: never target the dragged blocks or their descendants. */
+	function dropForbidden(targetId: string): boolean {
+		if (!targetId || !draggingId) return !targetId;
+		const group = selectedSet.has(draggingId) && selectedIds.length > 1 ? topmostSelected() : [draggingId];
+		const parentOf = new Map<string, string>();
+		for (const b of object.blocks) for (const c of b.childrenIds) parentOf.set(c, b.id);
+		let walk: string | undefined = targetId;
+		while (walk) {
+			if (group.includes(walk)) return true;
+			walk = parentOf.get(walk);
+		}
+		return false;
+	}
+
+	function onEditorDragOver(e: DragEvent) {
+		if (!draggingId) return;
+		e.preventDefault();
+		dragPoint = { x: e.clientX, y: e.clientY };
+		const hit = resolveDrop(e.clientX, e.clientY);
+		dropHint = hit;
+		if (hit) lastValidDrop = { id: hit.id, position: hit.position };
+		if (!dragScrollTimer) dragScrollTimer = setTimeout(dragScrollTick, 50);
+	}
+
+	/** scrollOnMove: crawl the document while the pointer sits at an edge. */
+	function dragScrollTick() {
+		dragScrollTimer = null;
+		if (!draggingId) return;
+		const h = window.innerHeight;
+		const y = dragPoint.y;
+		let dy = 0;
+		if (y < DRAG_EDGE) dy = -Math.min(DRAG_STEP, Math.ceil((DRAG_EDGE - y) / DRAG_SPEED));
+		else if (y > h - DRAG_EDGE) dy = Math.min(DRAG_STEP, Math.ceil((y - (h - DRAG_EDGE)) / DRAG_SPEED));
+		if (dy) {
+			dragScroller().scrollBy(0, dy);
+			// provider.tsx onScroll: the snapshot is refreshed, never rebuilt.
+			buildDragRects();
+			dropHint = resolveDrop(dragPoint.x, dragPoint.y);
+		}
+		dragScrollTimer = setTimeout(dragScrollTick, 50);
+	}
+
+	function endDrag() {
+		if (dragScrollTimer) clearTimeout(dragScrollTimer);
+		dragScrollTimer = null;
+		dragRects = [];
+		dropHint = null;
+		lastValidDrop = null;
+		draggingId = "";
+	}
+
+	async function onEditorDrop(e: DragEvent) {
+		if (!draggingId) return;
+		e.preventDefault();
+		// The pointer can be between targets on the frame the drop lands, so
+		// fall back to the last target we lit (provider.tsx lastValidTarget).
+		const hint = dropHint ?? (lastValidDrop && !dropForbidden(lastValidDrop.id) ? lastValidDrop : null);
+		dropHint = null;
+		if (dragScrollTimer) clearTimeout(dragScrollTimer);
+		dragScrollTimer = null;
+		dragRects = [];
+		lastValidDrop = null;
+		if (!hint) {
+			draggingId = "";
+			return;
+		}
+		await onDrop(hint.id, hint.position);
+	}
+
 	/** Empty-toggle placeholder click: create + focus the first child. */
 	async function onEmptyToggle(id: string) {
 		const innerId = crypto.randomUUID();
@@ -1375,6 +1635,7 @@
 </script>
 
 <svelte:window
+	ondragend={endDrag}
 	onkeydown={(e) => void onWindowKeydown(e)}
 	onmousedown={(e) => {
 		if (spellMenu && !(e.target as HTMLElement).closest(".spell-menu")) spellMenu = null;
@@ -1388,6 +1649,8 @@
 	bind:this={editorEl}
 	oncontextmenucapture={onEditorContextMenu}
 	onmousedown={selMouseDown}
+	ondragover={onEditorDragOver}
+	ondrop={(e) => void onEditorDrop(e)}
 	onclick={(e) => {
 		if (e.target === e.currentTarget && !selectedIds.length) void appendBlock();
 	}}
@@ -1398,12 +1661,16 @@
 			{byId}
 			{object}
 			{draggingId}
+			{dropHint}
 			selectedIds={selectedSet}
 			onkeydown={onKeydown}
 			oninput={onInput}
 			onblur={flushSave}
 			onselect={onSelect}
-			ondragbegin={(bid) => (draggingId = bid)}
+			ondragbegin={(bid) => {
+				draggingId = bid;
+				buildDragRects();
+			}}
 			ondrop={onDrop}
 			ontogglecheck={toggleChecked}
 			onemptytoggle={onEmptyToggle}
