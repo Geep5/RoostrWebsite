@@ -723,7 +723,18 @@
 			</span>
 			{#if objectRelation}
 				<div class="m-actions">
-				<span class="m-sync" class:ok={sync.phase === "live"} class:busy={sync.phase === "backfill"} data-tip={sync.phase === "live" ? `Synced · ${sync.imported} changes` : sync.phase === "backfill" ? "Syncing…" : "Not syncing"}><span class="m-sync-dot"></span></span>
+				<span
+					class="m-sync"
+					class:ok={sync.phase === "live" && !(sync.pending ?? 0)}
+					class:busy={sync.phase === "backfill" || (sync.pending ?? 0) > 0}
+					data-tip={sync.pending
+						? `${sync.pending} change(s) not yet published`
+						: sync.phase === "live"
+							? sync.detail ?? `Synced · ${sync.imported} changes`
+							: sync.phase === "backfill"
+								? sync.detail ?? "Syncing…"
+								: "Not syncing"}
+				><span class="m-sync-dot"></span></span>
 				<div class="more-wrap">
 					<button class="m-btn" data-tip="More" onclick={() => { showMore = !showMore; showCollections = false; }}>⋯</button>
 					{#if showMore}
@@ -739,7 +750,18 @@
 				</div>
 			{:else if objectSummary}
 				<div class="m-actions">
-				<span class="m-sync" class:ok={sync.phase === "live"} class:busy={sync.phase === "backfill"} data-tip={sync.phase === "live" ? `Synced · ${sync.imported} changes` : sync.phase === "backfill" ? "Syncing…" : "Not syncing"}><span class="m-sync-dot"></span></span>
+				<span
+					class="m-sync"
+					class:ok={sync.phase === "live" && !(sync.pending ?? 0)}
+					class:busy={sync.phase === "backfill" || (sync.pending ?? 0) > 0}
+					data-tip={sync.pending
+						? `${sync.pending} change(s) not yet published`
+						: sync.phase === "live"
+							? sync.detail ?? `Synced · ${sync.imported} changes`
+							: sync.phase === "backfill"
+								? sync.detail ?? "Syncing…"
+								: "Not syncing"}
+				><span class="m-sync-dot"></span></span>
 				{#if discussionUI.available}
 					<button class="m-btn disc-chip" class:active={discussionUI.open} data-tip="Conversations" onclick={() => (discussionUI.open = !discussionUI.open)}>
 						💬{#if discussionUI.convCount > 1}<span class="disc-n">{discussionUI.convCount}</span>{:else if discussionUI.count > 0}<span class="disc-n">{discussionUI.count}</span>{/if}
@@ -1064,11 +1086,15 @@
 		{/each}
 		<button class="space add" title="New space" onclick={() => void newSpace()}><span class="space-ico">+</span>{#if railWide}<span class="space-label">New space</span>{/if}</button>
 		<div class="rail-spacer"></div>
-		{#if sync.phase !== "live"}
+		{#if sync.phase !== "live" || (sync.pending ?? 0) > 0}
 			<span
 				class="sync-dot"
 				class:err={sync.phase === "error"}
-				title={sync.phase === "backfill" ? `Syncing — ${sync.imported} changes` : (sync.detail ?? sync.phase)}
+				title={sync.pending
+					? `${sync.pending} change(s) not yet published`
+					: sync.phase === "backfill"
+						? sync.detail ?? `Syncing — ${sync.imported} changes`
+						: (sync.detail ?? sync.phase)}
 			></span>
 		{/if}
 		<!-- Your identity opens Settings - the avatar when the profile has

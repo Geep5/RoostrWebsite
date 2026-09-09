@@ -339,6 +339,10 @@ export class RelaySync implements RelaySyncApi {
 	private replayFaultGeneration = 0;
 	private activeLiveEvents = 0;
 	private activeImports = 0;
+	/** Live subscriptions established (survives a long background history walk). */
+	private liveUp = false;
+	/** The first full-history walk is in flight; the watchdog must not queue another. */
+	private bootstrapping = false;
 	private cursorChain: Promise<void> = Promise.resolve();
 	private backfillChain: Promise<boolean> = Promise.resolve(false);
 
@@ -399,6 +403,27 @@ export class RelaySync implements RelaySyncApi {
 			});
 		}
 		if (fresh.length > 0) void this.backfill(1).catch((err) => this.events.onStatus({ phase: "error", detail: String(err) }));
+	}
+
+
+	/**
+	 * The dot answers "am I connected and is my work published" - historical
+	 * verification runs in the background and belongs in the detail text, not
+	 * in the phase. Green with an incomplete history is honest: live changes
+	 * flow; the tooltip says history is still being verified.
+	 */
+	private statusDetail(): string | undefined {
+		if (this.historyComplete) return undefined;
+		return `verifying full history in background · ${this.stats.imported} changes so far`;
+	}
+
+	private emitLiveStatus(): void {
+		this.events.onStatus({
+			phase: this.liveUp ? "live" : "backfill",
+			imported: this.stats.imported,
+			detail: this.liveUp ? this.statusDetail() : undefined,
+			pending: this.queue.length,
+		});
 	}
 
 	/** Owner duty: publish the relay write-allowlist. */
@@ -534,14 +559,29 @@ export class RelaySync implements RelaySyncApi {
 		// full history walk has completed on this device: the cursor tracks
 		// the NEWEST imported event, so an interrupted or partially-failed
 		// first bootstrap would otherwise skip everything older, forever.
+		//
+		// The walk runs in the BACKGROUND. Awaiting it here used to hold the
+		// first green dot hostage to a full clean pass over all history - on a
+		// phone that is minutes of orange, and a screen lock meant starting
+		// over. Live subscriptions come up first (imports dedupe against the
+		// walk's pages), the dot goes green as soon as they do, and the walk's
+		// progress persists page by page via the bootstrap floor.
 		const bootstrapped = await this.store.getBootstrapped();
-		try {
-			const complete = await this.backfill(bootstrapped ? this.cursor + 1 : 1);
-			if (!bootstrapped && complete) await this.store.setBootstrapped();
-		} catch (err) {
-			this.events.onStatus({ phase: "error", detail: err instanceof Error ? err.message : String(err) });
-			// fall through to live anyway — partial backfill is still progress
-		}
+		const floor = bootstrapped ? undefined : await this.store.getBootstrapFloor();
+		this.bootstrapping = true;
+		void this.backfill(bootstrapped ? this.cursor + 1 : 1, floor)
+			.then(async (complete) => {
+				if (this.stopped) return; // a stopped engine must not emit one last stale status
+				if (!bootstrapped && complete) await this.store.setBootstrapped();
+				this.emitLiveStatus();
+			})
+			.catch((err) => {
+				if (this.stopped) return; // stop() closes the pool under the walk; that is not an error
+				this.events.onStatus({ phase: "error", detail: err instanceof Error ? err.message : String(err) });
+			})
+			.finally(() => {
+				this.bootstrapping = false;
+			});
 
 		if (this.stopped) return;
 		// Gift wraps addressed to us: created_at is randomized, so no
@@ -555,7 +595,7 @@ export class RelaySync implements RelaySyncApi {
 		}
 		this.subscribeLive();
 		this.watchdogTimer = setInterval(() => void this.watchdog(), 60_000);
-		this.events.onStatus({ phase: this.historyComplete ? "live" : "backfill", imported: this.stats.imported });
+		this.emitLiveStatus();
 	}
 
 	private subscribeLive(): void {
@@ -596,6 +636,7 @@ export class RelaySync implements RelaySyncApi {
 				this.liveChain = this.liveChain.then(() => this.handleWrap(event)).catch(() => {});
 			},
 		});
+		this.liveUp = true;
 	}
 
 	/**
@@ -606,14 +647,17 @@ export class RelaySync implements RelaySyncApi {
 	 * "catching up" status, recover, and go live again.
 	 */
 	private async watchdog(): Promise<void> {
-		if (this.stopped || this.watchdogBusy) return;
+		if (this.stopped || this.watchdogBusy || this.bootstrapping) return;
 		this.watchdogBusy = true;
 		try {
 			if (!this.historyComplete || this.chunkGroups.size > 0 || this.discardedChunkFloor !== Infinity) {
-				const complete = await this.backfill(await this.store.getBootstrapped() ? await this.store.getCursor() : 1);
+				const complete = await this.backfill(
+					(await this.store.getBootstrapped()) ? await this.store.getCursor() : 1,
+					(await this.store.getBootstrapped()) ? undefined : await this.store.getBootstrapFloor(),
+				);
 				if (complete) await this.store.setBootstrapped();
 				this.subscribeLive();
-				this.events.onStatus({ phase: complete ? "live" : "backfill", imported: this.stats.imported });
+				this.emitLiveStatus();
 				return;
 			}
 			const spaceTags = [...this.sharedSpaces.values()].map((sp) => sp.spaceTag);
@@ -635,7 +679,7 @@ export class RelaySync implements RelaySyncApi {
 				this.pool = new SimplePool();
 				await this.catchupSince(this.cursor + 1);
 				this.subscribeLive();
-				this.events.onStatus({ phase: this.historyComplete ? "live" : "backfill", imported: this.stats.imported });
+				this.emitLiveStatus();
 				return;
 			}
 			const head = [...res[0], ...res[1]].reduce((max, e) => Math.max(max, e.created_at), 0);
@@ -643,7 +687,7 @@ export class RelaySync implements RelaySyncApi {
 				this.events.onStatus({ phase: "backfill", imported: this.stats.imported, detail: "catching up" });
 				await this.catchupSince(this.cursor + 1);
 				this.subscribeLive();
-				this.events.onStatus({ phase: this.historyComplete ? "live" : "backfill", imported: this.stats.imported });
+				this.emitLiveStatus();
 			}
 		} catch (err) {
 			this.historyComplete = false;
@@ -668,6 +712,7 @@ export class RelaySync implements RelaySyncApi {
 
 	stop(): void {
 		this.stopped = true;
+		this.liveUp = false;
 		this.chunkGroups.clear();
 		this.chunkBytes = 0;
 		if (this.watchdogTimer) {
@@ -702,10 +747,10 @@ export class RelaySync implements RelaySyncApi {
 	// ── Backfill ───────────────────────────────────────────────────
 
 	/** Returns true only when EVERY relay was walked to exhaustion. */
-	private backfill(since: number): Promise<boolean> {
+	private backfill(since: number, resumeUntil?: number): Promise<boolean> {
 		const run = this.backfillChain.then(async () => {
 			try {
-				return await this.walkHistory(since);
+				return await this.walkHistory(since, resumeUntil);
 			} catch (err) {
 				this.recordReplayFault(1);
 				await this.persistCursor();
@@ -716,9 +761,16 @@ export class RelaySync implements RelaySyncApi {
 		return run;
 	}
 
-	private async walkHistory(since: number): Promise<boolean> {
+	private async walkHistory(since: number, resumeUntil?: number): Promise<boolean> {
 		this.historyComplete = false;
 		await this.loadReplayGroups();
+		// A full-history walk persists its progress page by page: a phone that
+		// suspends mid-bootstrap resumes from the floor instead of restarting
+		// from event zero. The floor is only meaningful while bootstrapping -
+		// completion clears it and any replay fault discards it (a fault means
+		// a suspect range that must be re-covered, not skipped).
+		const trackFloor = since <= 1;
+		let coveredUntil: number | undefined = resumeUntil;
 		// An unresolved group may be missing fragments older than any observed
 		// part. Only actual repair scans need full history; healthy live assembly
 		// removes the identity without making the ordinary cursor sticky.
@@ -733,7 +785,7 @@ export class RelaySync implements RelaySyncApi {
 		const filters: Array<Parameters<SimplePool["querySync"]>[1]> = [{ kinds: [CHANGE_KIND], authors: [this.pk], since }];
 		for (const sp of this.sharedSpaces.values()) filters.push({ kinds: [CHANGE_KIND], "#h": [sp.spaceTag], since });
 		await Promise.all(this.relays.flatMap((relay) => filters.map(async (filter) => {
-			let until: number | undefined;
+			let until: number | undefined = resumeUntil;
 			try {
 				for (;;) {
 					if (this.stopped) { complete = false; return; }
@@ -743,6 +795,11 @@ export class RelaySync implements RelaySyncApi {
 					const oldest = Math.min(...page.map((e) => e.created_at));
 					if (until !== undefined && oldest >= until) throw new Error("saturated same-timestamp history page");
 					until = oldest;
+					// Coverage is only as deep as the slowest concurrent walker.
+					if (trackFloor) {
+						coveredUntil = coveredUntil === undefined ? until : Math.min(coveredUntil, until);
+						await this.store.setBootstrapFloor(coveredUntil);
+					}
 					await sleep(PAGE_SPACING_MS);
 				}
 			} catch (err) {
@@ -759,8 +816,10 @@ export class RelaySync implements RelaySyncApi {
 		this.historyComplete = complete && !this.stopped && this.replayGroups.size === 0 &&
 			this.activeLiveEvents === 0 && this.activeImports === 0 &&
 			this.replayFaultGeneration === checkpoint && since <= this.discardedChunkFloor;
-		if (this.historyComplete) this.discardedChunkFloor = Infinity;
-		else this.recordReplayFault(since);
+		if (this.historyComplete) {
+			this.discardedChunkFloor = Infinity;
+			if (trackFloor) await this.store.setBootstrapFloor(undefined);
+		} else this.recordReplayFault(since);
 		const repaired = this.historyComplete;
 		await this.persistCursor();
 		// IndexedDB persistence yields to live handlers. Restore the obligation
@@ -952,6 +1011,7 @@ export class RelaySync implements RelaySyncApi {
 		this.replayFaultGeneration++;
 		this.discardedChunkFloor = Math.min(this.discardedChunkFloor, at);
 		this.historyComplete = false;
+		void this.store.setBootstrapFloor(undefined);
 	}
 
 	private loadReplayGroups(): Promise<void> {
@@ -1031,6 +1091,7 @@ export class RelaySync implements RelaySyncApi {
 		if (pending.spaceId && (!space || space.keyId !== pending.keyId) && !pending.events) return;
 		this.queued.add(pending.key);
 		this.queue.push({ objectId: pending.objectId, changeId: pending.changeId, b64: bytesToB64(pending.bytes), attempts: 0, notBefore: 0, space, pending });
+		this.emitLiveStatus();
 		if (!this.queueRunning) {
 			this.queueRunning = true;
 			void this.runPublishQueue();
@@ -1068,6 +1129,7 @@ export class RelaySync implements RelaySyncApi {
 			await sleep(PUBLISH_SPACING_MS);
 		}
 		this.queueRunning = false;
+		this.emitLiveStatus();
 	}
 
 	private async publishOnce(item: PublishItem): Promise<boolean> {

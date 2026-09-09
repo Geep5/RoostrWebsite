@@ -60,7 +60,13 @@ const sync = new RelaySync(
 );
 
 const t0 = Date.now();
-await sync.start(); // backfill then live — publish() is never called
+await sync.start(); // live subscriptions come up immediately; the history walk
+// runs in the background and only its completion marks the store bootstrapped.
+// publish() is never called.
+while (!(await store.getBootstrapped())) {
+	if (Date.now() - t0 > 180_000) throw new Error("bootstrap did not complete in 180s");
+	await Bun.sleep(500);
+}
 const backfillMs = Date.now() - t0;
 
 // Stay live until quiet for QUIET_MS or MAX_EVENTS total.

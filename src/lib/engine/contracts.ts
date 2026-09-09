@@ -145,6 +145,14 @@ export interface ChangeStoreApi {
 	/** True once one COMPLETE history walk finished on this device. */
 	getBootstrapped(): Promise<boolean>;
 	setBootstrapped(): Promise<void>;
+	/**
+	 * Bootstrap resume point: the timestamp down to which a full-history walk
+	 * has imported cleanly. Saved per page so an interrupted first walk (a
+	 * phone locking its screen) resumes instead of restarting from zero.
+	 * Cleared once the walk completes or a replay fault forces a full re-walk.
+	 */
+	getBootstrapFloor(): Promise<number | undefined>;
+	setBootstrapFloor(v: number | undefined): Promise<void>;
 	/** Change ids already published to relays. */
 	isPublished(changeId: string): Promise<boolean>;
 	markPublished(changeId: string): Promise<void>;
@@ -155,7 +163,7 @@ export interface ChangeStoreApi {
 export interface SyncEvents {
 	/** Object ids whose change sets grew (batched). */
 	onObjects(ids: string[]): void;
-	onStatus(status: { phase: "backfill" | "live" | "error"; detail?: string; imported?: number }): void;
+	onStatus(status: { phase: "backfill" | "live" | "error"; detail?: string; imported?: number; pending?: number }): void;
 }
 
 export interface RelaySyncApi {

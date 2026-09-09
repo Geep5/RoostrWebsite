@@ -211,6 +211,19 @@ export class ChangeStore implements ChangeStoreApi {
 		await txDone(tx);
 	}
 
+	async getBootstrapFloor(): Promise<number | undefined> {
+		const store = this.handle().transaction(META, "readonly").objectStore(META);
+		const value = await req(store.get("bootstrap-floor"));
+		return typeof value === "number" ? value : undefined;
+	}
+
+	async setBootstrapFloor(v: number | undefined): Promise<void> {
+		const tx = this.handle().transaction(META, "readwrite");
+		if (v === undefined) tx.objectStore(META).delete("bootstrap-floor");
+		else tx.objectStore(META).put(v, "bootstrap-floor");
+		await txDone(tx);
+	}
+
 	async getCursor(): Promise<number> {
 		const store = this.handle().transaction(META, "readonly").objectStore(META);
 		const value = await req(store.get(CURSOR_KEY));

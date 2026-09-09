@@ -37,6 +37,8 @@ export interface SyncStatus {
 	phase: "idle" | "backfill" | "live" | "error";
 	imported: number;
 	detail?: string;
+	/** Changes written locally but not yet published to a relay. */
+	pending?: number;
 	/** One full history walk has completed on this device. */
 	bootstrapped: boolean;
 }
@@ -77,7 +79,7 @@ class WebBackend {
 			},
 			onStatus: (s) => {
 				void this.store.getBootstrapped().then((b) => {
-					this.status = { phase: s.phase, imported: s.imported ?? this.status.imported, detail: s.detail, bootstrapped: b };
+					this.status = { phase: s.phase, imported: s.imported ?? this.status.imported, detail: s.detail, pending: s.pending ?? this.status.pending, bootstrapped: b };
 					for (const fn of this.statusListeners) fn(this.status);
 				});
 			},
