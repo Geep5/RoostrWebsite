@@ -647,6 +647,8 @@
 		y={ctxMenu.y}
 		ids={ctxTargets()}
 		spaceId={fieldStr(object.fields, "channel")}
+		relationKeys={columns}
+		fieldsOf={(id) => rows.find((r) => r.id === id)?.fields}
 		{onremove}
 		onchanged={reload}
 		onclose={() => {
