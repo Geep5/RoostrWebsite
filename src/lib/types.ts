@@ -83,6 +83,12 @@ export interface RelationDefJSON {
 	hidden: boolean;
 	readOnly: boolean;
 	maxCount: number;
+	/** Object-format restriction (Anytype relationFormatObjectTypes): type ids
+	 * the picker limits candidates to. Empty = unrestricted. */
+	objectTypes?: string[];
+	/** Roostr extension (no Anytype equivalent): a query or collection id whose
+	 * members are the only pickable objects. Takes precedence over objectTypes. */
+	objectSource?: string;
 	options: Array<{ id: string; text: string; color: string; orderId: string }>;
 }
 

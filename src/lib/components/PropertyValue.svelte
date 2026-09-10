@@ -11,6 +11,8 @@
 	 */
 	import type { RelationDefJSON, ValueJSON } from "$lib/types";
 	import { layoutOf, store } from "$lib/data.svelte";
+	import { fetchAllQuery, fetchObject } from "$lib/api";
+	import { engineFiltersOf, spaceFilterOf } from "$lib/filters";
 	import { objectIcon } from "$lib/icons";
 	import CalendarPicker from "./CalendarPicker.svelte";
 	import OptionPicker from "./OptionPicker.svelte";
@@ -64,10 +66,46 @@
 	let objectQuery = $state("");
 	let objectOpen = $state(false);
 	const HIDDEN_TYPES: Record<string, true> = { program: true, relation: true, channel: true, pinned_fact: true, milestone: true, type: true, template: true, agent: true, skill: true };
+
+	// Relation restriction (Anytype relationFormatObjectTypes + Roostr's
+	// query/collection source). Source wins when set: its members are the
+	// only candidates. A query is evaluated at open time so membership is
+	// current; a collection reads its stored collectionIds.
+	let sourceIds = $state<Set<string> | null>(null);
+	let sourceLoadingFor = "";
+	$effect(() => {
+		if (!objectOpen || !rel.objectSource) return;
+		const srcId = rel.objectSource;
+		if (sourceLoadingFor === srcId) return;
+		sourceLoadingFor = srcId;
+		void (async () => {
+			try {
+				const src = await fetchObject(srcId);
+				if (src.typeKey === "collection") {
+					sourceIds = new Set((src.fields["collectionIds"]?.valuesValue?.items ?? []).map((i) => i.stringValue ?? "").filter(Boolean));
+				} else {
+					// setId makes the daemon resolve the query's Source (setOf)
+					// exactly as the query's own page does.
+					const recs = await fetchAllQuery({
+						setId: srcId,
+						filters: [...engineFiltersOf(src, store.relations), spaceFilterOf(src, store.channels[0]?.id ?? "")],
+					});
+					sourceIds = new Set(recs.map((r) => r.id));
+				}
+			} catch {
+				sourceIds = null;
+			}
+		})();
+	});
+	const allowedTypeKeys = $derived(
+		new Set((rel.objectTypes ?? []).map((id) => store.types.find((t) => t.id === id)?.key).filter((k): k is string => !!k)),
+	);
 	const candidates = $derived.by(() => {
 		const q = objectQuery.trim().toLowerCase();
-		return store.summaries
-			.filter((s) => !items.includes(s.id) && !HIDDEN_TYPES[s.typeKey])
+		let pool = store.summaries.filter((s) => !items.includes(s.id) && !HIDDEN_TYPES[s.typeKey]);
+		if (rel.objectSource) pool = sourceIds ? pool.filter((s) => sourceIds!.has(s.id)) : [];
+		else if (allowedTypeKeys.size > 0) pool = pool.filter((s) => allowedTypeKeys.has(s.typeKey));
+		return pool
 			.filter((s) => !q || (s.name ?? "").toLowerCase().includes(q))
 			.slice(0, 8);
 	});
