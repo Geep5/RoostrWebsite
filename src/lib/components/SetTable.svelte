@@ -248,11 +248,27 @@
 				out.push({ key: i.stringValue, width: DEFAULT_WIDTH });
 			} else if (i.mapValue) {
 				const k = i.mapValue.entries["key"]?.stringValue;
-				if (k) out.push({ key: k, width: i.mapValue.entries["width"]?.intValue ?? DEFAULT_WIDTH });
+				// "name" is the reserved entry carrying the Name column's width -
+				// it is view state, not a relation column (GalleryView skips it too).
+				if (k && k !== "name") out.push({ key: k, width: i.mapValue.entries["width"]?.intValue ?? DEFAULT_WIDTH });
 			}
 		}
 		return out.length > 0 ? out : DEFAULT_COLUMNS.map((k) => ({ key: k, width: DEFAULT_WIDTH }));
 	});
+
+	/** The Name column's persisted width; unset means "auto, take the slack". */
+	const storedNameWidth = $derived.by((): number | undefined => {
+		const items = object.fields["viewRelations"]?.valuesValue?.items ?? [];
+		for (const i of items) {
+			if (i.mapValue?.entries["key"]?.stringValue === "name") {
+				const w = i.mapValue.entries["width"]?.intValue;
+				if (typeof w === "number" && w >= MIN_WIDTH) return w;
+			}
+		}
+		return undefined;
+	});
+	let nameLocal = $state<number | null>(null);
+	const nameWidth = $derived(nameLocal ?? storedNameWidth);
 
 	/** Uncommitted state during a resize/reorder gesture. */
 	let local = $state<Col[] | null>(null);
@@ -261,16 +277,20 @@
 
 	let adding = $state<{ x: number; y: number } | null>(null);
 
+	async function persistView(next: Col[], nameW: number | undefined) {
+		const items = next.map((c) => ({
+			mapValue: { entries: { key: { stringValue: c.key }, width: { intValue: c.width } } },
+		}));
+		if (nameW !== undefined) {
+			items.push({ mapValue: { entries: { key: { stringValue: "name" }, width: { intValue: nameW } } } });
+		}
+		await note.setField(object.id, "viewRelations", { valuesValue: { items } });
+		await onchanged();
+	}
+
 	async function saveColumns(next: Col[]) {
 		local = next;
-		await note.setField(object.id, "viewRelations", {
-			valuesValue: {
-				items: next.map((c) => ({
-					mapValue: { entries: { key: { stringValue: c.key }, width: { intValue: c.width } } },
-				})),
-			},
-		});
-		await onchanged();
+		await persistView(next, storedNameWidth);
 		local = null;
 	}
 
@@ -289,6 +309,24 @@
 			window.removeEventListener("pointermove", move);
 			window.removeEventListener("pointerup", up);
 			void saveColumns(snapshot);
+		};
+		window.addEventListener("pointermove", move);
+		window.addEventListener("pointerup", up);
+	}
+
+	function startNameResize(e: PointerEvent) {
+		e.preventDefault();
+		e.stopPropagation();
+		const startX = e.clientX;
+		const th = (e.currentTarget as HTMLElement).closest("th");
+		const startW = nameWidth ?? th?.getBoundingClientRect().width ?? 240;
+		const move = (ev: PointerEvent) => {
+			nameLocal = Math.max(MIN_WIDTH, Math.round(startW + (ev.clientX - startX)));
+		};
+		const up = () => {
+			window.removeEventListener("pointermove", move);
+			window.removeEventListener("pointerup", up);
+			void persistView(cols, nameLocal ?? undefined).then(() => (nameLocal = null));
 		};
 		window.addEventListener("pointermove", move);
 		window.addEventListener("pointerup", up);
@@ -426,7 +464,7 @@
 	{/if}
 	<table>
 		<colgroup>
-			<col />
+			<col style={nameWidth ? `width:${nameWidth}px` : ""} />
 			{#each cols as c (c.key)}
 				<col style="width: {c.width}px" />
 			{/each}
@@ -436,6 +474,13 @@
 			<tr>
 				<th>
 					<button class="head" onclick={() => toggleSort("name")}>Name {sortKey === "name" ? (sortDir === "asc" ? "↑" : "↓") : ""}</button>
+					<span
+						class="resize"
+						role="separator"
+						aria-orientation="vertical"
+						title="Drag to resize"
+						onpointerdown={startNameResize}
+					></span>
 				</th>
 				{#each cols as c, i (c.key)}
 					<th
@@ -633,15 +678,21 @@
 	.resize {
 		position: absolute;
 		top: 0;
-		right: -3px;
-		width: 7px;
+		right: -5px;
+		width: 11px;
 		height: 100%;
 		cursor: col-resize;
 		z-index: 2;
 	}
+	/* Grips reveal when the header is hovered - otherwise they are invisible
+	   11px slivers nobody can find. */
+	th:hover .resize {
+		background: var(--accent);
+		opacity: 0.25;
+	}
 	.resize:hover {
 		background: var(--accent);
-		opacity: 0.5;
+		opacity: 0.6;
 	}
 	th .head {
 		border: none;
