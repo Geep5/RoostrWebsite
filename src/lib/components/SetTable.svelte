@@ -80,17 +80,14 @@
 		if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey) return;
 		const t = e.target as HTMLElement;
 		if (!setEl) return;
-		// Anytype starts the rubber band from the page around the table
-		// too, so the arm is window-level: a press inside the table always
-		// arms; a press outside arms anywhere in the content column (main),
-		// INCLUDING its padding - <article> hugs the table exactly, so an
-		// article-scoped rule left nowhere outside the table to start from.
-		// The sidebar, drawers and modals are not inside main.
+		// Anytype's SelectionProvider wraps ALL app content (selection/
+		// provider.tsx:1174): the rubber band arms anywhere except chrome and
+		// interactive surfaces - nav, side panels, headers, tab strip, menus,
+		// dialogs. Page margins, gaps between blocks, and the area below the
+		// table all arm; what is protected is the same as theirs (links,
+		// buttons, inputs, editors, the header row, the entry row).
 		const inSet = setEl.contains(t);
-		if (!inSet) {
-			const zone = setEl.closest("main") ?? setEl.closest("article");
-			if (!zone || !zone.contains(t)) return;
-		}
+		if (!inSet && t.closest("nav, aside, header, .tab-strip, .ctx-menu, .cell-pop, [role='dialog'], [role='menu']")) return;
 		// Interactive targets own their gestures; the header row owns
 		// sort/resize/reorder; the entry row owns its input; text
 		// editors (title, description) keep native text selection.

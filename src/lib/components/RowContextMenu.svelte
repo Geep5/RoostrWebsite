@@ -52,8 +52,27 @@
 	const n = $derived(ids.length);
 	const suffix = $derived(n > 1 ? ` (${n})` : "");
 
-	let showTypes = $state(false);
-	let showCols = $state(false);
+	// Anytype submenu geometry (menu/object/context.tsx onOver +
+	// component/menu/index.tsx position()): the submenu is a separate flyout
+	// anchored on the hovered item - flush against the parent menu's right
+	// edge (offsetX = parent width), vertically centered on the item, flipped
+	// to the parent's left edge within 10px of the window edge, clamped to
+	// the window. It is NOT an inline expansion of the parent menu.
+	type FlyKind = "types" | "cols" | "props";
+	let fly = $state<{ kind: FlyKind; left: number; top: number } | null>(null);
+	const FLY_W = 240;
+
+	function openFly(kind: FlyKind, e: MouseEvent) {
+		const item = (e.currentTarget as HTMLElement).getBoundingClientRect();
+		const menu = (e.currentTarget as HTMLElement).closest(".ctx-menu")!.getBoundingClientRect();
+		const estH = 320;
+		let left = menu.right;
+		if (left + FLY_W > window.innerWidth - 10) left = menu.left - FLY_W;
+		left = Math.max(8, Math.min(left, window.innerWidth - FLY_W - 10));
+		const top = Math.max(8, Math.min(item.top + item.height / 2 - estH / 2, window.innerHeight - estH - 10));
+		if (fly?.kind === kind) fly = null;
+		else fly = { kind, left, top };
+	}
 
 	// The fixed clamp assumed a ~320px menu; with a submenu or the property
 	// editor open it is much taller and slid off the bottom of the window.
@@ -61,9 +80,7 @@
 	let menuEl = $state<HTMLElement>();
 	let menuTop = $state<number | null>(null);
 	$effect(() => {
-		void showTypes;
-		void showCols;
-		void showProps;
+		void fly;
 		void editKey;
 		if (!menuEl) return;
 		requestAnimationFrame(() => {
@@ -110,7 +127,6 @@
 	// object links) MERGE - the initial value is the cross-record
 	// intersection, and only the delta the user added/removed touches
 	// each record, so untouched per-record values survive.
-	let showProps = $state(false);
 	let editKey = $state("");
 	let propFilter = $state("");
 
@@ -219,6 +235,7 @@
 		role="menuitem"
 		onclick={() => {
 			const targets = [...ids];
+			fly = null;
 			onclose();
 			// One object opens in place; a multi-selection opens Anytype-style:
 			// each object becomes an in-app tab in the strip.
@@ -237,19 +254,32 @@
 			for (const id of targets) tabs.open(`/app/object/${id}`);
 		}}>Open in new tab{suffix}</button
 	>
-	<button role="menuitem" onclick={() => { showTypes = !showTypes; showCols = false; showProps = false; }}>⇄ Change type{suffix} ▸</button>
-	{#if showTypes}
-		<div class="ctx-sub">
+	<button role="menuitem" class:hover={fly?.kind === "types"} onclick={(e) => openFly("types", e)}>⇄ Change type{suffix} ▸</button>
+	<!-- Anytype objectContext 'relation' item -> popup 'relation': edit one
+	     property across every selected record. -->
+	<button role="menuitem" class:hover={fly?.kind === "props"} onclick={(e) => { editKey = ""; openFly("props", e); }}>✎ Edit properties{suffix} ▸</button>
+	<button role="menuitem" class:hover={fly?.kind === "cols"} onclick={(e) => openFly("cols", e)}>▣ Add to collection{suffix} ▸</button>
+	{#if onremove}
+		<button role="menuitem" onclick={() => void remove()}>⊖ Remove from collection{suffix}</button>
+	{/if}
+	<div class="ctx-sep"></div>
+	<button role="menuitem" class="danger" onclick={() => void bin()}>🗑 Move to bin{suffix}</button>
+</div>
+
+{#if fly}
+	<div class="ctx-menu ctx-fly" style="left: {fly.left}px; top: {fly.top}px" role="menu">
+		{#if fly.kind === "types"}
 			{#each types as t (t.id)}
 				<button role="menuitem" onclick={() => void retype(t.key)}>{t.icon || typeGlyph(t.key)} {t.name || t.key}</button>
 			{/each}
-		</div>
-	{/if}
-	<!-- Anytype objectContext 'relation' item -> popup 'relation': edit one
-	     property across every selected record. -->
-	<button role="menuitem" onclick={() => { showProps = !showProps; showTypes = false; showCols = false; editKey = ""; }}>✎ Edit properties{suffix} ▸</button>
-	{#if showProps}
-		<div class="ctx-sub props">
+		{:else if fly.kind === "cols"}
+			{#each collections as c (c.id)}
+				<button role="menuitem" onclick={() => void addTo(c.id)}>{objectIcon(c.icon, c.typeKey)} {c.name || "Untitled"}</button>
+			{/each}
+			{#if collections.length === 0}
+				<span class="ctx-none">No collections in this space</span>
+			{/if}
+		{:else if fly.kind === "props"}
 			{#if editRel}
 				<button role="menuitem" class="ctx-back" onclick={() => { editKey = ""; editValue = undefined; }}>← {editRel.iconEmoji ? editRel.iconEmoji + " " : ""}{editRel.name || editRel.key}</button>
 				<div class="ctx-editor">
@@ -266,25 +296,9 @@
 					<span class="ctx-none">No properties</span>
 				{/if}
 			{/if}
-		</div>
-	{/if}
-	<button role="menuitem" onclick={() => { showCols = !showCols; showTypes = false; showProps = false; }}>▣ Add to collection{suffix} ▸</button>
-	{#if showCols}
-		<div class="ctx-sub">
-			{#each collections as c (c.id)}
-				<button role="menuitem" onclick={() => void addTo(c.id)}>{objectIcon(c.icon, c.typeKey)} {c.name || "Untitled"}</button>
-			{/each}
-			{#if collections.length === 0}
-				<span class="ctx-none">No collections in this space</span>
-			{/if}
-		</div>
-	{/if}
-	{#if onremove}
-		<button role="menuitem" onclick={() => void remove()}>⊖ Remove from collection{suffix}</button>
-	{/if}
-	<div class="ctx-sep"></div>
-	<button role="menuitem" class="danger" onclick={() => void bin()}>🗑 Move to bin{suffix}</button>
-</div>
+		{/if}
+	</div>
+{/if}
 
 <style>
 	.ctx-backdrop {
@@ -330,18 +344,12 @@
 		background: var(--border);
 		margin: 4px 6px;
 	}
-	.ctx-sub {
-		display: flex;
-		flex-direction: column;
-		max-height: 220px;
+	.ctx-fly {
+		position: fixed;
+		width: 240px;
+		max-height: min(340px, 60vh);
 		overflow-y: auto;
-		margin: 0 0 2px;
-		padding: 2px 0 2px 10px;
-		border-left: 1px solid var(--border);
-	}
-	.ctx-sub.props {
-		max-height: min(320px, 45vh);
-		overflow-y: auto;
+		z-index: 95;
 	}
 	.ctx-filter {
 		display: block;
