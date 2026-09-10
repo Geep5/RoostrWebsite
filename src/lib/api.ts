@@ -22,6 +22,8 @@ export const fetchRelations = (): Promise<RelationDefJSON[]> => backend.fetchRel
 export interface QueryResultRow {
 	id: string;
 	typeKey: string;
+	/** Only present when the query passed includeDeleted. */
+	deleted?: boolean;
 	name?: string;
 	snippet?: string;
 	createdAt: number;

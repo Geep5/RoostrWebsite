@@ -3,7 +3,7 @@
 	import { goto } from "$app/navigation";
 	import { page } from "$app/state";
 	import { activeSpace } from "$lib/space.svelte";
-	import { space as spaceApi, note, fetchObject, fetchQuery } from "$lib/api";
+	import { space as spaceApi, note, fetchObject, fetchQuery, fetchAllQuery } from "$lib/api";
 	import { objectIcon } from "$lib/icons";
 	import { layoutOf, discussionUI, store, refreshAll, connectEvents } from "$lib/data.svelte";
 	import { tabs, HOME_PATH } from "$lib/tabs.svelte";
@@ -489,12 +489,33 @@
 		if (!name?.trim()) return;
 		let key = name.trim().toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
 		if (!key) return;
-		if (store.types.some((t) => t.key === key)) {
-			alert(`A type with key "${key}" already exists.`);
+		// Uniqueness is per space, matching the sidebar's scope - a global
+		// check blocks every name another space already uses (six spaces all
+		// have a bundled "task" def, so "Task" was un-creatable everywhere).
+		// Bundled (space-less) defs apply everywhere and block in any space.
+		const space = activeSpace.id || defaultChannelId;
+		const clash = store.types.find((t) => t.key === key && (t.space === space || !t.space));
+		if (clash) {
+			alert(`A type with key "${key}" already exists in this space.`);
+			return;
+		}
+		// A binned def with this key in this space is RESTORED instead of
+		// forked - the bin is excluded from store.types, so check explicitly
+		// (Anytype undeletes on recreate rather than shadowing with a twin).
+		const binned = (await fetchAllQuery({ type: "type", includeDeleted: true })).find(
+			(r) =>
+				r.deleted === true &&
+				(r.fields["key"]?.stringValue ?? "") === key &&
+				(r.fields["channel"]?.stringValue ?? "") === space,
+		);
+		if (binned) {
+			await note.restore(binned.id);
+			await refreshAll();
+			await goto(`/app/object/${binned.id}`);
 			return;
 		}
 		const { id } = await note.create(name.trim(), "type", {
-			channel: { stringValue: activeSpace.id || defaultChannelId },
+			channel: { stringValue: space },
 			key: { stringValue: key },
 			layout: { stringValue: "page" },
 		});
