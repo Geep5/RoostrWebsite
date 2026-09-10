@@ -82,12 +82,14 @@
 		if (!setEl) return;
 		// Anytype starts the rubber band from the page around the table
 		// too, so the arm is window-level: a press inside the table always
-		// arms; a press outside arms only within the same content column
-		// (<article>) - the sidebar, drawers, and modals stay untouched.
+		// arms; a press outside arms anywhere in the content column (main),
+		// INCLUDING its padding - <article> hugs the table exactly, so an
+		// article-scoped rule left nowhere outside the table to start from.
+		// The sidebar, drawers and modals are not inside main.
 		const inSet = setEl.contains(t);
 		if (!inSet) {
-			const article = setEl.closest("article");
-			if (!article || !article.contains(t)) return;
+			const zone = setEl.closest("main") ?? setEl.closest("article");
+			if (!zone || !zone.contains(t)) return;
 		}
 		// Interactive targets own their gestures; the header row owns
 		// sort/resize/reorder; the entry row owns its input; text

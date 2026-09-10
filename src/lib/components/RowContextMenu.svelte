@@ -55,6 +55,23 @@
 	let showTypes = $state(false);
 	let showCols = $state(false);
 
+	// The fixed clamp assumed a ~320px menu; with a submenu or the property
+	// editor open it is much taller and slid off the bottom of the window.
+	// Measure the real height and clamp against that instead.
+	let menuEl = $state<HTMLElement>();
+	let menuTop = $state<number | null>(null);
+	$effect(() => {
+		void showTypes;
+		void showCols;
+		void showProps;
+		void editKey;
+		if (!menuEl) return;
+		requestAnimationFrame(() => {
+			const h = menuEl?.offsetHeight ?? 0;
+			if (h > 0) menuTop = Math.max(8, Math.min(y, window.innerHeight - h - 8));
+		});
+	});
+
 	/** Space types plus bundled ones — the same set every type picker offers. */
 	const types = $derived(store.types.filter((t) => !t.space || t.space === spaceId));
 	const collections = $derived(
@@ -194,7 +211,8 @@
 ></button>
 <div
 	class="ctx-menu"
-	style="left: {Math.min(x, window.innerWidth - 230)}px; top: {Math.min(y, window.innerHeight - 320)}px"
+	bind:this={menuEl}
+	style="left: {Math.min(x, window.innerWidth - 230)}px; top: {menuTop ?? Math.min(y, window.innerHeight - 320)}px"
 	role="menu"
 >
 	<button
@@ -322,7 +340,7 @@
 		border-left: 1px solid var(--border);
 	}
 	.ctx-sub.props {
-		max-height: 320px;
+		max-height: min(320px, 45vh);
 		overflow-y: auto;
 	}
 	.ctx-filter {
