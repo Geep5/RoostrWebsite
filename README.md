@@ -69,6 +69,7 @@ bun run scripts/parity-codec.ts
 bun run scripts/parity-replay-fixtures.ts
 bun run scripts/parity-query-fixtures.ts
 bun run scripts/parity-mutation-fixtures.ts
+bun run scripts/parity-wire.ts
 ```
 
 For a running local daemon, `scripts/parity-replay.ts` and `scripts/parity-query.ts`

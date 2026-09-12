@@ -11,7 +11,6 @@
  */
 
 import { hexToBytes } from "@noble/hashes/utils.js";
-import { proto } from "../src/lib/engine/proto";
 import { ChangeStore } from "../src/lib/engine/store";
 import { RelaySync, DEFAULT_RELAYS } from "../src/lib/engine/sync";
 import { initCore } from "../src/lib/engine/core";
@@ -27,16 +26,10 @@ const sk = hexToBytes(identity.privkey);
 const store = new ChangeStore();
 await store.open();
 
-const sync = new RelaySync(
-	sk,
-	DEFAULT_RELAYS,
-	store,
-	{
-		onObjects: () => {},
-		onStatus: (s) => console.log(`[status] ${s.phase}${s.detail ? `: ${s.detail}` : ""}`),
-	},
-	{ decode: (b) => proto.decodeChange(b) },
-);
+const sync = new RelaySync(sk, DEFAULT_RELAYS, store, {
+	onObjects: () => {},
+	onStatus: (s) => console.log(`[status] ${s.phase}${s.detail ? `: ${s.detail}` : ""}`),
+});
 
 await sync.start(); // full backfill from cursor 0 — publish() never called
 sync.stop();

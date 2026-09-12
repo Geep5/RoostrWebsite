@@ -1,21 +1,24 @@
 {
   "abiVersion": 1,
-  "compiler": "/opt/homebrew/bin/odin version dev-2026-08:8412dc37a",
+  "compiler": "/opt/homebrew/bin/odin version dev-2026-07:819fdc7a8",
   "target": "js_wasm32",
   "artifact": "engine.wasm",
-  "sha256": "456614f51deb850a533b9318ec43bd8314687f955d653810e6c4b4152819196f",
-  "sourceFingerprint": "6447b3897b06edfe19479548301de97c766bef9557f51de0f9198d4775fc18d6",
+  "sha256": "b824e017030af7e0d1421c523b6f12bdf5896064de617be40ab13f94657866c5",
+  "sourceFingerprint": "84bb491980cfbdd33c4d25908cf39bc202f9ddf5fc0cd1318e100e8c1a033b5f",
   "sourceFiles": {
+    "abi/abi.odin": "d4d2b2b0adac2067d0c6b669993490b1716537b96831300064af6e7b2646c283",
     "core/codec_json.odin": "e9e5e0ca74dd8e54e7772288dc67629731f1b68fccbc2d2b8e0b728d41fca82a",
     "core/dag.odin": "ada8d08dfb4ca83c1946947d67220a065f2121ce156618c23c028cfe5621014f",
-    "core/dispatch.odin": "ed4bd579742d02aec4492b99dded497a805fdd5d1c5a4b61eaf3f9bad66f96a4",
+    "core/dispatch.odin": "e23d019d9d429a6df2bb864620afbf0483418dbfb7e160096ee92bb42ac23b51",
     "core/jsonx.odin": "46f5d6fd05b572c8023b77e58f0a31205551281de4d59dca78961301ca7f4d39",
     "core/mutate.odin": "a5ff51b29d7f9ab3d6b3589f2ee651b45628c99d8ad7ffce900cc57e714015dd",
+    "core/nip44.odin": "71412d79e95596ecf93c1ffb11909824bb6b44c1bd3fea3ca9c351a46fed9e82",
     "core/proto.odin": "fa914e2ba4c4e404ba89c8427381601fb8832049b82b754ada76ae7948528791",
     "core/query.odin": "e9a5aa5783640a6c0d8868f15486a31ed0767adff6628c53a157e7dd361c85ca",
     "core/replay.odin": "d9a320dda1ccaa217bbcd5ca33c1b129f586456e79908694d3d2c58c59e1a4e5",
-    "wasm/main.odin": "91ac077b09e81675a746aa187f90b74036267f1b510b1e6dc210841f3d2049c8",
-    "build-wasm.mjs": "21750c6302d4dd4c26014ecc4cc6daa9f46876ce5aed767fe08497c1b7472847"
+    "core/wire.odin": "131052a1b4183b5b5ec495e6f6f3f5bbef3891ea8791f3ed4889792d2196b226",
+    "wasm/main.odin": "007614b554da7e706c3f2740338357df67ba9f83bfe40c89d2021e0343359474",
+    "build-wasm.mjs": "7f230f2118be60eac27e57272a8461d33e338d3aef55a9a6af289fa3404d79ff"
   },
   "runtimeFiles": {
     "src/lib/engine/core.ts": "d0cd39bacf82c5e60ec6ffd6a69da0b526f008b6d42b383f696c9ddd06ac4fa0",

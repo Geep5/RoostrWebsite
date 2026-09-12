@@ -11,9 +11,7 @@
 import { parseKey, authorIdFor } from "../src/lib/engine/keys";
 import { ChangeStore } from "../src/lib/engine/store";
 import { RelaySync, DEFAULT_RELAYS } from "../src/lib/engine/sync";
-import type { ChangeJSON } from "../src/lib/engine/contracts";
 import { initCore } from "../src/lib/engine/core";
-import { proto } from "../src/lib/engine/proto";
 
 await initCore({ wasmBytes: await Bun.file(new URL("../static/engine.wasm", import.meta.url)).arrayBuffer() });
 
@@ -28,12 +26,8 @@ const key = parseKey(identity.privkey);
 if (!key) throw new Error("privkey did not parse");
 console.log(`identity ${key.pk.slice(0, 8)}… (${key.npub.slice(0, 14)}…) authorId=${authorIdFor(key)}`);
 
-// ── Shared Odin codec (failure is fatal; never substitute a stub) ──
-const firstBytes: number[] = [];
-const decode = (bytes: Uint8Array): ChangeJSON | null => {
-	if (bytes.length > 0) firstBytes.push(bytes[0]);
-	return proto.decodeChange(bytes);
-};
+// Change bytes are opened, verified, and decoded by the shared Odin core; the
+// store keeps the raw wire bytes, which the report inspects after the walk.
 console.log("decode: shared Odin WASM");
 
 // ── Store + sync (fresh fake-indexeddb each run) ─────────────────
@@ -43,21 +37,15 @@ const cursorBefore = await store.getCursor();
 
 let objectNotifyBatches = 0;
 let objectNotifyIds = 0;
-const sync = new RelaySync(
-	key.sk,
-	DEFAULT_RELAYS,
-	store,
-	{
-		onObjects: (ids) => {
-			objectNotifyBatches++;
-			objectNotifyIds += ids.length;
-		},
-		onStatus: (s) => {
-			console.log(`[status] ${s.phase}${s.detail ? `: ${s.detail}` : ""}${s.imported !== undefined ? ` (imported=${s.imported})` : ""}`);
-		},
+const sync = new RelaySync(key.sk, DEFAULT_RELAYS, store, {
+	onObjects: (ids) => {
+		objectNotifyBatches++;
+		objectNotifyIds += ids.length;
 	},
-	{ decode },
-);
+	onStatus: (s) => {
+		console.log(`[status] ${s.phase}${s.detail ? `: ${s.detail}` : ""}${s.imported !== undefined ? ` (imported=${s.imported})` : ""}`);
+	},
+});
 
 const t0 = Date.now();
 await sync.start(); // live subscriptions come up immediately; the history walk
@@ -91,6 +79,8 @@ if (objectIds.length > 0) {
 }
 
 const cursorAfter = await store.getCursor();
+const firstBytes: number[] = [];
+for (const id of objectIds) for (const { bytes } of await store.rawChangesFor(id)) if (bytes.length > 0) firstBytes.push(bytes[0]);
 const protoLooking = firstBytes.filter((b) => (b & 7) <= 5 && b >> 3 >= 1 && b >> 3 <= 15).length;
 const leadingA = firstBytes.filter((b) => b === 0x0a).length;
 

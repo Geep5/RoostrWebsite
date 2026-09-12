@@ -1,7 +1,8 @@
 /**
  * sync.ts — relay backfill/live/publish (RelaySyncApi).
  *
- * Wire schema mirrors the desktop daemon (glonOdin/harness/src/nostrsync.ts):
+ * Wire schema mirrors the desktop daemon (glonOdin/harness/src/nostrsync.ts)
+ * and lives in the shared Odin core (glonOdin/core/wire.odin, `wire` method):
  *   - kind 1078 events, authored by our own key.
  *   - content = NIP-44 self-encryption (conversation key of sk with our own
  *     pk) of the base64 of the raw Change protobuf bytes.
@@ -10,6 +11,7 @@
  *     ['c', groupId, index, total] tags; groupId = sha256(b64) hex[0:16].
  *   - keyring events (kind 30078, d='roostr-keyring') are NOT handled in
  *     v1 — desktop remains the keyring authority for now.
+ * The host keeps secp256k1: event signing and the ECDH shared secret.
  *
  * Backfill pages querySync backwards via `until` (since cursor+1), paced
  * between pages so public relays don't rate-limit us; live is a
@@ -20,19 +22,18 @@
 
 import { SimplePool, finalizeEvent, getPublicKey, nip19, nip44, verifyEvent, type Event } from "nostr-tools";
 import { unwrapEvent, wrapEvent } from "nostr-tools/nip59";
-import { sha256 } from "@noble/hashes/sha2.js";
-import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
+import { bytesToHex } from "@noble/hashes/utils.js";
 import type { ChangeJSON, ChangeStoreApi, PendingPublish, RelaySyncApi, SharedProvenance, SyncEvents } from "./contracts";
 import type { ObjectJSON } from "$lib/types";
 import { computeObject } from "./replay";
-import { proto } from "./proto";
+import { CoreError, coreCall } from "./core";
+import { unpackCoreValueMaps } from "./core-values";
 import { loadKey } from "./keys";
 import { spaceKeyGet, spaceKeyImport } from "./spacekeys";
 
 export const DEFAULT_RELAYS = ["wss://roostr-relay.fly.dev"];
 
 const CHANGE_KIND = 1078;
-const EMPTY_CHANGE_ID_FIELD = new Uint8Array([0x0a, 0x00]);
 const ALLOWLIST_KIND = 30100;
 const ALLOWLIST_D = "roostr-allowlist";
 /** NIP-59 gift wrap: space-key invites and join requests, addressed by npub. */
@@ -123,7 +124,6 @@ export interface SharedSpaceInfo {
 }
 
 interface SharedSpace extends SharedSpaceInfo {
-	convKey: Uint8Array;
 	spaceTag: string;
 	writerSet: Set<string>;
 }
@@ -205,17 +205,18 @@ interface ImportItem {
 	chunkKey?: string;
 }
 
-function utf8(s: string): Uint8Array {
-	return new TextEncoder().encode(s);
+export function blindShared(keyHex: string, id: string): string {
+	return coreCall<string>("wire", { action: "blind", keyHex, id });
 }
 
-export function blindShared(keyHex: string, id: string): string {
-	const a = utf8(keyHex);
-	const b = utf8(id);
-	const buf = new Uint8Array(a.length + b.length);
-	buf.set(a);
-	buf.set(b, a.length);
-	return bytesToHex(sha256(buf)).slice(0, 16);
+/** A part opened with this key, or null when the key does not fit; core faults propagate. */
+function openPart(content: string, conversationKey: string): string | null {
+	try {
+		return coreCall<string>("wire", { action: "open", content, conversationKey });
+	} catch (err) {
+		if (err instanceof CoreError && err.code === "domain") return null;
+		throw err;
+	}
 }
 
 export function npubToHex(npub: string): string | null {
@@ -251,7 +252,6 @@ const PUBLISH_SPACING_MS = 120;
 const PAGE_SPACING_MS = 400;
 // Keep full-sized 40k-character encrypted chunks inside the 8 MiB relay budget.
 const PAGE_LIMIT = 128;
-const CHUNK_CHARS = 40_000;
 const NOTIFY_DEBOUNCE_MS = 100;
 
 function sleep(ms: number): Promise<void> {
@@ -276,8 +276,6 @@ function bytesToB64(bytes: Uint8Array): string {
 }
 
 export interface RelaySyncOptions {
-	/** Override change decoding (tests / proto not yet loaded). */
-	decode?: (bytes: Uint8Array) => ChangeJSON | null;
 	/** A gift-wrapped space key arrived and was imported. */
 	onSpaceKey?: () => void;
 	/** Debug hook: every raw relay event before decrypt. */
@@ -309,8 +307,9 @@ export class RelaySync implements RelaySyncApi {
 
 	private readonly pk: string;
 	private pool = new SimplePool();
-	private readonly conversationKey: Uint8Array;
-	private decode: ((bytes: Uint8Array) => ChangeJSON | null) | null;
+	/** NIP-44 self conversation key, hex, as the core's `wire` method takes it. */
+	private readonly conversationKey: string;
+	private readonly secretHex: string;
 	private readonly onRawEvent?: (event: Event) => void;
 	private readonly onSpaceKey?: () => void;
 	private wrapSub: { close(): void } | null = null;
@@ -364,8 +363,8 @@ export class RelaySync implements RelaySyncApi {
 		options: RelaySyncOptions = {},
 	) {
 		this.pk = getPublicKey(sk);
-		this.conversationKey = nip44.getConversationKey(sk, this.pk);
-		this.decode = options.decode ?? null;
+		this.conversationKey = bytesToHex(nip44.getConversationKey(sk, this.pk));
+		this.secretHex = bytesToHex(sk);
 		this.onRawEvent = options.onRawEvent;
 		this.onSpaceKey = options.onSpaceKey;
 		this.spaceOf = options.spaceOf ?? (() => "");
@@ -380,7 +379,6 @@ export class RelaySync implements RelaySyncApi {
 			if (!/^[0-9a-f]{64}$/.test(info.keyHex)) continue;
 			next.set(info.spaceId, {
 				...info,
-				convKey: hexToBytes(info.keyHex),
 				spaceTag: blindShared(info.keyHex, `space:${info.spaceId}`),
 				writerSet: new Set(info.writers),
 			});
@@ -443,23 +441,6 @@ export class RelaySync implements RelaySyncApi {
 		} catch {
 			/* retried on next refresh */
 		}
-	}
-
-
-	/** Blinded object tag: sha256(sk || objectId) hex prefix, as the daemon. */
-	private blind(objectId: string): string {
-		const idBytes = new TextEncoder().encode(objectId);
-		const buf = new Uint8Array(this.sk.length + idBytes.length);
-		buf.set(this.sk);
-		buf.set(idBytes, this.sk.length);
-		return bytesToHex(sha256(buf)).slice(0, 16);
-	}
-
-	private async getDecode(): Promise<(bytes: Uint8Array) => ChangeJSON | null> {
-		// backend.ts already loads proto statically; no circularity exists
-		// (proto has no sync import), so the static graph is honest here.
-		this.decode ??= (bytes: Uint8Array) => proto.decodeChange(bytes);
-		return this.decode;
 	}
 
 	// ── Gift wraps: key invites in, join requests in, key invites out ──
@@ -866,20 +847,17 @@ export class RelaySync implements RelaySyncApi {
 		const hTag = event.tags.find((t) => t[0] === "h")?.[1];
 		if (hTag) this.stats.blindedTags.add(hTag);
 
-		let part: string | null = null;
+		let part = openPart(event.content, this.conversationKey);
 		let space: SharedSpace | undefined;
-		try {
-			part = nip44.decrypt(event.content, this.conversationKey);
+		if (part !== null) {
 			if (event.pubkey !== this.pk) return null;
-		} catch {
+		} else {
 			for (const sp of this.sharedSpaces.values()) {
-				try {
 				if (!event.tags.some((tag) => tag[0] === "h" && tag[1] === sp.spaceTag)) continue;
-					part = nip44.decrypt(event.content, sp.convKey);
+				part = openPart(event.content, sp.keyHex);
+				if (part !== null) {
 					space = sp;
 					break;
-				} catch {
-					/* next key */
 				}
 			}
 			if (part === null) {
@@ -887,7 +865,6 @@ export class RelaySync implements RelaySyncApi {
 				return null;
 			}
 		}
-		if (part.length > CHUNK_CHARS || !/^[A-Za-z0-9+/]*={0,2}$/.test(part)) return null;
 		if (event.tags.filter((t) => t[0] === "c").length > 1) return null;
 		if (event.created_at > this.cursor) this.cursor = event.created_at;
 
@@ -901,7 +878,7 @@ export class RelaySync implements RelaySyncApi {
 			const [, gid, idxStr, totalStr] = chunkTag;
 			const total = Number(totalStr), index = Number(idxStr);
 			if (!/^[0-9a-f]{16}$/.test(gid ?? "") || !/^[0-9]+$/.test(totalStr ?? "") || !/^[0-9]+$/.test(idxStr ?? "") ||
-				!Number.isInteger(total) || total < 2 || total > 64 || !Number.isInteger(index) || index < 0 || index >= total || part.length > CHUNK_CHARS) return null;
+				!Number.isInteger(total) || total < 2 || total > 64 || !Number.isInteger(index) || index < 0 || index >= total) return null;
 			const now = Date.now();
 			for (const [key, group] of this.chunkGroups) if (group.expires <= now) {
 				this.recordReplayFault(group.at);
@@ -942,34 +919,23 @@ export class RelaySync implements RelaySyncApi {
 			this.chunkGroups.delete(key);
 			this.chunkBytes -= group.bytes;
 			full = Array.from({ length: group.total }, (_, i) => group!.parts.get(i)!).join("");
-			if (bytesToHex(sha256(utf8(full))).slice(0, 16) !== gid) {
-				this.recordReplayFault(group.at);
-				return null;
-			}
 		}
 
-		let bytes: Uint8Array;
+		// The core checks the group id over the reassembled text, strict base64,
+		// the protobuf shape, and the raw-byte content address (never a canonical
+		// re-encoding, which can drop legacy explicit default fields).
+		let verified: { id: string; change: unknown };
 		try {
-			bytes = b64ToBytes(full);
-		} catch {
+			verified = coreCall("wire", { action: "verify", bytes: full, gid: chunkTag?.[1] });
+		} catch (err) {
+			if (!(err instanceof CoreError && err.code === "domain")) throw err;
 			this.stats.decodeFailures++;
 			this.recordReplayFault(replayAt);
 			return null;
 		}
-		const decode = await this.getDecode();
-		const change = decode(bytes);
-		// The content address covers the received wire representation, not a
-		// canonical re-encoding that can drop legacy explicit default fields.
-		const rawId = bytes.length >= 34 && bytes[0] === 0x0a && bytes[1] === 0x20
-			? bytesToHex(sha256.create().update(EMPTY_CHANGE_ID_FIELD).update(bytes.subarray(34)).digest())
-			: null;
-		if (!change || change.id !== rawId) {
-			this.stats.decodeFailures++;
-			this.recordReplayFault(replayAt);
-			return null;
-		}
+		const change = unpackCoreValueMaps<ChangeJSON>(verified.change);
 		if (chunkKey) this.importingChunkGroups.add(chunkKey);
-		return { bytes, change, chunkKey, provenance: space ? { spaceId: space.spaceId, keyId: space.keyId, signer: event.pubkey } : undefined };
+		return { bytes: b64ToBytes(full), change, chunkKey, provenance: space ? { spaceId: space.spaceId, keyId: space.keyId, signer: event.pubkey } : undefined };
 	}
 
 	private importBatch(batch: ImportItem[], immediateNotify = false): Promise<void> {
@@ -1135,18 +1101,17 @@ export class RelaySync implements RelaySyncApi {
 	private async publishOnce(item: PublishItem): Promise<boolean> {
 		try {
 			if (!item.pending.events) {
-				const parts: string[] = [];
-				for (let i = 0; i < item.b64.length; i += CHUNK_CHARS) parts.push(item.b64.slice(i, i + CHUNK_CHARS));
-				if (parts.length > 64) throw new Error("change exceeds chunk limit");
-				const gid = parts.length > 1 ? bytesToHex(sha256(utf8(item.b64))).slice(0, 16) : "";
-				item.pending.events = parts.map((part, i) => {
-					const tags: string[][] = item.space
-						? [["h", blindShared(item.space.keyHex, item.objectId)], ["h", item.space.spaceTag]]
-						: [["h", this.blind(item.objectId)]];
-					if (gid) tags.push(["c", gid, String(i), String(parts.length)]);
-					return finalizeEvent({ kind: CHANGE_KIND, created_at: Math.floor(Date.now() / 1000), tags,
-						content: nip44.encrypt(part, item.space ? item.space.convKey : this.conversationKey) }, this.sk);
+				// Chunking, blinded tags, and NIP-44 sealing; "change exceeds chunk limit" surfaces here.
+				const sealed = coreCall<{ gid: string; parts: Array<{ content: string; tags: string[][] }> }>("wire", {
+					action: "seal",
+					change: item.b64,
+					objectId: item.objectId,
+					conversationKey: item.space ? item.space.keyHex : this.conversationKey,
+					...(item.space ? { space: { keyHex: item.space.keyHex, spaceId: item.space.spaceId } } : { secret: this.secretHex }),
 				});
+				const created_at = Math.floor(Date.now() / 1000);
+				item.pending.events = sealed.parts.map((part) =>
+					finalizeEvent({ kind: CHANGE_KIND, created_at, tags: part.tags, content: part.content }, this.sk));
 			}
 			// Persist BEFORE sending, including after any failed IndexedDB attempt.
 			await this.store.savePending(item.pending);
