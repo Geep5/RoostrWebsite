@@ -39,9 +39,11 @@ operator-only `glon-odin key-export` command is for explicit private recovery.
 
 ## Shared Odin engine
 
-Browser protobuf/hash, replay, queries and ordinary mutation planning use the
-same Odin sources as the native daemon, compiled to WebAssembly. IndexedDB,
-network transport and DOM integration remain platform adapters.
+Browser protobuf/hash, replay, queries, ordinary mutation planning and the
+relay receive session (chunk reassembly, cursor high-water mark, replay-group
+bookkeeping via the `sync` method) use the same Odin sources as the native
+daemon, compiled to WebAssembly. IndexedDB, network transport and DOM
+integration remain platform adapters.
 
 ```sh
 npm run build:core   # requires Odin and sibling ../glonOdin

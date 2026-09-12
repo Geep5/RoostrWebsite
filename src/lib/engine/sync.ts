@@ -11,7 +11,10 @@
  *     ['c', groupId, index, total] tags; groupId = sha256(b64) hex[0:16].
  *   - keyring events (kind 30078, d='roostr-keyring') are NOT handled in
  *     v1 — desktop remains the keyring authority for now.
- * The host keeps secp256k1: event signing and the ECDH shared secret.
+ * The host keeps secp256k1: event signing, signature verification and the
+ * ECDH shared secret. Receiving (decrypt, chunk reassembly, cursor, replay
+ * bookkeeping) is the core's `sync` session (glonOdin/core/sync_session.odin);
+ * this class feeds it verified events and persists what it reports.
  *
  * Backfill pages querySync backwards via `until` (since cursor+1), paced
  * between pages so public relays don't rate-limit us; live is a
@@ -161,15 +164,27 @@ export function blindShared(keyHex: string, id: string): string {
 	return coreCall<string>("wire", { action: "blind", keyHex, id });
 }
 
-/** A part opened with this key, or null when the key does not fit; core faults propagate. */
-function openPart(content: string, conversationKey: string): string | null {
-	try {
-		return coreCall<string>("wire", { action: "open", content, conversationKey });
-	} catch (err) {
-		if (err instanceof CoreError && err.code === "domain") return null;
-		throw err;
-	}
+interface SyncSessionState {
+	cursor: number;
+	/** Open (partially assembled) chunk groups. */
+	groups: number;
+	replayGroups: Array<[string, number]>;
+	replayFloor?: number;
 }
+
+interface IngestResult {
+	cursor: number;
+	item?: { bytes: string; change: unknown; chunkKey?: string; provenance?: SharedProvenance };
+	faultAt?: number;
+	replayGroups?: Array<[string, number]>;
+	decryptFailure?: boolean;
+	decodeFailure?: boolean;
+	hTag?: string;
+}
+
+/** The core's receive session is process-global and single-flight; only its
+ * owner may feed or close it, so a newer instance silently retires an older one. */
+let sessionOwner: RelaySync | null = null;
 
 export function npubToHex(npub: string): string | null {
 	try {
@@ -275,15 +290,9 @@ export class RelaySync implements RelaySyncApi {
 	private watchdogTimer: ReturnType<typeof setInterval> | null = null;
 	private watchdogBusy = false;
 
-	/** Reassembly buffer for chunked changes: gid → parts. */
-	private readonly chunkGroups = new Map<string, { total: number; parts: Map<number, string>; bytes: number; expires: number; at: number }>();
-	// Metadata survives buffer expiry/limits; unlike ciphertext, its cardinality
-	// follows unresolved changes. Successful group keys suppress replay suffixes.
-	private readonly replayGroups = new Map<string, number>();
-	private readonly importedChunkGroups = new Set<string>();
-	private readonly importingChunkGroups = new Set<string>();
-	private replayGroupsLoaded: Promise<void> | null = null;
-	private chunkBytes = 0;
+	/** Host mirror of the core session's replay obligations: chunk key → earliest created_at. */
+	private replayGroups = new Map<string, number>();
+	private sessionOpening: Promise<void> | null = null;
 	private importChain: Promise<void> = Promise.resolve();
 	private historyComplete = false;
 	private discardedChunkFloor = Infinity;
@@ -322,6 +331,39 @@ export class RelaySync implements RelaySyncApi {
 		this.spaceOf = options.spaceOf ?? (() => "");
 	}
 
+	private get sessionOpen(): boolean {
+		return sessionOwner === this;
+	}
+
+	/** (Re)open the core receive session from this instance's cursor and the persisted obligations. */
+	private async openSession(): Promise<void> {
+		const replayGroups = await this.store.getReplayGroups();
+		const state = coreCall<SyncSessionState>("sync", {
+			action: "session",
+			pk: this.pk,
+			conversationKey: this.conversationKey,
+			spaces: [...this.sharedSpaces.values()].map((sp) => ({ spaceId: sp.spaceId, keyHex: sp.keyHex, keyId: sp.keyId })),
+			cursor: this.cursor,
+			replayGroups,
+		});
+		sessionOwner = this;
+		this.replayGroups = new Map(state.replayGroups);
+	}
+
+	/** Paths that run before start() (tests drive them directly) open the session on first need. */
+	private ensureSession(): Promise<void> {
+		if (this.sessionOpen || this.stopped) return Promise.resolve();
+		return (this.sessionOpening ??= this.openSession().finally(() => {
+			this.sessionOpening = null;
+		}));
+	}
+
+	private closeSession(): void {
+		if (!this.sessionOpen) return;
+		coreCall("sync", { action: "close" });
+		sessionOwner = null;
+	}
+
 	/** Replace the shared-space view. New spaces get a full backfill of
 	 * their stream tag plus a live subscription. */
 	setSharedSpaces(infos: SharedSpaceInfo[]): void {
@@ -336,6 +378,9 @@ export class RelaySync implements RelaySyncApi {
 			});
 		}
 		this.sharedSpaces = next;
+		if (this.sessionOpen) {
+			coreCall("sync", { action: "spaces", spaces: [...next.values()].map((sp) => ({ spaceId: sp.spaceId, keyHex: sp.keyHex, keyId: sp.keyId })) });
+		}
 		const tags = [...next.values()].map((sp) => sp.spaceTag);
 		const fresh = tags.filter((t) => !prevTags.has(t));
 		if (this.stopped || !this.sub) return; // start() wires subscriptions itself
@@ -485,6 +530,7 @@ export class RelaySync implements RelaySyncApi {
 	async start(): Promise<void> {
 		await this.store.open();
 		this.cursor = await this.store.getCursor();
+		await this.openSession();
 		for (const pending of await this.store.pendingPublishes()) this.enqueue(pending);
 		this.events.onStatus({ phase: "backfill", imported: 0 });
 
@@ -583,7 +629,8 @@ export class RelaySync implements RelaySyncApi {
 		if (this.stopped || this.watchdogBusy || this.bootstrapping) return;
 		this.watchdogBusy = true;
 		try {
-			if (!this.historyComplete || this.chunkGroups.size > 0 || this.discardedChunkFloor !== Infinity) {
+			const groups = this.sessionOpen ? coreCall<SyncSessionState>("sync", { action: "state" }).groups : 0;
+			if (!this.historyComplete || groups > 0 || this.discardedChunkFloor !== Infinity) {
 				const complete = await this.backfill(
 					(await this.store.getBootstrapped()) ? await this.store.getCursor() : 1,
 					(await this.store.getBootstrapped()) ? undefined : await this.store.getBootstrapFloor(),
@@ -646,8 +693,7 @@ export class RelaySync implements RelaySyncApi {
 	stop(): void {
 		this.stopped = true;
 		this.liveUp = false;
-		this.chunkGroups.clear();
-		this.chunkBytes = 0;
+		this.closeSession();
 		if (this.watchdogTimer) {
 			clearInterval(this.watchdogTimer);
 			this.watchdogTimer = null;
@@ -696,7 +742,7 @@ export class RelaySync implements RelaySyncApi {
 
 	private async walkHistory(since: number, resumeUntil?: number): Promise<boolean> {
 		this.historyComplete = false;
-		await this.loadReplayGroups();
+		await this.ensureSession();
 		// A full-history walk persists its progress page by page: a phone that
 		// suspends mid-bootstrap resumes from the floor instead of restarting
 		// from event zero. The floor is only meaningful while bootstrapping -
@@ -790,108 +836,45 @@ export class RelaySync implements RelaySyncApi {
 
 	// ── Event → change ─────────────────────────────────────────────
 
-	/** Decrypt one relay event; returns decoded change bytes when a full
-	 * change (possibly reassembled from chunks) becomes available. */
+	/** Feed one signature-verified relay event to the core session; returns the
+	 * decoded change when a full change (possibly reassembled from chunks) is
+	 * available. The core owns reassembly, the cursor and replay bookkeeping. */
 	private async eventToChange(event: Event): Promise<ImportItem | null> {
 		this.stats.events++;
 		this.onRawEvent?.(event);
 		if (event.kind !== CHANGE_KIND || !verifyEvent(event)) return null;
-		const hTag = event.tags.find((t) => t[0] === "h")?.[1];
-		if (hTag) this.stats.blindedTags.add(hTag);
+		await this.ensureSession();
+		if (!this.sessionOpen) return null; // stopped
+		const r = coreCall<IngestResult>("sync", {
+			action: "ingest",
+			event: { pubkey: event.pubkey, created_at: event.created_at, kind: event.kind, tags: event.tags, content: event.content },
+			nowMs: Date.now(),
+		});
+		this.cursor = r.cursor;
+		if (r.hTag) this.stats.blindedTags.add(r.hTag);
+		if (r.decryptFailure) this.stats.decryptFailures++;
+		if (r.decodeFailure) this.stats.decodeFailures++;
+		if (r.faultAt !== undefined) this.recordReplayFault(r.faultAt);
+		if (r.replayGroups) this.replayGroups = new Map(r.replayGroups);
+		if (!r.item) return null;
+		return {
+			bytes: b64ToBytes(r.item.bytes),
+			change: unpackCoreValueMaps<ChangeJSON>(r.item.change),
+			chunkKey: r.item.chunkKey,
+			provenance: r.item.provenance,
+		};
+	}
 
-		let part = openPart(event.content, this.conversationKey);
-		let space: SharedSpace | undefined;
-		if (part !== null) {
-			if (event.pubkey !== this.pk) return null;
-		} else {
-			for (const sp of this.sharedSpaces.values()) {
-				if (!event.tags.some((tag) => tag[0] === "h" && tag[1] === sp.spaceTag)) continue;
-				part = openPart(event.content, sp.keyHex);
-				if (part !== null) {
-					space = sp;
-					break;
-				}
-			}
-			if (part === null) {
-				this.stats.decryptFailures++;
-				return null;
-			}
-		}
-		if (event.tags.filter((t) => t[0] === "c").length > 1) return null;
-		if (event.created_at > this.cursor) this.cursor = event.created_at;
-
-		const chunkTag = event.tags.find((t) => t[0] === "c");
-		let full: string;
-		let replayAt = event.created_at;
-		let chunkKey: string | undefined;
-		if (!chunkTag) {
-			full = part;
-		} else {
-			const [, gid, idxStr, totalStr] = chunkTag;
-			const total = Number(totalStr), index = Number(idxStr);
-			if (!/^[0-9a-f]{16}$/.test(gid ?? "") || !/^[0-9]+$/.test(totalStr ?? "") || !/^[0-9]+$/.test(idxStr ?? "") ||
-				!Number.isInteger(total) || total < 2 || total > 64 || !Number.isInteger(index) || index < 0 || index >= total) return null;
-			const now = Date.now();
-			for (const [key, group] of this.chunkGroups) if (group.expires <= now) {
-				this.recordReplayFault(group.at);
-				this.chunkBytes -= group.bytes;
-				this.chunkGroups.delete(key);
-			}
-			const key = JSON.stringify([event.pubkey, space?.spaceId ?? "", space?.keyId ?? 0, gid]);
-			if (this.importedChunkGroups.has(key) || this.importingChunkGroups.has(key)) return null;
-			this.replayGroups.set(key, Math.min(this.replayGroups.get(key) ?? Infinity, event.created_at));
-			chunkKey = key;
-			let group = this.chunkGroups.get(key);
-			if (group && (group.total !== total || (group.parts.has(index) && group.parts.get(index) !== part))) {
-				this.recordReplayFault(Math.min(group.at, event.created_at));
-				this.chunkBytes -= group.bytes;
-				this.chunkGroups.delete(key);
-				return null;
-			}
-			if (!group) {
-				if (this.chunkGroups.size >= 128) {
-					this.recordReplayFault(event.created_at);
-					return null;
-				}
-				group = { total, parts: new Map(), bytes: 0, expires: now + 300_000, at: this.replayGroups.get(key)! };
-				this.chunkGroups.set(key, group);
-			}
-			group.at = Math.min(group.at, event.created_at);
-			if (!group.parts.has(index)) {
-				if (this.chunkBytes + part.length > 16 * 1024 * 1024) {
-					this.recordReplayFault(group.at);
-					return null;
-				}
-				group.parts.set(index, part);
-				group.bytes += part.length;
-				this.chunkBytes += part.length;
-			}
-			if (group.parts.size !== group.total) return null;
-			replayAt = group.at;
-			this.chunkGroups.delete(key);
-			this.chunkBytes -= group.bytes;
-			full = Array.from({ length: group.total }, (_, i) => group!.parts.get(i)!).join("");
-		}
-
-		// The core checks the group id over the reassembled text, strict base64,
-		// the protobuf shape, and the raw-byte content address (never a canonical
-		// re-encoding, which can drop legacy explicit default fields).
-		let verified: { id: string; change: unknown };
-		try {
-			verified = coreCall("wire", { action: "verify", bytes: full, gid: chunkTag?.[1] });
-		} catch (err) {
-			if (!(err instanceof CoreError && err.code === "domain")) throw err;
-			this.stats.decodeFailures++;
-			this.recordReplayFault(replayAt);
-			return null;
-		}
-		const change = unpackCoreValueMaps<ChangeJSON>(verified.change);
-		if (chunkKey) this.importingChunkGroups.add(chunkKey);
-		return { bytes: b64ToBytes(full), change, chunkKey, provenance: space ? { spaceId: space.spaceId, keyId: space.keyId, signer: event.pubkey } : undefined };
+	/** Report a reassembled group's import outcome to the core session. */
+	private settle(chunkKey: string, imported: boolean): void {
+		if (!this.sessionOpen) return;
+		const r = coreCall<{ replayGroups?: Array<[string, number]> }>("sync", { action: "settle", chunkKey, imported });
+		if (r.replayGroups) this.replayGroups = new Map(r.replayGroups);
 	}
 
 	private importBatch(batch: ImportItem[], immediateNotify = false): Promise<void> {
 		this.activeImports++;
+		const imported = new Set<string>();
 		const run = this.importChain.then(async () => {
 			for (const item of batch) {
 				if (item.provenance) {
@@ -906,8 +889,8 @@ export class RelaySync implements RelaySyncApi {
 				const p = item.provenance;
 				await this.store.markPublished(p ? `${p.spaceId}/${p.keyId}/${item.change.id}` : item.change.id);
 				if (item.chunkKey) {
-					this.importedChunkGroups.add(item.chunkKey);
-					this.replayGroups.delete(item.chunkKey);
+					imported.add(item.chunkKey);
+					this.settle(item.chunkKey, true);
 				}
 				this.pendingObjects.add(item.change.objectId);
 			}
@@ -918,7 +901,7 @@ export class RelaySync implements RelaySyncApi {
 			await this.persistCursor();
 			throw err;
 		}).finally(() => {
-			for (const item of batch) if (item.chunkKey) this.importingChunkGroups.delete(item.chunkKey);
+			for (const item of batch) if (item.chunkKey && !imported.has(item.chunkKey)) this.settle(item.chunkKey, false);
 			this.activeImports--;
 		});
 		this.importChain = run.catch(() => {});
@@ -932,17 +915,9 @@ export class RelaySync implements RelaySyncApi {
 		void this.store.setBootstrapFloor(undefined);
 	}
 
-	private loadReplayGroups(): Promise<void> {
-		return this.replayGroupsLoaded ??= this.store.getReplayGroups().then((groups) => {
-			for (const [key, at] of groups) {
-				if (!this.importedChunkGroups.has(key)) this.replayGroups.set(key, Math.min(this.replayGroups.get(key) ?? Infinity, at));
-			}
-		});
-	}
-
 	private persistCursor(): Promise<void> {
 		const run = this.cursorChain.then(async () => {
-			await this.loadReplayGroups();
+			await this.ensureSession(); // the mirror must reflect persisted obligations before overwriting them
 			const saved = await this.store.getCursor();
 			const floor = Math.min(this.discardedChunkFloor, ...this.replayGroups.values());
 			const next = Math.min(this.cursor, floor === Infinity ? Infinity : Math.max(0, floor - 1));

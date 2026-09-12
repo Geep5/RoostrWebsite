@@ -1,6 +1,6 @@
 import { afterEach, beforeAll, describe, expect, test, spyOn } from "bun:test";
 import { readFileSync } from "node:fs";
-import { initCore } from "../src/lib/engine/core";
+import { coreCall, initCore } from "../src/lib/engine/core";
 import { finalizeEvent, getPublicKey, nip19, nip44, type Event } from "nostr-tools";
 import { sha256 } from "@noble/hashes/sha2.js";
 import { bytesToHex } from "@noble/hashes/utils.js";
@@ -54,10 +54,9 @@ interface SyncInternals {
 	watchdog(): Promise<void>;
 	cursor: number;
 	historyComplete: boolean;
-	chunkGroups: Map<string, unknown>;
+	pool: { publish(relays: string[], event: Event): Promise<string>[]; querySync(): Promise<Event[]>; subscribeMany(): { close(): void }; close(): void };
 	queryRelayPage(url: string, filter: Record<string, unknown>): Promise<Event[]>;
 	publishOnce(item: { objectId: string; changeId: string; b64: string; attempts: number; notBefore: number; pending: PendingPublish }): Promise<boolean>;
-	pool: { publish(relays: string[], event: Event): Promise<string>[]; querySync(): Promise<Event[]>; subscribeMany(): { close(): void }; close(): void };
 }
 function syncFixture(store: ChangeStore, relays: string[] = []) {
 	const sync = new RelaySync(ownerSk, relays, store, { onObjects() {}, onStatus() {} });
@@ -65,6 +64,8 @@ function syncFixture(store: ChangeStore, relays: string[] = []) {
 	cleanup.push(() => sync.stop());
 	return { sync, internals: sync as unknown as SyncInternals };
 }
+/** Open chunk groups now live in the core session (the receive state machine moved out of RelaySync). */
+const openGroups = () => coreCall<{ groups: number }>("sync", { action: "state" }).groups;
 const base64 = (c: ChangeJSON) => Buffer.from(encodeChange(c)).toString("base64");
 function event(part: string, sk = memberSk, tags: string[][] = [], key = spaceKey): Event {
 	return finalizeEvent({ kind: 1078, created_at: 100, content: nip44.encrypt(part, key), tags: [["h", blindShared(bytesToHex(key), "space:space")], ...tags] }, sk);
@@ -192,14 +193,14 @@ describe("encrypted chunk provenance", () => {
 		const { internals } = syncFixture(store);
 		await store.setCursor(200);
 		for (let i = 0; i < 129; i++) await internals.handleLiveEvent(event("YQ", memberSk, [["c", i.toString(16).padStart(16, "0"), "0", "2"]]));
-		expect(internals.chunkGroups.size).toBe(128);
+		expect(openGroups()).toBe(128);
 		expect(await store.getCursor()).toBe(99);
 		expect((await store.getReplayGroups()).length).toBe(129);
 		const now = Date.now();
 		const clock = spyOn(Date, "now").mockReturnValue(now + 300_001);
 		try {
 			await internals.handleLiveEvent(event("YQ", memberSk, [["c", "ffffffffffffffff", "0", "2"]]));
-			expect(internals.chunkGroups.size).toBe(1);
+			expect(openGroups()).toBe(1);
 			store.close(); await store.open();
 			expect(await store.getCursor()).toBe(99);
 			expect((await store.getReplayGroups()).length).toBe(130);
@@ -270,7 +271,7 @@ describe("history completion", () => {
 		await internals.handleLiveEvent(event(parts[0], ownerSk, [["c", gid, "0", "2"]]));
 		const pages = spyOn(internals, "queryRelayPage").mockRejectedValue(new Error("unavailable"));
 		expect(await internals.backfill(201)).toBe(false);
-		expect(internals.chunkGroups.size).toBe(1);
+		expect(openGroups()).toBe(1);
 		store.close(); await store.open();
 		expect(await store.getCursor()).toBe(0);
 		const restarted = syncFixture(store, ["wss://invalid.test"]).internals;
@@ -303,7 +304,7 @@ describe("history completion", () => {
 		expect(await internals.backfill(201)).toBe(true);
 		expect(await store.getCursor()).toBe(200);
 		expect(await store.getReplayGroups()).toEqual([]);
-		expect(internals.chunkGroups.size).toBe(0);
+		expect(openGroups()).toBe(0);
 	});
 	test("a fresh conflict during an otherwise complete scan requires another clean covering pass", async () => {
 		const store = await storeFixture();
@@ -319,7 +320,7 @@ describe("history completion", () => {
 			return [];
 		});
 		expect(await internals.backfill(201)).toBe(false);
-		expect(internals.chunkGroups.size).toBe(0);
+		expect(openGroups()).toBe(0);
 		expect(await store.getCursor()).toBe(99);
 		pages.mockResolvedValue([]);
 		expect(await internals.backfill(201)).toBe(false);
@@ -368,10 +369,10 @@ describe("history completion", () => {
 		const pages = spyOn(internals, "queryRelayPage").mockImplementation(async (_relay, filter) => filter["#h"] ? history : []);
 		expect(await internals.backfill(201)).toBe(true);
 		expect(await store.getCursor()).toBe(200);
-		expect(internals.chunkGroups.size).toBe(0);
+		expect(openGroups()).toBe(0);
 		expect(await store.getReplayGroups()).toEqual([]);
 		await internals.handleLiveEvent(history[1]);
-		expect(internals.chunkGroups.size).toBe(0);
+		expect(openGroups()).toBe(0);
 		expect(pages.mock.calls.every(([, filter]) => filter.since === 0)).toBe(true);
 		expect(await store.getCursor()).toBe(200);
 	});
@@ -390,7 +391,7 @@ describe("history completion", () => {
 		});
 		expect(await internals.backfill(100)).toBe(false);
 		expect(await store.getCursor()).toBe(99);
-		expect(internals.chunkGroups.size).toBe(1);
+		expect(openGroups()).toBe(1);
 		expect((await store.getReplayGroups()).length).toBe(1);
 		commits.mockRestore();
 		pages.mockImplementation(async (_relay, filter) => filter["#h"] ? history : []);
