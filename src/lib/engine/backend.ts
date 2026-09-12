@@ -7,7 +7,7 @@
 import type { ObjectJSON, ObjectSummary, SpaceJSON, RelationDefJSON, ValueJSON } from "$lib/types";
 import type { ChangeJSON, PendingPublish, QueryBody } from "./contracts";
 import { decodeChange, encodeChange, changeId } from "./proto";
-import { initCore } from "./core";
+import { coreCall, initCore } from "./core";
 import { sha256 } from "@noble/hashes/sha2.js";
 
 const HEX = "0123456789abcdef";
@@ -29,9 +29,8 @@ function fstr(fields: Record<string, ValueJSON> | undefined, k: string): string 
 	return fields?.[k]?.stringValue ?? "";
 }
 
-/** The synced vanish ledger object and its field prefix (src/vanish.odin). */
+/** The synced vanish ledger object (src/vanish.odin); the core reads its entries. */
 const VANISH_LOG_ID = "__vanished__";
-const VANISH_FIELD = "vanished:";
 
 export interface SyncStatus {
 	phase: "idle" | "backfill" | "live" | "error";
@@ -263,20 +262,18 @@ class WebBackend {
 	 * The ledger wins over whatever replayed. A relay copy of a vanished
 	 * object can arrive ahead of — or entirely without — the delete change
 	 * that tombstones it, since NIP-09 is advisory and a peer may republish
-	 * after the deletion was requested. Mirrors enforce_vanished_locked()
-	 * in the desktop's store.odin, which is why the two agree on what
-	 * exists.
+	 * after the deletion was requested. The ledger is read by the core's
+	 * `sync`/`vanished` method, shared with the desktop's
+	 * enforce_vanished_locked(), which is why the two agree on what exists.
 	 */
 	private enforceVanished(rebuilt: boolean, touched: string[]): void {
 		const ledgerChanged = touched.includes(VANISH_LOG_ID);
 		if (rebuilt || ledgerChanged) {
-			this.vanished = new Set<string>();
-			const ledger = this.states.get(VANISH_LOG_ID);
-			if (ledger) {
-				for (const k of Object.keys(ledger.fields)) {
-					if (k.startsWith(VANISH_FIELD)) this.vanished.add(k.slice(VANISH_FIELD.length));
-				}
-			}
+			const entries = coreCall<Array<{ objectId: string; at: number }>>("sync", {
+				action: "vanished",
+				ledger: this.states.get(VANISH_LOG_ID) ?? null,
+			});
+			this.vanished = new Set<string>(entries.map((e) => e.objectId));
 		}
 		if (this.vanished.size === 0) return;
 		// Ledger (re)loaded: sweep everything it names — O(vanished), boot

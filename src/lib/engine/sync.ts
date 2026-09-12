@@ -128,74 +128,26 @@ interface SharedSpace extends SharedSpaceInfo {
 	writerSet: Set<string>;
 }
 
-const OWNER_FIELDS: Record<string, true> = { members: true, owner: true, keyId: true, key: true, keys: true, served_by: true, machine: true, machine_id: true, machineId: true, bound_object: true };
-const CONTROL_TYPES: Record<string, true> = { machine: true, agent: true, program: true, typescript: true, skill: true, peer: true };
-
-function sameValue(a: unknown, b: unknown): boolean {
-	if (a === b) return true;
-	if (!a || !b || typeof a !== "object" || typeof b !== "object") return false;
-	if (Array.isArray(a) !== Array.isArray(b)) return false;
-	const left = a as Record<string, unknown>, right = b as Record<string, unknown>;
-	const keys = Object.keys(left);
-	return keys.length === Object.keys(right).length && keys.every((k) => Object.hasOwn(right, k) && sameValue(left[k], right[k]));
-}
-
-/** Pure authority gate. Existing scope and privileges never come from the candidate. */
+/**
+ * Pure authority gate, shared with the daemon and iOS through the core's
+ * `sync`/`authorize` method. Existing scope and privileges never come from
+ * the candidate. A malformed change or state is a rejection, not a fault.
+ */
 export function authorizeSharedChange(change: ChangeJSON, provenance: SharedProvenance, space: SharedSpaceInfo,
 	localPk: string, trustedSpace: ObjectJSON | null, existing: ObjectJSON | null): boolean {
-	if (provenance.spaceId !== space.spaceId || provenance.keyId !== space.keyId) return false;
-	const owner = provenance.signer === (space.owner || localPk);
-	if (trustedSpace && (trustedSpace.typeKey !== "channel" || trustedSpace.id !== space.spaceId || trustedSpace.deleted)) return false;
-	if (!owner) {
-		const members = trustedSpace?.fields.members?.valuesValue?.items ?? [];
-		if (!members.some((m) => m.mapValue?.entries?.role?.stringValue === "writer" &&
-			npubToHex(m.mapValue?.entries?.npub?.stringValue ?? "") === provenance.signer)) return false;
+	try {
+		return coreCall<{ ok: boolean; reason: string }>("sync", {
+			action: "authorize",
+			change,
+			provenance,
+			space: { spaceId: space.spaceId, keyId: space.keyId, owner: space.owner || localPk },
+			trustedSpace,
+			existing,
+		}).ok;
+	} catch (err) {
+		if (err instanceof CoreError && err.code === "domain") return false;
+		throw err;
 	}
-	if (!change.objectId || change.objectId === "__vanished__") return false;
-	if (existing) {
-		const scope = existing.typeKey === "channel" ? existing.id : existing.fields.channel?.stringValue;
-		if (scope !== space.spaceId || existing.typeKey === "vanish_log") return false;
-		if (!owner && Object.hasOwn(CONTROL_TYPES, existing.typeKey)) return false;
-	}
-	let type = existing?.typeKey ?? "";
-	let scoped = !!existing;
-	if (change.snapshot != null) {
-		const snap = change.snapshot as { id?: string; typeKey?: string; fields?: Record<string, unknown>; deleted?: boolean };
-		if (typeof snap !== "object" || Array.isArray(snap) || snap.id !== change.objectId || !snap.typeKey) return false;
-		if (existing && snap.typeKey !== existing.typeKey) return false;
-		type = snap.typeKey;
-		const state = computeObject([{ ...change, ops: [] }]);
-		if (!state) return false;
-		scoped = type === "channel" ? change.objectId === space.spaceId : state.fields.channel?.stringValue === space.spaceId;
-		if (type === "channel" && Object.hasOwn(state.fields, "channel")) return false;
-		if (!scoped) return false;
-		if (!owner) {
-			if (type === "channel" && (!existing || !!snap.deleted !== !!existing.deleted)) return false;
-			for (const key of Object.keys(OWNER_FIELDS)) if (!sameValue(state.fields[key], existing?.fields[key])) return false;
-		}
-	}
-	for (const op of change.ops) {
-		if (Object.keys(op).length !== 1) return false;
-		if (op.objectCreate) {
-			if (!op.objectCreate.typeKey || (type && op.objectCreate.typeKey !== type)) return false;
-			type = op.objectCreate.typeKey;
-			if (type === "channel") {
-				if (!owner || change.objectId !== space.spaceId) return false;
-				scoped = true;
-			}
-		}
-		if (op.fieldSet || op.fieldDelete) {
-			const key = op.fieldSet?.key ?? op.fieldDelete!.key;
-			if (!owner && Object.hasOwn(OWNER_FIELDS, key)) return false;
-			if (key === "channel") {
-				if (change.objectId === space.spaceId || !op.fieldSet || op.fieldSet.value.stringValue !== space.spaceId) return false;
-				scoped = true;
-			}
-		}
-		if (op.objectDelete && type === "channel" && !owner) return false;
-	}
-	return scoped && !!type && type !== "vanish_log" && (owner || !Object.hasOwn(CONTROL_TYPES, type)) &&
-		(type !== "channel" || change.objectId === space.spaceId);
 }
 
 interface ImportItem {
