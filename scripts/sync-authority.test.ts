@@ -8,7 +8,7 @@ import { authorizeSharedChange, blindShared, RelaySync, type SharedSpaceInfo } f
 import { ChangeStore, destroyDatabase } from "../src/lib/engine/store";
 import { changeId, decodeChange, encodeChange } from "../src/lib/engine/proto";
 import { computeObject } from "../src/lib/engine/replay";
-import type { ChangeJSON, PendingPublish, SharedProvenance } from "../src/lib/engine/contracts";
+import type { ChangeJSON, SharedProvenance } from "../src/lib/engine/contracts";
 import type { ObjectJSON } from "../src/lib/types";
 
 const ownerSk = new Uint8Array(32).fill(1), memberSk = new Uint8Array(32).fill(2), strangerSk = new Uint8Array(32).fill(3);
@@ -56,13 +56,19 @@ interface SyncInternals {
 	historyComplete: boolean;
 	pool: { publish(relays: string[], event: Event): Promise<string>[]; querySync(): Promise<Event[]>; subscribeMany(): { close(): void }; close(): void };
 	queryRelayPage(url: string, filter: Record<string, unknown>): Promise<Event[]>;
-	publishOnce(item: { objectId: string; changeId: string; b64: string; attempts: number; notBefore: number; pending: PendingPublish }): Promise<boolean>;
+	backfillChain: Promise<boolean>;
 }
 function syncFixture(store: ChangeStore, relays: string[] = []) {
 	const sync = new RelaySync(ownerSk, relays, store, { onObjects() {}, onStatus() {} });
+	const internals = sync as unknown as SyncInternals;
 	sync.setSharedSpaces([space]);
-	cleanup.push(() => sync.stop());
-	return { sync, internals: sync as unknown as SyncInternals };
+	cleanup.push(() => stopSettled(sync, internals));
+	return { sync, internals };
+}
+/** stop() leaves the background history walk running; let it settle before the store closes under it. */
+async function stopSettled(sync: RelaySync, internals: SyncInternals): Promise<void> {
+	sync.stop();
+	await internals.backfillChain;
 }
 /** Open chunk groups now live in the core session (the receive state machine moved out of RelaySync). */
 const openGroups = () => coreCall<{ groups: number }>("sync", { action: "state" }).groups;
@@ -403,20 +409,29 @@ describe("history completion", () => {
 describe("durable personal outbox", () => {
 	test("offline save and exact signed ciphertext survive close and reopen until acknowledgement", async () => {
 		const store = await storeFixture();
-		await store.addLocalChange(encodeChange(createDoc), createDoc);
-		const { internals } = syncFixture(store);
+		await store.addChanges([{ bytes: encodeChange(createDoc), change: createDoc }]);
 		const attempts: Event[] = [];
-		let offline = true;
-		internals.pool = { publish: (_, e) => { attempts.push(e); return [offline ? Promise.reject(new Error("offline")) : Promise.resolve("ok")]; }, querySync: async () => [], subscribeMany: () => ({ close() {} }), close() {} };
-		const pending = (await store.getPending(createDoc.id))!;
-		const item = { objectId: "doc", changeId: createDoc.id, b64: base64(createDoc), attempts: 0, notBefore: 0, pending };
-		expect(await internals.publishOnce(item)).toBe(false);
+		const fakePool = (ok: boolean, sent: PromiseWithResolvers<Event>) => ({
+			publish: (_: string[], e: Event) => { attempts.push(e); sent.resolve(e); return [ok ? Promise.resolve("ok") : Promise.reject(new Error("offline"))]; },
+			querySync: async () => [], subscribeMany: () => ({ close() {} }), close() {},
+		});
+		const offline = syncFixture(store);
+		const firstSend = Promise.withResolvers<Event>();
+		offline.internals.pool = fakePool(false, firstSend);
+		await offline.sync.start();
+		await offline.sync.publish(encodeChange(createDoc), createDoc.id, "doc");
+		await firstSend.promise;
+		await stopSettled(offline.sync, offline.internals);
+		// The signed event was persisted before the send was attempted.
 		store.close(); await store.open();
 		expect((await store.changesFor("doc"))[0].id).toBe(createDoc.id);
 		const restored = (await store.getPending(createDoc.id))!;
 		expect(JSON.stringify(restored.events?.[0])).toBe(JSON.stringify(attempts[0]));
-		offline = false;
-		expect(await internals.publishOnce({ ...item, pending: restored })).toBe(true);
+		const online = syncFixture(store);
+		const secondSend = Promise.withResolvers<Event>();
+		online.internals.pool = fakePool(true, secondSend);
+		await online.sync.start();
+		await secondSend.promise;
 		expect(JSON.stringify(attempts[1])).toBe(JSON.stringify(attempts[0]));
 		expect(attempts[0].tags.some((tag) => tag[0] === "expiration")).toBe(false);
 		await store.markPublished(createDoc.id);
@@ -431,6 +446,5 @@ describe("durable personal outbox", () => {
 		internals.pool = { publish: (_, e) => { sent.resolve(e); return [Promise.resolve("ok")]; }, querySync: async () => [], subscribeMany: () => ({ close() {} }), close() {} };
 		await sync.start();
 		expect((await sent.promise).pubkey).toBe(owner);
-		sync.stop();
 	});
 });

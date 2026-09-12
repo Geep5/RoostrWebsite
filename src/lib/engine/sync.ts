@@ -15,12 +15,15 @@
  * ECDH shared secret. Receiving (decrypt, chunk reassembly, cursor, replay
  * bookkeeping) is the core's `sync` session (glonOdin/core/sync_session.odin);
  * this class feeds it verified events and persists what it reports.
+ * Publishing is the same session's outbox (glonOdin/core/sync_outbox.odin):
+ * the core owns queue order, dedupe, the rotated-key rule, backoff and
+ * seals a change on its first attempt; this class signs the sealed parts,
+ * persists the exact signed events, sends them and reports the outcome.
  *
  * Backfill pages querySync backwards via `until` (since cursor+1), paced
  * between pages so public relays don't rate-limit us; live is a
- * subscribeMany since cursor+1. Publishing is a paced queue (one event per
- * PUBLISH_SPACING_MS) with exponential backoff, mirroring the daemon's
- * publishOnce loop.
+ * subscribeMany since cursor+1. Sends are paced one event per
+ * PUBLISH_SPACING_MS.
  */
 
 import { SimplePool, finalizeEvent, getPublicKey, nip19, nip44, verifyEvent, type Event } from "nostr-tools";
@@ -259,14 +262,26 @@ export interface SyncStats {
 	blindedTags: Set<string>;
 }
 
-interface PublishItem {
+interface SealedParts {
+	gid: string;
+	parts: Array<{ content: string; tags: string[][] }>;
+}
+
+/** One publish obligation handed out by the core outbox; `sealed` only until the host reports `sealed: true`. */
+interface OutboxItem {
+	key: string;
 	objectId: string;
 	changeId: string;
-	b64: string;
 	attempts: number;
-	notBefore: number;
-	space?: SharedSpace;
-	pending: PendingPublish;
+	spaceId?: string;
+	keyId?: number;
+	sealed?: SealedParts;
+}
+
+interface OutboxNext {
+	item?: OutboxItem;
+	waitMs: number;
+	pending: number;
 }
 
 export class RelaySync implements RelaySyncApi {
@@ -306,8 +321,8 @@ export class RelaySync implements RelaySyncApi {
 	private cursorChain: Promise<void> = Promise.resolve();
 	private backfillChain: Promise<boolean> = Promise.resolve(false);
 
-	private readonly queue: PublishItem[] = [];
-	private readonly queued = new Set<string>();
+	/** Mirror of the core outbox's queued-not-in-flight count, for the status dot. */
+	private pendingCount = 0;
 	private queueRunning = false;
 
 	private readonly pendingObjects = new Set<string>();
@@ -342,6 +357,7 @@ export class RelaySync implements RelaySyncApi {
 			action: "session",
 			pk: this.pk,
 			conversationKey: this.conversationKey,
+			secret: this.secretHex,
 			spaces: [...this.sharedSpaces.values()].map((sp) => ({ spaceId: sp.spaceId, keyHex: sp.keyHex, keyId: sp.keyId })),
 			cursor: this.cursor,
 			replayGroups,
@@ -417,7 +433,7 @@ export class RelaySync implements RelaySyncApi {
 			phase: this.liveUp ? "live" : "backfill",
 			imported: this.stats.imported,
 			detail: this.liveUp ? this.statusDetail() : undefined,
-			pending: this.queue.length,
+			pending: this.pendingCount,
 		});
 	}
 
@@ -531,7 +547,7 @@ export class RelaySync implements RelaySyncApi {
 		await this.store.open();
 		this.cursor = await this.store.getCursor();
 		await this.openSession();
-		for (const pending of await this.store.pendingPublishes()) this.enqueue(pending);
+		for (const pending of await this.store.pendingPublishes()) this.offerToOutbox(pending);
 		this.events.onStatus({ phase: "backfill", imported: 0 });
 
 		// The incremental `since = cursor+1` shortcut is only sound once ONE
@@ -912,7 +928,8 @@ export class RelaySync implements RelaySyncApi {
 		this.replayFaultGeneration++;
 		this.discardedChunkFloor = Math.min(this.discardedChunkFloor, at);
 		this.historyComplete = false;
-		void this.store.setBootstrapFloor(undefined);
+		// A closed store (stop() under a running walk) must not surface as an unhandled rejection.
+		void this.store.setBootstrapFloor(undefined).catch(() => {});
 	}
 
 	private persistCursor(): Promise<void> {
@@ -966,24 +983,36 @@ export class RelaySync implements RelaySyncApi {
 	// ── Publish ────────────────────────────────────────────────────
 
 	async publish(bytes: Uint8Array, changeId: string, objectId: string): Promise<void> {
-		const pending: PendingPublish[] = [{ key: changeId, changeId, objectId, bytes }];
+		const candidates: PendingPublish[] = [{ key: changeId, changeId, objectId, bytes }];
 		const space = this.sharedSpaces.get(this.spaceOf(objectId));
-		if (space) pending.push({ key: `${space.spaceId}/${space.keyId}/${changeId}`, changeId, objectId, bytes, spaceId: space.spaceId, keyId: space.keyId });
-		for (const item of pending) {
-			if (this.queued.has(item.key) || await this.store.isPublished(item.key)) continue;
+		if (space) candidates.push({ key: `${space.spaceId}/${space.keyId}/${changeId}`, changeId, objectId, bytes, spaceId: space.spaceId, keyId: space.keyId });
+		await this.ensureSession();
+		for (const item of candidates) {
+			if (await this.store.isPublished(item.key)) continue;
 			const saved = await this.store.getPending(item.key);
 			if (!saved) await this.store.savePending(item);
-			this.enqueue(saved ?? item);
+			this.offerToOutbox(saved ?? item);
 		}
 	}
 
-	private enqueue(pending: PendingPublish): void {
-		if (this.stopped || this.queued.has(pending.key)) return;
-		const space = pending.spaceId ? this.sharedSpaces.get(pending.spaceId) : undefined;
-		// A rotated key cannot recreate old ciphertext; retain the obligation for export.
-		if (pending.spaceId && (!space || space.keyId !== pending.keyId) && !pending.events) return;
-		this.queued.add(pending.key);
-		this.queue.push({ objectId: pending.objectId, changeId: pending.changeId, b64: bytesToB64(pending.bytes), attempts: 0, notBefore: 0, space, pending });
+	/** Hand a durable obligation to the core outbox, which owns order, dedupe and
+	 * the rotated-key rule; the store record stays either way. */
+	private offerToOutbox(pending: PendingPublish): void {
+		if (!this.sessionOpen) return; // stopped or retired: the next start() re-offers from the store
+		const { queued, pending: count } = coreCall<{ queued: boolean; reason?: string; pending: number }>("sync", {
+			action: "outbox_enqueue",
+			pending: {
+				key: pending.key,
+				objectId: pending.objectId,
+				changeId: pending.changeId,
+				bytes: bytesToB64(pending.bytes),
+				spaceId: pending.spaceId,
+				keyId: pending.keyId,
+				hasEvents: !!pending.events,
+			},
+		});
+		this.pendingCount = count;
+		if (!queued) return;
 		this.emitLiveStatus();
 		if (!this.queueRunning) {
 			this.queueRunning = true;
@@ -991,33 +1020,36 @@ export class RelaySync implements RelaySyncApi {
 		}
 	}
 
-	/** Paced, eventually-durable publish loop (daemon's publishOnce shape):
-	 * one event per PUBLISH_SPACING_MS, failures re-queued with exponential
-	 * backoff, never dropped while the sync lives. */
+	/** Drains the core outbox: one event per PUBLISH_SPACING_MS, outcomes
+	 * reported back so the core applies backoff and never drops an item while
+	 * the session lives. */
 	private async runPublishQueue(): Promise<void> {
-		while (!this.stopped) {
-			const now = Date.now();
-			const idx = this.queue.findIndex((q) => q.notBefore <= now);
-			if (idx === -1) {
-				if (this.queue.length === 0) break;
-				await sleep(500);
+		while (!this.stopped && this.sessionOpen) {
+			let next: OutboxNext;
+			try {
+				next = coreCall<OutboxNext>("sync", { action: "outbox_next", nowMs: Date.now() });
+			} catch (err) {
+				// An unsealable change (e.g. beyond the chunk limit): the core backed it off; keep draining the rest.
+				this.events.onStatus({ phase: "error", detail: `publish rejected: ${String(err).slice(0, 120)}` });
+				await sleep(PUBLISH_SPACING_MS);
 				continue;
 			}
-			const [item] = this.queue.splice(idx, 1);
-			const key = item.pending.key;
-			try {
-				if (await this.store.isPublished(key)) {
-					await this.store.markPublished(key);
-					this.queued.delete(key);
-					continue;
-				}
-				if (!await this.publishOnce(item)) throw new Error("publication pending");
-				await this.store.markPublished(key);
-				this.queued.delete(key);
-			} catch {
-				item.attempts++;
-				item.notBefore = Date.now() + Math.min(300_000, 2000 * 2 ** item.attempts);
-				this.queue.push(item);
+			this.pendingCount = next.pending;
+			if (!next.item) {
+				if (next.pending === 0) break;
+				await sleep(Math.min(500, Math.max(50, next.waitMs)));
+				continue;
+			}
+			const outcome = await this.publishOnce(next.item);
+			if (this.sessionOpen) {
+				const { pending } = coreCall<{ pending: number }>("sync", {
+					action: "outbox_result",
+					key: next.item.key,
+					ok: outcome.ok,
+					sealed: outcome.sealed,
+					nowMs: Date.now(),
+				});
+				this.pendingCount = pending;
 			}
 			await sleep(PUBLISH_SPACING_MS);
 		}
@@ -1025,35 +1057,40 @@ export class RelaySync implements RelaySyncApi {
 		this.emitLiveStatus();
 	}
 
-	private async publishOnce(item: PublishItem): Promise<boolean> {
+	/** Sign the core's sealed parts on the first attempt, persist the exact
+	 * signed events before sending, then send. `sealed` tells the core the
+	 * ciphertext is on disk so retries reuse it byte for byte. */
+	private async publishOnce(item: OutboxItem): Promise<{ ok: boolean; sealed: boolean }> {
+		let sealed = false;
 		try {
-			if (!item.pending.events) {
-				// Chunking, blinded tags, and NIP-44 sealing; "change exceeds chunk limit" surfaces here.
-				const sealed = coreCall<{ gid: string; parts: Array<{ content: string; tags: string[][] }> }>("wire", {
-					action: "seal",
-					change: item.b64,
-					objectId: item.objectId,
-					conversationKey: item.space ? item.space.keyHex : this.conversationKey,
-					...(item.space ? { space: { keyHex: item.space.keyHex, spaceId: item.space.spaceId } } : { secret: this.secretHex }),
-				});
+			if (await this.store.isPublished(item.key)) return { ok: true, sealed };
+			const pending = await this.store.getPending(item.key);
+			if (!pending) {
+				this.events.onStatus({ phase: "error", detail: `publish skipped: no stored obligation for ${item.key}` });
+				return { ok: true, sealed };
+			}
+			if (!pending.events) {
+				if (!item.sealed) throw new Error("no signed events to resend");
 				const created_at = Math.floor(Date.now() / 1000);
-				item.pending.events = sealed.parts.map((part) =>
+				pending.events = item.sealed.parts.map((part) =>
 					finalizeEvent({ kind: CHANGE_KIND, created_at, tags: part.tags, content: part.content }, this.sk));
 			}
 			// Persist BEFORE sending, including after any failed IndexedDB attempt.
-			await this.store.savePending(item.pending);
-			for (const event of item.pending.events) {
+			await this.store.savePending(pending);
+			sealed = true;
+			for (const event of pending.events) {
 				await Promise.any(this.pool.publish(this.relays, event));
-				if (item.pending.events.length > 1) await sleep(PUBLISH_SPACING_MS);
+				if (pending.events.length > 1) await sleep(PUBLISH_SPACING_MS);
 			}
-			return true;
+			await this.store.markPublished(item.key);
+			return { ok: true, sealed };
 		} catch (err) {
 			const detail =
 				err instanceof AggregateError
 					? err.errors.map((e) => String(e).slice(0, 80)).join(" | ")
 					: String(err).slice(0, 120);
 			this.events.onStatus({ phase: "error", detail: `publish rejected (attempt ${item.attempts + 1}): ${detail}` });
-			return false;
+			return { ok: false, sealed };
 		}
 	}
 }
