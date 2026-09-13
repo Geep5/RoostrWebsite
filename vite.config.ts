@@ -1,11 +1,14 @@
 import adapter from '@sveltejs/adapter-static';
 import { sveltekit } from '@sveltejs/kit/vite';
 import { defineConfig } from 'vite';
+import engine from './static/engine-core.json';
 
 export default defineConfig({
 	define: {
 		// Visible in Settings - answers "which build is this phone running?"
 		__BUILD_STAMP__: JSON.stringify(new Date().toISOString().slice(0, 16).replace("T", " ") + " UTC"),
+		// Pins the engine fetch to this build and lets the loader reject a cached stale module.
+		__ENGINE_SHA__: JSON.stringify(engine.sha256),
 	},
 	plugins: [
 		sveltekit({

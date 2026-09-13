@@ -1,3 +1,5 @@
+import { sha256 } from "@noble/hashes/sha2.js";
+import { bytesToHex } from "@noble/hashes/utils.js";
 import { odinRuntime, type OdinRuntime } from "./odin-runtime";
 
 const ABI_VERSION = 1;
@@ -42,9 +44,15 @@ export function initCore(options: CoreInitOptions = {}): Promise<void> {
 		const host = odinRuntime();
 		let bytes = options.wasmBytes;
 		if (!bytes) {
-			const response = await fetch(options.wasmUrl ?? "/engine.wasm");
+			// The JS bundle is content-hashed but /engine.wasm is a stable URL: pin
+			// the request to the build's engine and refuse a cached stale module
+			// (its dispatch table would answer "unknown core method").
+			const response = await fetch(options.wasmUrl ?? `/engine.wasm?v=${__ENGINE_SHA__.slice(0, 16)}`);
 			if (!response.ok) throw new Error(`Unable to load shared core: HTTP ${response.status}`);
 			bytes = await response.arrayBuffer();
+			if (!options.wasmUrl && bytesToHex(sha256(new Uint8Array(bytes))) !== __ENGINE_SHA__) {
+				throw new Error("Shared core is stale: the browser served an engine.wasm that does not match this build. Reload the page.");
+			}
 		}
 		const instance = (await WebAssembly.instantiate(bytes, host.imports)).instance;
 		const api = instance.exports as CoreExports;
