@@ -1,12 +1,11 @@
 :8080 {
 	root * /srv
 	encode gzip
-	# Hashed bundles are immutable; the engine and its manifest sit at stable
-	# URLs and must revalidate so a new build never runs against a cached core.
+	# Everything revalidates by default (HTML shell, engine, manifest) so a new
+	# build never runs against a cached core; hashed bundles are immutable.
+	header Cache-Control "no-cache"
 	@immutable path /_app/immutable/*
 	header @immutable Cache-Control "public, max-age=31536000, immutable"
-	@engine path /engine.wasm /engine-core.json /200.html
-	header @engine Cache-Control "no-cache"
 	try_files {path} {path}/index.html /200.html
 	file_server
 }
