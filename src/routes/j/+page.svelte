@@ -27,7 +27,7 @@
 	async function refreshIdentity() {
 		try {
 			const identity = await import("$lib/client-identity");
-			hasKey = isLocalBackend ? !!pairedSession() : !!identity.myNpub();
+			hasKey = isLocalBackend ? !!pairedSession() : !!(await identity.loadNpub());
 		} catch { hasKey = false; }
 		checked = true;
 	}

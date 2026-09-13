@@ -8,7 +8,7 @@
 	import { layoutOf, discussionUI, store, refreshAll, connectEvents } from "$lib/data.svelte";
 	import { tabs, HOME_PATH } from "$lib/tabs.svelte";
 	import CheckboxIcon from "$lib/components/CheckboxIcon.svelte";
-	import { backend, isLocalBackend, type SyncStatus } from "$lib/client-backend";
+	import { backend, isLocalBackend, isIOSBackend, type SyncStatus } from "$lib/client-backend";
 	import { pairedSession, onPairingChange } from "$lib/local-transport";
 	import PairGate from "$lib/components/PairGate.svelte";
 	import { loadKey } from "$lib/engine/keys";
@@ -638,7 +638,7 @@
 
 	async function boot() {
 		if (booting) return;
-		hasBrowserIdentity = !isLocalBackend && !!loadKey();
+		hasBrowserIdentity = !isLocalBackend && !isIOSBackend && !!loadKey();
 		booting = true;
 		bootError = "";
 		try {
@@ -663,18 +663,22 @@
 	// Channel selection settles as backfill fills the store; bootstrap a
 	// Personal channel ONLY once live with a genuinely empty vault
 	// (a fresh key), never mid-backfill of an existing one.
+	// Seeding publishes several changes, each ticking `sync`; the effect must
+	// not fork a second Personal while the first is still in flight.
+	let seedingPersonal = false;
 	$effect(() => {
 		if (!authed) return;
 		if (!activeSpace.id && store.channels.length > 0) activeSpace.id = store.channels[0].id;
 		// A fresh key's empty vault gets a Personal channel - but ONLY once a
 		// complete history walk proves the vault really is empty (an
 		// interrupted or relay-degraded first sync must never fork one).
-		if (sync.phase === "live" && sync.bootstrapped && store.loaded && store.channels.length === 0) {
+		if (!seedingPersonal && sync.phase === "live" && sync.bootstrapped && store.loaded && store.channels.length === 0) {
+			seedingPersonal = true;
 			void spaceApi.create("Personal").then(async ({ id }) => {
 				await seedSpaceDefaults(id);
 				await refreshAll();
 				activeSpace.id = id;
-			});
+			}).finally(() => { seedingPersonal = false; });
 		}
 	});
 
@@ -684,7 +688,8 @@
 		const applyMq = () => (isMobile = mq.matches);
 		applyMq();
 		mq.addEventListener("change", applyMq);
-		if (isLocalBackend ? pairedSession() : loadKey()) void boot();
+		// iOS: the host holds the identity, so there is nothing to gate on.
+		if (isIOSBackend || (isLocalBackend ? pairedSession() : loadKey())) void boot();
 		const offPairing = onPairingChange(() => {
 			if (!isLocalBackend || pairedSession()) return;
 			authed = false;
@@ -709,7 +714,7 @@
 		<p role="status" style="text-align:center">Opening your vault…</p>
 	{:else if isLocalBackend}
 		<PairGate onready={() => void boot()} />
-	{:else if hasBrowserIdentity}
+	{:else if hasBrowserIdentity || isIOSBackend}
 		<div style="text-align:center;padding:48px"><p>Your identity and local changes remain on this device.</p><button onclick={() => void boot()}>Retry opening vault</button></div>
 	{:else}
 		<KeyGate onready={() => void boot()} />

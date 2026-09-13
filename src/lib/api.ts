@@ -7,6 +7,7 @@
 
 import type { ObjectJSON, ObjectSummary, SpaceJSON, RelationDefJSON, BlockJSON, ValueJSON } from "$lib/types";
 import { backend, isLocalBackend } from "$lib/client-backend";
+import { IOSBackend } from "$lib/ios-backend";
 import { localJSON } from "$lib/local-transport";
 import { loadKey, saveKey, authorIdFor, clearKey } from "$lib/engine/keys";
 import { nip19 } from "nostr-tools";
@@ -117,11 +118,18 @@ export interface NostrSettings {
 export const settings = {
 	fetch: async (): Promise<NostrSettings> => {
 		if (isLocalBackend) return localJSON<NostrSettings>("/api/settings");
+		if (backend instanceof IOSBackend) return backend.fetchSettings();
 		const key = loadKey();
 		return { hasKey: !!key, relays: backend.relays(), authorId: key ? authorIdFor(key) : "" };
 	},
 	importKey: async (key: string) => {
 		if (isLocalBackend) throw new Error("Change the daemon identity explicitly in its terminal. Browser pairing cannot import private keys into the daemon.");
+		if (backend instanceof IOSBackend) {
+			// Identity, replica and keyring live in the host; the page just restarts on the new key.
+			await backend.importKey(key.trim());
+			location.reload();
+			return {};
+		}
 		// The old identity's replica must not leak into the new one.
 		await backend.logout();
 		localStorage.removeItem("roostr-space-keys");
@@ -132,7 +140,7 @@ export const settings = {
 	},
 	logout: async () => {
 		await backend.logout();
-		if (isLocalBackend) { location.href = "/app"; return; }
+		if (isLocalBackend || backend instanceof IOSBackend) { location.href = "/app"; return; }
 		localStorage.removeItem("roostr-space-keys");
 		localStorage.removeItem("roostr-profile");
 		clearKey();
@@ -140,6 +148,7 @@ export const settings = {
 	},
 	exportKey: async (): Promise<{ nsec: string; hex: string }> => {
 		if (isLocalBackend) throw new Error("Run ./glon-odin key-export explicitly in the daemon terminal to back up its identity.");
+		if (backend instanceof IOSBackend) return backend.exportKey();
 		const key = loadKey();
 		if (!key) throw new Error("no key");
 		return { nsec: nip19.nsecEncode(key.sk), hex: bytesToHex(key.sk) };
