@@ -68,5 +68,5 @@ export function decodeJoinLink(blob: string): SpaceJoinLink | null {
 }
 
 export function joinUrl(link: SpaceJoinLink): string {
-	return `https://getroostr.fly.dev/j#${encodeJoinLink(link)}`;
+	return `https://roostr.space/j#${encodeJoinLink(link)}`;
 }

@@ -1,6 +1,6 @@
 <script lang="ts">
 	/**
-	 * Public join landing: getroostr.fly.dev/j#r2.<blob>. The link carries
+	 * Public join landing: roostr.space/j#r2.<blob>. The link carries
 	 * NO key - it only names a space and its owner. "Request to join"
 	 * gift-wraps your npub to the owner (NIP-59); they approve in space
 	 * settings, and the space key arrives gift-wrapped back to you.

@@ -1,6 +1,14 @@
 :8080 {
 	root * /srv
 	encode gzip
+	# Canonical host is roostr.space. The old hostname and www redirect the
+	# site and join links, but /app keeps serving everywhere: a browser vault's
+	# key and outbox live in that origin's storage and must not be orphaned.
+	@legacy {
+		header_regexp host Host ^(getroostr\.fly\.dev|www\.roostr\.space)$
+		not path /app /app/* /engine.wasm /engine-core.json /_app/*
+	}
+	redir @legacy https://roostr.space{uri} permanent
 	# Hashed bundles are immutable; everything else (HTML shell, engine,
 	# manifest) revalidates so a new build never runs against a cached core.
 	handle /_app/immutable/* {
