@@ -242,6 +242,7 @@
 	<footer>
 		<span class="brand"><img class="logo" src="/logo.png" alt="" /> Roostr</span>
 		<span class="muted">local-first · end-to-end encrypted · yours</span>
+		<a href="/privacy">Privacy</a>
 		<a href="https://github.com/Geep5/Roostr">GitHub</a>
 	</footer>
 </div>
