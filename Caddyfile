@@ -17,7 +17,7 @@
 	}
 	handle {
 		header Cache-Control "no-cache"
-		try_files {path} {path}/index.html /200.html
+		try_files {path} {path}.html {path}/index.html /200.html
 		file_server
 	}
 }
