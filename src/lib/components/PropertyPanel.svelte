@@ -89,7 +89,7 @@
 	});
 
 	function fmt(v: ValueJSON | undefined): string {
-		if (!v) return "";
+		if (!v || format === "repeat") return "";
 		if (v.boolValue !== undefined) return v.boolValue ? "☑" : "☐";
 		if (v.stringValue !== undefined) return v.stringValue;
 		if (v.intValue !== undefined) return format === "date" ? new Date(v.intValue).toLocaleDateString() : String(v.intValue);

@@ -119,7 +119,9 @@
 	}
 </script>
 
-{#if rel.format === "checkbox"}
+{#if rel.format === "repeat"}
+	<!-- Owned by Repeat.svelte on the object page; the relation is hidden, so this only guards a stray mount. -->
+{:else if rel.format === "checkbox"}
 	<!-- Anytype checkbox cell: their 20px icon, toggles on click. -->
 	<button class="chk" class:on={checked} aria-checked={checked} role="checkbox" onclick={() => void onsave({ boolValue: !checked })}>
 		<CheckboxIcon {checked} />

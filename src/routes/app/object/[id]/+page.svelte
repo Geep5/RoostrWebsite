@@ -10,7 +10,7 @@
 	import { discussionUI, store, refreshAll, onObjectEvent, layoutOf } from "$lib/data.svelte";
 	import Editor from "$lib/components/Editor.svelte";
 	import FeaturedProps from "$lib/components/FeaturedProps.svelte";
-	import RepeatPreview from "$lib/components/RepeatPreview.svelte";
+	import Repeat from "$lib/components/Repeat.svelte";
 	import Discussion from "$lib/components/Discussion.svelte";
 	import ConversationDrawer from "$lib/components/ConversationDrawer.svelte";
 	import { loadAgentThreads } from "$lib/conversations";
@@ -501,8 +501,7 @@
 			<FeaturedProps {object} relations={scopedRelations} onchanged={refresh} />
 		{/if}
 		{#if !isChannel && !isChat && !isType && !isRelation && !isTemplate && !isQuery && !isCollection && !isAgent}
-			<!-- UI preview: recurring objects (page + task layouts). Mock state only - see RepeatPreview.svelte. -->
-			<RepeatPreview objectId={object.id} dueDate={object.fields["dueDate"]?.intValue} />
+			<Repeat {object} onchanged={refresh} />
 		{/if}
 
 		{#if isChannel}

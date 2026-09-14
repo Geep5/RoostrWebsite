@@ -167,3 +167,68 @@ export function fieldStr(fields: Record<string, ValueJSON>, key: string): string
 	const v = fields[key];
 	return typeof v?.stringValue === "string" ? v.stringValue : "";
 }
+
+export type RepeatFreq = "day" | "week" | "month" | "year";
+
+/** `repeat_set` rule params. `anchor_ms` (epoch ms on the day the cadence counts from) defaults to today. */
+export interface RepeatRuleJSON {
+	freq: RepeatFreq;
+	interval: number;
+	/** 0 = Sun … 6 = Sat. Weekly only. */
+	weekdays: number[];
+	/** Monthly only: same calendar day, or same "2nd Tuesday". */
+	monthly: "date" | "weekday";
+	/** Minutes after local midnight. */
+	time: number;
+	/** IANA zone the rule was written in (informational). */
+	tz: string;
+	anchor_ms?: number;
+}
+
+/** The engine's `repeat` field, decoded from its mapValue. */
+export interface RepeatJSON extends Omit<RepeatRuleJSON, "anchor_ms"> {
+	/** Local-day index (days since 1970-01-01 in the wall clock) the cadence counts from. */
+	anchor: number;
+	/** Epoch ms of the current occurrence. */
+	next: number;
+	fired_for?: number;
+	fired_at?: number;
+	fired_by?: string;
+	last_done?: number;
+	last_skipped?: number;
+	count?: number;
+	last_run?: { at: number; machine: string; conversation: string; error?: string };
+}
+
+const REPEAT_FREQS: readonly string[] = ["day", "week", "month", "year"];
+
+export function repeatOf(fields: Record<string, ValueJSON>): RepeatJSON | null {
+	const e = fields["repeat"]?.mapValue?.entries;
+	if (!e) return null;
+	const int = (v: ValueJSON | undefined) => (typeof v?.intValue === "number" ? v.intValue : undefined);
+	const str = (v: ValueJSON | undefined) => (typeof v?.stringValue === "string" ? v.stringValue : undefined);
+	const freq = str(e["freq"]);
+	const time = int(e["time"]);
+	const anchor = int(e["anchor"]);
+	const next = int(e["next"]);
+	if (!freq || !REPEAT_FREQS.includes(freq) || time === undefined || anchor === undefined || next === undefined) return null;
+	const run = e["last_run"]?.mapValue?.entries;
+	const runAt = run && int(run["at"]);
+	return {
+		freq: freq as RepeatFreq,
+		interval: int(e["interval"]) ?? 1,
+		weekdays: (e["weekdays"]?.valuesValue?.items ?? []).map(int).filter((d): d is number => d !== undefined),
+		monthly: str(e["monthly"]) === "weekday" ? "weekday" : "date",
+		time,
+		tz: str(e["tz"]) ?? "",
+		anchor,
+		next,
+		fired_for: int(e["fired_for"]),
+		fired_at: int(e["fired_at"]),
+		fired_by: str(e["fired_by"]),
+		last_done: int(e["last_done"]),
+		last_skipped: int(e["last_skipped"]),
+		count: int(e["count"]),
+		last_run: run && runAt !== undefined ? { at: runAt, machine: str(run["machine"]) ?? "", conversation: str(run["conversation"]) ?? "", error: str(run["error"]) } : undefined,
+	};
+}

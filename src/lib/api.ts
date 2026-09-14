@@ -5,7 +5,7 @@
  * publish them to relays (the home daemon imports them like any device).
  */
 
-import type { ObjectJSON, ObjectSummary, SpaceJSON, RelationDefJSON, BlockJSON, ValueJSON } from "$lib/types";
+import type { ObjectJSON, ObjectSummary, SpaceJSON, RelationDefJSON, BlockJSON, ValueJSON, RepeatRuleJSON } from "$lib/types";
 import { backend, isLocalBackend } from "$lib/client-backend";
 import { IOSBackend } from "$lib/ios-backend";
 import { localJSON } from "$lib/local-transport";
@@ -58,8 +58,14 @@ export async function fetchAllQuery(body: Record<string, unknown>, page = 500): 
 	return out;
 }
 
+/**
+ * The planner keeps no clock of its own: `now_ms` and the host's wall-clock
+ * offset ride along with every action so recurring objects advance in the
+ * user's local day (including `set_field done`, which the planner rewrites
+ * into `occurrence_complete`).
+ */
 async function mutate(action: string, params: Record<string, unknown>): Promise<Record<string, unknown>> {
-	return backend.mutate(action, params);
+	return backend.mutate(action, { ...params, now_ms: Date.now(), tz_offset_min: -new Date().getTimezoneOffset() });
 }
 
 export const note = {
@@ -86,6 +92,14 @@ export const note = {
 	setType: (objectId: string, typeKey: string) => mutate("set_type", { object_id: objectId, type_key: typeKey }),
 	vanish: (objectIds: string | string[]) =>
 		mutate("vanish", Array.isArray(objectIds) ? { object_ids: objectIds } : { object_id: objectIds }),
+};
+
+/** Recurring objects: the engine owns the rule and the occurrence math; a recurring object is never `done`. */
+export const repeat = {
+	set: (objectId: string, rule: RepeatRuleJSON) => mutate("repeat_set", { object_id: objectId, rule }) as Promise<{ next: number }>,
+	clear: (objectId: string) => mutate("repeat_clear", { object_id: objectId }),
+	complete: (objectId: string) => mutate("occurrence_complete", { object_id: objectId }) as Promise<{ next: number }>,
+	skip: (objectId: string) => mutate("occurrence_skip", { object_id: objectId }) as Promise<{ next: number }>,
 };
 
 export const table = {

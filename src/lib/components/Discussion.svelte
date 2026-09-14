@@ -58,7 +58,9 @@
 				ts: Number(meta["ts"] ?? 0),
 				text: meta["text"] ?? "",
 				replyTo: meta["replyTo"] ?? "",
-				origin: meta["origin"] ?? "",
+				// The harness scheduler posts with origin "schedule" and the
+				// recurring object under origin_object.
+				origin: (meta["origin"] === "schedule" ? meta["origin_object"] : meta["origin"]) ?? "",
 				reactions,
 			});
 		}
@@ -207,6 +209,7 @@
 
 	function who(author: string): string {
 		if (author === me) return "You";
+		if (author === "scheduler") return "Scheduler";
 		// An agent posts as its own object id, wherever it is replying. It is
 		// absent from `summaries` (agents are hidden infrastructure), so the
 		// name comes from store.agents — without it, a reply on an ordinary
