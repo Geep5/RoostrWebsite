@@ -11,7 +11,8 @@
 	 */
 	import type { ObjectJSON, RepeatFreq, RepeatJSON } from "$lib/types";
 	import { repeatOf } from "$lib/types";
-	import { repeat } from "$lib/api";
+	import { repeat, fetchAllQuery, fetchObject } from "$lib/api";
+	import { isIOSBackend } from "$lib/client-backend";
 
 	let {
 		object,
@@ -38,6 +39,32 @@
 
 	const rule = $derived(repeatOf(object.fields));
 	let open = $state(false);
+
+	// Agent-owned occurrences run on the machine that serves the space, never
+	// on a phone; the cell says so and names the machine when it can.
+	const agentOwned = $derived(!!(object.fields["assignee"] ?? object.fields["agent"]));
+	let servingName = $state("");
+	$effect(() => {
+		const spaceId = object.fields["channel"]?.stringValue ?? "";
+		if (!agentOwned || !spaceId) {
+			servingName = "";
+			return;
+		}
+		void (async () => {
+			try {
+				const space = await fetchObject(spaceId);
+				const servedBy = space.fields["served_by"]?.stringValue ?? "";
+				if (!servedBy) {
+					servingName = "no machine yet";
+					return;
+				}
+				const machines = await fetchAllQuery({ type: "machine" });
+				servingName = machines.find((m) => m.fields["machine_id"]?.stringValue === servedBy)?.fields["name"]?.stringValue || `${servedBy.slice(0, 8)}…`;
+			} catch {
+				servingName = "";
+			}
+		})();
+	});
 	let busy = $state(false);
 	let error = $state("");
 	// Navigating object -> object closes a stale editor.
@@ -241,6 +268,11 @@
 	</div>
 
 	{#if rule}
+		{#if agentOwned}
+			<p class="meta">
+				<span>runs on {servingName || "the machine serving this space"}{isIOSBackend ? " · not on this device" : ""}</span>
+			</p>
+		{/if}
 		{#if rule.last_done !== undefined || rule.fired_at !== undefined || rule.last_run}
 			<p class="meta">
 				{#if rule.last_done !== undefined}
