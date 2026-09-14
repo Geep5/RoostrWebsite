@@ -6,7 +6,7 @@
 	import { fromDom, selectionOffsets, setCaret, toggleMark, toHtml } from "$lib/marks";
 	import { isToggleOpen, setToggleOpen } from "$lib/toggles";
 	import { refreshSpell, misspelledAt } from "$lib/spelldom";
-	import { addToDictionary } from "$lib/spell";
+	import { addToDictionary, suggestions } from "$lib/spell";
 	import BlockNode from "./BlockNode.svelte";
 	import BlockMenu from "./BlockMenu.svelte";
 	import type { MenuAction } from "./BlockMenu.svelte";
@@ -74,7 +74,7 @@
 
 	// ── Spellcheck (basic English dictionary + ignore list) ─────────
 	let spellTimer: ReturnType<typeof setTimeout> | undefined;
-	let spellMenu = $state<{ word: string; x: number; y: number } | null>(null);
+	let spellMenu = $state<{ word: string; x: number; y: number; el: HTMLElement; from: number; to: number; options: string[] } | null>(null);
 
 	function scheduleSpell() {
 		clearTimeout(spellTimer);
@@ -88,12 +88,54 @@
 		scheduleSpell();
 	});
 
+	/**
+	 * Replace the misspelled word in place. Marks are re-derived from the DOM
+	 * by fromDom, so splicing the text nodes (not innerHTML) keeps bold/links
+	 * around the word intact; the block then saves like any typed edit.
+	 */
+	function replaceMisspelling(replacement: string) {
+		const menu = spellMenu;
+		spellMenu = null;
+		if (!menu) return;
+		const id = menu.el.closest<HTMLElement>("[data-block]")?.dataset.block;
+		if (!id) return;
+		const walker = document.createTreeWalker(menu.el, NodeFilter.SHOW_TEXT);
+		let offset = 0;
+		for (let n = walker.nextNode() as Text | null; n; n = walker.nextNode() as Text | null) {
+			const end = offset + n.length;
+			if (menu.from >= offset && menu.to <= end) {
+				n.replaceData(menu.from - offset, menu.to - menu.from, replacement);
+				break;
+			}
+			// A word split across text nodes (a mark boundary inside it): rebuild through the range.
+			if (menu.from < end && menu.to > offset) {
+				const range = document.createRange();
+				range.setStart(n, menu.from - offset);
+				let tail: Text | null = n;
+				let tailStart = offset;
+				while (tail && tailStart + tail.length < menu.to) {
+					tailStart += tail.length;
+					tail = walker.nextNode() as Text | null;
+				}
+				if (!tail) return;
+				range.setEnd(tail, menu.to - tailStart);
+				range.deleteContents();
+				range.insertNode(document.createTextNode(replacement));
+				break;
+			}
+			offset = end;
+		}
+		menu.el.normalize();
+		setCaret(menu.el, menu.from + replacement.length);
+		onInput(id);
+	}
+
 	function onEditorContextMenu(e: MouseEvent) {
 		const hit = misspelledAt(e.clientX, e.clientY);
 		if (hit) {
 			e.preventDefault();
 			e.stopPropagation();
-			spellMenu = { word: hit.word, x: e.clientX, y: e.clientY };
+			spellMenu = { ...hit, x: e.clientX, y: e.clientY, options: suggestions(hit.word) };
 			return;
 		}
 		// A live multi-selection owns the right-click (Anytype's provider
@@ -1773,15 +1815,25 @@
 
 {#if spellMenu}
 	<div class="spell-menu" style="left:{spellMenu.x}px; top:{spellMenu.y + 6}px" role="menu">
-		<span class="sm-word">"{spellMenu.word}"</span>
-		<button
-			onclick={() => {
-				addToDictionary(spellMenu!.word);
-				spellMenu = null;
-				scheduleSpell();
-			}}>Add to dictionary</button
-		>
-		<button class="sm-close" onclick={() => (spellMenu = null)}>✕</button>
+		{#if spellMenu.options.length}
+			<div class="sm-options">
+				{#each spellMenu.options as option (option)}
+					<button class="sm-option" onclick={() => replaceMisspelling(option)}>{option}</button>
+				{/each}
+			</div>
+		{:else}
+			<span class="sm-word">No suggestions for "{spellMenu.word}"</span>
+		{/if}
+		<div class="sm-row">
+			<button
+				onclick={() => {
+					addToDictionary(spellMenu!.word);
+					spellMenu = null;
+					scheduleSpell();
+				}}>Add "{spellMenu.word}" to dictionary</button
+			>
+			<button class="sm-close" onclick={() => (spellMenu = null)}>✕</button>
+		</div>
 	</div>
 {/if}
 
@@ -1933,8 +1985,10 @@
 		position: fixed;
 		z-index: 140;
 		display: flex;
-		align-items: center;
-		gap: 8px;
+		flex-direction: column;
+		align-items: stretch;
+		gap: 4px;
+		min-width: 180px;
 		background: var(--panel, #1a1d23);
 		border: 1px solid var(--border);
 		border-radius: 8px;
@@ -1944,10 +1998,30 @@
 	}
 	.sm-word {
 		color: var(--muted);
-		max-width: 160px;
+		max-width: 240px;
 		overflow: hidden;
 		text-overflow: ellipsis;
 		white-space: nowrap;
+		padding: 2px 6px;
+	}
+	.sm-options {
+		display: flex;
+		flex-direction: column;
+		border-bottom: 1px solid var(--border);
+		padding-bottom: 4px;
+	}
+	.sm-option {
+		text-align: left;
+		font-weight: 500;
+	}
+	.sm-row {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 8px;
+	}
+	.sm-row button:first-child {
+		color: var(--muted);
 	}
 	.spell-menu button {
 		background: none;
