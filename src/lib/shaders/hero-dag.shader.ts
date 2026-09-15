@@ -18,9 +18,9 @@ export const HeroDag = shader({
 		v.vUv = aCorner;
 		const node = storageRead(uNodes, iIdx);
 
-		// A change swells in when the present reaches its birth; the web
-		// only ever grows, there is no cycle and no cap.
-		const grown = smoothstep(node.w, node.w + 1.6, uNow);
+		// A change blooms in slowly when the present reaches its birth; the
+		// web only ever grows, there is no cycle and no cap.
+		const grown = smoothstep(node.w, node.w + 2.8, uNow);
 
 		let color = vec3(1.0, 0.66, 0.3);
 		let size = (0.03 + fract(iSeed * 7.3) * 0.012) * (0.25 + 0.75 * grown);

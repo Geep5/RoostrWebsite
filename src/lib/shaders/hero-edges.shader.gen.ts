@@ -62,8 +62,10 @@ fn vs_main(bm_in : BmVSIn) -> BmVSOut {
 @fragment
 fn fs_main(bm_in : BmVSOut) -> @location(0) vec4f {
   let taper = smoothstep(0.0, 0.08, bm_in.vAlong) * (1.0 - smoothstep(0.92, 1.0, bm_in.vAlong));
-  let grown = smoothstep(bm_in.vBirth, bm_in.vBirth + 1.6, bm_u.uNow);
-  return vec4f(bm_in.vTint, taper * 0.8 * grown);
+  let reach = smoothstep(bm_in.vBirth + 0.3, bm_in.vBirth + 1.9, bm_u.uNow) * 1.15;
+  let behindTip = 1.0 - smoothstep(reach - 0.14, reach, bm_in.vAlong);
+  let grown = smoothstep(bm_in.vBirth, bm_in.vBirth + 0.5, bm_u.uNow);
+  return vec4f(bm_in.vTint, taper * 0.8 * behindTip * grown);
 }
 `,
   attributes: { aQuad: 'vec2' },

@@ -229,7 +229,9 @@
 			const k = rnd() < 0.625 ? 0 : 1;
 			const a = rnd() * Math.PI * 2;
 			const r = 0.14 + rnd() * 0.5;
-			const node = addNode(Math.cos(a) * r, FRONT_Y, Math.sin(a) * r, at, k);
+			// Arrive flowy: spawn above the front and drift down into place.
+			const node = addNode(Math.cos(a) * r, FRONT_Y + 0.55, Math.sin(a) * r, at, k);
+			yTarget[node] = FRONT_Y;
 			const entity: Entity = { kind: k, node, depth: 0, parents: [], degree: 0 };
 			entities.push(entity);
 			const linkCount = 1 + (rnd() < 0.45 ? 1 : 0) + (rnd() < 0.18 ? 1 : 0);
@@ -252,7 +254,7 @@
 			for (let i = 0; i < nNodes; i++) {
 				const d = yTarget[i] - yCur[i];
 				if (Math.abs(d) < 0.0004) continue;
-				yCur[i] += d * 0.045;
+				yCur[i] += d * 0.028;
 				nodeData[i * 4 + 1] = yCur[i];
 				moving = true;
 			}

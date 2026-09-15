@@ -53,7 +53,11 @@ export const HeroEdges = shader({
 
 	fragment({ uNow }, { vTint, vAlong, vBirth }) {
 		const taper = smoothstep(0.0, 0.08, vAlong) * (1.0 - smoothstep(0.92, 1.0, vAlong));
-		const grown = smoothstep(vBirth, vBirth + 1.6, uNow);
-		return vec4(vTint, taper * 0.8 * grown);
+		// The weld travels: the edge grows out from the new node toward its
+		// parent, tip first, instead of appearing at once.
+		const reach = smoothstep(vBirth + 0.3, vBirth + 1.9, uNow) * 1.15;
+		const behindTip = 1.0 - smoothstep(reach - 0.14, reach, vAlong);
+		const grown = smoothstep(vBirth, vBirth + 0.5, uNow);
+		return vec4(vTint, taper * 0.8 * behindTip * grown);
 	},
 });

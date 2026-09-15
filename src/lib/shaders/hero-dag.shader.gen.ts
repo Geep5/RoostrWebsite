@@ -27,7 +27,7 @@ fn vs_main(bm_in : BmVSIn) -> BmVSOut {
   var bm_out : BmVSOut;
   bm_out.vUv = bm_in.aCorner;
   let node = uNodes[u32(bm_in.iIdx)];
-  let grown = smoothstep(node.w, node.w + 1.6, bm_u.uNow);
+  let grown = smoothstep(node.w, node.w + 2.8, bm_u.uNow);
   var color = vec3f(1.0, 0.66, 0.3);
   var size = (0.03 + fract(bm_in.iSeed * 7.3) * 0.012) * (0.25 + 0.75 * grown);
   var glow = (0.8 + fract(bm_in.iSeed * 4.7) * 0.5) * grown;
