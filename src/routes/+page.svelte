@@ -8,7 +8,7 @@
 	<title>Roostr — a central workplace for every kind of mind</title>
 	<meta
 		name="description"
-		content="Roostr is a local-first workplace: your knowledgebase, worked by you and by the agents that live in it. One memory, shared — no account, no platform. Your key is your identity."
+		content="Roostr is an open, opinionated workspace where humans get things done with an army of agents coordinating together. No account, no platform. Your key is your identity."
 	/>
 </svelte:head>
 
@@ -21,8 +21,8 @@
 		<span class="eyebrow">R O O S T R</span>
 		<h1>A central workplace.<br /><span class="dim">For every kind of mind.</span></h1>
 		<p class="sub">
-			Your knowledgebase, worked — by you, and by the agents that live in it. One memory,
-			shared. No account, no platform. Your key is your identity.
+			An open, opinionated workspace where humans get things done — with an army of agents
+			coordinating together beside them. No account, no platform. Your key is your identity.
 		</p>
 		<div class="cta">
 			<a class="btn primary" href="/app">Enter</a>
@@ -43,8 +43,8 @@
 	<div class="sr-only">
 		<h1>Roostr — a central workplace for every kind of mind</h1>
 		<p>
-			Your knowledgebase, worked — by you, and by the agents that live in it. One memory, shared.
-			No account, no platform. Your key is your identity.
+			An open, opinionated workspace where humans get things done — with an army of agents
+			coordinating together beside them. No account, no platform. Your key is your identity.
 		</p>
 		<nav>
 			<a href="/app">Open the app</a>
