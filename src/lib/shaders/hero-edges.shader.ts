@@ -8,16 +8,17 @@ import { shader, vec2, vec3, vec4, cos, sin, max, smoothstep, sqrt, abs, length,
  */
 export const HeroEdges = shader({
 	attributes: { aQuad: "vec2" },
-	instanceAttributes: { iA: "float", iB: "float", iTint: "vec3", iBirth: "float" },
+	instanceAttributes: { iA: "float", iB: "float", iTint: "vec3", iBirth: "float", iDeath: "float" },
 	uniforms: { uViewProj: "mat4", uTime: "float", uMouse: "vec2", uWidth: "float", uNow: "float" },
 	storage: { uNodes: "vec4" },
-	varyings: { vTint: "vec3", vAlong: "float", vBirth: "float", vAcross: "float" },
+	varyings: { vTint: "vec3", vAlong: "float", vBirth: "float", vAcross: "float", vDeath: "float" },
 
-	vertex({ aQuad, iA, iB, iTint, iBirth }, { uViewProj, uTime, uMouse, uWidth, uNow, uNodes }, v) {
+	vertex({ aQuad, iA, iB, iTint, iBirth, iDeath }, { uViewProj, uTime, uMouse, uWidth, uNow, uNodes }, v) {
 		v.vTint = iTint;
 		v.vAlong = aQuad.y;
 		v.vBirth = iBirth;
 		v.vAcross = aQuad.x;
+		v.vDeath = iDeath;
 
 		const na = storageRead(uNodes, iA);
 		const nb = storageRead(uNodes, iB);
@@ -62,7 +63,7 @@ export const HeroEdges = shader({
 		return uViewProj.mul(vec4(p, 1));
 	},
 
-	fragment({ uNow }, { vTint, vAlong, vBirth, vAcross }) {
+	fragment({ uNow }, { vTint, vAlong, vBirth, vAcross, vDeath }) {
 		const taper = smoothstep(0.0, 0.08, vAlong) * (1.0 - smoothstep(0.92, 1.0, vAlong));
 		// The weld travels: the edge grows out from the new node toward its
 		// parent, tip first, instead of appearing at once.
@@ -73,6 +74,11 @@ export const HeroEdges = shader({
 		// shading so it reads as a toy pipe on the yellow page.
 		const rim = 1.0 - smoothstep(0.68, 1.0, abs(vAcross));
 		const round = 0.72 + 0.28 * sqrt(max(0.0, 1.0 - vAcross * vAcross));
-		return vec4(vTint.scale(round), taper * rim * 0.92 * behindTip * grown);
+		// A broken connection: the pipe snaps mid-span and the two halves
+		// retract into their beads. Alive pipes keep iDeath at 1e30.
+		const dying = smoothstep(vDeath, vDeath + 0.9, uNow);
+		const gap = dying * 0.56;
+		const intact = smoothstep(gap - 0.06, gap + 0.02, abs(vAlong - 0.5) + 0.001);
+		return vec4(vTint.scale(round), taper * rim * 0.92 * behindTip * grown * intact);
 	},
 });

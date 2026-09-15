@@ -60,6 +60,10 @@
 		const eB: number[] = [];
 		const eTint: number[] = [];
 		const eBirth: number[] = [];
+		/** Death clock per edge; 1e30 = alive. Snapped mid-span when set. */
+		const eDeath: number[] = [];
+		/** Breakable plane welds, as entity pairs. */
+		const liveWelds: { edge: number; a: number; b: number }[] = [];
 		const entities: Entity[] = [];
 		/** Tail markers: the frozen past, sinking away below the plane. */
 		const tailNodes: number[] = [];
@@ -115,6 +119,7 @@
 			eB.push(b);
 			eTint.push(...tint);
 			eBirth.push(birth);
+			eDeath.push(1e30);
 		};
 
 		// --- the seed web: already built at first paint --------------------
@@ -269,10 +274,25 @@
 				const p = entities[t];
 				const tint = TYPES[k].tint;
 				addEdge(node, p.node, [tint[0] * 0.45, tint[1] * 0.45, tint[2] * 0.45], at);
+				liveWelds.push({ edge: eA.length - 1, a: entities.length - 1, b: t });
 				addEdge(marker, p.node, MUTED, at);
 				entity.degree++;
 				p.degree++;
 			}
+			return true;
+		};
+
+		/**
+		 * A broken connection: real workspaces unlink too. One live weld
+		 * snaps mid-span and its halves retract into their beads.
+		 */
+		const breakEdge = (at: number): boolean => {
+			if (liveWelds.length < 8) return false;
+			const i = Math.floor(rnd() * liveWelds.length);
+			const w = liveWelds.splice(i, 1)[0];
+			eDeath[w.edge] = at;
+			entities[w.a].degree = Math.max(0, entities[w.a].degree - 1);
+			entities[w.b].degree = Math.max(0, entities[w.b].degree - 1);
 			return true;
 		};
 
@@ -313,6 +333,8 @@
 			eTint,
 			eBirth,
 			fireEvent,
+			breakEdge,
+			eDeath,
 			ease,
 		};
 	}
@@ -362,6 +384,7 @@
 			edges.instanceAttributes.iB.set(new Float32Array(scene.eB));
 			edges.instanceAttributes.iTint.set(new Float32Array(scene.eTint));
 			edges.instanceAttributes.iBirth.set(new Float32Array(scene.eBirth));
+			edges.instanceAttributes.iDeath.set(new Float32Array(scene.eDeath));
 			edges.uniforms.uNodes.set(nodeBuf);
 			edges.uniforms.uWidth.set(0.022);
 
@@ -373,7 +396,9 @@
 				const dt = Math.min(t - lastT, 0.1);
 				lastT = t;
 				while (t >= nextEventAt) {
-					if (scene.fireEvent(nextEventAt)) dirty = true;
+					// Mostly the web grows; sometimes a connection breaks.
+					const fired = rnd() < 0.12 ? scene.breakEdge(nextEventAt) : scene.fireEvent(nextEventAt);
+					if (fired) dirty = true;
 					nextEventAt += 0.9 + rnd() * 1.8;
 				}
 				scene.sinkTail(dt);
@@ -389,6 +414,7 @@
 					edges.instanceAttributes.iB.set(new Float32Array(scene.eB));
 					edges.instanceAttributes.iTint.set(new Float32Array(scene.eTint));
 					edges.instanceAttributes.iBirth.set(new Float32Array(scene.eBirth));
+					edges.instanceAttributes.iDeath.set(new Float32Array(scene.eDeath));
 				}
 				mx += (tx - mx) * 0.045;
 				my += (ty - my) * 0.045;

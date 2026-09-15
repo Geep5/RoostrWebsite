@@ -112,7 +112,11 @@
 		gap: 14px;
 	}
 	.login {
-		padding: 11px 24px;
+		padding: 0 24px;
+		display: flex;
+		align-items: center;
+		height: 46px;
+		box-sizing: border-box;
 		border-radius: 11px;
 		background: rgba(36, 33, 27, 0.07);
 		border: 1px solid rgba(36, 33, 27, 0.28);
@@ -132,6 +136,7 @@
 		justify-content: center;
 		width: 46px;
 		height: 46px;
+		box-sizing: border-box;
 		border-radius: 11px;
 		color: #4a4232;
 		background: rgba(36, 33, 27, 0.06);
