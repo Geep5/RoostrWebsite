@@ -14,7 +14,7 @@
 
 	let { onclose }: { onclose: () => void } = $props();
 
-	let paired = $state(false);
+	let paired = $state(pairedSession() !== null);
 	let harnessError = $state("");
 
 	interface SkillRow {

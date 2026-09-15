@@ -5,8 +5,7 @@
 	import { ignoredWords, removeFromDictionary } from "$lib/spell";
 	import { backend, isLocalBackend } from "$lib/client-backend";
 	import { myNpub } from "$lib/client-identity";
-	import { localFetch, harnessFetch, pairedSession, unpairLocal, onPairingChange } from "$lib/local-transport";
-	import PairGate from "$lib/components/PairGate.svelte";
+	import { localFetch, harnessFetch, pairedSession, onPairingChange } from "$lib/local-transport";
 
 	// Compare only with the explicitly paired local daemon.
 	let paired = $state(pairedSession() !== null);
@@ -59,13 +58,6 @@
 		}
 	}
 
-	function disconnectLocal() {
-		if (isLocalBackend) {
-			void doLogout();
-		} else {
-			unpairLocal();
-		}
-	}
 
 	async function importKey() {
 		importError = "";
@@ -353,18 +345,9 @@
 			<h2><span class="cog">⚙️</span> Settings</h2>
 			<button class="x close-x" onclick={onclose}>×</button>
 		</header>
+		{#if settingsError}<p class="hint error" role="alert">{settingsError}</p>{/if}
 
-		<section>
-			<h3>Local pairing</h3>
-			<p class="hint">{isLocalBackend ? "Native mode — your identity and data stay with the local daemon." : "Browser mode — your local browser vault works without a daemon. Pairing enables local services without switching vaults."}</p>
-			{#if paired}
-				<p class="hint">Explicitly paired with this computer's local services.</p>
-				<button class="action subtle" onclick={disconnectLocal}>Unpair local services</button>
-			{:else}
-				<PairGate compact onready={() => { paired = pairedSession() !== null; void load(); if (isLocalBackend) void loadProfile(); }} />
-			{/if}
-			{#if settingsError}<p class="hint error" role="alert">{settingsError}</p>{/if}
-		</section>
+
 
 		<section>
 			<h3>Profile</h3>
@@ -537,7 +520,7 @@
 				<p class="hint">Checking agent daemon…</p>
 			{:else if agentAuth === null}
 				<p class="hint">
-					{paired ? "The paired agent daemon is unavailable. Start the local harness to manage credentials." : "Pair local services above to manage agent credentials. Browser data and relay chat remain available without pairing."}
+					{paired ? "The paired agent daemon is unavailable. Start the local harness to manage credentials." : "Pair under This machine to manage agent credentials. Browser data and relay chat remain available without pairing."}
 				</p>
 				{#if paired}<button class="action subtle" onclick={() => void loadAgentAuth()}>Retry agent connection</button>{/if}
 			{:else}

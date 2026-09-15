@@ -15,11 +15,10 @@
 	import { store } from "$lib/data.svelte";
 	import { typeGlyph } from "$lib/create";
 	import { harnessFetch, pairedSession, onPairingChange } from "$lib/local-transport";
-	import PairGate from "./PairGate.svelte";
 
 	let { channelId }: { channelId: string } = $props();
 
-	let paired = $state(false);
+	let paired = $state(pairedSession() !== null);
 	let rosterError = $state("");
 	let authError = $state("");
 	let actionError = $state("");
@@ -548,8 +547,7 @@
 	agent on the machine whose harness should run it.
 </p>
 {#if !paired}
-	<PairGate compact onready={refreshPairing} />
-	<p class="hint">Saved agents and their prompts are available in browser mode. Pair to run agents or inspect this machine's provider readiness.</p>
+	<p class="hint">Saved agents and their prompts remain available. Pair under This machine to run agents or inspect provider readiness.</p>
 {/if}
 {#if rosterError || authError}
 	<p class="hint" role="status">{rosterError || authError} Check that the paired native app and harness are running.</p>

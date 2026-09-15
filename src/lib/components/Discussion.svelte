@@ -15,7 +15,6 @@
 	import { renderMarkdown } from "$lib/markdown";
 	import { onMount } from "svelte";
 	import { harnessFetch, pairedSession, onPairingChange } from "$lib/local-transport";
-	import PairGate from "./PairGate.svelte";
 
 	let {
 		object,
@@ -154,7 +153,7 @@
 	// The paired harness reports live turn state on its authenticated surface;
 	// while the discussion is open we poll it so the user sees the
 	// agent composing (typing dots) or failing (warning row).
-	let paired = $state(false);
+	let paired = $state(pairedSession() !== null);
 	let presenceError = $state("");
 	function refreshPairing() {
 		paired = !!pairedSession();
@@ -292,11 +291,7 @@
 			<button onclick={() => void loadIdentity()}>Retry discussion identity</button>
 		{/if}
 		{#if !paired}
-			<details>
-				<summary>Live agent status requires pairing with the native app</summary>
-				<PairGate compact onready={refreshPairing} />
-				<p>Discussion history and comments remain available without the local harness.</p>
-			</details>
+			<p class="presence">Pair under This machine to see live agent status. Discussion history and comments remain available.</p>
 		{:else if presenceError}
 			<p class="presence error" role="status">{presenceError} Check that the paired native app and harness are running. Discussion remains available.</p>
 		{/if}

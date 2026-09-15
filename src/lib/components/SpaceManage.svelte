@@ -11,9 +11,8 @@
 	import { myNpub, listJoinRequests, clearJoinRequest, type JoinRequest } from "$lib/client-identity";
 	import { backend } from "$lib/client-backend";
 	import { harnessFetch, pairedSession, onPairingChange } from "$lib/local-transport";
-	import PairGate from "./PairGate.svelte";
 
-	let paired = $state(false);
+	let paired = $state(pairedSession() !== null);
 	let harnessError = $state("");
 	let machineDataError = $state("");
 	let identityError = $state("");
@@ -371,8 +370,7 @@
 		data — if this machine breaks, take over from any other; it stands down when it syncs.
 	</p>
 	{#if !paired}
-		<PairGate compact onready={refreshPairing} />
-		<p class="hint">Pair to identify this machine, take over serving, or bind a local checkout. Browser space controls remain available.</p>
+		<p class="hint">Pair under This machine to identify this machine, take over serving, or bind a local checkout. Browser space controls remain available.</p>
 	{/if}
 	{#if harnessError || machineDataError}
 		<p class="hint" role="alert">{harnessError || machineDataError}</p>

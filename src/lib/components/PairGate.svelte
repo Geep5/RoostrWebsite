@@ -6,7 +6,7 @@
 	let code = $state("");
 	let busy = $state(false);
 	let error = $state("");
-	let session = $state<ReturnType<typeof pairedSession>>(null);
+	let session = $state<ReturnType<typeof pairedSession>>(pairedSession());
 	let daemonCode = $state<string | null>(null);
 	let copied = $state(false);
 	let keyDraft = $state("");
