@@ -1,15 +1,17 @@
 <script lang="ts">
 	/**
-	 * The landing scene: a living change-DAG. It opens with the web already
-	 * built - the full now plane with the tail of changes beneath it - then
-	 * keeps growing: live RNG events (a human object, an agent object, an
-	 * edit) roll in one by one, attach to the existing web, and history
-	 * slowly sinks so the tail stretches downward forever. Nothing is
-	 * pregenerated past the seed web and nothing is capped. Degrades to
-	 * nothing where WebGPU is unavailable.
+	 * The landing scene: a living change-DAG. It opens on the seed web
+	 * already built - the full now plane with the tail of changes beneath
+	 * it - then grows one node at a time: each new change arrives at the
+	 * front, welds itself to 1-3 existing nodes, and PUSHES those
+	 * connections down a generation to take its spot. Newest at the front,
+	 * always. Node positions live in a GPU storage buffer so edges follow
+	 * their endpoints through every push. Nothing pregenerated past the
+	 * seed web, nothing capped. Degrades to nothing where WebGPU is
+	 * unavailable.
 	 */
 	import { onMount } from "svelte";
-	import { createRenderer, createProgram, mat4 } from "brometal";
+	import { createRenderer, createProgram, createStorageBuffer, mat4 } from "brometal";
 	import heroDag from "$lib/shaders/hero-dag.shader.gen";
 	import heroEdges from "$lib/shaders/hero-edges.shader.gen";
 
@@ -25,55 +27,63 @@
 	})();
 
 	const SLICES = 12;
-	const STEP = 0.24;
 	const NOW = SLICES - 1;
-	/** Seconds between slices in the seed history. */
-	const SLICE_SECONDS = 1.6;
-	/** The present at first paint: all seed history already grown. */
-	const P0 = NOW * SLICE_SECONDS + 2.5;
-	/** Downward drift of history, world units per second. Keep in sync with
-	 * the uNow sink in hero-dag/hero-edges shaders. */
-	const SINK = 0.05;
+	/** Where the newest change always sits. */
+	const FRONT_Y = 0.85;
+	/** One generation down per push. */
+	const GAP = 0.24;
+	/** Room to grow: memory preallocated, the DAG itself never is. */
+	const MAX_NODES = 65536;
 
 	interface Entity {
 		kind: number; // 0 human, 1 agent
-		x: number;
-		y: number; // baked, sink-offset included: a welded link endpoint
-		z: number;
+		node: number; // index into the node storage buffer
+		depth: number; // generations pushed down from the front
+		parents: number[]; // entity indices this one welds to
 		degree: number;
 	}
 
 	/**
 	 * The live scene: GPU arrays that only ever grow, the entity list new
-	 * changes attach to, and the event roller. Per-mount so HMR starts clean.
+	 * changes attach to, and the push-down roller. Per-mount so HMR starts
+	 * clean.
 	 */
 	function createScene() {
-		const pos: number[] = [];
-		const kind: number[] = [];
-		const seed: number[] = [];
-		const births: number[] = [];
-		const starts: number[] = [];
-		const ends: number[] = [];
-		const tints: number[] = [];
-		const edgeBirths: number[] = [];
+		const nodeData = new Float32Array(MAX_NODES * 4); // x, yTopo, z, birth
+		const yCur: number[] = [];
+		const yTarget: number[] = [];
+		let nNodes = 0;
+
+		const iIdx: number[] = [];
+		const iKind: number[] = [];
+		const iSeed: number[] = [];
+		const eA: number[] = [];
+		const eB: number[] = [];
+		const eTint: number[] = [];
+		const eBirth: number[] = [];
 		const entities: Entity[] = [];
 
-		const yOf = (slice: number) => (slice - (SLICES - 1) / 2) * STEP;
-		const timeOf = (slice: number) => slice * SLICE_SECONDS;
-		/** Plane height where new changes are born, baked for a birth at `at`. */
-		const birthY = (at: number) => 0.85 + at * SINK;
+		/** Tail height of a seed slice: history below the front plane. */
+		const tailY = (slice: number) => FRONT_Y - (NOW - slice) * GAP;
 
-		const pushNode = (x: number, y: number, z: number, k: number, birth: number) => {
-			pos.push(x, y, z);
-			kind.push(k);
-			seed.push(rnd());
-			births.push(birth);
+		const addNode = (x: number, yTopo: number, z: number, birth: number, kind: number): number => {
+			const idx = nNodes++;
+			nodeData[idx * 4] = x;
+			nodeData[idx * 4 + 1] = yTopo;
+			nodeData[idx * 4 + 2] = z;
+			nodeData[idx * 4 + 3] = birth;
+			yCur[idx] = yTopo;
+			yTarget[idx] = yTopo;
+			iIdx.push(idx);
+			iKind.push(kind);
+			iSeed.push(rnd());
+			return idx;
 		};
-		const pushLink = (a: [number, number, number], b: [number, number, number], tint: [number, number, number], birth: number) => {
-			starts.push(...a);
-			ends.push(...b);
-			tints.push(...tint);
-			edgeBirths.push(birth);
+		const addEdge = (a: number, b: number, tint: [number, number, number], birth: number) => {
+			eA.push(a);
+			eB.push(b);
+			eTint.push(...tint);
+			eBirth.push(birth);
 		};
 
 		// --- the seed web: already built at first paint --------------------
@@ -85,77 +95,92 @@
 			dx: number;
 			dz: number;
 			links: number[];
+			bornSlice: number;
+			bornX: number;
+			bornZ: number;
+			retouch?: { slice: number; x: number; z: number; node?: number };
 		}
-		const seedEntities: SeedEntity[] = [];
+		const seed: SeedEntity[] = [];
 		for (let i = 0; i < 52; i++) {
 			const a = rnd() * Math.PI * 2;
 			const r = 0.14 + rnd() * 0.5;
-			seedEntities.push({
+			const x = Math.cos(a) * r;
+			const z = Math.sin(a) * r;
+			const birth = Math.floor(rnd() * (SLICES * 0.7));
+			seed.push({
 				kind: rnd() < 0.55 ? 0 : 1,
-				birth: Math.floor(rnd() * (SLICES * 0.7)),
-				x: Math.cos(a) * r,
-				z: Math.sin(a) * r,
+				birth,
+				x,
+				z,
 				dx: (rnd() - 0.5) * 0.06,
 				dz: (rnd() - 0.5) * 0.06,
 				links: [],
+				bornSlice: birth,
+				bornX: x,
+				bornZ: z,
 			});
 			for (let l = 0; l < (i > 0 && rnd() < 0.42 ? 2 : 1) && i > 0; l++) {
 				const target = Math.floor(rnd() * i);
-				if (!seedEntities[i].links.includes(target)) seedEntities[i].links.push(target);
+				if (!seed[i].links.includes(target)) seed[i].links.push(target);
 			}
 		}
 
-		// Baked with the P0 sink offset: at uNow = P0 the seed web sits at
-		// exactly its designed composition, then sinks with everything else.
-		const posOf = (e: SeedEntity, slice: number): [number, number, number] => {
+		// Simulate the slices: some nodes get re-touched later, moving them.
+		const posAt = (e: SeedEntity, slice: number): [number, number] => {
 			const age = slice - e.birth;
-			return [e.x + e.dx * age, yOf(slice) + P0 * SINK, e.z + e.dz * age];
+			return [e.x + e.dx * age, e.z + e.dz * age];
 		};
-
-		for (let k = 0; k < NOW; k++) {
-			for (const e of seedEntities) {
-				if (e.birth !== k) continue;
-				const [x, y, z] = posOf(e, k);
-				pushNode(x, y, z, e.kind, timeOf(k));
-				// Its new links attach down through the stack, to the parents'
-				// own planes - each change visibly joins history.
-				for (const target of e.links) {
-					const p = seedEntities[target];
-					pushLink([x, y, z], posOf(p, p.birth), e.kind === 0 ? [0.5, 0.38, 0.22] : [0.25, 0.42, 0.6], timeOf(k));
-					pushNode(...posOf(p, p.birth), 3, timeOf(p.birth));
-				}
-				// Some nodes get re-touched later: an edit at a higher plane,
-				// bright, with a thread back to where it was born.
-				if (rnd() < 0.22 && k + 2 < SLICES) {
-					const touch = k + 2 + Math.floor(rnd() * (SLICES - k - 2));
-					const [tx, ty, tz] = posOf(e, touch);
-					pushNode(tx, ty, tz, 2, timeOf(touch));
-					pushLink([tx, ty, tz], [x, y, z], [0.5, 0.5, 0.62], timeOf(touch));
-					e.x = tx;
-					e.z = tz;
-					e.dx = 0;
-					e.dz = 0;
-					e.birth = touch;
-				}
+		for (const e of seed) {
+			if (rnd() < 0.22 && e.birth + 2 < SLICES) {
+				const touch = e.birth + 2 + Math.floor(rnd() * (SLICES - e.birth - 2));
+				const [tx, tz] = posAt(e, touch);
+				e.retouch = { slice: touch, x: tx, z: tz };
+				e.x = tx;
+				e.z = tz;
+				e.dx = 0;
+				e.dz = 0;
+				e.birth = touch;
 			}
 		}
 
-		// The now plane: the whole web as it stands - every node, every
-		// connection - that the tail of changes below built up to. Each
-		// entity's position here is its live endpoint for future changes.
-		for (const [i, e] of seedEntities.entries()) {
-			if (e.birth > NOW) continue;
-			const [x, y, z] = posOf(e, NOW);
-			pushNode(x, y, z, e.kind, timeOf(NOW));
-			entities.push({ kind: e.kind, x, y, z, degree: e.links.length });
+		// Nodes: a tail marker where each entity was born, re-touch markers,
+		// context dots at link endpoints, and the live plane node at the
+		// front that future changes weld to. Seed history is already grown.
+		const SEED_BIRTH = -2;
+		const tailNode: number[] = [];
+		for (const e of seed) {
+			tailNode.push(addNode(e.bornX, tailY(Math.min(e.bornSlice, NOW - 1)), e.bornZ, SEED_BIRTH, e.kind));
+		}
+		for (const e of seed) {
+			if (e.retouch) e.retouch.node = addNode(e.retouch.x, tailY(e.retouch.slice), e.retouch.z, SEED_BIRTH, 2);
+		}
+		for (const e of seed) {
+			const [px, pz] = posAt(e, NOW);
+			const node = addNode(px, FRONT_Y, pz, SEED_BIRTH, e.kind);
+			entities.push({ kind: e.kind, node, depth: 0, parents: e.links.slice(), degree: e.links.length });
+		}
+
+		// Edges: tail births weld to their parents' tail markers (with dim
+		// context dots there), re-touches thread down to the birth marker,
+		// and the front plane carries every connection as the web stands.
+		for (const [i, e] of seed.entries()) {
 			for (const target of e.links) {
-				if (target < i && seedEntities[target].birth <= NOW) {
-					pushLink([x, y, z], posOf(seedEntities[target], NOW), e.kind === 0 ? [0.55, 0.42, 0.26] : [0.3, 0.48, 0.68], timeOf(NOW));
+				const p = seed[target];
+				const tint: [number, number, number] = e.kind === 0 ? [0.5, 0.38, 0.22] : [0.25, 0.42, 0.6];
+				addNode(p.bornX, tailY(Math.min(p.bornSlice, NOW - 1)), p.bornZ, SEED_BIRTH, 3);
+				addEdge(tailNode[i], tailNode[target], tint, SEED_BIRTH);
+				if (target < i) {
+					const bright: [number, number, number] = e.kind === 0 ? [0.55, 0.42, 0.26] : [0.3, 0.48, 0.68];
+					addEdge(entities[i].node, entities[target].node, bright, SEED_BIRTH);
 				}
+			}
+			if (e.retouch) {
+				// The thread from the re-touch marker down to the birth marker.
+				addEdge(e.retouch.node!, tailNode[i], [0.5, 0.5, 0.62], SEED_BIRTH);
 			}
 		}
 
-		// --- the living web: events rolled live, never pregenerated --------
+		// --- the living web: one node at a time, rolled live ---------------
 		/** Preferential attachment: usually someone recent, sometimes a hub. */
 		const pickTarget = (exclude: number): number => {
 			if (entities.length === 0) return -1;
@@ -177,40 +202,78 @@
 		};
 
 		/**
-		 * One moment in the workspace, rolled live like a real Roostr DAG:
-		 * usually a new object - a human's page or an agent's artifact -
-		 * welding itself to 1-3 existing nodes; sometimes an edit, an old
-		 * object burning bright again at the top with a thread back down.
+		 * The push: a node connected to the new change sinks a generation,
+		 * and so do things connected through it that the change outranks.
+		 * Newest at the front, always.
 		 */
-		const fireEvent = (at: number) => {
-			const y = birthY(at);
-			if (rnd() < 0.88) {
-				const k = rnd() < 0.625 ? 0 : 1;
-				const a = rnd() * Math.PI * 2;
-				const r = 0.14 + rnd() * 0.5;
-				const e: Entity = { kind: k, x: Math.cos(a) * r, y, z: Math.sin(a) * r, degree: 0 };
-				entities.push(e);
-				pushNode(e.x, e.y, e.z, k, at);
-				const linkCount = 1 + (rnd() < 0.45 ? 1 : 0) + (rnd() < 0.18 ? 1 : 0);
-				for (let l = 0; l < linkCount; l++) {
-					const t = pickTarget(entities.length - 1);
-					if (t === -1) continue;
-					const p = entities[t];
-					pushLink([e.x, e.y, e.z], [p.x, p.y, p.z], k === 0 ? [0.5, 0.38, 0.22] : [0.25, 0.42, 0.6], at);
-					e.degree++;
-					p.degree++;
-				}
-			} else {
-				const t = pickTarget(-1);
-				if (t === -1) return;
-				const p = entities[t];
-				pushNode(p.x, y, p.z, 2, at);
-				pushLink([p.x, y, p.z], [p.x, p.y, p.z], [0.5, 0.5, 0.62], at);
-				p.degree++;
+		const pushDown = (first: number, depth: number) => {
+			const stack: [number, number][] = [[first, depth]];
+			while (stack.length > 0) {
+				const [i, d] = stack.pop()!;
+				const e = entities[i];
+				if (e.depth >= d) continue;
+				e.depth = d;
+				yTarget[e.node] = FRONT_Y - d * GAP;
+				for (const p of e.parents) stack.push([p, d + 1]);
 			}
 		};
 
-		return { pos, kind, seed, births, starts, ends, tints, edgeBirths, fireEvent };
+		/**
+		 * One moment in the workspace, rolled live like a real Roostr DAG:
+		 * a new object - a human's page or an agent's artifact - arrives at
+		 * the front and welds itself to 1-3 existing nodes, pushing each of
+		 * them down a generation to take its spot.
+		 */
+		const fireEvent = (at: number): boolean => {
+			if (nNodes >= MAX_NODES - 1) return false;
+			const k = rnd() < 0.625 ? 0 : 1;
+			const a = rnd() * Math.PI * 2;
+			const r = 0.14 + rnd() * 0.5;
+			const node = addNode(Math.cos(a) * r, FRONT_Y, Math.sin(a) * r, at, k);
+			const entity: Entity = { kind: k, node, depth: 0, parents: [], degree: 0 };
+			entities.push(entity);
+			const linkCount = 1 + (rnd() < 0.45 ? 1 : 0) + (rnd() < 0.18 ? 1 : 0);
+			for (let l = 0; l < linkCount; l++) {
+				const t = pickTarget(entities.length - 1);
+				if (t === -1) continue;
+				const p = entities[t];
+				entity.parents.push(t);
+				addEdge(node, p.node, k === 0 ? [0.5, 0.38, 0.22] : [0.25, 0.42, 0.6], at);
+				entity.degree++;
+				p.degree++;
+				pushDown(t, 1);
+			}
+			return true;
+		};
+
+		/** Ease every pushed node toward its new depth; true while moving. */
+		const ease = (): boolean => {
+			let moving = false;
+			for (let i = 0; i < nNodes; i++) {
+				const d = yTarget[i] - yCur[i];
+				if (Math.abs(d) < 0.0004) continue;
+				yCur[i] += d * 0.045;
+				nodeData[i * 4 + 1] = yCur[i];
+				moving = true;
+			}
+			return moving;
+		};
+
+		return {
+			nodeData,
+			get nNodes() {
+				return nNodes;
+			},
+			iIdx,
+			iKind,
+			iSeed,
+			eA,
+			eB,
+			eTint,
+			eBirth,
+			fireEvent,
+			ease,
+		};
 	}
 
 	onMount(() => {
@@ -241,44 +304,46 @@
 			}
 
 			const scene = createScene();
+			const nodeBuf = createStorageBuffer(renderer, scene.nodeData);
 			const quad = new Float32Array([-1, -1, 1, -1, 1, 1, -1, -1, 1, 1, -1, 1]);
 			const strip = new Float32Array([0, 0, 1, 0, 0, 1, 0, 1, 1, 0, 1, 1]);
 
 			const nodes = createProgram(renderer, heroDag, { blend: "additive" });
 			nodes.attributes.aCorner.set(quad);
-			nodes.instanceAttributes.iPos.set(new Float32Array(scene.pos));
-			nodes.instanceAttributes.iKind.set(new Float32Array(scene.kind));
-			nodes.instanceAttributes.iSeed.set(new Float32Array(scene.seed));
-			nodes.instanceAttributes.iBirth.set(new Float32Array(scene.births));
+			nodes.instanceAttributes.iIdx.set(new Float32Array(scene.iIdx));
+			nodes.instanceAttributes.iKind.set(new Float32Array(scene.iKind));
+			nodes.instanceAttributes.iSeed.set(new Float32Array(scene.iSeed));
+			nodes.uniforms.uNodes.set(nodeBuf);
 
 			const edges = createProgram(renderer, heroEdges, { blend: "alpha" });
 			edges.attributes.aQuad.set(strip);
-			edges.instanceAttributes.iStart.set(new Float32Array(scene.starts));
-			edges.instanceAttributes.iEnd.set(new Float32Array(scene.ends));
-			edges.instanceAttributes.iTint.set(new Float32Array(scene.tints));
-			edges.instanceAttributes.iBirth.set(new Float32Array(scene.edgeBirths));
+			edges.instanceAttributes.iA.set(new Float32Array(scene.eA));
+			edges.instanceAttributes.iB.set(new Float32Array(scene.eB));
+			edges.instanceAttributes.iTint.set(new Float32Array(scene.eTint));
+			edges.instanceAttributes.iBirth.set(new Float32Array(scene.eBirth));
+			edges.uniforms.uNodes.set(nodeBuf);
 			edges.uniforms.uWidth.set(0.008);
 
-			let nextEventAt = P0 + 0.8 + rnd() * 1.4;
+			let nextEventAt = 0.8 + rnd() * 1.2;
 			let dirty = false;
 
 			stop = renderer.loop((t) => {
-				const uNow = P0 + t;
-				while (uNow >= nextEventAt) {
-					scene.fireEvent(nextEventAt);
+				while (t >= nextEventAt) {
+					if (scene.fireEvent(nextEventAt)) dirty = true;
 					nextEventAt += 0.9 + rnd() * 1.8;
-					dirty = true;
+				}
+				if (scene.ease()) {
+					nodeBuf.write(scene.nodeData.subarray(0, scene.nNodes * 4));
 				}
 				if (dirty) {
 					dirty = false;
-					nodes.instanceAttributes.iPos.set(new Float32Array(scene.pos));
-					nodes.instanceAttributes.iKind.set(new Float32Array(scene.kind));
-					nodes.instanceAttributes.iSeed.set(new Float32Array(scene.seed));
-					nodes.instanceAttributes.iBirth.set(new Float32Array(scene.births));
-					edges.instanceAttributes.iStart.set(new Float32Array(scene.starts));
-					edges.instanceAttributes.iEnd.set(new Float32Array(scene.ends));
-					edges.instanceAttributes.iTint.set(new Float32Array(scene.tints));
-					edges.instanceAttributes.iBirth.set(new Float32Array(scene.edgeBirths));
+					nodes.instanceAttributes.iIdx.set(new Float32Array(scene.iIdx));
+					nodes.instanceAttributes.iKind.set(new Float32Array(scene.iKind));
+					nodes.instanceAttributes.iSeed.set(new Float32Array(scene.iSeed));
+					edges.instanceAttributes.iA.set(new Float32Array(scene.eA));
+					edges.instanceAttributes.iB.set(new Float32Array(scene.eB));
+					edges.instanceAttributes.iTint.set(new Float32Array(scene.eTint));
+					edges.instanceAttributes.iBirth.set(new Float32Array(scene.eBirth));
 				}
 				mx += (tx - mx) * 0.045;
 				my += (ty - my) * 0.045;
@@ -288,12 +353,12 @@
 				edges.uniforms.uViewProj.set(viewProj);
 				edges.uniforms.uTime.set(t);
 				edges.uniforms.uMouse.set([mx, my]);
-				edges.uniforms.uNow.set(uNow);
+				edges.uniforms.uNow.set(t);
 				edges.draw();
 				nodes.uniforms.uViewProj.set(viewProj);
 				nodes.uniforms.uTime.set(t);
 				nodes.uniforms.uMouse.set([mx, my]);
-				nodes.uniforms.uNow.set(uNow);
+				nodes.uniforms.uNow.set(t);
 				nodes.draw();
 			});
 		})();

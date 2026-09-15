@@ -1,21 +1,27 @@
-import { shader, vec2, vec3, vec4, cos, sin, max, smoothstep, length } from "brometal";
+import { shader, vec2, vec3, vec4, cos, sin, max, smoothstep, length, storageRead } from "brometal";
 
 /**
- * The connectedness: thin quads welding nodes inside each time slice,
- * and near-vertical tracks following the same node between slices - the
- * threads that show structure persisting through time. Same swirl as the
- * nodes so everything stays welded.
+ * The welds. Each edge is a pair of indices into the uNodes storage
+ * buffer, so when a new change pushes its connections down a generation
+ * the edges follow their endpoints exactly. Same age drift and swirl as
+ * the nodes.
  */
 export const HeroEdges = shader({
 	attributes: { aQuad: "vec2" },
-	instanceAttributes: { iStart: "vec3", iEnd: "vec3", iTint: "vec3", iBirth: "float" },
+	instanceAttributes: { iA: "float", iB: "float", iTint: "vec3", iBirth: "float" },
 	uniforms: { uViewProj: "mat4", uTime: "float", uMouse: "vec2", uWidth: "float", uNow: "float" },
+	storage: { uNodes: "vec4" },
 	varyings: { vTint: "vec3", vAlong: "float", vBirth: "float" },
 
-	vertex({ aQuad, iStart, iEnd, iTint, iBirth }, { uViewProj, uTime, uMouse, uWidth, uNow }, v) {
+	vertex({ aQuad, iA, iB, iTint, iBirth }, { uViewProj, uTime, uMouse, uWidth, uNow, uNodes }, v) {
 		v.vTint = iTint;
 		v.vAlong = aQuad.y;
 		v.vBirth = iBirth;
+
+		const na = storageRead(uNodes, iA);
+		const nb = storageRead(uNodes, iB);
+		const start = vec3(na.x, na.y - (uNow - na.w) * 0.02, na.z);
+		const end = vec3(nb.x, nb.y - (uNow - nb.w) * 0.02, nb.z);
 
 		const yaw = uTime * 0.22 + uMouse.x * 0.5;
 		const tilt = 0.42 + uMouse.y * 0.18;
@@ -24,20 +30,16 @@ export const HeroEdges = shader({
 		const ct = cos(tilt);
 		const st = sin(tilt);
 
-		// Same sink as the nodes (rate in sync with LandingVeil.svelte) so
-		// edges stay welded to their endpoints as history drifts down.
-		const asy = iStart.y - uNow * 0.05;
-		const ax = iStart.x * cy + iStart.z * sy;
-		const az0 = iStart.z * cy - iStart.x * sy;
-		const ay = asy * ct - az0 * st;
-		const az1 = asy * st + az0 * ct;
+		const ax = start.x * cy + start.z * sy;
+		const az0 = start.z * cy - start.x * sy;
+		const ay = start.y * ct - az0 * st;
+		const az1 = start.y * st + az0 * ct;
 		const a2 = vec3(ax, ay, az1);
 
-		const bsy = iEnd.y - uNow * 0.05;
-		const bx = iEnd.x * cy + iEnd.z * sy;
-		const bz0 = iEnd.z * cy - iEnd.x * sy;
-		const by = bsy * ct - bz0 * st;
-		const bz1 = bsy * st + bz0 * ct;
+		const bx = end.x * cy + end.z * sy;
+		const bz0 = end.z * cy - end.x * sy;
+		const by = end.y * ct - bz0 * st;
+		const bz1 = end.y * st + bz0 * ct;
 		const b2 = vec3(bx, by, bz1);
 
 		const dir = b2.sub(a2);
