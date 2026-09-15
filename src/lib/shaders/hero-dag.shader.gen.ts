@@ -46,7 +46,7 @@ fn vs_main(bm_in : BmVSIn) -> BmVSOut {
       }
     }
   }
-  var p = vec3f(node.x, node.y - (bm_u.uNow - node.w) * 0.02, node.z);
+  var p = vec3f(node.x, node.y, node.z);
   let yaw = bm_u.uTime * 0.22 + bm_u.uMouse.x * 0.5;
   let cy = cos(yaw);
   let sy = sin(yaw);

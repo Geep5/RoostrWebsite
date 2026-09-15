@@ -37,9 +37,7 @@
 
 	interface Entity {
 		kind: number; // 0 human, 1 agent
-		node: number; // index into the node storage buffer
-		depth: number; // generations pushed down from the front
-		parents: number[]; // entity indices this one welds to
+		node: number; // index into the node storage buffer - its plane node
 		degree: number;
 	}
 
@@ -62,6 +60,9 @@
 		const eTint: number[] = [];
 		const eBirth: number[] = [];
 		const entities: Entity[] = [];
+		/** Tail markers: the frozen past, sinking away below the plane. */
+		const tailNodes: number[] = [];
+		const MUTED: [number, number, number] = [0.3, 0.33, 0.4];
 
 		/** Tail height of a seed slice: history below the front plane. */
 		const tailY = (slice: number) => FRONT_Y - (NOW - slice) * GAP;
@@ -149,15 +150,21 @@
 		const SEED_BIRTH = -2;
 		const tailNode: number[] = [];
 		for (const e of seed) {
-			tailNode.push(addNode(e.bornX, tailY(Math.min(e.bornSlice, NOW - 1)), e.bornZ, SEED_BIRTH, e.kind));
+			const n = addNode(e.bornX, tailY(Math.min(e.bornSlice, NOW - 1)), e.bornZ, SEED_BIRTH, 3);
+			tailNode.push(n);
+			tailNodes.push(n);
 		}
 		for (const e of seed) {
-			if (e.retouch) e.retouch.node = addNode(e.retouch.x, tailY(e.retouch.slice), e.retouch.z, SEED_BIRTH, 2);
+			if (e.retouch) {
+				const n = addNode(e.retouch.x, tailY(e.retouch.slice), e.retouch.z, SEED_BIRTH, 3);
+				e.retouch.node = n;
+				tailNodes.push(n);
+			}
 		}
 		for (const e of seed) {
 			const [px, pz] = posAt(e, NOW);
 			const node = addNode(px, FRONT_Y, pz, SEED_BIRTH, e.kind);
-			entities.push({ kind: e.kind, node, depth: 0, parents: e.links.slice(), degree: e.links.length });
+			entities.push({ kind: e.kind, node, degree: e.links.length });
 		}
 
 		// Edges: tail births weld to their parents' tail markers (with dim
@@ -166,9 +173,9 @@
 		for (const [i, e] of seed.entries()) {
 			for (const target of e.links) {
 				const p = seed[target];
-				const tint: [number, number, number] = e.kind === 0 ? [0.5, 0.38, 0.22] : [0.25, 0.42, 0.6];
-				addNode(p.bornX, tailY(Math.min(p.bornSlice, NOW - 1)), p.bornZ, SEED_BIRTH, 3);
-				addEdge(tailNode[i], tailNode[target], tint, SEED_BIRTH);
+				const dot = addNode(p.bornX, tailY(Math.min(p.bornSlice, NOW - 1)), p.bornZ, SEED_BIRTH, 3);
+				tailNodes.push(dot);
+				addEdge(tailNode[i], tailNode[target], MUTED, SEED_BIRTH);
 				if (target < i) {
 					const bright: [number, number, number] = e.kind === 0 ? [0.55, 0.42, 0.26] : [0.3, 0.48, 0.68];
 					addEdge(entities[i].node, entities[target].node, bright, SEED_BIRTH);
@@ -176,7 +183,7 @@
 			}
 			if (e.retouch) {
 				// The thread from the re-touch marker down to the birth marker.
-				addEdge(e.retouch.node!, tailNode[i], [0.5, 0.5, 0.62], SEED_BIRTH);
+				addEdge(e.retouch.node!, tailNode[i], MUTED, SEED_BIRTH);
 			}
 		}
 
@@ -202,50 +209,45 @@
 		};
 
 		/**
-		 * The push: a node connected to the new change sinks a generation,
-		 * and so do things connected through it that the change outranks.
-		 * Newest at the front, always.
-		 */
-		const pushDown = (first: number, depth: number) => {
-			const stack: [number, number][] = [[first, depth]];
-			while (stack.length > 0) {
-				const [i, d] = stack.pop()!;
-				const e = entities[i];
-				if (e.depth >= d) continue;
-				e.depth = d;
-				yTarget[e.node] = FRONT_Y - d * GAP;
-				for (const p of e.parents) stack.push([p, d + 1]);
-			}
-		};
-
-		/**
 		 * One moment in the workspace, rolled live like a real Roostr DAG:
-		 * a new object - a human's page or an agent's artifact - arrives at
-		 * the front and welds itself to 1-3 existing nodes, pushing each of
-		 * them down a generation to take its spot.
+		 * a new object - a human's page or an agent's artifact - drifts into
+		 * the now plane and welds itself to 1-3 existing nodes, so the plane
+		 * keeps every node ever made and grows forever. The change itself
+		 * drops into the tail: a muted marker with muted threads up to the
+		 * parents it welded, sinking away into the past.
 		 */
 		const fireEvent = (at: number): boolean => {
-			if (nNodes >= MAX_NODES - 1) return false;
+			if (nNodes >= MAX_NODES - 2) return false;
 			const k = rnd() < 0.625 ? 0 : 1;
 			const a = rnd() * Math.PI * 2;
-			const r = 0.14 + rnd() * 0.5;
-			// Arrive flowy: spawn above the front and drift down into place.
-			const node = addNode(Math.cos(a) * r, FRONT_Y + 0.55, Math.sin(a) * r, at, k);
+			// The plane widens a little as it fills.
+			const r = 0.14 + rnd() * Math.min(0.62, 0.5 + entities.length * 0.0015);
+			const x = Math.cos(a) * r;
+			const z = Math.sin(a) * r;
+			// Arrive flowy: spawn above the plane and drift down into place.
+			const node = addNode(x, FRONT_Y + 0.55, z, at, k);
 			yTarget[node] = FRONT_Y;
-			const entity: Entity = { kind: k, node, depth: 0, parents: [], degree: 0 };
+			const entity: Entity = { kind: k, node, degree: 0 };
 			entities.push(entity);
+			// The past: same spot, muted, already sinking.
+			const marker = addNode(x, FRONT_Y, z, at, 3);
+			tailNodes.push(marker);
 			const linkCount = 1 + (rnd() < 0.45 ? 1 : 0) + (rnd() < 0.18 ? 1 : 0);
 			for (let l = 0; l < linkCount; l++) {
 				const t = pickTarget(entities.length - 1);
 				if (t === -1) continue;
 				const p = entities[t];
-				entity.parents.push(t);
 				addEdge(node, p.node, k === 0 ? [0.5, 0.38, 0.22] : [0.25, 0.42, 0.6], at);
+				addEdge(marker, p.node, MUTED, at);
 				entity.degree++;
 				p.degree++;
-				pushDown(t, 1);
 			}
 			return true;
+		};
+
+		/** History sinks: tail markers drift down, the plane never does. */
+		const sinkTail = (dt: number) => {
+			for (const i of tailNodes) yTarget[i] -= 0.05 * dt;
 		};
 
 		/** Ease every pushed node toward its new depth; true while moving. */
@@ -263,6 +265,7 @@
 
 		return {
 			nodeData,
+			sinkTail,
 			get nNodes() {
 				return nNodes;
 			},
@@ -328,12 +331,16 @@
 
 			let nextEventAt = 0.8 + rnd() * 1.2;
 			let dirty = false;
+			let lastT = 0;
 
 			stop = renderer.loop((t) => {
+				const dt = Math.min(t - lastT, 0.1);
+				lastT = t;
 				while (t >= nextEventAt) {
 					if (scene.fireEvent(nextEventAt)) dirty = true;
 					nextEventAt += 0.9 + rnd() * 1.8;
 				}
+				scene.sinkTail(dt);
 				if (scene.ease()) {
 					nodeBuf.write(scene.nodeData.subarray(0, scene.nNodes * 4));
 				}

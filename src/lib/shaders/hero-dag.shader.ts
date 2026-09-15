@@ -38,9 +38,7 @@ export const HeroDag = shader({
 			glow = 0.35 * grown;
 		}
 
-		// Age drift: everything settles downward slowly (rate in sync with
-		// hero-edges and LandingVeil.svelte); depth pushes move node.y.
-		let p = vec3(node.x, node.y - (uNow - node.w) * 0.02, node.z);
+		let p = vec3(node.x, node.y, node.z);
 		const yaw = uTime * 0.22 + uMouse.x * 0.5;
 		const cy = cos(yaw);
 		const sy = sin(yaw);

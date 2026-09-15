@@ -20,8 +20,8 @@ export const HeroEdges = shader({
 
 		const na = storageRead(uNodes, iA);
 		const nb = storageRead(uNodes, iB);
-		const start = vec3(na.x, na.y - (uNow - na.w) * 0.02, na.z);
-		const end = vec3(nb.x, nb.y - (uNow - nb.w) * 0.02, nb.z);
+		const start = vec3(na.x, na.y, na.z);
+		const end = vec3(nb.x, nb.y, nb.z);
 
 		const yaw = uTime * 0.22 + uMouse.x * 0.5;
 		const tilt = 0.42 + uMouse.y * 0.18;

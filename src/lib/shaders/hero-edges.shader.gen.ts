@@ -32,8 +32,8 @@ fn vs_main(bm_in : BmVSIn) -> BmVSOut {
   bm_out.vBirth = bm_in.iBirth;
   let na = uNodes[u32(bm_in.iA)];
   let nb = uNodes[u32(bm_in.iB)];
-  let start = vec3f(na.x, na.y - (bm_u.uNow - na.w) * 0.02, na.z);
-  let end = vec3f(nb.x, nb.y - (bm_u.uNow - nb.w) * 0.02, nb.z);
+  let start = vec3f(na.x, na.y, na.z);
+  let end = vec3f(nb.x, nb.y, nb.z);
   let yaw = bm_u.uTime * 0.22 + bm_u.uMouse.x * 0.5;
   let tilt = 0.42 + bm_u.uMouse.y * 0.18;
   let cy = cos(yaw);
