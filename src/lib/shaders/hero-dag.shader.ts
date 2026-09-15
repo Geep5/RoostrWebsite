@@ -64,7 +64,11 @@ export const HeroDag = shader({
 		}
 		let glow = glowBase * grown;
 
-		let p = vec3(node.x, node.y, node.z);
+		// A gentle bob: the plane breathes. Phased off the birth time so the
+		// edge shader can match it exactly and the welds never detach.
+		const bobY = sin(uTime * 1.5 + node.w * 13.7) * 0.022 * grown;
+		const bobX = cos(uTime * 1.1 + node.w * 27.3) * 0.012 * grown;
+		let p = vec3(node.x + bobX, node.y + bobY, node.z);
 		const yaw = uTime * 0.22 + uMouse.x * 0.5;
 		const cy = cos(yaw);
 		const sy = sin(yaw);

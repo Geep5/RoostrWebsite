@@ -83,7 +83,9 @@ fn vs_main(bm_in : BmVSIn) -> BmVSOut {
     glowBase = 0.4;
   }
   var glow = glowBase * grown;
-  var p = vec3f(node.x, node.y, node.z);
+  let bobY = sin(bm_u.uTime * 1.5 + node.w * 13.7) * 0.022 * grown;
+  let bobX = cos(bm_u.uTime * 1.1 + node.w * 27.3) * 0.012 * grown;
+  var p = vec3f(node.x + bobX, node.y + bobY, node.z);
   let yaw = bm_u.uTime * 0.22 + bm_u.uMouse.x * 0.5;
   let cy = cos(yaw);
   let sy = sin(yaw);

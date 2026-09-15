@@ -32,8 +32,10 @@ fn vs_main(bm_in : BmVSIn) -> BmVSOut {
   bm_out.vBirth = bm_in.iBirth;
   let na = uNodes[u32(bm_in.iA)];
   let nb = uNodes[u32(bm_in.iB)];
-  let start = vec3f(na.x, na.y, na.z);
-  let end = vec3f(nb.x, nb.y, nb.z);
+  let gA = smoothstep(na.w, na.w + 2.8, bm_u.uNow);
+  let gB = smoothstep(nb.w, nb.w + 2.8, bm_u.uNow);
+  let start = vec3f(na.x + cos(bm_u.uTime * 1.1 + na.w * 27.3) * 0.012 * gA, na.y + sin(bm_u.uTime * 1.5 + na.w * 13.7) * 0.022 * gA, na.z);
+  let end = vec3f(nb.x + cos(bm_u.uTime * 1.1 + nb.w * 27.3) * 0.012 * gB, nb.y + sin(bm_u.uTime * 1.5 + nb.w * 13.7) * 0.022 * gB, nb.z);
   let yaw = bm_u.uTime * 0.22 + bm_u.uMouse.x * 0.5;
   let tilt = 0.42 + bm_u.uMouse.y * 0.18;
   let cy = cos(yaw);

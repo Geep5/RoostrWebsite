@@ -50,6 +50,7 @@
 		const nodeData = new Float32Array(MAX_NODES * 4); // x, yTopo, z, birth
 		const yCur: number[] = [];
 		const yTarget: number[] = [];
+		const yVel: number[] = [];
 		let nNodes = 0;
 
 		const iIdx: number[] = [];
@@ -103,6 +104,7 @@
 			nodeData[idx * 4 + 3] = birth;
 			yCur[idx] = yTopo;
 			yTarget[idx] = yTopo;
+			yVel[idx] = 0;
 			iIdx.push(idx);
 			iKind.push(kind);
 			iSeed.push(rnd());
@@ -279,13 +281,18 @@
 			for (const i of tailNodes) yTarget[i] -= 0.05 * dt;
 		};
 
-		/** Ease every pushed node toward its new depth; true while moving. */
+		/**
+		 * Spring every node toward its target height: arrivals and pushes
+		 * overshoot and bounce a little before they settle - playful, never
+		 * mechanical. True while anything is still moving.
+		 */
 		const ease = (): boolean => {
 			let moving = false;
 			for (let i = 0; i < nNodes; i++) {
 				const d = yTarget[i] - yCur[i];
-				if (Math.abs(d) < 0.0004) continue;
-				yCur[i] += d * 0.028;
+				if (Math.abs(d) < 0.0004 && Math.abs(yVel[i]) < 0.0004) continue;
+				yVel[i] = (yVel[i] + d * 0.006) * 0.92;
+				yCur[i] += yVel[i];
 				nodeData[i * 4 + 1] = yCur[i];
 				moving = true;
 			}
@@ -328,7 +335,7 @@
 		void (async () => {
 			let renderer: Awaited<ReturnType<typeof createRenderer>>;
 			try {
-				renderer = await createRenderer(canvas!, { clearColor: [0.006, 0.008, 0.016, 1] });
+				renderer = await createRenderer(canvas!, { clearColor: [0.012, 0.01, 0.006, 1] });
 			} catch {
 				return;
 			}

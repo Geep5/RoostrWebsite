@@ -92,18 +92,19 @@
 		align-items: center;
 		gap: 12px;
 		text-decoration: none;
-		color: #aab1c6;
+		color: #d8c391;
 		font-size: 20px;
-		font-weight: 600;
+		font-weight: 500;
 		letter-spacing: 0.04em;
 	}
 	.mark img {
 		width: 38px;
 		height: 38px;
 		border-radius: 10px;
+		filter: drop-shadow(0 3px 10px rgba(0, 0, 0, 0.55)) drop-shadow(0 0 16px rgba(242, 193, 78, 0.28));
 	}
 	.mark:hover {
-		color: #e3e8f4;
+		color: #ffe9ad;
 	}
 	.chrome-links {
 		display: flex;
@@ -113,17 +114,17 @@
 	.login {
 		padding: 11px 24px;
 		border-radius: 11px;
-		background: rgba(170, 177, 198, 0.1);
-		border: 1px solid rgba(170, 177, 198, 0.22);
-		color: #cfd5e4;
+		background: rgba(242, 193, 78, 0.1);
+		border: 1px solid rgba(242, 193, 78, 0.32);
+		color: #e8d9b0;
 		font-size: 16px;
 		font-weight: 500;
 		text-decoration: none;
 		backdrop-filter: blur(6px);
 	}
 	.login:hover {
-		background: rgba(170, 177, 198, 0.18);
-		color: #fff;
+		background: rgba(242, 193, 78, 0.2);
+		color: #ffe9ad;
 	}
 	.gh {
 		display: flex;
@@ -132,13 +133,13 @@
 		width: 46px;
 		height: 46px;
 		border-radius: 11px;
-		color: #8d93a8;
-		background: rgba(170, 177, 198, 0.08);
-		border: 1px solid rgba(170, 177, 198, 0.16);
+		color: #a89b78;
+		background: rgba(242, 193, 78, 0.08);
+		border: 1px solid rgba(242, 193, 78, 0.2);
 	}
 	.gh:hover {
-		color: #fff;
-		background: rgba(170, 177, 198, 0.16);
+		color: #ffd97a;
+		background: rgba(242, 193, 78, 0.18);
 	}
 	.veil-copy {
 		position: absolute;
@@ -161,7 +162,7 @@
 		display: block;
 		font-size: 12px;
 		letter-spacing: 0.55em;
-		color: #6b6f82;
+		color: #c9a54a;
 		margin-bottom: 28px;
 	}
 	.veil-copy h1 {
@@ -174,12 +175,12 @@
 		text-shadow: 0 2px 40px rgba(3, 4, 10, 0.9);
 	}
 	.dim {
-		color: #4f5878;
+		color: #8f7642;
 	}
 	.veil-copy .sub {
 		max-width: 480px;
 		margin: 0 auto 40px;
-		color: #8d92a6;
+		color: #9d9682;
 		font-size: 16px;
 		line-height: 1.7;
 		font-weight: 300;
@@ -191,12 +192,12 @@
 		text-decoration: none;
 		font-weight: 500;
 		font-size: 15px;
-		color: #fff;
-		background: #2b6fe0;
-		border: 1px solid #3f83ef;
+		color: #241a05;
+		background: #f2c14e;
+		border: 1px solid #f7d47e;
 	}
 	.btn.primary:hover {
-		background: #3a80f0;
+		background: #f7cf6a;
 	}
 	.sr-only {
 		position: absolute;

@@ -20,8 +20,18 @@ export const HeroEdges = shader({
 
 		const na = storageRead(uNodes, iA);
 		const nb = storageRead(uNodes, iB);
-		const start = vec3(na.x, na.y, na.z);
-		const end = vec3(nb.x, nb.y, nb.z);
+		const gA = smoothstep(na.w, na.w + 2.8, uNow);
+		const gB = smoothstep(nb.w, nb.w + 2.8, uNow);
+		const start = vec3(
+			na.x + cos(uTime * 1.1 + na.w * 27.3) * 0.012 * gA,
+			na.y + sin(uTime * 1.5 + na.w * 13.7) * 0.022 * gA,
+			na.z,
+		);
+		const end = vec3(
+			nb.x + cos(uTime * 1.1 + nb.w * 27.3) * 0.012 * gB,
+			nb.y + sin(uTime * 1.5 + nb.w * 13.7) * 0.022 * gB,
+			nb.z,
+		);
 
 		const yaw = uTime * 0.22 + uMouse.x * 0.5;
 		const tilt = 0.42 + uMouse.y * 0.18;
