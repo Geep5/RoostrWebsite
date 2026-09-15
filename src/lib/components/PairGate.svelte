@@ -1,13 +1,24 @@
 <script lang="ts">
 	import { onMount } from "svelte";
-	import { pairLocal, pairedSession, onPairingChange, unpairLocal } from "$lib/local-transport";
+	import { pairLocal, pairedSession, onPairingChange, unpairLocal, LOCAL_API } from "$lib/local-transport";
 	let { onready, compact = false }: { onready: () => void; compact?: boolean } = $props();
 	let code = $state("");
 	let busy = $state(false);
 	let error = $state("");
 	let session = $state<ReturnType<typeof pairedSession>>(null);
+	let daemonCode = $state<string | null>(null);
 	onMount(() => {
 		session = pairedSession();
+		// The daemon guards outside access only, so it serves its current
+		// pairing code to a UI running on this machine - no terminal trip.
+		void (async () => {
+			try {
+				const res = await fetch(`${LOCAL_API}/api/pair/code`, { credentials: "omit", redirect: "error" });
+				if (!res.ok) return;
+				const value = await res.json();
+				if (typeof value.code === "string" && /^[a-f0-9]{64}$/i.test(value.code)) daemonCode = value.code;
+			} catch { /* daemon offline or older - the manual form still works */ }
+		})();
 		return onPairingChange(() => {
 			const next = pairedSession();
 			if (session && !next) error = "Pairing expired or was removed. Obtain a fresh terminal code to reconnect.";
@@ -30,9 +41,16 @@
 		<button onclick={() => onready()}>Reconnect</button>
 		<button onclick={() => unpairLocal()}>Unpair this tab</button>
 	{:else}
-		<p>Start the daemon, then enter the one-use pairing code printed in its terminal. Codes expire after five minutes. Pairing explicitly allows this browser origin to access local data and machine controls for 24 hours.</p>
+		<p>Pairing explicitly allows this browser origin to access local data and machine controls for 24 hours. Codes are one-use and expire after five minutes.</p>
+		{#if daemonCode}
+			<div class="daemon-code">
+				<span>This daemon&rsquo;s current code</span>
+				<code>{daemonCode}</code>
+				<button type="button" disabled={busy} onclick={() => { code = daemonCode!; void pair(); }}>{busy ? "Pairing…" : "Pair with this code"}</button>
+			</div>
+		{/if}
 		<form onsubmit={(event) => { event.preventDefault(); void pair(); }}>
-			<label for="local-pair-code">Terminal pairing code</label>
+			<label for="local-pair-code">Or paste a terminal code</label>
 			<input id="local-pair-code" type="password" bind:value={code} autocomplete="off" spellcheck="false" required disabled={busy} />
 			<button type="submit" disabled={busy || !code.trim()}>{busy ? "Pairing…" : "Pair this tab"}</button>
 		</form>
@@ -51,5 +69,8 @@
 	button { padding: 9px 14px; border: 1px solid #666; border-radius: 6px; background: #292929; color: inherit; cursor: pointer; }
 	button:disabled { opacity: .5; cursor: default; }
 	.hint { font-size: 12px; }
+	.daemon-code { display: grid; gap: 8px; margin: 0 0 14px; padding: 12px; border: 1px solid #3d3d3d; border-radius: 10px; background: #1d1d1d; }
+	.daemon-code span { color: #999; font-size: 12px; }
+	.daemon-code code { display: block; padding: 8px 10px; border-radius: 6px; background: #111; color: #e8d9a0; font-size: 12px; word-break: break-all; user-select: all; }
 	[role="alert"] { color: #ffaca5; }
 </style>
