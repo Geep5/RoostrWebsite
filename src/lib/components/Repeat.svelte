@@ -11,8 +11,9 @@
 	 */
 	import type { ObjectJSON, RepeatFreq, RepeatJSON } from "$lib/types";
 	import { repeatOf } from "$lib/types";
-	import { repeat, fetchAllQuery, fetchObject } from "$lib/api";
+	import { repeat } from "$lib/api";
 	import { isIOSBackend } from "$lib/client-backend";
+	import { machineName, resolveServing, servingCopy } from "$lib/serving";
 
 	let {
 		object,
@@ -40,28 +41,28 @@
 	const rule = $derived(repeatOf(object.fields));
 	let open = $state(false);
 
-	// Agent-owned occurrences run on the machine that serves the space, never
-	// on a phone; the cell says so and names the machine when it can.
+	// Agent-owned occurrences run on the machine the engine resolves for
+	// this object (`$lib/serving`), never on a phone; the cell says so and
+	// names the machine when it can, plus the warning when nobody can.
 	const agentOwned = $derived(!!(object.fields["assignee"] ?? object.fields["agent"]));
 	let servingName = $state("");
+	let servingWarning = $state("");
 	$effect(() => {
-		const spaceId = object.fields["channel"]?.stringValue ?? "";
-		if (!agentOwned || !spaceId) {
+		const current = object;
+		if (!agentOwned) {
 			servingName = "";
+			servingWarning = "";
 			return;
 		}
 		void (async () => {
 			try {
-				const space = await fetchObject(spaceId);
-				const servedBy = space.fields["served_by"]?.stringValue ?? "";
-				if (!servedBy) {
-					servingName = "no machine yet";
-					return;
-				}
-				const machines = await fetchAllQuery({ type: "machine" });
-				servingName = machines.find((m) => m.fields["machine_id"]?.stringValue === servedBy)?.fields["name"]?.stringValue || `${servedBy.slice(0, 8)}…`;
+				const { serving, machines } = await resolveServing(current);
+				servingName = machineName(machines, serving.machineId);
+				const copy = servingCopy(serving, machines);
+				servingWarning = copy.warning ? copy.text : "";
 			} catch {
 				servingName = "";
+				servingWarning = "";
 			}
 		})();
 	});
@@ -270,7 +271,7 @@
 	{#if rule}
 		{#if agentOwned}
 			<p class="meta">
-				<span>runs on {servingName || "the machine serving this space"}{isIOSBackend ? " · not on this device" : ""}</span>
+				<span>runs on {servingName || "the machine serving this space"}{isIOSBackend ? " · not on this device" : ""}{#if servingWarning}<span class="overdue"> · {servingWarning}</span>{/if}</span>
 			</p>
 		{/if}
 		{#if rule.last_done !== undefined || rule.fired_at !== undefined || rule.last_run}

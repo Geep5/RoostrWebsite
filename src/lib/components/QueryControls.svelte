@@ -181,6 +181,13 @@
 		{ id: "notEqual", label: "is unchecked", needsValue: false },
 	];
 
+	/** The serving resolver's reasons plus the two rolled-up states. */
+	const SERVING_CONDITIONS: ConditionDef[] = [
+		{ id: "equal", label: "is", needsValue: true },
+		{ id: "notEqual", label: "is not", needsValue: true },
+	];
+	const SERVING_OPTIONS = ["attention", "ok", "pinned", "space", "capability", "unsatisfied", "pinned-uncapable"];
+
 	function formatOf(key: string): string {
 		if (key === "type" || key === "id") return "shorttext";
 		if (key === "createdAt" || key === "updatedAt") return "number";
@@ -188,6 +195,7 @@
 	}
 
 	function conditionsFor(key: string): ConditionDef[] {
+		if (key === "serving") return SERVING_CONDITIONS;
 		const f = formatOf(key);
 		if (f === "number" || f === "date") return NUMBER_CONDITIONS;
 		if (f === "tag" || f === "status") return SELECT_CONDITIONS;
@@ -197,6 +205,7 @@
 	}
 
 	function optionsFor(key: string): string[] {
+		if (key === "serving") return SERVING_OPTIONS;
 		return (relations.find((r) => r.key === key)?.options ?? []).map((o) => o.text);
 	}
 
@@ -208,10 +217,11 @@
 	 * would collide here even with one def per key upstream. */
 	const filterKeys = $derived.by(() => {
 		const keys = relations.filter((r) => !r.hidden && r.key !== "setOf").map((r) => r.key);
-		return [...new Set(["type", ...keys, "createdAt", "updatedAt"])];
+		return [...new Set(["type", ...keys, "createdAt", "updatedAt", "serving"])];
 	});
 
 	function labelOf(key: string): string {
+		if (key === "serving") return "Serving";
 		if (key === "type") return "Type";
 		if (key === "createdAt") return "Created";
 		if (key === "updatedAt") return "Updated";

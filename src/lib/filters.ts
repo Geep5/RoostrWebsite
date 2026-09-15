@@ -6,6 +6,28 @@
 import type { ObjectJSON, RelationDefJSON } from "$lib/types";
 import { SYSTEM_TYPE_KEYS } from "$lib/types";
 
+/**
+ * Filter keys the engine cannot evaluate because their value is computed
+ * by the host, not stored on the object. `serving` resolves per object
+ * through the engine's serving resolver ($lib/serving); views apply it
+ * client-side after the engine query (SetTable).
+ */
+export const VIRTUAL_FILTER_KEYS: Record<string, true> = { serving: true };
+
+/** Stored serving filter rules, parsed for the client-side pass. */
+export function servingFiltersOf(object: ObjectJSON): Array<{ condition: string; value: string }> {
+	const items = object.fields["viewFilters"]?.valuesValue?.items ?? [];
+	const out: Array<{ condition: string; value: string }> = [];
+	for (const item of items) {
+		const e = item.mapValue?.entries;
+		if (!e || e["key"]?.stringValue !== "serving") continue;
+		const value = (e["value"]?.valuesValue?.items ?? []).map((i) => i.stringValue ?? "").filter(Boolean)[0] ?? "";
+		if (!value) continue;
+		out.push({ condition: e["condition"]?.stringValue ?? "equal", value });
+	}
+	return out;
+}
+
 export function engineFiltersOf(object: ObjectJSON, relations: RelationDefJSON[]): Array<Record<string, unknown>> {
 	const items = object.fields["viewFilters"]?.valuesValue?.items ?? [];
 	const out: Array<Record<string, unknown>> = [];
@@ -13,6 +35,7 @@ export function engineFiltersOf(object: ObjectJSON, relations: RelationDefJSON[]
 		const e = item.mapValue?.entries;
 		if (!e) continue;
 		const key = e["key"]?.stringValue ?? "";
+		if (VIRTUAL_FILTER_KEYS[key]) continue; // host-computed - client-side pass only
 		const condition = e["condition"]?.stringValue ?? "equal";
 		const values = (e["value"]?.valuesValue?.items ?? [])
 			.map((i) => i.stringValue)

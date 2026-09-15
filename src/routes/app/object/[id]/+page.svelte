@@ -4,13 +4,14 @@
 	import { goto } from "$app/navigation";
 	import type { ObjectJSON } from "$lib/types";
 	import { fieldStr } from "$lib/types";
-	import { engineFiltersOf, spaceFilterOf } from "$lib/filters";
+	import { engineFiltersOf, servingFiltersOf, spaceFilterOf } from "$lib/filters";
 	import { spaceRelations } from "$lib/relations";
 	import { fetchObject, fetchQuery, note } from "$lib/api";
 	import { discussionUI, store, refreshAll, onObjectEvent, layoutOf } from "$lib/data.svelte";
 	import Editor from "$lib/components/Editor.svelte";
 	import FeaturedProps from "$lib/components/FeaturedProps.svelte";
 	import Repeat from "$lib/components/Repeat.svelte";
+	import ServingChip from "$lib/components/ServingChip.svelte";
 	import Discussion from "$lib/components/Discussion.svelte";
 	import ConversationDrawer from "$lib/components/ConversationDrawer.svelte";
 	import { loadAgentThreads } from "$lib/conversations";
@@ -24,6 +25,7 @@
 	import PropertyPanel from "$lib/components/PropertyPanel.svelte";
 	import EmojiPicker from "$lib/components/EmojiPicker.svelte";
 	import { objectIcon } from "$lib/icons";
+	import { UNSERVED_TYPES } from "$lib/serving";
 
 	let object = $state<ObjectJSON>();
 	let editor = $state<Editor>();
@@ -178,6 +180,9 @@
 	/** Stored viewFilters → engine filter objects with format-aware value coercion. */
 	const engineFilters = $derived.by((): Array<Record<string, unknown>> => (object ? engineFiltersOf(object, scopedRelations) : []));
 
+	/** Serving rules travel beside the body: host-computed, applied by the table after the engine query. */
+	const servingRules = $derived.by(() => (object ? servingFiltersOf(object) : []));
+
 	/** Pick-lists (columns, filters, featured props) offer only this
 	 *  space's properties - spaces are self-contained. */
 	const scopedRelations = $derived(object ? spaceRelations(store.relations, object.fields["channel"]?.stringValue || store.channels[0]?.id || "") : []);
@@ -203,17 +208,17 @@
 		// Spaces are self-contained: every set implicitly filters to the
 		// owning space's objects.
 		const spaceFilter = spaceFilterOf(object, store.channels[0]?.id ?? "");
-		if (isQuery) return { setId: object.id, filters: [...engineFilters, spaceFilter], ...text };
+		if (isQuery) return { setId: object.id, filters: [...engineFilters, spaceFilter], servingFilters: servingRules, ...text };
 		// A type page IS a set of its instances (Anytype's type view).
 		if (isType) {
 			const key = object.fields["key"]?.stringValue;
 			if (!key) return null;
-			return { type: key, filters: [...engineFilters, spaceFilter], ...text };
+			return { type: key, filters: [...engineFilters, spaceFilter], servingFilters: servingRules, ...text };
 		}
 		if (isCollection) {
 			if (memberIds.length === 0) return null;
 			// View filters stack on top of membership (AND semantics).
-			return { filters: [{ key: "id", condition: "in", value: memberIds }, ...engineFilters, spaceFilter], ...text };
+			return { filters: [{ key: "id", condition: "in", value: memberIds }, ...engineFilters, spaceFilter], servingFilters: servingRules, ...text };
 		}
 		return null;
 	});
@@ -499,6 +504,9 @@
 		{/if}
 		{#if !isChannel && !isChat && !isType && !isRelation}
 			<FeaturedProps {object} relations={scopedRelations} onchanged={refresh} />
+		{/if}
+		{#if !UNSERVED_TYPES[object.typeKey]}
+			<ServingChip {object} onchanged={refresh} />
 		{/if}
 		{#if !isChannel && !isChat && !isType && !isRelation && !isTemplate && !isQuery && !isCollection && !isAgent}
 			<Repeat {object} onchanged={refresh} />

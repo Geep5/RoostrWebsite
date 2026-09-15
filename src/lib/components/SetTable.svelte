@@ -12,7 +12,8 @@
 	import PropertyValue from "./PropertyValue.svelte";
 	import { tagStyle } from "$lib/options";
 	import CheckboxIcon from "./CheckboxIcon.svelte";
-	import { fetchQuery, note, type QueryResultRow } from "$lib/api";
+	import { fetchAllQuery, fetchQuery, note, type QueryResultRow } from "$lib/api";
+	import { fetchMachines, resolveMany, servingCopy } from "$lib/serving";
 	import { store, layoutOf } from "$lib/data.svelte";
 	import type { ObjectJSON, RelationDefJSON, ValueJSON } from "$lib/types";
 	import { fieldStr } from "$lib/types";
@@ -224,6 +225,7 @@
 		{ key: "type", name: "Type" },
 		{ key: "createdAt", name: "Created" },
 		{ key: "updatedAt", name: "Updated" },
+		{ key: "serving", name: "Serving" },
 	];
 
 	/** Anytype default grid columns for a fresh view. */
@@ -347,14 +349,60 @@
 		void saveColumns(next);
 	}
 
+	// ── Virtual "Serving" property ──────────────────────────────────
+	// The value is resolved per row by the engine's serving resolver
+	// ($lib/serving), never stored: a serving column shows it, serving
+	// filter rules (peeled from the body, which never sends them to the
+	// engine) and a serving sort are applied here after the query.
+	interface ServingInfo {
+		text: string;
+		warning: boolean;
+		reason: string;
+		machineId: string;
+	}
+	let servingById = $state<Map<string, ServingInfo>>(new Map());
+
+	function servingMatch(rule: { condition: string; value: string }, info: ServingInfo | undefined): boolean {
+		const hit = rule.value === "attention" ? (info?.warning ?? false) : rule.value === "ok" ? !(info?.warning ?? true) : info?.reason === rule.value;
+		return rule.condition === "notEqual" ? !hit : hit;
+	}
+
+	/** Attention (unsatisfied / pinned-uncapable) first, then unresolved, then fine. */
+	function servingRank(info: ServingInfo | undefined): number {
+		if (!info) return 1;
+		return info.warning ? 0 : info.machineId ? 2 : 1;
+	}
+
 	async function load() {
-		const sorts = (override ? [{ key: override.key, type: override.dir }] : defaultSorts.length > 0 ? defaultSorts : [{ key: "updatedAt", type: "desc" }]).map((s) => ({
+		const { servingFilters, ...engineBody } = body as Record<string, unknown> & { servingFilters?: Array<{ condition: string; value: string }> };
+		const rules = servingFilters ?? [];
+		const effectiveKey = override?.key ?? defaultSorts[0]?.key ?? "updatedAt";
+		const effectiveType = override?.dir ?? defaultSorts[0]?.type ?? "desc";
+		const servingSort = effectiveKey === "serving" ? { type: effectiveType } : null;
+		const base = servingSort ? [{ key: "updatedAt", type: "desc" }] : override ? [{ key: effectiveKey, type: effectiveType }] : defaultSorts.length > 0 ? defaultSorts : [{ key: "updatedAt", type: "desc" }];
+		const sorts = base.map((s) => ({
 			key: s.key,
 			type: s.type,
 			emptyPlacement: ("empty" in s ? s.empty : undefined) ?? "end",
 		}));
-		const res = await fetchQuery({ ...body, sorts });
+		const res = await fetchQuery({ ...engineBody, sorts });
 		rows = res.records;
+		if (columns.includes("serving") || rules.length > 0 || servingSort) {
+			const [{ rows: machineRows, machines }, spaceRows] = await Promise.all([fetchMachines(), fetchAllQuery({ type: "channel" })]);
+			const spaces = [...spaceRows].sort((a, b) => a.createdAt - b.createdAt);
+			const resolved = await resolveMany(rows, spaces, machineRows);
+			const map = new Map<string, ServingInfo>();
+			rows.forEach((r, i) => {
+				const s = resolved[i];
+				map.set(r.id, { ...servingCopy(s, machines), reason: s.reason, machineId: s.machineId });
+			});
+			servingById = map;
+			if (rules.length > 0) rows = rows.filter((r) => rules.every((rule) => servingMatch(rule, servingById.get(r.id))));
+			if (servingSort) {
+				const dir = servingSort.type === "desc" ? -1 : 1;
+				rows = [...rows].sort((a, b) => dir * (servingRank(servingById.get(a.id)) - servingRank(servingById.get(b.id))) || (a.updatedAt - b.updatedAt) * -1);
+			}
+		}
 	}
 
 	$effect(() => {
@@ -420,6 +468,7 @@
 	}
 
 	function cell(r: QueryResultRow, key: string): string {
+		if (key === "serving") return servingById.get(r.id)?.text ?? "";
 		if (key === "type") {
 			// Display name, never the raw key: "finance_task" reads as its
 			// type's name (or at worst the key with spaces).
@@ -556,7 +605,7 @@
 								{/if}
 							</td>
 						{:else}
-							<td class:muted={c === "type" || c === "createdAt" || c === "updatedAt"}>{cell(r, c)}</td>
+							<td class:muted={c === "type" || c === "createdAt" || c === "updatedAt"} class:cell-warn={c === "serving" && (servingById.get(r.id)?.warning ?? false)}>{cell(r, c)}</td>
 						{/if}
 					{/each}
 					<td></td>
@@ -802,6 +851,9 @@
 		background: var(--hl-light);
 	}
 	/* Anytype cellContent.c-checkbox: 20px icon, secondary until checked. */
+	.cell-warn {
+		color: #f55522;
+	}
 	.cell-check {
 		display: inline-flex;
 		color: var(--muted);
