@@ -30,10 +30,16 @@ fn vs_main(bm_in : BmVSIn) -> BmVSOut {
   if (bm_in.iKind > 0.5 && bm_in.iKind < 1.5) {
     color = vec3f(0.35, 0.68, 1.0);
   } else {
-    if (bm_in.iKind > 1.5) {
+    if (bm_in.iKind > 1.5 && bm_in.iKind < 2.5) {
       color = vec3f(0.95, 0.97, 1.0);
       size = 0.038 + fract(bm_in.iSeed * 5.1) * 0.008;
       glow = 1.15;
+    } else {
+      if (bm_in.iKind > 2.5) {
+        color = vec3f(0.42, 0.48, 0.62);
+        size = 0.016;
+        glow = 0.35;
+      }
     }
   }
   var p = bm_in.iPos;

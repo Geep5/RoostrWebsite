@@ -55,7 +55,7 @@
 		// Persistent entities: born over the first two-thirds of the stack,
 		// homes on the unit disc, drifting a little per slice.
 		const entities: Entity[] = [];
-		for (let i = 0; i < 46; i++) {
+		for (let i = 0; i < 40; i++) {
 			const a = rnd() * Math.PI * 2;
 			const r = 0.14 + rnd() * 0.5;
 			entities.push({
@@ -91,25 +91,29 @@
 		};
 
 		for (let k = 0; k < SLICES; k++) {
-			const present: number[] = [];
 			for (const [i, e] of entities.entries()) {
-				if (e.birth > k) continue;
-				present.push(i);
+				if (e.birth !== k) continue;
 				const [x, y, z] = posOf(e, k);
-				// The newest slice burns a little brighter.
 				pushNode(x, y, z, e.kind);
+				// Its new links attach down through the stack, to the parents'
+				// own planes - each change visibly joins history.
 				for (const target of e.links) {
-					if (target < i && entities[target].birth <= k) {
-						pushLink([x, y, z], posOf(entities[target], k), e.kind === 0 ? [0.5, 0.38, 0.22] : [0.25, 0.42, 0.6]);
-					}
+					const p = entities[target];
+					pushLink([x, y, z], posOf(p, p.birth), e.kind === 0 ? [0.5, 0.38, 0.22] : [0.25, 0.42, 0.6]);
+					pushNode(...posOf(p, p.birth), 3);
 				}
-			}
-			// Tracks: the same node between this slice and the last.
-			if (k > 0) {
-				for (const i of present) {
-					const e = entities[i];
-					if (e.birth > k - 1) continue;
-					pushLink(posOf(e, k), posOf(e, k - 1), [0.32, 0.36, 0.5]);
+				// Some nodes get re-touched later: an edit at a higher plane,
+				// bright, with a thread back to where it was born.
+				if (rnd() < 0.22 && k + 2 < SLICES) {
+					const touch = k + 2 + Math.floor(rnd() * (SLICES - k - 2));
+					const [tx, ty, tz] = posOf(e, touch);
+					pushNode(tx, ty, tz, 2);
+					pushLink([tx, ty, tz], [x, y, z], [0.5, 0.5, 0.62]);
+					e.x = tx;
+					e.z = tz;
+					e.dx = 0;
+					e.dz = 0;
+					e.birth = touch;
 				}
 			}
 		}

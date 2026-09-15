@@ -20,10 +20,15 @@ export const HeroDag = shader({
 		let glow = 0.8 + fract(iSeed * 4.7) * 0.5;
 		if (iKind > 0.5 && iKind < 1.5) {
 			color = vec3(0.35, 0.68, 1.0);
-		} else if (iKind > 1.5) {
+		} else if (iKind > 1.5 && iKind < 2.5) {
 			color = vec3(0.95, 0.97, 1.0);
 			size = 0.038 + fract(iSeed * 5.1) * 0.008;
 			glow = 1.15;
+		} else if (iKind > 2.5) {
+			// Context: the parent a change attaches to - present, not the story.
+			color = vec3(0.42, 0.48, 0.62);
+			size = 0.016;
+			glow = 0.35;
 		}
 
 		// Swirl: the whole stack turns like a tall glass, with a pointer tilt.
