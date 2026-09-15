@@ -55,7 +55,7 @@
 		// Persistent entities: born over the first two-thirds of the stack,
 		// homes on the unit disc, drifting a little per slice.
 		const entities: Entity[] = [];
-		for (let i = 0; i < 40; i++) {
+		for (let i = 0; i < 52; i++) {
 			const a = rnd() * Math.PI * 2;
 			const r = 0.14 + rnd() * 0.5;
 			entities.push({
@@ -90,7 +90,7 @@
 			tints.push(...tint);
 		};
 
-		for (let k = 0; k < SLICES; k++) {
+		for (let k = 0; k < SLICES - 1; k++) {
 			for (const [i, e] of entities.entries()) {
 				if (e.birth !== k) continue;
 				const [x, y, z] = posOf(e, k);
@@ -114,6 +114,20 @@
 					e.dx = 0;
 					e.dz = 0;
 					e.birth = touch;
+				}
+			}
+		}
+
+		// The now plane: the whole web as it stands - every node, every
+		// connection - that the tail of changes below built up to.
+		const NOW = SLICES - 1;
+		for (const [i, e] of entities.entries()) {
+			if (e.birth > NOW) continue;
+			const [x, y, z] = posOf(e, NOW);
+			pushNode(x, y, z, e.kind);
+			for (const target of e.links) {
+				if (target < i && entities[target].birth <= NOW) {
+					pushLink([x, y, z], posOf(entities[target], NOW), e.kind === 0 ? [0.55, 0.42, 0.26] : [0.3, 0.48, 0.68]);
 				}
 			}
 		}
