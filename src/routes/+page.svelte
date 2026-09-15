@@ -17,6 +17,18 @@
 		<LandingVeil />
 	</a>
 
+	<div class="veil-copy">
+		<span class="eyebrow">R O O S T R</span>
+		<h1>A central workplace.<br /><span class="dim">For every kind of mind.</span></h1>
+		<p class="sub">
+			Your knowledgebase, worked — by you, and by the agents that live in it. One memory,
+			shared. No account, no platform. Your key is your identity.
+		</p>
+		<div class="cta">
+			<a class="btn primary" href="/app">Enter</a>
+		</div>
+	</div>
+
 	<header class="chrome">
 		<a class="mark" href="/" aria-label="Roostr home"><img src="/logo.png" alt="Roostr" /><span>Roostr</span></a>
 		<nav class="chrome-links">
@@ -127,6 +139,64 @@
 	.gh:hover {
 		color: #fff;
 		background: rgba(170, 177, 198, 0.16);
+	}
+	.veil-copy {
+		position: absolute;
+		inset: 0;
+		z-index: 2;
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		justify-content: center;
+		text-align: center;
+		padding: 0 24px;
+		pointer-events: none;
+		background: radial-gradient(ellipse 60% 65% at 50% 50%, rgba(3, 4, 10, 0.72) 0%, rgba(3, 4, 10, 0.28) 55%, transparent 75%);
+	}
+	.veil-copy .cta,
+	.veil-copy a {
+		pointer-events: auto;
+	}
+	.eyebrow {
+		display: block;
+		font-size: 12px;
+		letter-spacing: 0.55em;
+		color: #6b6f82;
+		margin-bottom: 28px;
+	}
+	.veil-copy h1 {
+		color: #e9ecf5;
+		font-size: clamp(42px, 6.5vw, 72px);
+		font-weight: 300;
+		line-height: 1.04;
+		letter-spacing: -0.015em;
+		margin: 0 0 26px;
+		text-shadow: 0 2px 40px rgba(3, 4, 10, 0.9);
+	}
+	.dim {
+		color: #4f5878;
+	}
+	.veil-copy .sub {
+		max-width: 480px;
+		margin: 0 auto 40px;
+		color: #8d92a6;
+		font-size: 16px;
+		line-height: 1.7;
+		font-weight: 300;
+		text-shadow: 0 1px 24px rgba(3, 4, 10, 0.9);
+	}
+	.btn.primary {
+		padding: 11px 34px;
+		border-radius: 9px;
+		text-decoration: none;
+		font-weight: 500;
+		font-size: 15px;
+		color: #fff;
+		background: #2b6fe0;
+		border: 1px solid #3f83ef;
+	}
+	.btn.primary:hover {
+		background: #3a80f0;
 	}
 	.sr-only {
 		position: absolute;

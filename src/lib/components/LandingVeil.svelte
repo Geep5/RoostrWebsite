@@ -6,10 +6,9 @@
 	 * at its tip. Degrades to nothing where WebGPU is unavailable.
 	 */
 	import { onMount } from "svelte";
-	import { createRenderer, createProgram, loadTexture, mat4 } from "brometal";
+	import { createRenderer, createProgram, mat4 } from "brometal";
 	import heroDag from "$lib/shaders/hero-dag.shader.gen";
 	import heroEdges from "$lib/shaders/hero-edges.shader.gen";
-	import heroLogo from "$lib/shaders/hero-logo.shader.gen";
 
 	let canvas = $state<HTMLCanvasElement>();
 
@@ -116,10 +115,8 @@
 
 		void (async () => {
 			let renderer: Awaited<ReturnType<typeof createRenderer>>;
-			let logoTex: Awaited<ReturnType<typeof loadTexture>>;
 			try {
 				renderer = await createRenderer(canvas!, { clearColor: [0.006, 0.008, 0.016, 1] });
-				logoTex = await loadTexture(renderer, "/logo.png");
 			} catch {
 				return;
 			}
@@ -145,19 +142,12 @@
 			edges.instanceAttributes.iTint.set(dag.tints);
 			edges.uniforms.uWidth.set(0.017);
 
-			const mark = createProgram(renderer, heroLogo, { blend: "alpha" });
-			mark.attributes.aCorner.set(quad);
-			mark.uniforms.uTex.set(logoTex);
-
 			stop = renderer.loop((t) => {
 				mx += (tx - mx) * 0.045;
 				my += (ty - my) * 0.045;
 				const proj = mat4.perspective(Math.PI / 4.4, renderer.aspect, 0.1, 100);
 				const view = mat4.lookAt([0, 0.8, 6.2], [-0.5, 0.25, 0], [0, 1, 0]);
 				const viewProj = mat4.multiply(proj, view);
-				mark.uniforms.uViewProj.set(viewProj);
-				mark.uniforms.uMouse.set([mx, my]);
-				mark.draw();
 				edges.uniforms.uViewProj.set(viewProj);
 				edges.uniforms.uMouse.set([mx, my]);
 				edges.uniforms.uScroll.set((t * 0.55) % 7);
