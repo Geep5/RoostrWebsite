@@ -1,28 +1,39 @@
-import { shader, vec2, vec3, vec4, mod, max, smoothstep, length, abs } from "brometal";
+import { shader, vec2, vec3, vec4, cos, sin, max, smoothstep, length } from "brometal";
 
 /**
- * The links of the change-DAG: thin quads from each change to its
- * parent(s), wrapped along +x with the nodes. Edges whose endpoints land
- * on opposite sides of the wrap fade out instead of streaking across.
+ * The connectedness: thin quads welding nodes inside each time slice,
+ * and near-vertical tracks following the same node between slices - the
+ * threads that show structure persisting through time. Same swirl as the
+ * nodes so everything stays welded.
  */
 export const HeroEdges = shader({
 	attributes: { aQuad: "vec2" },
 	instanceAttributes: { iStart: "vec3", iEnd: "vec3", iTint: "vec3" },
-	uniforms: { uViewProj: "mat4", uMouse: "vec2", uWidth: "float", uScroll: "float", uWrap: "float" },
-	varyings: { vTint: "vec3", vAlong: "float", vFade: "float" },
+	uniforms: { uViewProj: "mat4", uTime: "float", uMouse: "vec2", uWidth: "float" },
+	varyings: { vTint: "vec3", vAlong: "float" },
 
-	vertex({ aQuad, iStart, iEnd, iTint }, { uViewProj, uMouse, uWidth, uScroll, uWrap }, v) {
+	vertex({ aQuad, iStart, iEnd, iTint }, { uViewProj, uTime, uMouse, uWidth }, v) {
 		v.vTint = iTint;
 		v.vAlong = aQuad.y;
 
-		const AHEAD = 3.0;
-		const sx = mod(iStart.x + uScroll, uWrap) - uWrap + AHEAD;
-		const ex = mod(iEnd.x + uScroll, uWrap) - uWrap + AHEAD;
-		// A wrapped edge would stretch the whole tube; kill it at the seam.
-		v.vFade = 1.0 - smoothstep(1.2, 1.8, abs(sx - ex));
+		const yaw = uTime * 0.22 + uMouse.x * 0.5;
+		const tilt = 0.42 + uMouse.y * 0.18;
+		const cy = cos(yaw);
+		const sy = sin(yaw);
+		const ct = cos(tilt);
+		const st = sin(tilt);
 
-		const a2 = vec3(sx + uMouse.x * 0.08, iStart.y - uMouse.y * 0.05, 0.0);
-		const b2 = vec3(ex + uMouse.x * 0.08, iEnd.y - uMouse.y * 0.05, 0.0);
+		const ax = iStart.x * cy + iStart.z * sy;
+		const az0 = iStart.z * cy - iStart.x * sy;
+		const ay = iStart.y * ct - az0 * st;
+		const az1 = iStart.y * st + az0 * ct;
+		const a2 = vec3(ax, ay, az1);
+
+		const bx = iEnd.x * cy + iEnd.z * sy;
+		const bz0 = iEnd.z * cy - iEnd.x * sy;
+		const by = iEnd.y * ct - bz0 * st;
+		const bz1 = iEnd.y * st + bz0 * ct;
+		const b2 = vec3(bx, by, bz1);
 
 		const dir = b2.sub(a2);
 		const len = length(dir);
@@ -33,8 +44,8 @@ export const HeroEdges = shader({
 		return uViewProj.mul(vec4(p, 1));
 	},
 
-	fragment(_uniforms, { vTint, vAlong, vFade }) {
+	fragment(_uniforms, { vTint, vAlong }) {
 		const taper = smoothstep(0.0, 0.08, vAlong) * (1.0 - smoothstep(0.92, 1.0, vAlong));
-		return vec4(vTint, taper * 0.85 * vFade);
+		return vec4(vTint, taper * 0.8);
 	},
 });

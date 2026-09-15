@@ -151,7 +151,7 @@
 		text-align: center;
 		padding: 0 24px;
 		pointer-events: none;
-		background: radial-gradient(ellipse 60% 65% at 50% 50%, rgba(3, 4, 10, 0.72) 0%, rgba(3, 4, 10, 0.28) 55%, transparent 75%);
+		background: radial-gradient(ellipse 58% 62% at 50% 50%, rgba(3, 4, 10, 0.82) 0%, rgba(3, 4, 10, 0.45) 58%, transparent 78%);
 	}
 	.veil-copy .cta,
 	.veil-copy a {
