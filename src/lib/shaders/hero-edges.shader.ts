@@ -64,7 +64,9 @@ export const HeroEdges = shader({
 	},
 
 	fragment({ uNow }, { vTint, vAlong, vBirth, vAcross, vDeath }) {
-		const taper = smoothstep(0.0, 0.08, vAlong) * (1.0 - smoothstep(0.92, 1.0, vAlong));
+		// No end taper: pipes run full-length into the bead centers, and the
+		// beads (drawn after) cap the joints - solid connections, no ghostly
+		// gap where a pipe meets its node.
 		// The weld travels: the edge grows out from the new node toward its
 		// parent, tip first, instead of appearing at once.
 		const reach = smoothstep(vBirth + 0.3, vBirth + 1.9, uNow) * 1.15;
@@ -79,6 +81,6 @@ export const HeroEdges = shader({
 		const dying = smoothstep(vDeath, vDeath + 0.9, uNow);
 		const gap = dying * 0.56;
 		const intact = smoothstep(gap - 0.06, gap + 0.02, abs(vAlong - 0.5) + 0.001);
-		return vec4(vTint.scale(round), taper * rim * 0.92 * behindTip * grown * intact);
+		return vec4(vTint.scale(round), rim * 0.92 * behindTip * grown * intact);
 	},
 });

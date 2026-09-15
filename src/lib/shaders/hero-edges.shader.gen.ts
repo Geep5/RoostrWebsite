@@ -68,7 +68,6 @@ fn vs_main(bm_in : BmVSIn) -> BmVSOut {
 }
 @fragment
 fn fs_main(bm_in : BmVSOut) -> @location(0) vec4f {
-  let taper = smoothstep(0.0, 0.08, bm_in.vAlong) * (1.0 - smoothstep(0.92, 1.0, bm_in.vAlong));
   let reach = smoothstep(bm_in.vBirth + 0.3, bm_in.vBirth + 1.9, bm_u.uNow) * 1.15;
   let behindTip = 1.0 - smoothstep(reach - 0.14, reach, bm_in.vAlong);
   let grown = smoothstep(bm_in.vBirth, bm_in.vBirth + 0.5, bm_u.uNow);
@@ -77,7 +76,7 @@ fn fs_main(bm_in : BmVSOut) -> @location(0) vec4f {
   let dying = smoothstep(bm_in.vDeath, bm_in.vDeath + 0.9, bm_u.uNow);
   let gap = dying * 0.56;
   let intact = smoothstep(gap - 0.06, gap + 0.02, abs(bm_in.vAlong - 0.5) + 0.001);
-  return vec4f(bm_in.vTint * round, taper * rim * 0.92 * behindTip * grown * intact);
+  return vec4f(bm_in.vTint * round, rim * 0.92 * behindTip * grown * intact);
 }
 `,
   attributes: { aQuad: 'vec2' },
