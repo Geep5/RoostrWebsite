@@ -35,15 +35,17 @@ fn vs_main(bm_in : BmVSIn) -> BmVSOut {
   let sy = sin(yaw);
   let ct = cos(tilt);
   let st = sin(tilt);
+  let asy = bm_in.iStart.y - bm_u.uNow * 0.05;
   let ax = bm_in.iStart.x * cy + bm_in.iStart.z * sy;
   let az0 = bm_in.iStart.z * cy - bm_in.iStart.x * sy;
-  let ay = bm_in.iStart.y * ct - az0 * st;
-  let az1 = bm_in.iStart.y * st + az0 * ct;
+  let ay = asy * ct - az0 * st;
+  let az1 = asy * st + az0 * ct;
   let a2 = vec3f(ax, ay, az1);
+  let bsy = bm_in.iEnd.y - bm_u.uNow * 0.05;
   let bx = bm_in.iEnd.x * cy + bm_in.iEnd.z * sy;
   let bz0 = bm_in.iEnd.z * cy - bm_in.iEnd.x * sy;
-  let by = bm_in.iEnd.y * ct - bz0 * st;
-  let bz1 = bm_in.iEnd.y * st + bz0 * ct;
+  let by = bsy * ct - bz0 * st;
+  let bz1 = bsy * st + bz0 * ct;
   let b2 = vec3f(bx, by, bz1);
   let dir = b2 - a2;
   let len = length(dir);
@@ -57,7 +59,7 @@ fn vs_main(bm_in : BmVSIn) -> BmVSOut {
 @fragment
 fn fs_main(bm_in : BmVSOut) -> @location(0) vec4f {
   let taper = smoothstep(0.0, 0.08, bm_in.vAlong) * (1.0 - smoothstep(0.92, 1.0, bm_in.vAlong));
-  let grown = smoothstep(bm_in.vBirth, bm_in.vBirth + 1.6, bm_u.uNow) * (1.0 - smoothstep(23.2, 25.9, bm_u.uNow));
+  let grown = smoothstep(bm_in.vBirth, bm_in.vBirth + 1.6, bm_u.uNow);
   return vec4f(bm_in.vTint, taper * 0.8 * grown);
 }
 `,

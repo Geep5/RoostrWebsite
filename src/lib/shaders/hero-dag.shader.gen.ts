@@ -26,7 +26,7 @@ struct BmVSOut {
 fn vs_main(bm_in : BmVSIn) -> BmVSOut {
   var bm_out : BmVSOut;
   bm_out.vUv = bm_in.aCorner;
-  let grown = smoothstep(bm_in.iBirth, bm_in.iBirth + 1.6, bm_u.uNow) * (1.0 - smoothstep(23.2, 25.9, bm_u.uNow));
+  let grown = smoothstep(bm_in.iBirth, bm_in.iBirth + 1.6, bm_u.uNow);
   var color = vec3f(1.0, 0.66, 0.3);
   var size = (0.03 + fract(bm_in.iSeed * 7.3) * 0.012) * (0.25 + 0.75 * grown);
   var glow = (0.8 + fract(bm_in.iSeed * 4.7) * 0.5) * grown;
@@ -45,7 +45,7 @@ fn vs_main(bm_in : BmVSIn) -> BmVSOut {
       }
     }
   }
-  var p = bm_in.iPos;
+  var p = vec3f(bm_in.iPos.x, bm_in.iPos.y - bm_u.uNow * 0.05, bm_in.iPos.z);
   let yaw = bm_u.uTime * 0.22 + bm_u.uMouse.x * 0.5;
   let cy = cos(yaw);
   let sy = sin(yaw);

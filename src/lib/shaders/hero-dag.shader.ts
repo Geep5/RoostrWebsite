@@ -15,9 +15,9 @@ export const HeroDag = shader({
 	vertex({ aCorner, iPos, iKind, iSeed, iBirth }, { uViewProj, uTime, uMouse, uNow }, v) {
 		v.vUv = aCorner;
 
-		// The build: a change swells in when the present reaches its birth,
-		// and the whole sculpture dissolves before the cycle restarts.
-		const grown = smoothstep(iBirth, iBirth + 1.6, uNow) * (1.0 - smoothstep(23.2, 25.9, uNow));
+		// A change swells in when the present reaches its birth; the web
+		// only ever grows, there is no cycle and no cap.
+		const grown = smoothstep(iBirth, iBirth + 1.6, uNow);
 
 		let color = vec3(1.0, 0.66, 0.3);
 		let size = (0.03 + fract(iSeed * 7.3) * 0.012) * (0.25 + 0.75 * grown);
@@ -35,8 +35,10 @@ export const HeroDag = shader({
 			glow = 0.35 * grown;
 		}
 
-		// Swirl: the whole stack turns like a tall glass, with a pointer tilt.
-		let p = iPos;
+		// History sinks: every moment drifts down so the tail of changes
+		// stretches downward forever. Keep the rate in sync with SINK in
+		// LandingVeil.svelte.
+		let p = vec3(iPos.x, iPos.y - uNow * 0.05, iPos.z);
 		const yaw = uTime * 0.22 + uMouse.x * 0.5;
 		const cy = cos(yaw);
 		const sy = sin(yaw);

@@ -24,16 +24,20 @@ export const HeroEdges = shader({
 		const ct = cos(tilt);
 		const st = sin(tilt);
 
+		// Same sink as the nodes (rate in sync with LandingVeil.svelte) so
+		// edges stay welded to their endpoints as history drifts down.
+		const asy = iStart.y - uNow * 0.05;
 		const ax = iStart.x * cy + iStart.z * sy;
 		const az0 = iStart.z * cy - iStart.x * sy;
-		const ay = iStart.y * ct - az0 * st;
-		const az1 = iStart.y * st + az0 * ct;
+		const ay = asy * ct - az0 * st;
+		const az1 = asy * st + az0 * ct;
 		const a2 = vec3(ax, ay, az1);
 
+		const bsy = iEnd.y - uNow * 0.05;
 		const bx = iEnd.x * cy + iEnd.z * sy;
 		const bz0 = iEnd.z * cy - iEnd.x * sy;
-		const by = iEnd.y * ct - bz0 * st;
-		const bz1 = iEnd.y * st + bz0 * ct;
+		const by = bsy * ct - bz0 * st;
+		const bz1 = bsy * st + bz0 * ct;
 		const b2 = vec3(bx, by, bz1);
 
 		const dir = b2.sub(a2);
@@ -47,7 +51,7 @@ export const HeroEdges = shader({
 
 	fragment({ uNow }, { vTint, vAlong, vBirth }) {
 		const taper = smoothstep(0.0, 0.08, vAlong) * (1.0 - smoothstep(0.92, 1.0, vAlong));
-		const grown = smoothstep(vBirth, vBirth + 1.6, uNow) * (1.0 - smoothstep(23.2, 25.9, uNow));
+		const grown = smoothstep(vBirth, vBirth + 1.6, uNow);
 		return vec4(vTint, taper * 0.8 * grown);
 	},
 });
