@@ -6,8 +6,8 @@
 	// browserless and gws). Account-scoped things stay in Settings -
 	// this surface describes the box the harness runs on.
 	import { onMount } from "svelte";
-	import { fetchAllQuery, type QueryResultRow } from "$lib/api";
-	import { UNSERVED_TYPES, capabilityLabel, fetchMachines, resolveMany, type MachineRow } from "$lib/serving";
+	import { fetchAllQuery } from "$lib/api";
+	import Machines from "./Machines.svelte";
 	import { goto } from "$app/navigation";
 	import { harnessFetch, pairedSession, onPairingChange } from "$lib/local-transport";
 	import PairGate from "./PairGate.svelte";
@@ -85,7 +85,7 @@
 			const out = (await res.json()) as { error?: string; active?: boolean };
 			if (!res.ok || out.error) return (credError = out.error ?? `HTTP ${res.status}`);
 			await loadCredentials();
-			await loadMachines();
+			window.dispatchEvent(new Event("roostr:machines-changed"));
 			return "";
 		} catch (error) {
 			return (credError = error instanceof Error ? error.message : "Request failed.");
@@ -113,7 +113,7 @@
 		}
 		credBrowserPending = "";
 		await loadCredentials();
-		await loadMachines();
+		window.dispatchEvent(new Event("roostr:machines-changed"));
 	}
 	let skillPromptDraft = $state<Record<string, string>>({});
 	let skillPromptSaved = $state<string>("");
@@ -217,46 +217,6 @@
 		}
 	}
 
-	// ── Machines: the roster from the DAG, what each can do, what it serves ──
-	//
-	// Serving is resolved client-side by the engine, one call per candidate:
-	// every space (its default) plus every object carrying a pin or a
-	// capability need. Anything else follows its space and is not listed.
-	const SERVES_SHOWN = 20;
-	interface MachineView extends MachineRow {
-		serves: string[];
-	}
-	let machines = $state<MachineView[] | null>(null);
-	let machinesError = $state("");
-	async function loadMachines() {
-		try {
-			const [{ rows, machines: roster }, spaces, pinned, needing] = await Promise.all([
-				fetchMachines(),
-				fetchAllQuery({ type: "channel" }),
-				fetchAllQuery({ filters: [{ key: "served_by", condition: "exists" }] }),
-				fetchAllQuery({ filters: [{ key: "requires", condition: "exists" }] }),
-			]);
-			// Oldest first: the first channel is the default space owning unstamped objects.
-			spaces.sort((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id));
-			const seen = new Set<string>();
-			const objects: QueryResultRow[] = [];
-			for (const r of [...spaces, ...pinned, ...needing]) {
-				if (seen.has(r.id) || (r.typeKey !== "channel" && UNSERVED_TYPES[r.typeKey])) continue;
-				seen.add(r.id);
-				objects.push(r);
-			}
-			const resolved = await resolveMany(objects, spaces, rows);
-			machines = roster.map((m) => ({
-				...m,
-				serves: objects.filter((_, i) => resolved[i].machineId === m.machineId).map((o) => o.fields["name"]?.stringValue || "Untitled"),
-			}));
-			machinesError = "";
-		} catch (error) {
-			machines = null;
-			machinesError = error instanceof Error ? error.message : "Cannot load machines.";
-		}
-	}
-
 	function refreshPairing() {
 		paired = !!pairedSession();
 		if (!paired) {
@@ -274,7 +234,6 @@
 
 	onMount(() => {
 		refreshPairing();
-		void loadMachines();
 		void loadGlobalSkills().catch((error) => {
 			harnessError = error instanceof Error ? error.message : "Cannot load saved skills.";
 		});
@@ -389,38 +348,7 @@
 			{/if}
 		</section>
 
-		<section>
-			<h3>Machines</h3>
-			{#if machinesError}
-				<p class="hint" role="alert">{machinesError}</p>
-			{:else if machines === null}
-				<p class="hint">Loading machines…</p>
-			{:else if machines.length === 0}
-				<p class="hint">No machine has published itself yet — run the harness on a device to add one.</p>
-			{:else}
-				<p class="hint">Every device running a harness, what it can do, and what the engine routes to it: space defaults, pinned objects, and capability needs. Pin or edit needs from any object's header.</p>
-				{#each machines as m (m.id)}
-					<div class="machine">
-						<div class="machine-row">
-							<span class="machine-name">🖥️ {m.name || `${m.machineId.slice(0, 8)}…`}</span>
-							{#each m.capabilities as c (c)}
-								<span class="chip on">{capabilityLabel(c)}</span>
-							{/each}
-							{#if m.capabilities.length === 0}
-								<span class="chip">no capabilities</span>
-							{/if}
-						</div>
-						<p class="machine-serves">
-							{#if m.serves.length === 0}
-								serves nothing
-							{:else}
-								serves {m.serves.length}: {m.serves.slice(0, SERVES_SHOWN).join(", ")}{#if m.serves.length > SERVES_SHOWN} +{m.serves.length - SERVES_SHOWN} more{/if}
-							{/if}
-						</p>
-					</div>
-				{/each}
-			{/if}
-		</section>
+		<Machines />
 
 		<section>
 			<h3>Integrations</h3>
@@ -819,29 +747,5 @@
 	}
 	.danger-btn {
 		color: var(--red);
-	}
-	.machine {
-		border-top: 1px solid var(--border);
-		padding: 8px 0 6px;
-	}
-	.machine:first-of-type {
-		border-top: none;
-	}
-	.machine-row {
-		display: flex;
-		align-items: center;
-		flex-wrap: wrap;
-		gap: 6px;
-	}
-	.machine-name {
-		font-size: 13px;
-		font-weight: 600;
-		margin-right: 4px;
-	}
-	.machine-serves {
-		margin: 3px 0 0;
-		font-size: 12px;
-		color: var(--muted);
-		line-height: 1.45;
 	}
 </style>

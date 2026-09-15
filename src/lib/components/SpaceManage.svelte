@@ -116,6 +116,7 @@
 	}
 	import { invalidateAll } from "$app/navigation";
 	import SpaceAgents from "./SpaceAgents.svelte";
+	import Machines from "./Machines.svelte";
 
 	let {
 		object,
@@ -385,6 +386,8 @@
 			<span class="hint-inline">— manage from a machine running the harness</span>
 		{/if}
 	</div>
+
+	<Machines />
 
 	<h3>Project</h3>
 	<p class="hint">
