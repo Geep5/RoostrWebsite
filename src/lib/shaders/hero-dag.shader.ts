@@ -8,27 +8,31 @@ import { shader, vec2, vec3, vec4, sin, cos, fract, clamp, smoothstep, length } 
  */
 export const HeroDag = shader({
 	attributes: { aCorner: "vec2" },
-	instanceAttributes: { iPos: "vec3", iKind: "float", iSeed: "float" },
-	uniforms: { uViewProj: "mat4", uTime: "float", uMouse: "vec2" },
+	instanceAttributes: { iPos: "vec3", iKind: "float", iSeed: "float", iBirth: "float" },
+	uniforms: { uViewProj: "mat4", uTime: "float", uMouse: "vec2", uNow: "float" },
 	varyings: { vUv: "vec2", vColor: "vec3", vAlpha: "float" },
 
-	vertex({ aCorner, iPos, iKind, iSeed }, { uViewProj, uTime, uMouse }, v) {
+	vertex({ aCorner, iPos, iKind, iSeed, iBirth }, { uViewProj, uTime, uMouse, uNow }, v) {
 		v.vUv = aCorner;
 
+		// The build: a change swells in when the present reaches its birth,
+		// and the whole sculpture dissolves before the cycle restarts.
+		const grown = smoothstep(iBirth, iBirth + 1.6, uNow) * (1.0 - smoothstep(23.2, 25.9, uNow));
+
 		let color = vec3(1.0, 0.66, 0.3);
-		let size = 0.03 + fract(iSeed * 7.3) * 0.012;
-		let glow = 0.8 + fract(iSeed * 4.7) * 0.5;
+		let size = (0.03 + fract(iSeed * 7.3) * 0.012) * (0.25 + 0.75 * grown);
+		let glow = (0.8 + fract(iSeed * 4.7) * 0.5) * grown;
 		if (iKind > 0.5 && iKind < 1.5) {
 			color = vec3(0.35, 0.68, 1.0);
 		} else if (iKind > 1.5 && iKind < 2.5) {
 			color = vec3(0.95, 0.97, 1.0);
-			size = 0.038 + fract(iSeed * 5.1) * 0.008;
-			glow = 1.15;
+			size = (0.038 + fract(iSeed * 5.1) * 0.008) * (0.25 + 0.75 * grown);
+			glow = 1.15 * grown;
 		} else if (iKind > 2.5) {
 			// Context: the parent a change attaches to - present, not the story.
 			color = vec3(0.42, 0.48, 0.62);
-			size = 0.016;
-			glow = 0.35;
+			size = 0.016 * (0.25 + 0.75 * grown);
+			glow = 0.35 * grown;
 		}
 
 		// Swirl: the whole stack turns like a tall glass, with a pointer tilt.

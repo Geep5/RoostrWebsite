@@ -8,13 +8,14 @@ import { shader, vec2, vec3, vec4, cos, sin, max, smoothstep, length } from "bro
  */
 export const HeroEdges = shader({
 	attributes: { aQuad: "vec2" },
-	instanceAttributes: { iStart: "vec3", iEnd: "vec3", iTint: "vec3" },
-	uniforms: { uViewProj: "mat4", uTime: "float", uMouse: "vec2", uWidth: "float" },
-	varyings: { vTint: "vec3", vAlong: "float" },
+	instanceAttributes: { iStart: "vec3", iEnd: "vec3", iTint: "vec3", iBirth: "float" },
+	uniforms: { uViewProj: "mat4", uTime: "float", uMouse: "vec2", uWidth: "float", uNow: "float" },
+	varyings: { vTint: "vec3", vAlong: "float", vBirth: "float" },
 
-	vertex({ aQuad, iStart, iEnd, iTint }, { uViewProj, uTime, uMouse, uWidth }, v) {
+	vertex({ aQuad, iStart, iEnd, iTint, iBirth }, { uViewProj, uTime, uMouse, uWidth, uNow }, v) {
 		v.vTint = iTint;
 		v.vAlong = aQuad.y;
+		v.vBirth = iBirth;
 
 		const yaw = uTime * 0.22 + uMouse.x * 0.5;
 		const tilt = 0.42 + uMouse.y * 0.18;
@@ -44,8 +45,9 @@ export const HeroEdges = shader({
 		return uViewProj.mul(vec4(p, 1));
 	},
 
-	fragment(_uniforms, { vTint, vAlong }) {
+	fragment({ uNow }, { vTint, vAlong, vBirth }) {
 		const taper = smoothstep(0.0, 0.08, vAlong) * (1.0 - smoothstep(0.92, 1.0, vAlong));
-		return vec4(vTint, taper * 0.8);
+		const grown = smoothstep(vBirth, vBirth + 1.6, uNow) * (1.0 - smoothstep(23.2, 25.9, uNow));
+		return vec4(vTint, taper * 0.8 * grown);
 	},
 });

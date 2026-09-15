@@ -35,22 +35,29 @@
 		links: number[];
 	}
 
+	const CYCLE = 26;
+
 	interface StackData {
 		pos: Float32Array;
 		kind: Float32Array;
 		seed: Float32Array;
+		births: Float32Array;
 		starts: Float32Array;
 		ends: Float32Array;
 		tints: Float32Array;
+		edgeBirths: Float32Array;
 	}
 
 	function buildStack(): StackData {
 		const pos: number[] = [];
 		const kind: number[] = [];
 		const seed: number[] = [];
+		const births: number[] = [];
 		const starts: number[] = [];
 		const ends: number[] = [];
 		const tints: number[] = [];
+		const edgeBirths: number[] = [];
+		const timeOf = (slice: number) => (slice / SLICES) * (CYCLE - 8);
 
 		// Persistent entities: born over the first two-thirds of the stack,
 		// homes on the unit disc, drifting a little per slice.
@@ -79,36 +86,38 @@
 			const age = slice - e.birth;
 			return [e.x + e.dx * age, yOf(slice), e.z + e.dz * age];
 		};
-		const pushNode = (x: number, y: number, z: number, k: number) => {
+		const pushNode = (x: number, y: number, z: number, k: number, birth: number) => {
 			pos.push(x, y, z);
 			kind.push(k);
 			seed.push(rnd());
+			births.push(birth);
 		};
-		const pushLink = (a: [number, number, number], b: [number, number, number], tint: [number, number, number]) => {
+		const pushLink = (a: [number, number, number], b: [number, number, number], tint: [number, number, number], birth: number) => {
 			starts.push(...a);
 			ends.push(...b);
 			tints.push(...tint);
+			edgeBirths.push(birth);
 		};
 
 		for (let k = 0; k < SLICES - 1; k++) {
 			for (const [i, e] of entities.entries()) {
 				if (e.birth !== k) continue;
 				const [x, y, z] = posOf(e, k);
-				pushNode(x, y, z, e.kind);
+				pushNode(x, y, z, e.kind, timeOf(k));
 				// Its new links attach down through the stack, to the parents'
 				// own planes - each change visibly joins history.
 				for (const target of e.links) {
 					const p = entities[target];
-					pushLink([x, y, z], posOf(p, p.birth), e.kind === 0 ? [0.5, 0.38, 0.22] : [0.25, 0.42, 0.6]);
-					pushNode(...posOf(p, p.birth), 3);
+					pushLink([x, y, z], posOf(p, p.birth), e.kind === 0 ? [0.5, 0.38, 0.22] : [0.25, 0.42, 0.6], timeOf(k));
+					pushNode(...posOf(p, p.birth), 3, timeOf(p.birth));
 				}
 				// Some nodes get re-touched later: an edit at a higher plane,
 				// bright, with a thread back to where it was born.
 				if (rnd() < 0.22 && k + 2 < SLICES) {
 					const touch = k + 2 + Math.floor(rnd() * (SLICES - k - 2));
 					const [tx, ty, tz] = posOf(e, touch);
-					pushNode(tx, ty, tz, 2);
-					pushLink([tx, ty, tz], [x, y, z], [0.5, 0.5, 0.62]);
+					pushNode(tx, ty, tz, 2, timeOf(touch));
+					pushLink([tx, ty, tz], [x, y, z], [0.5, 0.5, 0.62], timeOf(touch));
 					e.x = tx;
 					e.z = tz;
 					e.dx = 0;
@@ -124,10 +133,10 @@
 		for (const [i, e] of entities.entries()) {
 			if (e.birth > NOW) continue;
 			const [x, y, z] = posOf(e, NOW);
-			pushNode(x, y, z, e.kind);
+			pushNode(x, y, z, e.kind, timeOf(NOW));
 			for (const target of e.links) {
 				if (target < i && entities[target].birth <= NOW) {
-					pushLink([x, y, z], posOf(entities[target], NOW), e.kind === 0 ? [0.55, 0.42, 0.26] : [0.3, 0.48, 0.68]);
+					pushLink([x, y, z], posOf(entities[target], NOW), e.kind === 0 ? [0.55, 0.42, 0.26] : [0.3, 0.48, 0.68], timeOf(NOW));
 				}
 			}
 		}
@@ -136,9 +145,11 @@
 			pos: new Float32Array(pos),
 			kind: new Float32Array(kind),
 			seed: new Float32Array(seed),
+			births: new Float32Array(births),
 			starts: new Float32Array(starts),
 			ends: new Float32Array(ends),
 			tints: new Float32Array(tints),
+			edgeBirths: new Float32Array(edgeBirths),
 		};
 	}
 
@@ -178,12 +189,14 @@
 			nodes.instanceAttributes.iPos.set(stack.pos);
 			nodes.instanceAttributes.iKind.set(stack.kind);
 			nodes.instanceAttributes.iSeed.set(stack.seed);
+			nodes.instanceAttributes.iBirth.set(stack.births);
 
 			const edges = createProgram(renderer, heroEdges, { blend: "alpha" });
 			edges.attributes.aQuad.set(strip);
 			edges.instanceAttributes.iStart.set(stack.starts);
 			edges.instanceAttributes.iEnd.set(stack.ends);
 			edges.instanceAttributes.iTint.set(stack.tints);
+			edges.instanceAttributes.iBirth.set(stack.edgeBirths);
 			edges.uniforms.uWidth.set(0.008);
 
 			stop = renderer.loop((t) => {
@@ -195,10 +208,12 @@
 				edges.uniforms.uViewProj.set(viewProj);
 				edges.uniforms.uTime.set(t);
 				edges.uniforms.uMouse.set([mx, my]);
+				edges.uniforms.uNow.set((8 + t * 1.4) % CYCLE);
 				edges.draw();
 				nodes.uniforms.uViewProj.set(viewProj);
 				nodes.uniforms.uTime.set(t);
 				nodes.uniforms.uMouse.set([mx, my]);
+				nodes.uniforms.uNow.set((8 + t * 1.4) % CYCLE);
 				nodes.draw();
 			});
 		})();
