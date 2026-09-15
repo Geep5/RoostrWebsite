@@ -157,6 +157,10 @@ export class ChangeStore implements ChangeStoreApi {
 	}
 
 	async objectIds(): Promise<string[]> {
+		// WebKit throws "Unable to open cursor" for a nextunique cursor on an
+		// index with no entries (dexie/Dexie.js#1030, still present on iOS 17+),
+		// which is exactly a fresh vault on a new origin. Nothing to iterate anyway.
+		if ((await req(this.handle().transaction(CHANGES, "readonly").objectStore(CHANGES).count())) === 0) return [];
 		const index = this.handle().transaction(CHANGES, "readonly").objectStore(CHANGES).index("objectId");
 		const { promise, resolve, reject } = Promise.withResolvers<string[]>();
 		const ids: string[] = [];
