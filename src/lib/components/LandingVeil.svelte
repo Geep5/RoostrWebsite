@@ -66,7 +66,7 @@
 		layerIds.push([push(0, 0, 0, rnd() < 0.55 ? 0 : 1)]);
 		for (let layer = 1; layer < LAYERS; layer++) {
 			const prev = layerIds[layer - 1];
-			const z = -layer * SPACING;
+			const lx = layer * SPACING;
 			const ids: number[] = [];
 			// Each previous node usually continues; sometimes a second
 			// parent makes a merge; sometimes an extra branch appears.
@@ -74,12 +74,12 @@
 				const px = pos[parent * 3];
 				const py = pos[parent * 3 + 1];
 				const merge = prev.length > 1 && i > 0 && rnd() < 0.16;
-				const child = push(px * 0.86 + (rnd() - 0.5) * 0.6, py * 0.9 + (rnd() - 0.5) * 0.45, z, merge ? 2 : rnd() < 0.55 ? 0 : 1);
+				const child = push(lx, py * 0.9 + (rnd() - 0.5) * 0.5, px * 0.86 + (rnd() - 0.5) * 0.7, merge ? 2 : rnd() < 0.55 ? 0 : 1);
 				link(child, parent);
 				if (merge) link(child, prev[rnd() < 0.5 ? 0 : prev.length - 1]);
 				ids.push(child);
 				if (rnd() < 0.14 && ids.length < 7) {
-					const branch = push(px * 0.86 + (rnd() - 0.5) * 1.1, py * 0.9 + (rnd() - 0.5) * 0.8, z, rnd() < 0.5 ? 0 : 1);
+					const branch = push(lx, py * 0.9 + (rnd() - 0.5) * 0.9, px * 0.86 + (rnd() - 0.5) * 1.2, rnd() < 0.5 ? 0 : 1);
 					link(branch, parent);
 					ids.push(branch);
 				}
@@ -130,7 +130,7 @@
 
 			const dag = buildDag();
 			const quad = new Float32Array([-1, -1, 1, -1, 1, 1, -1, -1, 1, 1, -1, 1]);
-			const strip = new Float32Array([0, 0, 0, 1, 1, 0, 1, 0, 1, 1, 0, 1]);
+			const strip = new Float32Array([0, 0, 1, 0, 0, 1, 0, 1, 1, 0, 1, 1]);
 
 			const nodes = createProgram(renderer, heroDag, { blend: "additive" });
 			nodes.attributes.aCorner.set(quad);
@@ -138,7 +138,7 @@
 			nodes.instanceAttributes.iKind.set(dag.kind);
 			nodes.instanceAttributes.iSeed.set(dag.seed);
 
-			const edges = createProgram(renderer, heroEdges, { blend: "additive" });
+			const edges = createProgram(renderer, heroEdges, { blend: "alpha" });
 			edges.attributes.aQuad.set(strip);
 			edges.instanceAttributes.iStart.set(dag.starts);
 			edges.instanceAttributes.iEnd.set(dag.ends);
@@ -153,17 +153,21 @@
 				mx += (tx - mx) * 0.045;
 				my += (ty - my) * 0.045;
 				const proj = mat4.perspective(Math.PI / 4.4, renderer.aspect, 0.1, 100);
-				const view = mat4.lookAt([-0.6, 1.1, 3.4], [-0.9, -0.2, -5.5], [0, 1, 0]);
+				const view = mat4.lookAt([0, 0.8, 6.2], [-0.5, 0.25, 0], [0, 1, 0]);
 				const viewProj = mat4.multiply(proj, view);
 				mark.uniforms.uViewProj.set(viewProj);
 				mark.uniforms.uMouse.set([mx, my]);
 				mark.draw();
 				edges.uniforms.uViewProj.set(viewProj);
 				edges.uniforms.uMouse.set([mx, my]);
+				edges.uniforms.uScroll.set((t * 0.55) % 7);
+				edges.uniforms.uWrap.set(7);
 				edges.draw();
 				nodes.uniforms.uViewProj.set(viewProj);
 				nodes.uniforms.uTime.set(t);
 				nodes.uniforms.uMouse.set([mx, my]);
+				nodes.uniforms.uScroll.set((t * 0.55) % 7);
+				nodes.uniforms.uWrap.set(7);
 				nodes.draw();
 			});
 		})();

@@ -26,8 +26,9 @@ fn vs_main(bm_in : BmVSIn) -> BmVSOut {
   let tilt = bm_u.uMouse.y * 0.22;
   let ct = cos(tilt);
   let st = sin(tilt);
-  let px = bm_in.aCorner.x * 0.26 * cy;
-  let pz0 = -(bm_in.aCorner.x * 0.26) * sy;
+  let cx = 2.55 + bm_in.aCorner.x * 0.26;
+  let px = cx * cy + 0.3 * sy;
+  let pz0 = 0.3 * cy - cx * sy;
   let py = bm_in.aCorner.y * 0.26 * ct - pz0 * st;
   let pz1 = bm_in.aCorner.y * 0.26 * st + pz0 * ct;
   bm_out.bm_position = bm_u.uViewProj * vec4f(vec3f(px, py, pz1), 1.0);
