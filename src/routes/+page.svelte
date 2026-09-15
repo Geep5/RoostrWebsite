@@ -1,5 +1,19 @@
 <script lang="ts">
+	import { onMount } from "svelte";
 	import LandingVeil from "$lib/components/LandingVeil.svelte";
+
+	// The landing wears the logo yellow wall-to-wall; the rest of the site
+	// (the app!) keeps its own dark theme.
+	onMount(() => {
+		const prevBg = document.body.style.background;
+		const prevTheme = document.querySelector('meta[name="theme-color"]')?.getAttribute("content") ?? null;
+		document.body.style.background = "#f2cb70";
+		document.querySelector('meta[name="theme-color"]')?.setAttribute("content", "#f2cb70");
+		return () => {
+			document.body.style.background = prevBg;
+			if (prevTheme !== null) document.querySelector('meta[name="theme-color"]')?.setAttribute("content", prevTheme);
+		};
+	});
 </script>
 
 <svelte:head>
