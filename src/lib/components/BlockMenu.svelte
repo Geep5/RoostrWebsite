@@ -1,4 +1,5 @@
 <script lang="ts">
+	import Icon from "./Icon.svelte";
 	import type { BlockJSON } from "$lib/types";
 	import { Style } from "$lib/types";
 	import { creatableTypes } from "$lib/create";
@@ -310,34 +311,34 @@
 			<div class="section-name">{t ? "Text" : "Block"}</div>
 			{#if t}
 				<button class="sub-row" class:open={sub?.kind === "style"} onclick={(e) => toggleSub("style", e)} onpointerenter={(e) => hoverSub("style", e)}>
-					Style
-					<span class="trail">{curStyle}<span class="chev">›</span></span>
+					<Icon name="type" />Style
+					<span class="trail">{curStyle}<span class="chev"><Icon name="chevron-right" size={14} /></span></span>
 				</button>
 			{/if}
 			<button class="sub-row" class:open={sub?.kind === "align"} onclick={(e) => toggleSub("align", e)} onpointerenter={(e) => hoverSub("align", e)}>
-				Align
-				<span class="trail">{curAlign}<span class="chev">›</span></span>
+				<Icon name="align-left" />Align
+				<span class="trail">{curAlign}<span class="chev"><Icon name="chevron-right" size={14} /></span></span>
 			</button>
 			{#if t}
 				<button class="sub-row" class:open={sub?.kind === "color"} onclick={(e) => toggleSub("color", e)} onpointerenter={(e) => hoverSub("color", e)}>
-					Color
-					<span class="trail"><span class="dot" style="background:{curColor.text || 'var(--fg)'}"></span><span class="chev">›</span></span>
+					<Icon name="palette" />Color
+					<span class="trail"><span class="dot" style="background:{curColor.text || 'var(--fg)'}"></span><span class="chev"><Icon name="chevron-right" size={14} /></span></span>
 				</button>
 			{/if}
 			<button class="sub-row" class:open={sub?.kind === "background"} onclick={(e) => toggleSub("background", e)} onpointerenter={(e) => hoverSub("background", e)}>
-				Background
-				<span class="trail"><span class="dot" style="background:{curBg.bg || 'transparent'}"></span><span class="chev">›</span></span>
+				<Icon name="paint-bucket" />Background
+				<span class="trail"><span class="dot" style="background:{curBg.bg || 'transparent'}"></span><span class="chev"><Icon name="chevron-right" size={14} /></span></span>
 			</button>
 			{#if t}
-				<button onpointerenter={hoverPlain} onclick={() => fire({ kind: "clear_style" })}>Clear style</button>
+				<button onpointerenter={hoverPlain} onclick={() => fire({ kind: "clear_style" })}><Icon name="eraser" />Clear style</button>
 			{/if}
 			<div class="sep"></div>
 			<button class="sub-row" class:open={sub?.kind === "turn"} onclick={(e) => toggleSub("turn", e)} onpointerenter={(e) => hoverSub("turn", e)}>
-				Turn into object
-				<span class="trail"><span class="chev">›</span></span>
+				<Icon name="box" />Turn into object
+				<span class="trail"><span class="chev"><Icon name="chevron-right" size={14} /></span></span>
 			</button>
-			<button onpointerenter={hoverPlain} onclick={() => fire({ kind: "duplicate" })}>Duplicate</button>
-			<button class="danger" onpointerenter={hoverPlain} onclick={() => fire({ kind: "delete" })}>Delete block</button>
+			<button onpointerenter={hoverPlain} onclick={() => fire({ kind: "duplicate" })}><Icon name="copy" />Duplicate</button>
+			<button class="danger" onpointerenter={hoverPlain} onclick={() => fire({ kind: "delete" })}><Icon name="trash" />Delete block</button>
 		</div>
 	{/if}
 </div>
@@ -485,8 +486,7 @@
 		font-size: 12px;
 	}
 	.chev {
-		font-size: 15px;
-		line-height: 1;
+		display: flex;
 	}
 	.dot {
 		width: 14px;

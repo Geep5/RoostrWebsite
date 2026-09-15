@@ -1,4 +1,5 @@
 <script lang="ts">
+	import Icon from "./Icon.svelte";
 	/**
 	 * Right-click menu for a record in a set/collection view: open it,
 	 * retype it, add it to a collection, sever its collection membership,
@@ -244,7 +245,7 @@
 				return;
 			}
 			for (const id of targets) tabs.open(`/app/object/${id}`);
-		}}>Open{suffix}</button
+		}}><Icon name="arrow-up-right" />Open{suffix}</button
 	>
 	<button
 		role="menuitem"
@@ -252,18 +253,18 @@
 			const targets = [...ids];
 			onclose();
 			for (const id of targets) tabs.open(`/app/object/${id}`);
-		}}>Open in new tab{suffix}</button
+		}}><Icon name="external-link" />Open in new tab{suffix}</button
 	>
-	<button role="menuitem" class:hover={fly?.kind === "types"} onclick={(e) => openFly("types", e)}>⇄ Change type{suffix} ▸</button>
+	<button role="menuitem" class:hover={fly?.kind === "types"} onclick={(e) => openFly("types", e)}><Icon name="arrow-left-right" />Change type{suffix}<span class="chev"><Icon name="chevron-right" size={14} /></span></button>
 	<!-- Anytype objectContext 'relation' item -> popup 'relation': edit one
 	     property across every selected record. -->
-	<button role="menuitem" class:hover={fly?.kind === "props"} onclick={(e) => { editKey = ""; openFly("props", e); }}>✎ Edit properties{suffix} ▸</button>
-	<button role="menuitem" class:hover={fly?.kind === "cols"} onclick={(e) => openFly("cols", e)}>▣ Add to collection{suffix} ▸</button>
+	<button role="menuitem" class:hover={fly?.kind === "props"} onclick={(e) => { editKey = ""; openFly("props", e); }}><Icon name="sliders-horizontal" />Edit properties{suffix}<span class="chev"><Icon name="chevron-right" size={14} /></span></button>
+	<button role="menuitem" class:hover={fly?.kind === "cols"} onclick={(e) => openFly("cols", e)}><Icon name="folder-plus" />Add to collection{suffix}<span class="chev"><Icon name="chevron-right" size={14} /></span></button>
 	{#if onremove}
-		<button role="menuitem" onclick={() => void remove()}>⊖ Remove from collection{suffix}</button>
+		<button role="menuitem" onclick={() => void remove()}><Icon name="folder-minus" />Remove from collection{suffix}</button>
 	{/if}
 	<div class="ctx-sep"></div>
-	<button role="menuitem" class="danger" onclick={() => void bin()}>🗑 Move to bin{suffix}</button>
+	<button role="menuitem" class="danger" onclick={() => void bin()}><Icon name="trash" />Move to bin{suffix}</button>
 </div>
 
 {#if fly}
@@ -281,7 +282,7 @@
 			{/if}
 		{:else if fly.kind === "props"}
 			{#if editRel}
-				<button role="menuitem" class="ctx-back" onclick={() => { editKey = ""; editValue = undefined; }}>← {editRel.iconEmoji ? editRel.iconEmoji + " " : ""}{editRel.name || editRel.key}</button>
+				<button role="menuitem" class="ctx-back" onclick={() => { editKey = ""; editValue = undefined; }}><Icon name="chevron-left" size={14} />{editRel.iconEmoji ? editRel.iconEmoji + " " : ""}{editRel.name || editRel.key}</button>
 				<div class="ctx-editor">
 					<PropertyValue rel={editRel} value={editValue} onsave={(v) => void applyProp(editRel, v)} />
 				</div>
@@ -322,7 +323,9 @@
 		flex-direction: column;
 	}
 	.ctx-menu button {
-		display: block;
+		display: flex;
+		align-items: center;
+		gap: 9px;
 		width: 100%;
 		text-align: left;
 		background: none;
@@ -338,6 +341,11 @@
 	}
 	.ctx-menu .danger {
 		color: var(--red);
+	}
+	.ctx-menu .chev {
+		margin-left: auto;
+		display: flex;
+		color: var(--muted);
 	}
 	.ctx-sep {
 		height: 1px;
