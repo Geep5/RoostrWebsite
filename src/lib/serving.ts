@@ -27,10 +27,16 @@ export interface MachineRow {
 	capabilities: string[];
 }
 
-/** Mirrors the harness catalog (`harness/src/skillmgr.ts` CATALOG): the only capability keys a machine can publish. */
+/**
+ * Mirrors the harness catalogs (`harness/src/skillmgr.ts` CATALOG plus
+ * `harness/src/credentials.ts` CREDENTIALS): the only capability keys a
+ * machine can publish.
+ */
 export const CAPABILITIES: Array<{ key: string; label: string }> = [
 	{ key: "browserless", label: "Headless Chrome" },
 	{ key: "google", label: "Google Workspace" },
+	{ key: "x", label: "X (Twitter)" },
+	{ key: "linkedin", label: "LinkedIn" },
 ];
 
 export function capabilityLabel(key: string): string {

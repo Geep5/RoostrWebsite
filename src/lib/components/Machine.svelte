@@ -45,6 +45,76 @@
 
 	let skillRows = $state<SkillRow[] | null>(null);
 	let holdups = $state<Holdup[]>([]);
+
+	// ── Credentials: service logins agents on this machine may use ──
+	interface CredentialRow {
+		key: string;
+		label: string;
+		note: string;
+		loginUrl?: string;
+		passwordFields?: Array<{ key: string; label: string; secret: boolean }>;
+		active: { password: boolean; browser: boolean };
+		updatedAt?: number;
+	}
+	let credentials = $state<CredentialRow[] | null>(null);
+	let credSetupFor = $state("");
+	let credDraft = $state<Record<string, string>>({});
+	let credBrowserPending = $state("");
+	let credRemoveConfirm = $state("");
+	let credError = $state("");
+	let credBusy = $state(false);
+
+	async function loadCredentials() {
+		if (!pairedSession()) return;
+		try {
+			const res = await harnessFetch("/credentials");
+			if (!res.ok) throw new Error(`HTTP ${res.status}`);
+			credentials = ((await res.json()) as { credentials: CredentialRow[] }).credentials;
+			credError = "";
+		} catch (error) {
+			credentials = null;
+			credError = error instanceof Error ? error.message : "Cannot load credentials.";
+		}
+	}
+
+	async function credCall(path: string, body: Record<string, unknown>): Promise<string> {
+		credBusy = true;
+		credError = "";
+		try {
+			const res = await harnessFetch(path, { method: "POST", body: JSON.stringify(body) });
+			const out = (await res.json()) as { error?: string; active?: boolean };
+			if (!res.ok || out.error) return (credError = out.error ?? `HTTP ${res.status}`);
+			await loadCredentials();
+			await loadMachines();
+			return "";
+		} catch (error) {
+			return (credError = error instanceof Error ? error.message : "Request failed.");
+		} finally {
+			credBusy = false;
+		}
+	}
+
+	async function savePasswordCredential(key: string, fields: Array<{ key: string; label: string; secret: boolean }>) {
+		const values: Record<string, string> = {};
+		for (const f of fields) values[f.key] = credDraft[`${key}:${f.key}`] ?? "";
+		if (!(await credCall("/credentials/password", { key, fields: values }))) credSetupFor = "";
+	}
+
+	async function startBrowserLogin(key: string) {
+		if (!(await credCall("/credentials/browser/start", { key }))) credBrowserPending = key;
+	}
+
+	async function finishBrowserLogin(key: string) {
+		const res = await harnessFetch("/credentials/browser/finish", { method: "POST", body: JSON.stringify({ key }) });
+		const out = (await res.json()) as { active?: boolean; error?: string };
+		if (!out.active) {
+			credError = "No login cookies yet - finish signing in in the Chrome window, then click Done.";
+			return;
+		}
+		credBrowserPending = "";
+		await loadCredentials();
+		await loadMachines();
+	}
 	let skillPromptDraft = $state<Record<string, string>>({});
 	let skillPromptSaved = $state<string>("");
 	let skillOpen = $state<string>("");
@@ -192,12 +262,14 @@
 		if (!paired) {
 			skillRows = null;
 			holdups = [];
+			credentials = null;
 			harnessError = "";
 			if (skillPoll) clearInterval(skillPoll);
 			skillPoll = undefined;
 			return;
 		}
 		void loadSkills();
+		void loadCredentials();
 	}
 
 	onMount(() => {
@@ -250,6 +322,70 @@
 						<p class="holdup-err">{h.error}</p>
 					</div>
 				{/each}
+			{/if}
+		</section>
+
+		<section>
+			<h3>Credentials</h3>
+			{#if !paired}
+				<p class="hint">Pair to manage this machine's credentials.</p>
+			{:else if credentials === null}
+				<p class="hint" role="alert">{credError || "Credentials are unavailable until the harness responds."}</p>
+			{:else}
+				<p class="hint">
+					Service logins agents on this machine may use. Passwords live only on this machine (owner-only file); browser
+					logins open a Chrome you sign into once, and agents reuse that profile. An active credential becomes a machine
+					capability, so work that needs it is routed here.
+				</p>
+				{#each credentials as c (c.key)}
+					<div class="skill">
+						<div class="skill-row">
+							<span class="skill-name cred-label">{c.label}</span>
+							{#if c.active.password}<span class="chip on">password ✓</span>{/if}
+							{#if c.active.browser}<span class="chip on">browser ✓</span>{/if}
+							{#if !c.active.password && !c.active.browser}<span class="chip">not set up</span>{/if}
+							<span class="row-gap"></span>
+							{#if c.passwordFields}
+								<button class="subtle-btn" disabled={credBusy} onclick={() => { credSetupFor = credSetupFor === c.key ? "" : c.key; credError = ""; }}>{c.active.password ? "Replace" : "Enter keys"}</button>
+							{/if}
+							{#if c.loginUrl && !c.active.browser}
+								<button class="subtle-btn" disabled={credBusy} onclick={() => void startBrowserLogin(c.key)}>Open login window</button>
+							{/if}
+							{#if c.active.password || c.active.browser}
+								{#if credRemoveConfirm === c.key}
+									<button class="subtle-btn reset-right" disabled={credBusy} onclick={async () => { if (!(await credCall("/credentials/remove", { key: c.key }))) credRemoveConfirm = ""; }}>Remove?</button>
+									<button class="subtle-btn" onclick={() => (credRemoveConfirm = "")}>Cancel</button>
+								{:else}
+									<button class="remove-link" onclick={() => (credRemoveConfirm = c.key)}>Remove</button>
+								{/if}
+							{/if}
+						</div>
+						<p class="hint cred-note">{c.note}</p>
+						{#if credBrowserPending === c.key}
+							<p class="hint cred-browser-note">A Chrome window opened on this Mac - sign in there, then come back and <button class="subtle-btn" onclick={() => void finishBrowserLogin(c.key)}>Done</button></p>
+						{/if}
+						{#if credSetupFor === c.key && c.passwordFields}
+							<div class="cred-form">
+								{#each c.passwordFields as f (f.key)}
+									<label class="cred-field">
+										<span>{f.label}</span>
+										<input
+											type={f.secret ? "password" : "text"}
+											autocomplete="off"
+											value={credDraft[`${c.key}:${f.key}`] ?? ""}
+											oninput={(e) => (credDraft = { ...credDraft, [`${c.key}:${f.key}`]: e.currentTarget.value })}
+										/>
+									</label>
+								{/each}
+								<div class="cred-actions">
+									<button class="subtle-btn" disabled={credBusy} onclick={() => void savePasswordCredential(c.key, c.passwordFields!)}>Save to this machine</button>
+									<button class="subtle-btn" onclick={() => (credSetupFor = "")}>Cancel</button>
+								</div>
+							</div>
+						{/if}
+					</div>
+				{/each}
+				{#if credError}<p class="hint" role="alert">{credError}</p>{/if}
 			{/if}
 		</section>
 
