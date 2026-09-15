@@ -202,23 +202,21 @@
 			entities.push({ kind: e.kind, node, degree: e.links.length });
 		}
 
-		// Edges: tail births weld to their parents' tail markers (with dim
-		// context dots there), re-touches thread down to the birth marker,
-		// and the front plane carries every connection as the web stands.
+		// The rule of the sculpture: every past node welds UP to something in
+		// the now, and every now node anchors DOWN into its own past. The
+		// front plane also carries every connection as the web stands.
 		for (const [i, e] of seed.entries()) {
+			addEdge(entities[i].node, tailNode[i], MUTED, SEED_BIRTH);
 			for (const target of e.links) {
-				const p = seed[target];
-				const dot = addNode(p.bornX, tailY(Math.min(p.bornSlice, NOW - 1)), p.bornZ, SEED_BIRTH, PAST);
-				tailNodes.push(dot);
-				addEdge(tailNode[i], tailNode[target], MUTED, SEED_BIRTH);
+				addEdge(tailNode[i], entities[target].node, MUTED, SEED_BIRTH);
 				if (target < i) {
 					const t2 = TYPES[e.kind].tint;
 					addEdge(entities[i].node, entities[target].node, [t2[0] * 0.45, t2[1] * 0.45, t2[2] * 0.45], SEED_BIRTH);
 				}
 			}
 			if (e.retouch) {
-				// The thread from the re-touch marker down to the birth marker.
-				addEdge(e.retouch.node!, tailNode[i], MUTED, SEED_BIRTH);
+				// The re-touch marker threads up to the living node too.
+				addEdge(e.retouch.node!, entities[i].node, MUTED, SEED_BIRTH);
 			}
 		}
 
@@ -267,6 +265,8 @@
 			// The past: same spot, muted, already sinking.
 			const marker = addNode(x, FRONT_Y, z, at, PAST);
 			tailNodes.push(marker);
+			// The anchor: every now node connects down to its own past.
+			addEdge(node, marker, MUTED, at);
 			const linkCount = 1 + (rnd() < 0.45 ? 1 : 0) + (rnd() < 0.18 ? 1 : 0);
 			for (let l = 0; l < linkCount; l++) {
 				const t = pickTarget(entities.length - 1);
