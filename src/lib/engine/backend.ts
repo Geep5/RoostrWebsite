@@ -91,6 +91,11 @@ class WebBackend {
 			},
 		});
 		await this.refreshShared();
+		// Converge the bundled catalog (new relations/types the engine added
+		// since this space was seeded) - the native daemon does this at boot;
+		// a browser-only vault has no daemon, so the website does it here.
+		// Idempotent by fixture: a converged space commits nothing.
+		void this.mutate("bootstrap_space_defaults", {}).catch((err: unknown) => console.warn("bootstrap_space_defaults failed", err));
 		void this.sync.start().then(() => this.refreshShared());
 	}
 

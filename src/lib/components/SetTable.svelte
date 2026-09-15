@@ -601,7 +601,7 @@
 								{:else if fmt === "checkbox"}
 									<span class="cell-check" class:on={r.fields[c]?.boolValue === true}><CheckboxIcon checked={r.fields[c]?.boolValue === true} size={20} /></span>
 								{:else}
-									{cell(r, c)}
+									<span class:cell-warn={c === "error" && cell(r, c) !== ""}>{cell(r, c)}</span>
 								{/if}
 							</td>
 						{:else}
