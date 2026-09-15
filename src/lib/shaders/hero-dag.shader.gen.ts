@@ -28,24 +28,61 @@ fn vs_main(bm_in : BmVSIn) -> BmVSOut {
   bm_out.vUv = bm_in.aCorner;
   let node = uNodes[u32(bm_in.iIdx)];
   let grown = smoothstep(node.w, node.w + 2.8, bm_u.uNow);
-  var color = vec3f(1.0, 0.66, 0.3);
-  var size = (0.03 + fract(bm_in.iSeed * 7.3) * 0.012) * (0.25 + 0.75 * grown);
-  var glow = (0.8 + fract(bm_in.iSeed * 4.7) * 0.5) * grown;
+  var color = vec3f(0.92, 0.42, 0.55);
+  var sizeMul = 1.0;
   if (bm_in.iKind > 0.5 && bm_in.iKind < 1.5) {
-    color = vec3f(0.35, 0.68, 1.0);
+    color = vec3f(0.35, 0.85, 0.6);
   } else {
     if (bm_in.iKind > 1.5 && bm_in.iKind < 2.5) {
-      color = vec3f(0.95, 0.97, 1.0);
-      size = (0.038 + fract(bm_in.iSeed * 5.1) * 0.008) * (0.25 + 0.75 * grown);
-      glow = 1.15 * grown;
+      color = vec3f(0.95, 0.75, 0.8);
     } else {
-      if (bm_in.iKind > 2.5) {
-        color = vec3f(0.42, 0.48, 0.62);
-        size = 0.016 * (0.25 + 0.75 * grown);
-        glow = 0.35 * grown;
+      if (bm_in.iKind > 2.5 && bm_in.iKind < 3.5) {
+        color = vec3f(0.95, 0.72, 0.35);
+        sizeMul = 1.35;
+      } else {
+        if (bm_in.iKind > 3.5 && bm_in.iKind < 4.5) {
+          color = vec3f(0.65, 0.5, 0.95);
+          sizeMul = 0.95;
+        } else {
+          if (bm_in.iKind > 4.5 && bm_in.iKind < 5.5) {
+            color = vec3f(0.45, 0.7, 1.0);
+            sizeMul = 0.9;
+          } else {
+            if (bm_in.iKind > 5.5 && bm_in.iKind < 6.5) {
+              color = vec3f(0.8, 0.42, 0.75);
+              sizeMul = 0.9;
+            } else {
+              if (bm_in.iKind > 6.5 && bm_in.iKind < 7.5) {
+                color = vec3f(0.95, 0.85, 0.4);
+                sizeMul = 1.15;
+              } else {
+                if (bm_in.iKind > 7.5 && bm_in.iKind < 8.5) {
+                  color = vec3f(0.95, 0.6, 0.35);
+                  sizeMul = 1.1;
+                } else {
+                  if (bm_in.iKind > 8.5 && bm_in.iKind < 9.5) {
+                    color = vec3f(0.75, 0.8, 0.95);
+                    sizeMul = 1.2;
+                  } else {
+                    if (bm_in.iKind > 9.5) {
+                      color = vec3f(0.42, 0.44, 0.52);
+                      sizeMul = 0.55;
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
       }
     }
   }
+  var size = (0.03 + fract(bm_in.iSeed * 7.3) * 0.012) * sizeMul * (0.25 + 0.75 * grown);
+  var glowBase = 0.8 + fract(bm_in.iSeed * 4.7) * 0.5;
+  if (bm_in.iKind > 9.5) {
+    glowBase = 0.4;
+  }
+  var glow = glowBase * grown;
   var p = vec3f(node.x, node.y, node.z);
   let yaw = bm_u.uTime * 0.22 + bm_u.uMouse.x * 0.5;
   let cy = cos(yaw);

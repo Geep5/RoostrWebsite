@@ -63,6 +63,34 @@
 		/** Tail markers: the frozen past, sinking away below the plane. */
 		const tailNodes: number[] = [];
 		const MUTED: [number, number, number] = [0.3, 0.33, 0.4];
+		/** The past marker kind: anything >= 10 renders muted gray. */
+		const PAST = 10;
+
+		/**
+		 * The object types of a real Roostr space: color, birth weight,
+		 * counted like the real graph - humans the dominant mass, then
+		 * tasks, games, and the long tail of everything else.
+		 */
+		const TYPES: { tint: [number, number, number]; weight: number }[] = [
+			{ tint: [0.92, 0.42, 0.55], weight: 0.42 }, // human
+			{ tint: [0.35, 0.85, 0.6], weight: 0.13 }, // task
+			{ tint: [0.95, 0.75, 0.8], weight: 0.11 }, // game
+			{ tint: [0.95, 0.72, 0.35], weight: 0.06 }, // publisher
+			{ tint: [0.65, 0.5, 0.95], weight: 0.06 }, // chat
+			{ tint: [0.45, 0.7, 1.0], weight: 0.06 }, // query
+			{ tint: [0.8, 0.42, 0.75], weight: 0.05 }, // bookmark
+			{ tint: [0.95, 0.85, 0.4], weight: 0.05 }, // sponsor
+			{ tint: [0.95, 0.6, 0.35], weight: 0.04 }, // vendor
+			{ tint: [0.75, 0.8, 0.95], weight: 0.02 }, // page
+		];
+		const rollType = (): number => {
+			let roll = rnd();
+			for (let i = 0; i < TYPES.length; i++) {
+				roll -= TYPES[i].weight;
+				if (roll <= 0) return i;
+			}
+			return 0;
+		};
 
 		/** Tail height of a seed slice: history below the front plane. */
 		const tailY = (slice: number) => FRONT_Y - (NOW - slice) * GAP;
@@ -109,7 +137,7 @@
 			const z = Math.sin(a) * r;
 			const birth = Math.floor(rnd() * (SLICES * 0.7));
 			seed.push({
-				kind: rnd() < 0.55 ? 0 : 1,
+				kind: rollType(),
 				birth,
 				x,
 				z,
@@ -150,13 +178,13 @@
 		const SEED_BIRTH = -2;
 		const tailNode: number[] = [];
 		for (const e of seed) {
-			const n = addNode(e.bornX, tailY(Math.min(e.bornSlice, NOW - 1)), e.bornZ, SEED_BIRTH, 3);
+			const n = addNode(e.bornX, tailY(Math.min(e.bornSlice, NOW - 1)), e.bornZ, SEED_BIRTH, PAST);
 			tailNode.push(n);
 			tailNodes.push(n);
 		}
 		for (const e of seed) {
 			if (e.retouch) {
-				const n = addNode(e.retouch.x, tailY(e.retouch.slice), e.retouch.z, SEED_BIRTH, 3);
+				const n = addNode(e.retouch.x, tailY(e.retouch.slice), e.retouch.z, SEED_BIRTH, PAST);
 				e.retouch.node = n;
 				tailNodes.push(n);
 			}
@@ -173,12 +201,12 @@
 		for (const [i, e] of seed.entries()) {
 			for (const target of e.links) {
 				const p = seed[target];
-				const dot = addNode(p.bornX, tailY(Math.min(p.bornSlice, NOW - 1)), p.bornZ, SEED_BIRTH, 3);
+				const dot = addNode(p.bornX, tailY(Math.min(p.bornSlice, NOW - 1)), p.bornZ, SEED_BIRTH, PAST);
 				tailNodes.push(dot);
 				addEdge(tailNode[i], tailNode[target], MUTED, SEED_BIRTH);
 				if (target < i) {
-					const bright: [number, number, number] = e.kind === 0 ? [0.55, 0.42, 0.26] : [0.3, 0.48, 0.68];
-					addEdge(entities[i].node, entities[target].node, bright, SEED_BIRTH);
+					const t2 = TYPES[e.kind].tint;
+					addEdge(entities[i].node, entities[target].node, [t2[0] * 0.6, t2[1] * 0.6, t2[2] * 0.6], SEED_BIRTH);
 				}
 			}
 			if (e.retouch) {
@@ -218,7 +246,7 @@
 		 */
 		const fireEvent = (at: number): boolean => {
 			if (nNodes >= MAX_NODES - 2) return false;
-			const k = rnd() < 0.625 ? 0 : 1;
+			const k = rollType();
 			const a = rnd() * Math.PI * 2;
 			// The plane widens a little as it fills.
 			const r = 0.14 + rnd() * Math.min(0.62, 0.5 + entities.length * 0.0015);
@@ -230,14 +258,15 @@
 			const entity: Entity = { kind: k, node, degree: 0 };
 			entities.push(entity);
 			// The past: same spot, muted, already sinking.
-			const marker = addNode(x, FRONT_Y, z, at, 3);
+			const marker = addNode(x, FRONT_Y, z, at, PAST);
 			tailNodes.push(marker);
 			const linkCount = 1 + (rnd() < 0.45 ? 1 : 0) + (rnd() < 0.18 ? 1 : 0);
 			for (let l = 0; l < linkCount; l++) {
 				const t = pickTarget(entities.length - 1);
 				if (t === -1) continue;
 				const p = entities[t];
-				addEdge(node, p.node, k === 0 ? [0.5, 0.38, 0.22] : [0.25, 0.42, 0.6], at);
+				const tint = TYPES[k].tint;
+				addEdge(node, p.node, [tint[0] * 0.55, tint[1] * 0.55, tint[2] * 0.55], at);
 				addEdge(marker, p.node, MUTED, at);
 				entity.degree++;
 				p.degree++;

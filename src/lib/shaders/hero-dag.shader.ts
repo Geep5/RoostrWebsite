@@ -22,21 +22,47 @@ export const HeroDag = shader({
 		// web only ever grows, there is no cycle and no cap.
 		const grown = smoothstep(node.w, node.w + 2.8, uNow);
 
-		let color = vec3(1.0, 0.66, 0.3);
-		let size = (0.03 + fract(iSeed * 7.3) * 0.012) * (0.25 + 0.75 * grown);
-		let glow = (0.8 + fract(iSeed * 4.7) * 0.5) * grown;
+		// The Roostr palette: every object type has its own color and size,
+		// like the real space - humans the big pink mass, tasks teal,
+		// publishers gold, chats purple. Kind >= 10: the muted past.
+		let color = vec3(0.92, 0.42, 0.55); // human
+		let sizeMul = 1.0;
 		if (iKind > 0.5 && iKind < 1.5) {
-			color = vec3(0.35, 0.68, 1.0);
+			color = vec3(0.35, 0.85, 0.6); // task
 		} else if (iKind > 1.5 && iKind < 2.5) {
-			color = vec3(0.95, 0.97, 1.0);
-			size = (0.038 + fract(iSeed * 5.1) * 0.008) * (0.25 + 0.75 * grown);
-			glow = 1.15 * grown;
-		} else if (iKind > 2.5) {
-			// Context: the parent a change attaches to - present, not the story.
-			color = vec3(0.42, 0.48, 0.62);
-			size = 0.016 * (0.25 + 0.75 * grown);
-			glow = 0.35 * grown;
+			color = vec3(0.95, 0.75, 0.8); // game
+		} else if (iKind > 2.5 && iKind < 3.5) {
+			color = vec3(0.95, 0.72, 0.35); // publisher
+			sizeMul = 1.35;
+		} else if (iKind > 3.5 && iKind < 4.5) {
+			color = vec3(0.65, 0.5, 0.95); // chat
+			sizeMul = 0.95;
+		} else if (iKind > 4.5 && iKind < 5.5) {
+			color = vec3(0.45, 0.7, 1.0); // query
+			sizeMul = 0.9;
+		} else if (iKind > 5.5 && iKind < 6.5) {
+			color = vec3(0.8, 0.42, 0.75); // bookmark
+			sizeMul = 0.9;
+		} else if (iKind > 6.5 && iKind < 7.5) {
+			color = vec3(0.95, 0.85, 0.4); // sponsor
+			sizeMul = 1.15;
+		} else if (iKind > 7.5 && iKind < 8.5) {
+			color = vec3(0.95, 0.6, 0.35); // vendor
+			sizeMul = 1.1;
+		} else if (iKind > 8.5 && iKind < 9.5) {
+			color = vec3(0.75, 0.8, 0.95); // page
+			sizeMul = 1.2;
+		} else if (iKind > 9.5) {
+			// The past: tail markers, muted semi-gray.
+			color = vec3(0.42, 0.44, 0.52);
+			sizeMul = 0.55;
 		}
+		let size = (0.03 + fract(iSeed * 7.3) * 0.012) * sizeMul * (0.25 + 0.75 * grown);
+		let glowBase = 0.8 + fract(iSeed * 4.7) * 0.5;
+		if (iKind > 9.5) {
+			glowBase = 0.4;
+		}
+		let glow = glowBase * grown;
 
 		let p = vec3(node.x, node.y, node.z);
 		const yaw = uTime * 0.22 + uMouse.x * 0.5;
