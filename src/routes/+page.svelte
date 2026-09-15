@@ -101,7 +101,7 @@
 		width: 38px;
 		height: 38px;
 		border-radius: 10px;
-		filter: drop-shadow(0 4px 10px rgba(60, 42, 8, 0.35));
+		filter: drop-shadow(0 2px 4px rgba(40, 28, 6, 0.6));
 	}
 	.mark:hover {
 		color: #24211b;
