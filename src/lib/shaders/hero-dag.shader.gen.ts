@@ -77,12 +77,13 @@ fn vs_main(bm_in : BmVSIn) -> BmVSOut {
       }
     }
   }
-  var size = (0.03 + fract(bm_in.iSeed * 7.3) * 0.012) * sizeMul * (0.25 + 0.75 * grown);
-  var glowBase = 0.8 + fract(bm_in.iSeed * 4.7) * 0.5;
+  color = color * 0.82;
+  var size = (0.034 + fract(bm_in.iSeed * 7.3) * 0.012) * sizeMul * (0.25 + 0.75 * grown);
+  var glow = (0.9 + fract(bm_in.iSeed * 4.7) * 0.1) * grown;
   if (bm_in.iKind > 9.5) {
-    glowBase = 0.4;
+    color = vec3f(0.45, 0.41, 0.34);
+    glow = 0.55 * grown;
   }
-  var glow = glowBase * grown;
   let bobY = sin(bm_u.uTime * 1.5 + node.w * 13.7) * 0.022 * grown;
   let bobX = cos(bm_u.uTime * 1.1 + node.w * 27.3) * 0.012 * grown;
   var p = vec3f(node.x + bobX, node.y + bobY, node.z);
@@ -108,9 +109,8 @@ fn vs_main(bm_in : BmVSIn) -> BmVSOut {
 @fragment
 fn fs_main(bm_in : BmVSOut) -> @location(0) vec4f {
   let d = length(bm_in.vUv);
-  let core = 1.0 - smoothstep(0.0, 0.32, d);
-  let halo = (1.0 - smoothstep(0.1, 1.0, d)) * 0.5;
-  return vec4f(bm_in.vColor, (core + halo) * bm_in.vAlpha);
+  let disc = 1.0 - smoothstep(0.72, 1.0, d);
+  return vec4f(bm_in.vColor, disc * bm_in.vAlpha);
 }
 `,
   attributes: { aCorner: 'vec2' },

@@ -57,12 +57,15 @@ export const HeroDag = shader({
 			color = vec3(0.42, 0.44, 0.52);
 			sizeMul = 0.55;
 		}
-		let size = (0.03 + fract(iSeed * 7.3) * 0.012) * sizeMul * (0.25 + 0.75 * grown);
-		let glowBase = 0.8 + fract(iSeed * 4.7) * 0.5;
+		// Solid toddler-toy beads: a touch bigger, no glow, rich matte color
+		// slightly deepened so it reads on the yellow page.
+		color = color.scale(0.82);
+		let size = (0.034 + fract(iSeed * 7.3) * 0.012) * sizeMul * (0.25 + 0.75 * grown);
+		let glow = (0.9 + fract(iSeed * 4.7) * 0.1) * grown;
 		if (iKind > 9.5) {
-			glowBase = 0.4;
+			color = vec3(0.45, 0.41, 0.34);
+			glow = 0.55 * grown;
 		}
-		let glow = glowBase * grown;
 
 		// A gentle bob: the plane breathes. Phased off the birth time so the
 		// edge shader can match it exactly and the welds never detach.
@@ -90,8 +93,9 @@ export const HeroDag = shader({
 
 	fragment(_uniforms, { vUv, vColor, vAlpha }) {
 		const d = length(vUv);
-		const core = 1.0 - smoothstep(0.0, 0.32, d);
-		const halo = (1.0 - smoothstep(0.1, 1.0, d)) * 0.5;
-		return vec4(vColor, (core + halo) * vAlpha);
+		// A smooth solid disc with a clean antialiased rim - a bead, not a
+		// light. No halo, no glow.
+		const disc = 1.0 - smoothstep(0.72, 1.0, d);
+		return vec4(vColor, disc * vAlpha);
 	},
 });

@@ -92,7 +92,7 @@
 		align-items: center;
 		gap: 12px;
 		text-decoration: none;
-		color: #d8c391;
+		color: #3d3627;
 		font-size: 20px;
 		font-weight: 500;
 		letter-spacing: 0.04em;
@@ -101,10 +101,10 @@
 		width: 38px;
 		height: 38px;
 		border-radius: 10px;
-		filter: drop-shadow(0 3px 10px rgba(0, 0, 0, 0.55)) drop-shadow(0 0 16px rgba(242, 193, 78, 0.28));
+		filter: drop-shadow(0 4px 10px rgba(60, 42, 8, 0.35));
 	}
 	.mark:hover {
-		color: #ffe9ad;
+		color: #24211b;
 	}
 	.chrome-links {
 		display: flex;
@@ -114,9 +114,9 @@
 	.login {
 		padding: 11px 24px;
 		border-radius: 11px;
-		background: rgba(242, 193, 78, 0.1);
-		border: 1px solid rgba(242, 193, 78, 0.32);
-		color: #e8d9b0;
+		background: rgba(36, 33, 27, 0.07);
+		border: 1px solid rgba(36, 33, 27, 0.28);
+		color: #3d3627;
 		font-size: 16px;
 		font-weight: 500;
 		text-decoration: none;
@@ -124,7 +124,7 @@
 	}
 	.login:hover {
 		background: rgba(242, 193, 78, 0.2);
-		color: #ffe9ad;
+		color: #24211b;
 	}
 	.gh {
 		display: flex;
@@ -133,13 +133,13 @@
 		width: 46px;
 		height: 46px;
 		border-radius: 11px;
-		color: #a89b78;
-		background: rgba(242, 193, 78, 0.08);
-		border: 1px solid rgba(242, 193, 78, 0.2);
+		color: #4a4232;
+		background: rgba(36, 33, 27, 0.06);
+		border: 1px solid rgba(36, 33, 27, 0.22);
 	}
 	.gh:hover {
-		color: #ffd97a;
-		background: rgba(242, 193, 78, 0.18);
+		color: #24211b;
+		background: rgba(36, 33, 27, 0.14);
 	}
 	.veil-copy {
 		position: absolute;
@@ -152,7 +152,7 @@
 		text-align: center;
 		padding: 0 24px;
 		pointer-events: none;
-		background: radial-gradient(ellipse 58% 62% at 50% 50%, rgba(3, 4, 10, 0.82) 0%, rgba(3, 4, 10, 0.45) 58%, transparent 78%);
+		background: radial-gradient(ellipse 58% 62% at 50% 50%, rgba(222, 178, 74, 0.55) 0%, rgba(222, 178, 74, 0.22) 58%, transparent 78%);
 	}
 	.veil-copy .cta,
 	.veil-copy a {
@@ -162,29 +162,29 @@
 		display: block;
 		font-size: 12px;
 		letter-spacing: 0.55em;
-		color: #c9a54a;
+		color: #7c6227;
 		margin-bottom: 28px;
 	}
 	.veil-copy h1 {
-		color: #e9ecf5;
+		color: #23201a;
 		font-size: clamp(42px, 6.5vw, 72px);
 		font-weight: 300;
 		line-height: 1.04;
 		letter-spacing: -0.015em;
 		margin: 0 0 26px;
-		text-shadow: 0 2px 40px rgba(3, 4, 10, 0.9);
+		text-shadow: 0 1px 30px rgba(242, 203, 112, 0.7);
 	}
 	.dim {
-		color: #8f7642;
+		color: #6e5c33;
 	}
 	.veil-copy .sub {
 		max-width: 480px;
 		margin: 0 auto 40px;
-		color: #9d9682;
+		color: #4d4433;
 		font-size: 16px;
 		line-height: 1.7;
 		font-weight: 300;
-		text-shadow: 0 1px 24px rgba(3, 4, 10, 0.9);
+		text-shadow: 0 1px 20px rgba(242, 203, 112, 0.7);
 	}
 	.btn.primary {
 		padding: 11px 34px;
@@ -192,12 +192,12 @@
 		text-decoration: none;
 		font-weight: 500;
 		font-size: 15px;
-		color: #241a05;
-		background: #f2c14e;
-		border: 1px solid #f7d47e;
+		color: #f2cb70;
+		background: #24211b;
+		border: 1px solid #3a352c;
 	}
 	.btn.primary:hover {
-		background: #f7cf6a;
+		background: #363126;
 	}
 	.sr-only {
 		position: absolute;

@@ -63,7 +63,7 @@
 		const entities: Entity[] = [];
 		/** Tail markers: the frozen past, sinking away below the plane. */
 		const tailNodes: number[] = [];
-		const MUTED: [number, number, number] = [0.3, 0.33, 0.4];
+		const MUTED: [number, number, number] = [0.45, 0.41, 0.34];
 		/** The past marker kind: anything >= 10 renders muted gray. */
 		const PAST = 10;
 
@@ -208,7 +208,7 @@
 				addEdge(tailNode[i], tailNode[target], MUTED, SEED_BIRTH);
 				if (target < i) {
 					const t2 = TYPES[e.kind].tint;
-					addEdge(entities[i].node, entities[target].node, [t2[0] * 0.6, t2[1] * 0.6, t2[2] * 0.6], SEED_BIRTH);
+					addEdge(entities[i].node, entities[target].node, [t2[0] * 0.45, t2[1] * 0.45, t2[2] * 0.45], SEED_BIRTH);
 				}
 			}
 			if (e.retouch) {
@@ -268,7 +268,7 @@
 				if (t === -1) continue;
 				const p = entities[t];
 				const tint = TYPES[k].tint;
-				addEdge(node, p.node, [tint[0] * 0.55, tint[1] * 0.55, tint[2] * 0.55], at);
+				addEdge(node, p.node, [tint[0] * 0.45, tint[1] * 0.45, tint[2] * 0.45], at);
 				addEdge(marker, p.node, MUTED, at);
 				entity.degree++;
 				p.degree++;
@@ -335,7 +335,7 @@
 		void (async () => {
 			let renderer: Awaited<ReturnType<typeof createRenderer>>;
 			try {
-				renderer = await createRenderer(canvas!, { clearColor: [0.012, 0.01, 0.006, 1] });
+				renderer = await createRenderer(canvas!, { clearColor: [0.949, 0.796, 0.439, 1] }); // the page yellow, #f2cb70
 			} catch {
 				return;
 			}
@@ -349,7 +349,7 @@
 			const quad = new Float32Array([-1, -1, 1, -1, 1, 1, -1, -1, 1, 1, -1, 1]);
 			const strip = new Float32Array([0, 0, 1, 0, 0, 1, 0, 1, 1, 0, 1, 1]);
 
-			const nodes = createProgram(renderer, heroDag, { blend: "additive" });
+			const nodes = createProgram(renderer, heroDag, { blend: "alpha" });
 			nodes.attributes.aCorner.set(quad);
 			nodes.instanceAttributes.iIdx.set(new Float32Array(scene.iIdx));
 			nodes.instanceAttributes.iKind.set(new Float32Array(scene.iKind));
@@ -363,7 +363,7 @@
 			edges.instanceAttributes.iTint.set(new Float32Array(scene.eTint));
 			edges.instanceAttributes.iBirth.set(new Float32Array(scene.eBirth));
 			edges.uniforms.uNodes.set(nodeBuf);
-			edges.uniforms.uWidth.set(0.008);
+			edges.uniforms.uWidth.set(0.022);
 
 			let nextEventAt = 0.8 + rnd() * 1.2;
 			let dirty = false;

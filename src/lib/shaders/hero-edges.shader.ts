@@ -1,4 +1,4 @@
-import { shader, vec2, vec3, vec4, cos, sin, max, smoothstep, length, storageRead } from "brometal";
+import { shader, vec2, vec3, vec4, cos, sin, max, smoothstep, sqrt, abs, length, storageRead } from "brometal";
 
 /**
  * The welds. Each edge is a pair of indices into the uNodes storage
@@ -11,12 +11,13 @@ export const HeroEdges = shader({
 	instanceAttributes: { iA: "float", iB: "float", iTint: "vec3", iBirth: "float" },
 	uniforms: { uViewProj: "mat4", uTime: "float", uMouse: "vec2", uWidth: "float", uNow: "float" },
 	storage: { uNodes: "vec4" },
-	varyings: { vTint: "vec3", vAlong: "float", vBirth: "float" },
+	varyings: { vTint: "vec3", vAlong: "float", vBirth: "float", vAcross: "float" },
 
 	vertex({ aQuad, iA, iB, iTint, iBirth }, { uViewProj, uTime, uMouse, uWidth, uNow, uNodes }, v) {
 		v.vTint = iTint;
 		v.vAlong = aQuad.y;
 		v.vBirth = iBirth;
+		v.vAcross = aQuad.x;
 
 		const na = storageRead(uNodes, iA);
 		const nb = storageRead(uNodes, iB);
@@ -61,13 +62,17 @@ export const HeroEdges = shader({
 		return uViewProj.mul(vec4(p, 1));
 	},
 
-	fragment({ uNow }, { vTint, vAlong, vBirth }) {
+	fragment({ uNow }, { vTint, vAlong, vBirth, vAcross }) {
 		const taper = smoothstep(0.0, 0.08, vAlong) * (1.0 - smoothstep(0.92, 1.0, vAlong));
 		// The weld travels: the edge grows out from the new node toward its
 		// parent, tip first, instead of appearing at once.
 		const reach = smoothstep(vBirth + 0.3, vBirth + 1.9, uNow) * 1.15;
 		const behindTip = 1.0 - smoothstep(reach - 0.14, reach, vAlong);
 		const grown = smoothstep(vBirth, vBirth + 0.5, uNow);
-		return vec4(vTint, taper * 0.8 * behindTip * grown);
+		// A pipe, not a line: solid round tube - soft rim, fake cylindrical
+		// shading so it reads as a toy pipe on the yellow page.
+		const rim = 1.0 - smoothstep(0.68, 1.0, abs(vAcross));
+		const round = 0.72 + 0.28 * sqrt(max(0.0, 1.0 - vAcross * vAcross));
+		return vec4(vTint.scale(round), taper * rim * 0.92 * behindTip * grown);
 	},
 });

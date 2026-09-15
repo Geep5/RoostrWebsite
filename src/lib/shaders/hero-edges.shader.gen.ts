@@ -23,6 +23,7 @@ struct BmVSOut {
   @location(0) vTint : vec3f,
   @location(1) vAlong : f32,
   @location(2) vBirth : f32,
+  @location(3) vAcross : f32,
 }
 @vertex
 fn vs_main(bm_in : BmVSIn) -> BmVSOut {
@@ -30,6 +31,7 @@ fn vs_main(bm_in : BmVSIn) -> BmVSOut {
   bm_out.vTint = bm_in.iTint;
   bm_out.vAlong = bm_in.aQuad.y;
   bm_out.vBirth = bm_in.iBirth;
+  bm_out.vAcross = bm_in.aQuad.x;
   let na = uNodes[u32(bm_in.iA)];
   let nb = uNodes[u32(bm_in.iB)];
   let gA = smoothstep(na.w, na.w + 2.8, bm_u.uNow);
@@ -67,7 +69,9 @@ fn fs_main(bm_in : BmVSOut) -> @location(0) vec4f {
   let reach = smoothstep(bm_in.vBirth + 0.3, bm_in.vBirth + 1.9, bm_u.uNow) * 1.15;
   let behindTip = 1.0 - smoothstep(reach - 0.14, reach, bm_in.vAlong);
   let grown = smoothstep(bm_in.vBirth, bm_in.vBirth + 0.5, bm_u.uNow);
-  return vec4f(bm_in.vTint, taper * 0.8 * behindTip * grown);
+  let rim = 1.0 - smoothstep(0.68, 1.0, abs(bm_in.vAcross));
+  let round = 0.72 + 0.28 * sqrt(max(0.0, 1.0 - bm_in.vAcross * bm_in.vAcross));
+  return vec4f(bm_in.vTint * round, taper * rim * 0.92 * behindTip * grown);
 }
 `,
   attributes: { aQuad: 'vec2' },
