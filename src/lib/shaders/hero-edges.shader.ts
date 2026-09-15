@@ -1,4 +1,4 @@
-import { shader, vec2, vec3, vec4, cos, sin, mod, max, min, smoothstep, length, abs } from "brometal";
+import { shader, vec2, vec3, vec4, mod, max, smoothstep, length, abs } from "brometal";
 
 /**
  * The links of the change-DAG: thin quads from each change to its
@@ -21,27 +21,8 @@ export const HeroEdges = shader({
 		// A wrapped edge would stretch the whole tube; kill it at the seam.
 		v.vFade = 1.0 - smoothstep(1.2, 1.8, abs(sx - ex));
 
-		const yaw = uMouse.x * 0.4;
-		const tilt = uMouse.y * 0.22;
-		const cy = cos(yaw);
-		const sy = sin(yaw);
-		const ct = cos(tilt);
-		const st = sin(tilt);
-
-		const a = vec3(sx, iStart.y, iStart.z);
-		const b = vec3(ex, iEnd.y, iEnd.z);
-
-		const ax = a.x * cy + a.z * sy;
-		const az0 = a.z * cy - a.x * sy;
-		const ay = a.y * ct - az0 * st;
-		const az1 = a.y * st + az0 * ct;
-		const a2 = vec3(ax, ay, az1);
-
-		const bx = b.x * cy + b.z * sy;
-		const bz0 = b.z * cy - b.x * sy;
-		const by = b.y * ct - bz0 * st;
-		const bz1 = b.y * st + bz0 * ct;
-		const b2 = vec3(bx, by, bz1);
+		const a2 = vec3(sx + uMouse.x * 0.08, iStart.y - uMouse.y * 0.05, 0.0);
+		const b2 = vec3(ex + uMouse.x * 0.08, iEnd.y - uMouse.y * 0.05, 0.0);
 
 		const dir = b2.sub(a2);
 		const len = length(dir);

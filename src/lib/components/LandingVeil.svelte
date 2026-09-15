@@ -73,12 +73,12 @@
 				const px = pos[parent * 3];
 				const py = pos[parent * 3 + 1];
 				const merge = prev.length > 1 && i > 0 && rnd() < 0.16;
-				const child = push(lx, py * 0.9 + (rnd() - 0.5) * 0.5, px * 0.86 + (rnd() - 0.5) * 0.7, merge ? 2 : rnd() < 0.55 ? 0 : 1);
+				const child = push(lx, py * 0.9 + (rnd() - 0.5) * 0.5, px * 0.86 + (rnd() - 0.5) * 0.0, merge ? 2 : rnd() < 0.55 ? 0 : 1);
 				link(child, parent);
 				if (merge) link(child, prev[rnd() < 0.5 ? 0 : prev.length - 1]);
 				ids.push(child);
 				if (rnd() < 0.14 && ids.length < 7) {
-					const branch = push(lx, py * 0.9 + (rnd() - 0.5) * 0.9, px * 0.86 + (rnd() - 0.5) * 1.2, rnd() < 0.5 ? 0 : 1);
+					const branch = push(lx, py * 0.9 + (rnd() - 0.5) * 0.9, px * 0.86 + (rnd() - 0.5) * 0.0, rnd() < 0.5 ? 0 : 1);
 					link(branch, parent);
 					ids.push(branch);
 				}
@@ -145,18 +145,26 @@
 			stop = renderer.loop((t) => {
 				mx += (tx - mx) * 0.045;
 				my += (ty - my) * 0.045;
-				const proj = mat4.perspective(Math.PI / 4.4, renderer.aspect, 0.1, 100);
-				const view = mat4.lookAt([0, 0.8, 6.2], [-0.5, 0.25, 0], [0, 1, 0]);
-				const viewProj = mat4.multiply(proj, view);
+				// True 2D: an orthographic frame, halfH world units tall.
+				const halfH = 1.4;
+				const halfW = halfH * renderer.aspect;
+				const cx = -0.4;
+				const cy = 0.1;
+				const viewProj = new Float32Array([
+					1 / halfW, 0, 0, 0,
+					0, 1 / halfH, 0, 0,
+					0, 0, -0.02, 0,
+					-cx / halfW, -cy / halfH, -1, 1,
+				]);
 				edges.uniforms.uViewProj.set(viewProj);
 				edges.uniforms.uMouse.set([mx, my]);
-				edges.uniforms.uScroll.set((t * 0.55) % 7);
+				edges.uniforms.uScroll.set((t * 0.28) % 7);
 				edges.uniforms.uWrap.set(7);
 				edges.draw();
 				nodes.uniforms.uViewProj.set(viewProj);
 				nodes.uniforms.uTime.set(t);
 				nodes.uniforms.uMouse.set([mx, my]);
-				nodes.uniforms.uScroll.set((t * 0.55) % 7);
+				nodes.uniforms.uScroll.set((t * 0.28) % 7);
 				nodes.uniforms.uWrap.set(7);
 				nodes.draw();
 			});

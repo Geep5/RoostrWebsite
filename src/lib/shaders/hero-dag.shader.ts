@@ -1,4 +1,4 @@
-import { shader, vec2, vec3, vec4, sin, cos, mod, max, fract, clamp, smoothstep, length } from "brometal";
+import { shader, vec2, vec3, vec4, sin, mod, max, fract, clamp, smoothstep, length } from "brometal";
 
 /**
  * Debug-bisect: the constellation version (no stream math) - known to render.
@@ -26,24 +26,15 @@ export const HeroDag = shader({
 		const wrap = max(uWrap, 0.001);
 		const x = mod(iPos.x + uScroll, wrap) - wrap + 3.0;
 		const born = x + wrap - 3.0;
-		const grown = clamp(born / 2.8, 0.0, 1.0);
-		let p = vec3(x, iPos.y + sin(uTime * 0.6 + iSeed * 6.2832) * 0.03, iPos.z);
-		const yaw = uMouse.x * 0.4;
-		const cy = cos(yaw);
-		const sy = sin(yaw);
-		const px = p.x * cy + p.z * sy;
-		const pz0 = p.z * cy - p.x * sy;
-		const tilt = uMouse.y * 0.22;
-		const ct = cos(tilt);
-		const st = sin(tilt);
-		const py = p.y * ct - pz0 * st;
-		const pz1 = p.y * st + pz0 * ct;
-		p = vec3(px, py, pz1);
+		// A change swells from nothing over a long first stretch of the frame,
+		// so growth reads as growth, not panning.
+		const grown = smoothstep(0.0, 4.2, born);
+		// Flat: the DAG lives on the z=0 plane; a small pan of parallax, no rotation.
+		let p = vec3(x + uMouse.x * 0.08, iPos.y + sin(uTime * 0.6 + iSeed * 6.2832) * 0.02 - uMouse.y * 0.05, 0.0);
 
-		const depthFade = clamp((p.z + 4.5) / 6.0, 0.35, 1.0);
-		const world = p.add(vec3(aCorner.x * size * (0.3 + 0.7 * grown), aCorner.y * size * (0.3 + 0.7 * grown), 0));
+		const world = p.add(vec3(aCorner.x * size * grown, aCorner.y * size * grown, 0));
 		v.vColor = color;
-		v.vAlpha = depthFade * glow * (0.15 + 0.85 * grown);
+		v.vAlpha = glow * grown;
 		return uViewProj.mul(vec4(world, 1));
 	},
 
