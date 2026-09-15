@@ -1,57 +1,108 @@
 <script lang="ts">
 	/**
-	 * The landing veil: a brometal/WebGPU scene — a lattice globe with two
-	 * counter-rotating helical streams (human knowledge descending, agent
-	 * work rising) braiding through the same substrate. Pointer parallax.
-	 * Degrades to nothing where WebGPU is unavailable (the copy still reads).
+	 * The landing scene: the glon change-DAG as a WebGPU starfield —
+	 * generations of change objects (warm = human, cool = agent, bright =
+	 * merges) linked parent to child, slowly turning, with the Roostr mark
+	 * at its tip. Degrades to nothing where WebGPU is unavailable.
 	 */
 	import { onMount } from "svelte";
-	import { createRenderer, createProgram, mat4 } from "brometal";
-	import heroVeil from "$lib/shaders/hero-veil.shader.gen";
+	import { createRenderer, createProgram, loadTexture, mat4 } from "brometal";
+	import heroDag from "$lib/shaders/hero-dag.shader.gen";
+	import heroEdges from "$lib/shaders/hero-edges.shader.gen";
+	import heroLogo from "$lib/shaders/hero-logo.shader.gen";
 
 	let canvas = $state<HTMLCanvasElement>();
 
-	const LATTICE = 680;
-	const STREAM = 380;
-	const N = LATTICE + STREAM * 2;
+	/** Deterministic RNG so the DAG is the same sculpture on every load. */
+	const rnd = (() => {
+		let s = 20260914;
+		return () => {
+			s = (s * 1664525 + 1013904223) >>> 0;
+			return s / 4294967296;
+		};
+	})();
 
-	/** Cheap deterministic seeds so the scene is identical every load. */
-	const rnd = (k: number) => {
-		const x = Math.sin(k * 127.1 + 311.7) * 43758.5453;
-		return x - Math.floor(x);
-	};
+	interface DagData {
+		pos: Float32Array;
+		kind: Float32Array;
+		seed: Float32Array;
+		starts: Float32Array;
+		ends: Float32Array;
+		tints: Float32Array;
+		edges: number;
+		nodes: number;
+	}
+
+	function buildDag(): DagData {
+		const LAYERS = 22;
+		const SPACING = 0.62;
+		const pos: number[] = [];
+		const kind: number[] = [];
+		const seed: number[] = [];
+		const starts: number[] = [];
+		const ends: number[] = [];
+		const tints: number[] = [];
+		const layerIds: number[][] = [];
+		let n = 0;
+		let e = 0;
+
+		const push = (x: number, y: number, z: number, k: number): number => {
+			pos.push(x, y, z);
+			kind.push(k);
+			seed.push(rnd());
+			return n++;
+		};
+		const link = (child: number, parent: number) => {
+			starts.push(pos[child * 3], pos[child * 3 + 1], pos[child * 3 + 2]);
+			ends.push(pos[parent * 3], pos[parent * 3 + 1], pos[parent * 3 + 2]);
+			// The link takes its child's authorship, dimmed.
+			const warm = kind[child] < 0.5;
+			const merge = kind[child] > 1.5;
+			tints.push(merge ? 0.75 : warm ? 0.5 : 0.25, merge ? 0.75 : warm ? 0.4 : 0.42, merge ? 0.8 : warm ? 0.25 : 0.6);
+			e++;
+		};
+
+		// Root change.
+		layerIds.push([push(0, 0, 0, rnd() < 0.55 ? 0 : 1)]);
+		for (let layer = 1; layer < LAYERS; layer++) {
+			const prev = layerIds[layer - 1];
+			const z = -layer * SPACING;
+			const ids: number[] = [];
+			// Each previous node usually continues; sometimes a second
+			// parent makes a merge; sometimes an extra branch appears.
+			for (const [i, parent] of prev.entries()) {
+				const px = pos[parent * 3];
+				const py = pos[parent * 3 + 1];
+				const merge = prev.length > 1 && i > 0 && rnd() < 0.16;
+				const child = push(px * 0.86 + (rnd() - 0.5) * 0.6, py * 0.9 + (rnd() - 0.5) * 0.45, z, merge ? 2 : rnd() < 0.55 ? 0 : 1);
+				link(child, parent);
+				if (merge) link(child, prev[rnd() < 0.5 ? 0 : prev.length - 1]);
+				ids.push(child);
+				if (rnd() < 0.14 && ids.length < 7) {
+					const branch = push(px * 0.86 + (rnd() - 0.5) * 1.1, py * 0.9 + (rnd() - 0.5) * 0.8, z, rnd() < 0.5 ? 0 : 1);
+					link(branch, parent);
+					ids.push(branch);
+				}
+			}
+			layerIds.push(ids);
+		}
+
+		return {
+			pos: new Float32Array(pos),
+			kind: new Float32Array(kind),
+			seed: new Float32Array(seed),
+			starts: new Float32Array(starts),
+			ends: new Float32Array(ends),
+			tints: new Float32Array(tints),
+			edges: e,
+			nodes: n,
+		};
+	}
 
 	onMount(() => {
 		if (!canvas) return;
 		let cancelled = false;
 		let stop: (() => void) | null = null;
-
-		const corners = new Float32Array([-1, -1, 1, -1, 1, 1, -1, -1, 1, 1, -1, 1]);
-		const pos = new Float32Array(N * 3);
-		const kind = new Float32Array(N);
-		const seed = new Float32Array(N);
-
-		// Fibonacci sphere: an even lattice with no poles to clump at.
-		const golden = Math.PI * (3 - Math.sqrt(5));
-		let i = 0;
-		for (let k = 0; k < LATTICE; k++, i++) {
-			const y = 1 - (k / (LATTICE - 1)) * 2;
-			const r = Math.sqrt(Math.max(0, 1 - y * y));
-			const th = golden * k;
-			pos[i * 3] = Math.cos(th) * r;
-			pos[i * 3 + 1] = y;
-			pos[i * 3 + 2] = Math.sin(th) * r;
-			kind[i] = 0;
-			seed[i] = rnd(k * 11 + 1);
-		}
-		for (let k = 0; k < STREAM; k++, i++) {
-			kind[i] = 1;
-			seed[i] = rnd(k * 3 + 17);
-		}
-		for (let k = 0; k < STREAM; k++, i++) {
-			kind[i] = 2;
-			seed[i] = rnd(k * 7 + 41);
-		}
 
 		let mx = 0,
 			my = 0,
@@ -65,30 +116,55 @@
 
 		void (async () => {
 			let renderer: Awaited<ReturnType<typeof createRenderer>>;
+			let logoTex: Awaited<ReturnType<typeof loadTexture>>;
 			try {
-				renderer = await createRenderer(canvas!, { clearColor: [0.008, 0.01, 0.018, 1] });
+				renderer = await createRenderer(canvas!, { clearColor: [0.006, 0.008, 0.016, 1] });
+				logoTex = await loadTexture(renderer, "/logo.png");
 			} catch {
-				return; // no WebGPU: the hero copy carries the page alone
+				return;
 			}
 			if (cancelled) {
 				renderer.destroy();
 				return;
 			}
-			const program = createProgram(renderer, heroVeil, { blend: "additive" });
-			program.attributes.aCorner.set(corners);
-			program.instanceAttributes.iPos.set(pos);
-			program.instanceAttributes.iKind.set(kind);
-			program.instanceAttributes.iSeed.set(seed);
+
+			const dag = buildDag();
+			const quad = new Float32Array([-1, -1, 1, -1, 1, 1, -1, -1, 1, 1, -1, 1]);
+			const strip = new Float32Array([0, 0, 0, 1, 1, 0, 1, 0, 1, 1, 0, 1]);
+
+			const nodes = createProgram(renderer, heroDag, { blend: "additive" });
+			nodes.attributes.aCorner.set(quad);
+			nodes.instanceAttributes.iPos.set(dag.pos);
+			nodes.instanceAttributes.iKind.set(dag.kind);
+			nodes.instanceAttributes.iSeed.set(dag.seed);
+
+			const edges = createProgram(renderer, heroEdges, { blend: "additive" });
+			edges.attributes.aQuad.set(strip);
+			edges.instanceAttributes.iStart.set(dag.starts);
+			edges.instanceAttributes.iEnd.set(dag.ends);
+			edges.instanceAttributes.iTint.set(dag.tints);
+			edges.uniforms.uWidth.set(0.017);
+
+			const mark = createProgram(renderer, heroLogo, { blend: "alpha" });
+			mark.attributes.aCorner.set(quad);
+			mark.uniforms.uTex.set(logoTex);
 
 			stop = renderer.loop((t) => {
 				mx += (tx - mx) * 0.045;
 				my += (ty - my) * 0.045;
-				const proj = mat4.perspective(Math.PI / 4.6, renderer.aspect, 0.1, 100);
-				const view = mat4.lookAt([0, 0.4, 5.4], [0, 0, 0], [0, 1, 0]);
-				program.uniforms.uViewProj.set(mat4.multiply(proj, view));
-				program.uniforms.uTime.set(t);
-				program.uniforms.uMouse.set([mx, my]);
-				program.draw();
+				const proj = mat4.perspective(Math.PI / 4.4, renderer.aspect, 0.1, 100);
+				const view = mat4.lookAt([-0.6, 1.1, 3.4], [-0.9, -0.2, -5.5], [0, 1, 0]);
+				const viewProj = mat4.multiply(proj, view);
+				mark.uniforms.uViewProj.set(viewProj);
+				mark.uniforms.uMouse.set([mx, my]);
+				mark.draw();
+				edges.uniforms.uViewProj.set(viewProj);
+				edges.uniforms.uMouse.set([mx, my]);
+				edges.draw();
+				nodes.uniforms.uViewProj.set(viewProj);
+				nodes.uniforms.uTime.set(t);
+				nodes.uniforms.uMouse.set([mx, my]);
+				nodes.draw();
 			});
 		})();
 
