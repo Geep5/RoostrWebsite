@@ -63,6 +63,20 @@
 	let credRemoveConfirm = $state("");
 	let credError = $state("");
 	let credBusy = $state(false);
+	interface GoogleAccountRow {
+		account: string;
+		configured: boolean;
+		authMethod: string;
+		clientConfigExists: boolean;
+		credentialsExists: boolean;
+		storage: string;
+		error?: string;
+	}
+	let googleAccounts = $state<GoogleAccountRow[] | null>(null);
+	let googleAccountDraft = $state("");
+	let googleAccountError = $state("");
+	let googleAccountBusy = $state(false);
+	let googleRemoveConfirm = $state("");
 
 	async function loadCredentials() {
 		if (!pairedSession()) return;
@@ -121,6 +135,53 @@
 	let skillConfirm = $state<string>("");
 	let skillResetConfirm = $state<string>("");
 	let skillPoll: ReturnType<typeof setInterval> | undefined;
+
+	async function loadGoogleAccounts() {
+		if (!pairedSession()) return;
+		try {
+			const res = await harnessFetch("/google/accounts");
+			if (!res.ok) throw new Error(`HTTP ${res.status}`);
+			googleAccounts = ((await res.json()) as { accounts: GoogleAccountRow[] }).accounts;
+			googleAccountError = "";
+		} catch (error) {
+			googleAccounts = null;
+			googleAccountError = error instanceof Error ? error.message : "Cannot load Google accounts.";
+		}
+	}
+
+	async function addGoogleAccount() {
+		const account = googleAccountDraft.trim().toLowerCase();
+		if (!account) return;
+		googleAccountBusy = true;
+		googleAccountError = "";
+		try {
+			const res = await harnessFetch("/google/accounts/add", { method: "POST", body: JSON.stringify({ account }) });
+			const out = (await res.json()) as { error?: string };
+			if (!res.ok || out.error) throw new Error(out.error ?? `HTTP ${res.status}`);
+			googleAccountDraft = "";
+			await loadGoogleAccounts();
+		} catch (error) {
+			googleAccountError = error instanceof Error ? error.message : "Cannot add Google account.";
+		} finally {
+			googleAccountBusy = false;
+		}
+	}
+
+	async function removeGoogleAccount(account: string) {
+		googleAccountBusy = true;
+		googleAccountError = "";
+		try {
+			const res = await harnessFetch("/google/accounts/remove", { method: "POST", body: JSON.stringify({ account }) });
+			const out = (await res.json()) as { error?: string };
+			if (!res.ok || out.error) throw new Error(out.error ?? `HTTP ${res.status}`);
+			googleRemoveConfirm = "";
+			await loadGoogleAccounts();
+		} catch (error) {
+			googleAccountError = error instanceof Error ? error.message : "Cannot remove Google account.";
+		} finally {
+			googleAccountBusy = false;
+		}
+	}
 
 	async function loadSkills() {
 		if (!pairedSession()) return;
@@ -230,6 +291,7 @@
 		}
 		void loadSkills();
 		void loadCredentials();
+		void loadGoogleAccounts();
 	}
 
 	onMount(() => {
@@ -284,70 +346,6 @@
 			{/if}
 		</section>
 
-		<section>
-			<h3>Credentials</h3>
-			{#if !paired}
-				<p class="hint">Pair to manage this machine's credentials.</p>
-			{:else if credentials === null}
-				<p class="hint" role="alert">{credError || "Credentials are unavailable until the harness responds."}</p>
-			{:else}
-				<p class="hint">
-					Service logins agents on this machine may use. Passwords live only on this machine (owner-only file); browser
-					logins open a Chrome you sign into once, and agents reuse that profile. An active credential becomes a machine
-					capability, so work that needs it is routed here.
-				</p>
-				{#each credentials as c (c.key)}
-					<div class="skill">
-						<div class="skill-row">
-							<span class="skill-name cred-label">{c.label}</span>
-							{#if c.active.password}<span class="chip on">password ✓</span>{/if}
-							{#if c.active.browser}<span class="chip on">browser ✓</span>{/if}
-							{#if !c.active.password && !c.active.browser}<span class="chip">not set up</span>{/if}
-							<span class="row-gap"></span>
-							{#if c.passwordFields}
-								<button class="subtle-btn" disabled={credBusy} onclick={() => { credSetupFor = credSetupFor === c.key ? "" : c.key; credError = ""; }}>{c.active.password ? "Replace" : "Enter keys"}</button>
-							{/if}
-							{#if c.loginUrl && !c.active.browser}
-								<button class="subtle-btn" disabled={credBusy} onclick={() => void startBrowserLogin(c.key)}>Open login window</button>
-							{/if}
-							{#if c.active.password || c.active.browser}
-								{#if credRemoveConfirm === c.key}
-									<button class="subtle-btn reset-right" disabled={credBusy} onclick={async () => { if (!(await credCall("/credentials/remove", { key: c.key }))) credRemoveConfirm = ""; }}>Remove?</button>
-									<button class="subtle-btn" onclick={() => (credRemoveConfirm = "")}>Cancel</button>
-								{:else}
-									<button class="remove-link" onclick={() => (credRemoveConfirm = c.key)}>Remove</button>
-								{/if}
-							{/if}
-						</div>
-						<p class="hint cred-note">{c.note}</p>
-						{#if credBrowserPending === c.key}
-							<p class="hint cred-browser-note">A Chrome window opened on this Mac - sign in there, then come back and <button class="subtle-btn" onclick={() => void finishBrowserLogin(c.key)}>Done</button></p>
-						{/if}
-						{#if credSetupFor === c.key && c.passwordFields}
-							<div class="cred-form">
-								{#each c.passwordFields as f (f.key)}
-									<label class="cred-field">
-										<span>{f.label}</span>
-										<input
-											type={f.secret ? "password" : "text"}
-											autocomplete="off"
-											value={credDraft[`${c.key}:${f.key}`] ?? ""}
-											oninput={(e) => (credDraft = { ...credDraft, [`${c.key}:${f.key}`]: e.currentTarget.value })}
-										/>
-									</label>
-								{/each}
-								<div class="cred-actions">
-									<button class="subtle-btn" disabled={credBusy} onclick={() => void savePasswordCredential(c.key, c.passwordFields!)}>Save to this machine</button>
-									<button class="subtle-btn" onclick={() => (credSetupFor = "")}>Cancel</button>
-								</div>
-							</div>
-						{/if}
-					</div>
-				{/each}
-				{#if credError}<p class="hint" role="alert">{credError}</p>{/if}
-			{/if}
-		</section>
-
 		<Machines />
 
 		<section>
@@ -359,6 +357,92 @@
 					Device-local capabilities, brokered by the harness: every agent can use an enabled one
 					through its tools (web_fetch, …) without ever seeing this machine's credentials.
 				</p>
+				{#if credentials === null}
+					<p class="hint" role="alert">{credError || "Credentials are unavailable until the harness responds."}</p>
+				{:else if credentials}
+					{#each credentials as c (c.key)}
+						<div class="skill">
+							<div class="skill-row">
+								<span class="skill-name cred-label">{c.label}</span>
+								{#if c.active.password}<span class="chip on">password ✓</span>{/if}
+								{#if c.active.browser}<span class="chip on">browser ✓</span>{/if}
+								{#if !c.active.password && !c.active.browser}<span class="chip">not set up</span>{/if}
+								<span class="row-gap"></span>
+								{#if c.passwordFields}
+									<button class="subtle-btn" disabled={credBusy} onclick={() => { credSetupFor = credSetupFor === c.key ? "" : c.key; credError = ""; }}>{c.active.password ? "Replace" : "Enter keys"}</button>
+								{/if}
+								{#if c.loginUrl && !c.active.browser}
+									<button class="subtle-btn" disabled={credBusy} onclick={() => void startBrowserLogin(c.key)}>Open login window</button>
+								{/if}
+								{#if c.active.password || c.active.browser}
+									{#if credRemoveConfirm === c.key}
+										<button class="subtle-btn reset-right" disabled={credBusy} onclick={async () => { if (!(await credCall("/credentials/remove", { key: c.key }))) credRemoveConfirm = ""; }}>Remove?</button>
+										<button class="subtle-btn" onclick={() => (credRemoveConfirm = "")}>Cancel</button>
+									{:else}
+										<button class="remove-link" onclick={() => (credRemoveConfirm = c.key)}>Remove</button>
+									{/if}
+								{/if}
+							</div>
+							<p class="hint cred-note">{c.note}</p>
+							{#if credBrowserPending === c.key}
+								<p class="hint cred-browser-note">A Chrome window opened on this Mac - sign in there, then come back and <button class="subtle-btn" onclick={() => void finishBrowserLogin(c.key)}>Done</button></p>
+							{/if}
+							{#if credSetupFor === c.key && c.passwordFields}
+								<div class="cred-form">
+									{#each c.passwordFields as f (f.key)}
+										<label class="cred-field">
+											<span>{f.label}</span>
+											<input
+												type={f.secret ? "password" : "text"}
+												autocomplete="off"
+												value={credDraft[`${c.key}:${f.key}`] ?? ""}
+												oninput={(e) => (credDraft = { ...credDraft, [`${c.key}:${f.key}`]: e.currentTarget.value })}
+											/>
+										</label>
+									{/each}
+									<div class="cred-actions">
+										<button class="subtle-btn" disabled={credBusy} onclick={() => void savePasswordCredential(c.key, c.passwordFields!)}>Save to this machine</button>
+										<button class="subtle-btn" onclick={() => (credSetupFor = "")}>Cancel</button>
+									</div>
+								</div>
+							{/if}
+						</div>
+					{/each}
+					{#if credError}<p class="hint" role="alert">{credError}</p>{/if}
+				{/if}
+				<div class="gskills">
+					<p class="hint">
+						Google account selectors for <code>gws-as</code>. Secrets stay in each account's local config directory; agents choose the account explicitly.
+					</p>
+					{#if googleAccounts === null}
+						<p class="hint" role="alert">{googleAccountError || "Google accounts are unavailable until the harness responds."}</p>
+					{:else}
+						{#each googleAccounts as account (account.account)}
+							<div class="gskill">
+								<span class="skill-name cred-label">{account.account}</span>
+								<span class="chip {account.authMethod !== "none" && account.authMethod !== "" ? "on" : account.clientConfigExists ? "needs-auth" : "failed"}">
+									{account.authMethod !== "none" && account.authMethod !== "" ? account.authMethod : account.clientConfigExists ? "auth needed" : "missing client"}
+								</span>
+								{#if googleRemoveConfirm === account.account}
+									<button class="subtle-btn reset-right" disabled={googleAccountBusy} onclick={() => void removeGoogleAccount(account.account)}>Remove?</button>
+									<button class="subtle-btn" onclick={() => (googleRemoveConfirm = "")}>Cancel</button>
+								{:else}
+									<button class="remove-link" onclick={() => (googleRemoveConfirm = account.account)}>Remove</button>
+								{/if}
+							</div>
+						{/each}
+						<form
+							onsubmit={(e) => {
+								e.preventDefault();
+								void addGoogleAccount();
+							}}
+						>
+							<input bind:value={googleAccountDraft} placeholder="support@matcherino.com" autocomplete="off" />
+							<button type="submit" disabled={googleAccountBusy || !googleAccountDraft.trim()}>Add Google account</button>
+						</form>
+						{#if googleAccountError}<p class="hint" role="alert">{googleAccountError}</p>{/if}
+					{/if}
+				</div>
 				{#each skillRows as s (s.key)}
 					<div class="skill">
 						<div class="skill-row">
