@@ -31,11 +31,38 @@ interface ChangeRow {
 	json: ChangeJSON;
 }
 
-function req<T>(r: IDBRequest<T>): Promise<T> {
+/** The database itself is unreachable - as opposed to a change that will not replay. */
+export class StorageUnavailableError extends Error {}
+
+/**
+ * WebKit can leave an IndexedDB request pending with no event at all -
+ * after storage pressure, an eviction mid-session, or a backgrounded tab
+ * whose database process went away. An unbounded wait then propagates
+ * upward as a promise that never settles: a send button stuck mid-flight,
+ * a discussion that never finishes loading, a space list missing rows.
+ * A bounded wait turns that silence into an error a caller can report.
+ */
+export const IDB_TIMEOUT_MS = 12_000;
+
+async function withTimeout<T>(promise: Promise<T>, what: string, ms = IDB_TIMEOUT_MS): Promise<T> {
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	try {
+		return await Promise.race([
+			promise,
+			new Promise<never>((_, reject) => {
+				timer = setTimeout(() => reject(new StorageUnavailableError(`local storage stopped responding (${what}); reload the page`)), ms);
+			}),
+		]);
+	} finally {
+		clearTimeout(timer);
+	}
+}
+
+export function req<T>(r: IDBRequest<T>, timeoutMs = IDB_TIMEOUT_MS): Promise<T> {
 	const { promise, resolve, reject } = Promise.withResolvers<T>();
 	r.onsuccess = () => resolve(r.result);
 	r.onerror = () => reject(r.error);
-	return promise;
+	return withTimeout(promise, "read", timeoutMs);
 }
 
 function txDone(tx: IDBTransaction): Promise<void> {
@@ -43,7 +70,7 @@ function txDone(tx: IDBTransaction): Promise<void> {
 	tx.oncomplete = () => resolve();
 	tx.onerror = () => reject(tx.error);
 	tx.onabort = () => reject(tx.error ?? new Error("transaction aborted"));
-	return promise;
+	return withTimeout(promise, "write");
 }
 
 async function idbFactory(): Promise<IDBFactory> {
@@ -76,7 +103,11 @@ export class ChangeStore implements ChangeStoreApi {
 		};
 		r.onsuccess = () => resolve(r.result);
 		r.onerror = () => reject(r.error);
-		this.db = await promise;
+		// Another tab still holding an older version fires `blocked` and then
+		// NOTHING: no success, no error. Boot would wait forever on an event
+		// that never comes, so name the cause instead.
+		r.onblocked = () => reject(new StorageUnavailableError("another Roostr tab is holding an older local database; close it (or reload every Roostr tab) and try again"));
+		this.db = await withTimeout(promise, "open");
 		// A logout in ANY tab deletes this database; a connection that
 		// doesn't yield here blocks that delete forever - and every later
 		// open() queues behind the pending delete. Yield and reload: the

@@ -18,7 +18,7 @@ const toHex = (b: Uint8Array): string => {
 };
 import { computeObject } from "./replay";
 import { runQuery } from "./query";
-import { ChangeStore, destroyDatabase } from "./store";
+import { ChangeStore, destroyDatabase, StorageUnavailableError } from "./store";
 import { RelaySync, DEFAULT_RELAYS, npubToHex, type SharedSpaceInfo } from "./sync";
 import { spaceKeyAll } from "./spacekeys";
 import { getPublicKey } from "nostr-tools";
@@ -246,7 +246,7 @@ class WebBackend {
 		}
 		const ids = [...this.dirty];
 		this.dirty.clear();
-		for (const id of ids) {
+		for (const [index, id] of ids.entries()) {
 			try {
 				const changes = await this.store.changesFor(id);
 				if (changes.length === 0) continue;
@@ -256,7 +256,24 @@ class WebBackend {
 					void this.store.putState(id, changes.length, obj);
 				}
 			} catch (err) {
-				// One malformed legacy object must never brick the vault.
+				// Two different failures used to share one silent `continue`:
+				// a change that will never replay (skip it forever - one
+				// malformed legacy object must not brick the vault) and a
+				// database that stopped answering (transient). Dropping the
+				// latter from `dirty` is what made a phone show half its
+				// spaces and an empty discussion for the rest of the session.
+				if (err instanceof StorageUnavailableError) {
+					// An interrupted boot scan must run again, or objects the
+					// cache pass never reached stay missing.
+					if (rebuilt) this.allDirty = true;
+					for (const pending of ids.slice(index)) this.dirty.add(pending);
+					// WebKit's own remedy for a connection whose database
+					// process went away: drop it and open a fresh one, so the
+					// retry is not aimed at the same dead handle.
+					this.store.close();
+					await this.store.open().catch((reopen: unknown) => console.warn("[replica] reopen after storage failure:", reopen));
+					throw err;
+				}
 				console.warn(`[replica] replay failed for ${id}:`, err);
 			}
 		}

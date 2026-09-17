@@ -26,11 +26,14 @@
 	import EmojiPicker from "$lib/components/EmojiPicker.svelte";
 	import { objectIcon } from "$lib/icons";
 	import { UNSERVED_TYPES } from "$lib/serving";
+	import { StorageUnavailableError } from "$lib/engine/store";
 
 	let object = $state<ObjectJSON>();
 	let editor = $state<Editor>();
 	let table = $state<SetTable>();
 	let queryControls = $state<{ createRecord: (name?: string) => Promise<void> } | undefined>();
+	let loadError = $state("");
+	let loadRetry: ReturnType<typeof setTimeout> | undefined;
 
 	/** Table-view New: the record joins the view (collection membership
 	 *  included) - Anytype's inline entry row. */
@@ -57,8 +60,17 @@
 		let o;
 		try {
 			o = await fetchObject(id);
-		} catch {
-			return; // retried on the next commit event for this id
+			loadError = "";
+		} catch (err) {
+			// A vault that has not synced this object yet is normal and quiet.
+			// A database that stopped answering is not: there may never BE a
+			// commit event to retry on, so say so and retry on a timer.
+			if (err instanceof StorageUnavailableError) {
+				loadError = err.message;
+				clearTimeout(loadRetry);
+				loadRetry = setTimeout(() => void loadObject(id), 3_000);
+			}
+			return;
 		}
 		{
 			if (page.params.id !== id) return;
@@ -628,6 +640,8 @@
 			<ConversationDrawer {object} onchanged={refresh} />
 		</aside>
 	{/if}
+{:else if loadError}
+	<p class="muted">Cannot open this object: {loadError}</p>
 {:else}
 	<p class="muted">Loading…</p>
 {/if}
