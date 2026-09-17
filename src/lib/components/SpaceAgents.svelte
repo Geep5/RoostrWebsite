@@ -332,8 +332,17 @@
 	async function savePrompt(a: AgentRow) {
 		const next = promptDraft[a.id] ?? a.system;
 		await note.setField(a.id, "system", { stringValue: next });
-		promptSaved = a.id;
 		setTimeout(() => (promptSaved = promptSaved === a.id ? "" : promptSaved), 1500);
+		await load();
+	}
+
+	/** Selectable models; a custom value stays listed. Provider mirrors callLLM's dispatch. */
+	const MODEL_OPTIONS = ["claude-sonnet-4-5", "claude-haiku-4-20250414", "kimi-k3", "kimi-k2.6", "kimi-k2.7-code", "mock"];
+	function modelOptions(current: string): string[] {
+		return current && !MODEL_OPTIONS.includes(current) ? [current, ...MODEL_OPTIONS] : MODEL_OPTIONS;
+	}
+	async function saveModel(a: AgentRow, model: string): Promise<void> {
+		await note.setField(a.id, "model", { stringValue: model });
 		await load();
 	}
 
@@ -603,6 +612,14 @@
 					The agent rebuilds its prompt from this object every tool iteration, so an edit lands on
 					its next iteration — nothing to restart.
 				</p>
+				<label class="model-row">
+					Model
+					<select value={a.model} onchange={(e) => void saveModel(a, (e.currentTarget as HTMLSelectElement).value)}>
+						{#each modelOptions(a.model) as m (m)}
+							<option value={m}>{m}{m === "mock" ? " (offline test)" : provider(m) === "kimi" ? " (Kimi)" : " (Anthropic)"}</option>
+						{/each}
+					</select>
+				</label>
 				<textarea
 					rows="8"
 					placeholder="Empty — the agent uses the built-in default prompt."
@@ -898,6 +915,22 @@
 	}
 	.prompt textarea:disabled {
 		opacity: 0.55;
+	}
+	.model-row {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		margin: 0 0 8px;
+		color: var(--muted);
+		font-size: 12px;
+	}
+	.model-row select {
+		background: var(--bg);
+		border: 1px solid var(--border);
+		border-radius: 8px;
+		color: var(--fg);
+		font: inherit;
+		padding: 4px 8px;
 	}
 	.prompt-actions {
 		display: flex;
