@@ -982,16 +982,32 @@ export class RelaySync implements RelaySyncApi {
 
 	// ── Publish ────────────────────────────────────────────────────
 
+	/**
+	 * A local write must never depend on the network. The durable
+	 * obligation is stored FIRST; only then do we try to open a session and
+	 * hand it to the outbox. A phone that suspended its relay session (iOS
+	 * Safari does this aggressively) therefore still commits, and `start()`
+	 * re-offers every stored obligation on the next load.
+	 */
 	async publish(bytes: Uint8Array, changeId: string, objectId: string): Promise<void> {
 		const candidates: PendingPublish[] = [{ key: changeId, changeId, objectId, bytes }];
 		const space = this.sharedSpaces.get(this.spaceOf(objectId));
 		if (space) candidates.push({ key: `${space.spaceId}/${space.keyId}/${changeId}`, changeId, objectId, bytes, spaceId: space.spaceId, keyId: space.keyId });
-		await this.ensureSession();
+		const owed: PendingPublish[] = [];
 		for (const item of candidates) {
 			if (await this.store.isPublished(item.key)) continue;
 			const saved = await this.store.getPending(item.key);
 			if (!saved) await this.store.savePending(item);
-			this.offerToOutbox(saved ?? item);
+			owed.push(saved ?? item);
+		}
+		if (owed.length === 0) return;
+		try {
+			await this.ensureSession();
+			for (const item of owed) this.offerToOutbox(item);
+		} catch (err) {
+			// Stored, unsent: the next start() re-offers it. Surfacing this as
+			// a write failure would discard a message the DAG already holds.
+			this.events.onStatus({ phase: "error", detail: `publish deferred: ${(err instanceof Error ? err.message : String(err)).slice(0, 120)}` });
 		}
 	}
 

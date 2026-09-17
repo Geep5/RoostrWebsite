@@ -460,7 +460,15 @@ class WebBackend {
 					await this.store.addLocalChange(bytes, decoded);
 					this.dirty.add(change.objectId);
 					await this.ensure();
-					await this.sync?.publish(bytes, change.id, change.objectId);
+					// Publishing is an obligation, not part of the write: a
+					// relay that cannot be reached must never turn a committed
+					// change into a failed one (the message would vanish from
+					// the composer while living on in the DAG).
+					try {
+						await this.sync?.publish(bytes, change.id, change.objectId);
+					} catch (err) {
+						console.error("[roostr] publish deferred:", err);
+					}
 					const cb = [...this.commitListeners];
 					for (const fn of cb) fn([change.objectId]);
 					return change.id;

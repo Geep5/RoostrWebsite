@@ -130,6 +130,8 @@
 	let draft = $state("");
 	let replyTo = $state("");
 	let pickerFor = $state("");
+	let sending = $state(false);
+	let sendError = $state("");
 	let me = $state("");
 	let identityError = $state("");
 
@@ -254,17 +256,33 @@
 	async function send() {
 		const text = draft.trim();
 		if (!text) return;
-		draft = "";
 		const reply = replyTo;
-		replyTo = "";
-		await chat.post(object.id, text, reply);
-		await onchanged();
+		sending = true;
+		sendError = "";
+		try {
+			await chat.post(object.id, text, reply);
+			// Cleared only once the change is committed: a failed write used
+			// to swallow the message - empty composer, nothing posted, no
+			// reason given.
+			draft = "";
+			replyTo = "";
+			await onchanged();
+		} catch (err) {
+			sendError = err instanceof Error ? err.message : String(err);
+		} finally {
+			sending = false;
+		}
 	}
 
 	async function toggleReaction(messageId: string, emoji: string) {
 		pickerFor = "";
-		await chat.react(object.id, messageId, emoji);
-		await onchanged();
+		sendError = "";
+		try {
+			await chat.react(object.id, messageId, emoji);
+			await onchanged();
+		} catch (err) {
+			sendError = err instanceof Error ? err.message : String(err);
+		}
 	}
 </script>
 
@@ -378,6 +396,9 @@
 				<button title="Cancel reply" onclick={() => (replyTo = "")}>×</button>
 			</div>
 		{/if}
+		{#if sendError}
+			<p class="presence error" role="alert">Not sent: {sendError} — your text is still in the box; tap send again.</p>
+		{/if}
 		<!-- Anytype commentForm: rounded highlight box, content area on top,
 		     toolbar row with the send control at the right. -->
 		<div class="composer">
@@ -401,7 +422,7 @@
 			></textarea>
 			<div class="form-toolbar">
 				<span class="toolbar-side"></span>
-				<button class="send" disabled={!draft.trim()} aria-label="Send" onclick={() => void send()}>
+				<button class="send" disabled={sending || !draft.trim()} aria-label="Send" onclick={() => void send()}>
 					<svg viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M10 16V5M10 5L5 10M10 5l5 5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" /></svg>
 				</button>
 			</div>
