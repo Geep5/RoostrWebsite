@@ -6,8 +6,8 @@
  */
 
 import { fetchObject, fetchQuery } from "$lib/api";
+import { lastChatMessage } from "$lib/chat";
 import { store } from "$lib/data.svelte";
-import type { ObjectJSON } from "$lib/types";
 
 export interface AgentThread {
 	id: string;
@@ -25,16 +25,7 @@ export function whoName(author: string): string {
 }
 
 /** Last chat message of an object's block tree (discussion or chat). */
-export function lastMessage(obj: ObjectJSON): { text: string; author: string; count: number; last: number } {
-	const msgs = obj.blocks.filter((b) => b.content.custom?.contentType === "chat");
-	const meta = msgs[msgs.length - 1]?.content.custom?.meta ?? {};
-	return {
-		text: (meta["text"] ?? "").slice(0, 90),
-		author: meta["author"] ?? "",
-		count: msgs.length,
-		last: Math.max(0, ...msgs.map((b) => Number(b.content.custom?.meta?.["ts"] ?? 0))),
-	};
-}
+export const lastMessage = lastChatMessage;
 
 export async function loadAgentThreads(objectId: string): Promise<AgentThread[]> {
 	// This object's bound agent, if one has been minted.

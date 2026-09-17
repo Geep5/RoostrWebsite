@@ -8,6 +8,7 @@
 	 * mutate.odin chat_post/chat_react.
 	 */
 	import type { ObjectJSON } from "$lib/types";
+	import { chatMessages } from "$lib/chat";
 	import { goto } from "$app/navigation";
 	import { chat, settings } from "$lib/api";
 	import { store } from "$lib/data.svelte";
@@ -23,48 +24,7 @@
 		onchanged,
 	}: { object: ObjectJSON; full?: boolean; pagemode?: boolean; onchanged: () => Promise<void> } = $props();
 
-	interface Message {
-		id: string;
-		author: string;
-		ts: number;
-		text: string;
-		replyTo: string;
-		origin: string;
-		reactions: Array<{ emoji: string; authors: string[] }>;
-	}
-
-	const messages = $derived.by((): Message[] => {
-		const byId = new Map(object.blocks.map((b) => [b.id, b]));
-		const root = byId.get("__discussion__");
-		if (!root) return [];
-		const out: Message[] = [];
-		for (const cid of root.childrenIds) {
-			const custom = byId.get(cid)?.content.custom;
-			// The harness also stores tool_use/tool_result/compaction blocks
-			// under __discussion__ - only chat messages render here.
-			if (custom?.contentType !== "chat") continue;
-			const meta = custom.meta ?? {};
-			const reactions: Message["reactions"] = [];
-			for (const chunk of (meta["reactions"] ?? "").split(";")) {
-				const bar = chunk.indexOf("|");
-				if (bar <= 0) continue;
-				const authors = chunk.slice(bar + 1).split(",").filter(Boolean);
-				if (authors.length) reactions.push({ emoji: chunk.slice(0, bar), authors });
-			}
-			out.push({
-				id: cid,
-				author: meta["author"] ?? "",
-				ts: Number(meta["ts"] ?? 0),
-				text: meta["text"] ?? "",
-				replyTo: meta["replyTo"] ?? "",
-				// The harness scheduler posts with origin "schedule" and the
-				// recurring object under origin_object.
-				origin: (meta["origin"] === "schedule" ? meta["origin_object"] : meta["origin"]) ?? "",
-				reactions,
-			});
-		}
-		return out;
-	});
+	const messages = $derived(chatMessages(object));
 
 	const messageById = $derived(new Map(messages.map((m) => [m.id, m])));
 
