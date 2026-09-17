@@ -846,6 +846,12 @@
 				</div>
 				<span class="m-title">Spaces</span>
 			</div>
+			{#if !sync.bootstrapped && sync.phase !== "idle"}
+				<!-- A phone has no hover, so the rail's sync dot is invisible
+				     there: a first load that is still importing history used
+				     to look like a vault with spaces missing. -->
+				<p class="m-importing">Loading your vault… {sync.imported.toLocaleString()} changes imported. Spaces appear as they arrive.</p>
+			{/if}
 			<div class="m-cards">
 				{#each orderedSpaces as c (c.id)}
 					{@const latest = latestInChannel(c.id)}
@@ -2883,6 +2889,12 @@
 		font-size: 10px;
 		color: var(--muted);
 		opacity: 0.6;
+	}
+	.m-importing {
+		margin: 0 16px 8px;
+		font-size: 12px;
+		line-height: 1.35;
+		color: var(--muted);
 	}
 	.prop-del-overlay {
 		position: fixed;

@@ -220,8 +220,10 @@ export function importSpaceInvite(inv: { space: string; owner: string; key: stri
 }
 const PUBLISH_SPACING_MS = 120;
 const PAGE_SPACING_MS = 400;
+/** Floor for the adaptive page delay: enough to interleave, not enough to stall a cold load. */
+const MIN_PAGE_SPACING_MS = 40;
 // Keep full-sized 40k-character encrypted chunks inside the 8 MiB relay budget.
-const PAGE_LIMIT = 128;
+export const PAGE_LIMIT = 128;
 const NOTIFY_DEBOUNCE_MS = 100;
 
 function sleep(ms: number): Promise<void> {
@@ -775,39 +777,67 @@ export class RelaySync implements RelaySyncApi {
 		this.discardedChunkFloor = Math.min(this.discardedChunkFloor, since);
 		const checkpoint = this.replayFaultGeneration;
 		await this.persistCursor();
-		const byId = new Map<string, Event>();
+		// Imported page by page, NOT buffered until the walk ends. A phone
+		// loses the tab to a lock screen or a memory reclaim mid-walk; a
+		// whole-history buffer meant every event fetched so far was thrown
+		// away, so the next load restarted and each device ended up with a
+		// different arbitrary slice of the vault (one browser showing one
+		// set of spaces, another showing a different set). Per-page import
+		// also caps peak memory at one page instead of the whole history.
+		const seen = new Set<string>();
+		const importPage = async (page: Event[]): Promise<void> => {
+			const batch: ImportItem[] = [];
+			for (const event of [...page].sort((a, b) => a.created_at - b.created_at || a.id.localeCompare(b.id))) {
+				if (seen.has(event.id)) continue;
+				seen.add(event.id);
+				const item = await this.eventToChange(event);
+				if (item) batch.push(item);
+			}
+			if (batch.length > 0) await this.importBatch(batch, true);
+		};
 		let complete = this.relays.length > 0;
 		const filters: Array<Parameters<SimplePool["querySync"]>[1]> = [{ kinds: [CHANGE_KIND], authors: [this.pk], since }];
 		for (const sp of this.sharedSpaces.values()) filters.push({ kinds: [CHANGE_KIND], "#h": [sp.spaceTag], since });
 		await Promise.all(this.relays.flatMap((relay) => filters.map(async (filter) => {
 			let until: number | undefined = resumeUntil;
-			try {
-				for (;;) {
-					if (this.stopped) { complete = false; return; }
-					const page = await this.queryRelayPage(relay, { ...filter, until, limit: PAGE_LIMIT });
-					for (const event of page) byId.set(event.id, event);
-					if (page.length < PAGE_LIMIT) return;
-					const oldest = Math.min(...page.map((e) => e.created_at));
-					if (until !== undefined && oldest >= until) throw new Error("saturated same-timestamp history page");
-					until = oldest;
-					// Coverage is only as deep as the slowest concurrent walker.
-					if (trackFloor) {
-						coveredUntil = coveredUntil === undefined ? until : Math.min(coveredUntil, until);
-						await this.store.setBootstrapFloor(coveredUntil);
-					}
-					await sleep(PAGE_SPACING_MS);
+			for (;;) {
+				if (this.stopped) { complete = false; return; }
+				// A relay that fails, stalls, or saturates is this walk's
+				// problem: note it and stop covering this filter. A STORE
+				// failure is the caller's problem - it must propagate so the
+				// recovery obligation outlives the scan, so the import below
+				// deliberately sits outside this guard.
+				let page: Event[];
+				const pageStarted = Date.now();
+				try {
+					page = await this.queryRelayPage(relay, { ...filter, until, limit: PAGE_LIMIT });
+				} catch (err) {
+					complete = false;
+					this.events.onStatus({ phase: "backfill", detail: `${relay}: ${String(err).slice(0, 100)}` });
+					return;
 				}
-			} catch (err) {
-				complete = false;
-				this.events.onStatus({ phase: "backfill", detail: `${relay}: ${String(err).slice(0, 100)}` });
+				await importPage(page);
+				if (page.length < PAGE_LIMIT) return;
+				const oldest = Math.min(...page.map((e) => e.created_at));
+				if (until !== undefined && oldest >= until) {
+					complete = false;
+					this.events.onStatus({ phase: "backfill", detail: `${relay}: saturated same-timestamp history page` });
+					return;
+				}
+				until = oldest;
+				// Coverage is only as deep as the slowest concurrent walker.
+				if (trackFloor) {
+					coveredUntil = coveredUntil === undefined ? until : Math.min(coveredUntil, until);
+					await this.store.setBootstrapFloor(coveredUntil);
+				}
+				// Politeness paced against the relay's own cost, not a flat
+				// 400ms. A 12k-change vault is ~97 pages per filter: a fixed
+				// delay spent 39 seconds of a cold phone's first load doing
+				// nothing at all. Never idle longer than the page took, and
+				// never longer than the old ceiling.
+				await sleep(Math.min(PAGE_SPACING_MS, Math.max(MIN_PAGE_SPACING_MS, Date.now() - pageStarted)));
 			}
 		})));
-		const batch: ImportItem[] = [];
-		for (const event of [...byId.values()].sort((a, b) => a.created_at - b.created_at || a.id.localeCompare(b.id))) {
-			const item = await this.eventToChange(event);
-			if (item) batch.push(item);
-		}
-		await this.importBatch(batch, true);
 		this.historyComplete = complete && !this.stopped && this.replayGroups.size === 0 &&
 			this.activeLiveEvents === 0 && this.activeImports === 0 &&
 			this.replayFaultGeneration === checkpoint && since <= this.discardedChunkFloor;
