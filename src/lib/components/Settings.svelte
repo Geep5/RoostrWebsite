@@ -410,10 +410,9 @@
 				<button class="action subtle" onclick={() => { revealed = false; nsec = ""; }}>Hide</button>
 			{/if}
 			{#if !importing}
-				{#if !isLocalBackend}
-					<button class="action subtle" onclick={() => (importing = true)}>Sign in with existing key…</button>
-				{:else}
-					<p class="hint">Changing the native identity requires the local operator; never paste its private key into this browser.</p>
+				<button class="action subtle" onclick={() => (importing = true)}>Sign in with existing key…</button>
+				{#if isLocalBackend}
+					<p class="hint">Replaces this machine's daemon identity for every paired tab; the previous identity's shared-space authority is revoked.</p>
 				{/if}
 				<button
 					class="action subtle"

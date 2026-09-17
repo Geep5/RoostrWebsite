@@ -137,7 +137,17 @@ export const settings = {
 		return { hasKey: !!key, relays: backend.relays(), authorId: key ? authorIdFor(key) : "" };
 	},
 	importKey: async (key: string) => {
-		if (isLocalBackend) throw new Error("Change the daemon identity explicitly in its terminal. Browser pairing cannot import private keys into the daemon.");
+		if (isLocalBackend) {
+			// The daemon accepts key import from paired UI sessions; it swaps the
+			// machine-wide identity, so every tab on this daemon follows.
+			await localJSON("/api/mutate", {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({ action: "nostr_key_import", key: key.trim() }),
+			});
+			location.reload();
+			return {};
+		}
 		if (backend instanceof IOSBackend) {
 			// Identity, replica and keyring live in the host; the page just restarts on the new key.
 			await backend.importKey(key.trim());

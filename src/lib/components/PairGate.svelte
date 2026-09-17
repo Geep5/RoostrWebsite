@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { onMount } from "svelte";
 	import { pairLocal, pairedSession, onPairingChange, unpairLocal, LOCAL_API } from "$lib/local-transport";
+	import { settings } from "$lib/api";
 	let { onready, compact = false }: { onready: () => void; compact?: boolean } = $props();
 	let code = $state("");
 	let busy = $state(false);
@@ -8,6 +9,10 @@
 	let session = $state<ReturnType<typeof pairedSession>>(null);
 	let daemonCode = $state<string | null>(null);
 	let copied = $state(false);
+	let keyDraft = $state("");
+	let keyBusy = $state(false);
+	let keyError = $state("");
+	let keyOpen = $state(false);
 	onMount(() => {
 		session = pairedSession();
 		// The daemon guards outside access only, so it serves its current
@@ -41,6 +46,13 @@
 			setTimeout(() => (copied = false), 1600);
 		} catch { /* clipboard unavailable - the code is selectable anyway */ }
 	}
+	async function importIdentity() {
+		keyBusy = true;
+		keyError = "";
+		try { await settings.importKey(keyDraft); } // reloads the page on success
+		catch (cause) { keyError = cause instanceof Error ? cause.message : "Key import failed."; }
+		finally { keyBusy = false; }
+	}
 </script>
 
 <section class:compact aria-label="Local daemon pairing">
@@ -51,6 +63,18 @@
 			<button class="primary" onclick={() => onready()}>Reconnect</button>
 			<button class="ghost" onclick={() => unpairLocal()}>Unpair this tab</button>
 		</div>
+		<details class="identity" bind:open={keyOpen}>
+			<summary>Sign in with a Nostr key instead</summary>
+			<p class="hint">
+				Paste an nsec (or 64-char hex) to make it this machine's identity — like signing in on the web app.
+				This replaces the daemon identity for <strong>every</strong> paired tab; the previous identity's shared-space authority is revoked.
+			</p>
+			<form onsubmit={(event) => { event.preventDefault(); void importIdentity(); }}>
+				<input type="password" bind:value={keyDraft} placeholder="nsec1… or 64-char hex" autocomplete="off" spellcheck="false" disabled={keyBusy} />
+				<button class="primary" type="submit" disabled={keyBusy || !keyDraft.trim()}>{keyBusy ? "Importing…" : "Use this key"}</button>
+			</form>
+			{#if keyError}<p role="alert">{keyError}</p>{/if}
+		</details>
 	{:else}
 		<p>Pairing allows this browser origin to access local data and machine controls for 24 hours. Codes are one-use and expire after five minutes.</p>
 		{#if daemonCode}
@@ -147,4 +171,7 @@
 		user-select: all;
 	}
 	[role="alert"] { margin: 14px 0 0; color: #ff9d94; }
+	.identity { margin-top: 18px; border-top: 1px solid #262628; padding-top: 14px; }
+	.identity summary { cursor: pointer; color: #c9c9cf; font-weight: 550; }
+	.identity summary:hover { color: #fff; }
 </style>
