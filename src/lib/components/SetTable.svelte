@@ -721,6 +721,26 @@
 		padding: 0;
 		white-space: nowrap;
 		position: relative;
+		/* A fixed-layout column narrower than its label used to paint the
+		   label straight over the next header - on a phone "Name" and
+		   "Type" landed on top of each other. Body cells already clip;
+		   headers must too. The resize grip is positioned outside the box,
+		   so clipping happens on the label, not the cell. */
+	}
+	th .head {
+		display: block;
+		max-width: 100%;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+		border: none;
+		background: none;
+		color: var(--muted);
+		font-weight: 500;
+		font-size: 13px;
+		padding: 6px 10px;
+		cursor: pointer;
+		user-select: none;
 	}
 	th.drag-over {
 		box-shadow: inset 2px 0 0 var(--accent);
@@ -743,16 +763,6 @@
 	.resize:hover {
 		background: var(--accent);
 		opacity: 0.6;
-	}
-	th .head {
-		border: none;
-		background: none;
-		color: var(--muted);
-		font-weight: 500;
-		font-size: 13px;
-		padding: 6px 10px;
-		cursor: pointer;
-		user-select: none;
 	}
 	th .head:hover {
 		color: inherit;
