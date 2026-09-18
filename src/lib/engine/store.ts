@@ -214,6 +214,17 @@ export class ChangeStore implements ChangeStoreApi {
 	 * round-trip PER ROW (tens of seconds at 20k+ changes), so instead:
 	 * unique-key walk (one step per object) + a parallel count() per id.
 	 */
+	/**
+	 * Every change's protobuf, for seeding the core's cache directly. The
+	 * JSON beside it is deliberately not read: the point of this path is that
+	 * nothing is serialised on the way in.
+	 */
+	async allChangeBytes(): Promise<Uint8Array[]> {
+		const store = this.handle().transaction(CHANGES, "readonly").objectStore(CHANGES);
+		const rows = (await req(store.getAll())) as ChangeRow[];
+		return rows.map((r) => r.bytes).filter((b): b is Uint8Array => b instanceof Uint8Array && b.byteLength > 0);
+	}
+
 	async changeCounts(): Promise<Map<string, number>> {
 		const ids = await this.objectIds();
 		const index = this.handle().transaction(CHANGES, "readonly").objectStore(CHANGES).index("objectId");

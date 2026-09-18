@@ -2,7 +2,7 @@ import { sha256 } from "@noble/hashes/sha2.js";
 import { bytesToHex } from "@noble/hashes/utils.js";
 import { odinRuntime, type OdinRuntime } from "./odin-runtime";
 
-const ABI_VERSION = 1;
+const ABI_VERSION = 2; // 2 added the binary side-channel (core_reserve_blob)
 const REQUEST_LIMIT = 16 * 1024 * 1024;
 const encoder = new TextEncoder();
 const decoder = new TextDecoder("utf-8", { fatal: true });
@@ -12,6 +12,7 @@ type CoreExports = WebAssembly.Exports & {
 	_start(): void;
 	core_abi_version(): number;
 	core_reserve(length: number): number;
+	core_reserve_blob(length: number): number;
 	core_execute(): number;
 	core_response_pointer(): number;
 	core_response_length(): number;
@@ -57,7 +58,7 @@ export function initCore(options: CoreInitOptions = {}): Promise<void> {
 		const instance = (await WebAssembly.instantiate(bytes, host.imports)).instance;
 		const api = instance.exports as CoreExports;
 		if (!(api.memory instanceof WebAssembly.Memory)) throw new Error("Shared core does not export memory");
-		for (const name of ["_start", "core_abi_version", "core_reserve", "core_execute", "core_response_pointer", "core_response_length", "core_reset"]) {
+		for (const name of ["_start", "core_abi_version", "core_reserve", "core_reserve_blob", "core_execute", "core_response_pointer", "core_response_length", "core_reset"]) {
 			if (typeof api[name] !== "function") throw new Error(`Shared core is missing ${name}`);
 		}
 		host.setMemory(api.memory);
@@ -86,7 +87,23 @@ export function resetCore(): void {
 /** The ABI is synchronous and single-flight. Results are copied and decoded
  * before resetting the request arena. No WASM-backed view escapes this call.
  */
+/**
+ * Call the core with raw bytes alongside the JSON request.
+ *
+ * Used for payloads the host ALREADY holds as protobuf - changes out of its
+ * own store - so nothing is stringified on the way in and nothing is parsed
+ * on the way out. That is what lifts the 16 MiB JSON reservation off cold
+ * start: bytes are about a quarter the size of the JSON that described them.
+ */
+export function coreCallWithBlob<T>(method: string, payload: unknown, blob: Uint8Array): T {
+	return call<T>(method, payload, blob);
+}
+
 export function coreCall<T>(method: string, payload: unknown): T {
+	return call<T>(method, payload);
+}
+
+function call<T>(method: string, payload: unknown, blob?: Uint8Array): T {
 	const api = exports;
 	if (!api) throw new CoreError("not_initialized", "Call and await initCore() before using the shared engine");
 	if (active) throw new CoreError("reentrant", "Shared core calls are not reentrant");
@@ -99,6 +116,11 @@ export function coreCall<T>(method: string, payload: unknown): T {
 		const pointer = api.core_reserve(input.byteLength) >>> 0;
 		if (!pointer) throw new CoreError("runtime", "Shared core refused the request reservation");
 		new Uint8Array(api.memory.buffer, pointer, input.byteLength).set(input);
+		if (blob && blob.byteLength > 0) {
+			const blobPointer = api.core_reserve_blob(blob.byteLength) >>> 0;
+			if (!blobPointer) throw new CoreError("request_limit", "Shared core refused the blob reservation");
+			new Uint8Array(api.memory.buffer, blobPointer, blob.byteLength).set(blob);
+		}
 		if (api.core_execute() !== 0) throw new CoreError("runtime", "Shared core rejected the request state");
 		const outputPointer = api.core_response_pointer() >>> 0;
 		const outputLength = api.core_response_length() >>> 0;

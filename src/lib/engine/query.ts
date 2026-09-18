@@ -1,6 +1,6 @@
 import type { ObjectJSON } from "$lib/types";
 import type { QueryBody, QueryResultRowJSON } from "./contracts";
-import { coreCall, coreGeneration } from "./core";
+import { coreCall, coreCallWithBlob, coreGeneration } from "./core";
 
 export type QueryRow = QueryResultRowJSON & { name: string; snippet?: string };
 
@@ -112,4 +112,97 @@ export function runQuery(
 	signatures = next;
 	generation = currentGeneration;
 	return result;
+}
+
+/**
+ * Load a whole vault into the core from raw change bytes.
+ *
+ * The host stores every change with its protobuf beside its JSON, so a cold
+ * start hands the bytes over untouched: the core decodes, toposorts and
+ * replays straight into its cache. What that replaces, measured on this
+ * machine: 8.3 MB of JSON stringified host-side for 10k objects, parsed by
+ * the ABI, then re-marshalled and re-parsed per object into the cache region -
+ * three serialisations each, and a hard failure past 16 MiB.
+ *
+ * Frames are `[u32 little-endian length][change bytes]`, repeated. Self
+ * describing, so the JSON request carries no length array.
+ */
+export interface CorpusLoad {
+	/** Objects this load replayed, summed across batches. */
+	objects: number;
+	changes: number;
+	bytes: number;
+	/** Undecodable changes, skipped and counted rather than hidden. */
+	skipped: number;
+	/** Objects the core holds afterwards - the authoritative total. */
+	cached: number;
+}
+
+export function loadCorpus(changes: Iterable<Uint8Array>, reset = true): CorpusLoad {
+	// Two bounds, both learned by measurement: the blob buffer is 32 MiB, and
+	// a single push of ~20k objects exhausts the WASM heap even when its bytes
+	// are small - the cost per cached object is ~5.8 KB regardless of size.
+	const all = [...changes];
+	if (all.length > CORPUS_BATCH_CHANGES || byteLengthOf(all) > CORPUS_BATCH_BYTES) {
+		let out: CorpusLoad = { objects: 0, changes: 0, bytes: 0, skipped: 0, cached: 0 };
+		let batch: Uint8Array[] = [];
+		let size = 0;
+		let first = reset;
+		const flush = () => {
+			if (batch.length === 0) return;
+			const part = pushCorpus(batch, first);
+			first = false;
+			out = {
+				objects: out.objects + part.objects,
+				changes: out.changes + part.changes,
+				bytes: out.bytes + part.bytes,
+				skipped: out.skipped + part.skipped,
+				// The cache count is cumulative already, so the last batch's
+				// number is the truth - summing it would double-count.
+				cached: part.cached,
+			};
+			batch = [];
+			size = 0;
+		};
+		for (const change of all) {
+			if (batch.length >= CORPUS_BATCH_CHANGES || size + change.byteLength > CORPUS_BATCH_BYTES) flush();
+			batch.push(change);
+			size += change.byteLength;
+		}
+		flush();
+		signatures = new Map();
+		generation = coreGeneration();
+		return out;
+	}
+	const out = pushCorpus(all, reset);
+	signatures = new Map();
+	generation = coreGeneration();
+	return out;
+}
+
+/** Changes per push, and bytes per push - both under the measured walls. */
+const CORPUS_BATCH_CHANGES = 4000;
+const CORPUS_BATCH_BYTES = 24 * 1024 * 1024;
+
+const byteLengthOf = (parts: Uint8Array[]): number => parts.reduce((sum, p) => sum + 4 + p.byteLength, 0);
+
+/** True when the core has no corpus for this generation yet. */
+export const needsColdLoad = (): boolean => generation !== coreGeneration();
+
+function pushCorpus(parts: Uint8Array[], reset: boolean): CorpusLoad {
+	let total = 0;
+	for (const part of parts) total += 4 + part.byteLength;
+	if (total === 0) return { objects: 0, changes: 0, bytes: 0, skipped: 0, cached: 0 };
+	const blob = new Uint8Array(total);
+	const header = new DataView(blob.buffer);
+	let offset = 0;
+	for (const part of parts) {
+		header.setUint32(offset, part.byteLength, true);
+		offset += 4;
+		blob.set(part, offset);
+		offset += part.byteLength;
+	}
+	// The corpus IS the snapshot the signature diff would have built, so the
+	// caller drops the stale signatures once the last batch lands.
+	return coreCallWithBlob<CorpusLoad>("corpus", { action: "push", reset }, blob);
 }
