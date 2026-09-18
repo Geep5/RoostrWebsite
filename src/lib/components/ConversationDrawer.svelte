@@ -15,7 +15,20 @@
 	import { agoShort, lastMessage, loadAgentThreads, whoName, type AgentThread } from "$lib/conversations";
 	import Discussion from "./Discussion.svelte";
 
-	let { object, onchanged }: { object: ObjectJSON; onchanged: () => Promise<void> } = $props();
+	let {
+		object,
+		onchanged,
+		floating = false,
+		onpopout,
+		ondock,
+	}: {
+		object: ObjectJSON;
+		onchanged: () => Promise<void>;
+		/** True once the human has popped the pane out into a card. */
+		floating?: boolean;
+		onpopout?: () => void;
+		ondock?: () => void;
+	} = $props();
 
 	let view = $state<"list" | "thread">("list");
 	let activeId = $state("");
@@ -95,6 +108,14 @@
 			<span class="dd-sub">{fieldStr(object.fields, "name") || "Untitled"}</span>
 		</div>
 		<span class="dd-count">{threads.length + 1}</span>
+	{/if}
+	<!-- Affixed is the default; popping out hands the pane to the pointer as
+	     a card that can be dragged anywhere. Subtle on purpose: it sits with
+	     the close control, not as a call to action. -->
+	{#if floating}
+		<button class="dd-affix" data-tip="Affix to the side" onclick={() => ondock?.()}>⇥</button>
+	{:else}
+		<button class="dd-affix" data-tip="Pop out" onclick={() => onpopout?.()}>⇱</button>
 	{/if}
 	<button class="dd-close" data-tip="Close" onclick={() => (discussionUI.open = false)}>»</button>
 </header>
@@ -208,7 +229,8 @@
 		color: var(--fg);
 		border-color: var(--muted);
 	}
-	.dd-close {
+	.dd-close,
+	.dd-affix {
 		background: none;
 		border: 1px solid var(--border);
 		border-radius: 7px;
@@ -219,9 +241,16 @@
 		cursor: pointer;
 		flex: none;
 	}
-	.dd-close:hover {
+	/* Subtle until wanted: no border at rest, so the pane header stays quiet. */
+	.dd-affix {
+		border-color: transparent;
+		opacity: 0.6;
+	}
+	.dd-close:hover,
+	.dd-affix:hover {
 		color: var(--fg);
 		border-color: var(--muted);
+		opacity: 1;
 	}
 	.dd-list {
 		flex: 1;

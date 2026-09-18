@@ -338,6 +338,17 @@
 	/** Mobile is a full sheet, so a position saved on a wide window must not
 	 *  leak into it as inline left/height and fight the media query. */
 	const floatingNow = $derived(drawerPos !== null && !isMobileVp);
+	/**
+	 * Affixed discussion = a real pane. The shell keeps a fourth grid track
+	 * sized by --disc-w, so an open discussion pushes the page over instead
+	 * of covering it. Floating (popped out) and mobile (full sheet) give the
+	 * column back.
+	 */
+	$effect(() => {
+		const affixed = discussionUI.open && hasDiscussion && !floatingNow && !isMobileVp;
+		document.documentElement.style.setProperty("--disc-w", affixed ? `${drawerW}px` : "0px");
+		return () => document.documentElement.style.setProperty("--disc-w", "0px");
+	});
 	/** Keep the card reachable: a saved spot must survive a smaller window,
 	 *  and the header must never leave the screen or it cannot be grabbed. */
 	function clampPos(p: DrawerPos, w = drawerW): DrawerPos {
@@ -403,6 +414,17 @@
 		window.addEventListener("resize", onResize);
 		return () => window.removeEventListener("resize", onResize);
 	});
+	/** Hand the pane to the pointer: same geometry, now a draggable card. */
+	function drawerPopOut() {
+		const card = document.querySelector(".disc-drawer");
+		const r = card?.getBoundingClientRect();
+		drawerPos = clampPos({
+			x: r ? Math.max(8, r.left - 24) : window.innerWidth - drawerW - 40,
+			y: r ? r.top : drawerTop + 24,
+			h: r?.height ?? Math.max(320, window.innerHeight - drawerTop - 80),
+		});
+		savePos();
+	}
 
 	function drawerResizeStart(e: PointerEvent) {
 		// Cancelling pointerdown is safe here - the resize edge has no
@@ -637,7 +659,13 @@
 			}}
 		>
 			<div class="dd-resize" role="separator" aria-orientation="vertical" onpointerdown={drawerResizeStart}></div>
-			<ConversationDrawer {object} onchanged={refresh} />
+			<ConversationDrawer
+				{object}
+				onchanged={refresh}
+				floating={floatingNow}
+				onpopout={drawerPopOut}
+				ondock={drawerDock}
+			/>
 		</aside>
 	{/if}
 {:else if loadError}
@@ -834,36 +862,29 @@
 			height: 72px;
 		}
 	}
-	/* A floating card OVER the object area, not a flush dock: inset from
-	   every edge, rounded, bordered all around, sitting on a deep shadow. */
+	/* Affixed: the pane fills the shell's fourth column - flush to the right
+	   edge, full height under the header, square inner corner so it reads as
+	   a pane rather than a card parked on top of the page. */
 	.disc-drawer {
 		position: fixed;
-		right: 12px;
-		bottom: 12px;
-		/* Above every piece of page chrome, so a card dragged upward covers
-		   the sticky header (95) rather than sliding under it, and clears the
-		   editor's popovers (120-140) it now floats over. Deliberately below
-		   the 200+ overlays - Settings, Search, This-machine, the type panel:
-		   a modal the human just opened must not open behind the card. */
+		right: 0;
+		bottom: 0;
 		z-index: 150;
-		/* Border-box so an explicit width/height means the whole card. With
-		   content-box the 1px border sat outside the number, so each drag
-		   re-measured 2px taller than it had just been told to be and the
-		   card grew every time it was moved. */
 		box-sizing: border-box;
 		display: flex;
 		flex-direction: column;
 		background: var(--panel);
-		border: 1px solid var(--border);
-		border-radius: 14px;
+		border-left: 1px solid var(--border);
+		border-radius: 0;
 		overflow: hidden;
-		box-shadow: 0 18px 60px rgb(0 0 0 / 0.5);
 	}
-	/* Dragged: the card stops deriving its box from the viewport edges and
-	   carries its own left/top/height instead. */
+	/* Popped out: a card again, floating wherever it was dragged. */
 	.disc-drawer.floating {
 		right: auto;
 		bottom: auto;
+		border: 1px solid var(--border);
+		border-radius: 14px;
+		box-shadow: 0 18px 60px rgb(0 0 0 / 0.5);
 	}
 	/* The handle reads as one. Scoped styles cannot see the child's header,
 	   hence :global - the selector stays anchored to this card. */

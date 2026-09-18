@@ -1078,7 +1078,7 @@
 		<button class="tab-new" data-tip="New tab" aria-label="New tab" onclick={() => tabs.open("/app", false)}>＋</button>
 	</div>
 {/if}
-<div class="shell" style="grid-template-columns: {railWidth}px {sideWidth}px 1fr;{railDragging ? ' transition: none;' : ''}">
+<div class="shell" style="grid-template-columns: {railWidth}px {sideWidth}px 1fr var(--disc-w, 0px);{railDragging ? ' transition: none;' : ''}">
 	<nav class="vault" class:wide={railWide}>
 		{#each orderedSpaces as c (c.id)}
 			<button
@@ -1574,7 +1574,11 @@
 	}
 	.shell {
 		display: grid;
-		grid-template-columns: 56px 220px 1fr;
+		/* Rail | nav | page | discussion. The fourth track is 0 until the
+		   discussion is affixed, and the object page sets --disc-w to its
+		   width - so an open discussion takes its own column instead of
+		   floating over the page it belongs to. */
+		grid-template-columns: 56px 220px 1fr var(--disc-w, 0px);
 		flex: 1;
 		min-height: 0;
 		transition: grid-template-columns 0.16s ease;
