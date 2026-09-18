@@ -49,6 +49,9 @@ class WebBackend {
 	/** Object ids the synced ledger says are gone; rebuilt when it commits. */
 	private vanished = new Set<string>();
 	private dirty = new Set<string>();
+	/** What changed since the last query, so a query pushes only that. */
+	private queryUpserted = new Set<string>();
+	private queryRemoved = new Set<string>();
 	private allDirty = true;
 	private commitListeners = new Set<(ids: string[]) => void>();
 	status: SyncStatus = { phase: "idle", imported: 0, bootstrapped: false };
@@ -253,6 +256,7 @@ class WebBackend {
 				const obj = computeObject(changes);
 				if (obj) {
 					this.states.set(id, obj);
+					this.queryUpserted.add(id);
 					void this.store.putState(id, changes.length, obj);
 				}
 			} catch (err) {
@@ -301,8 +305,13 @@ class WebBackend {
 		// Ledger (re)loaded: sweep everything it names — O(vanished), boot
 		// only. Otherwise just the objects that were replayed can have come
 		// back, so the steady-state cost is the size of that batch.
-		if (rebuilt || ledgerChanged) for (const id of this.vanished) this.states.delete(id);
-		else for (const id of touched) if (this.vanished.has(id)) this.states.delete(id);
+		// Every state removal is a query removal too, or the core keeps
+		// serving rows for objects this replica no longer has.
+		const drop = (id: string) => {
+			if (this.states.delete(id)) this.queryRemoved.add(id);
+		};
+		if (rebuilt || ledgerChanged) for (const id of this.vanished) drop(id);
+		else for (const id of touched) if (this.vanished.has(id)) drop(id);
 	}
 
 	/**
@@ -433,7 +442,13 @@ class WebBackend {
 
 	async fetchQuery(body: QueryBody): Promise<{ total: number; records: never[] }> {
 		await this.ensure();
-		return runQuery(this.states.values(), body) as { total: number; records: never[] };
+		const delta = { upserted: [...this.queryUpserted], removed: [...this.queryRemoved] };
+		const result = runQuery(this.states.values(), body, delta) as { total: number; records: never[] };
+		// Cleared only after the push succeeds: a thrown core call must leave
+		// the delta owing, or the core keeps stale rows for good.
+		this.queryUpserted.clear();
+		this.queryRemoved.clear();
+		return result;
 	}
 
 	async mutate(action: string, params: Record<string, unknown>): Promise<Record<string, unknown>> {
