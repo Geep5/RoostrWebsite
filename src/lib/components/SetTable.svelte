@@ -721,14 +721,16 @@
 		padding: 0;
 		white-space: nowrap;
 		position: relative;
-		/* A fixed-layout column narrower than its label used to paint the
-		   label straight over the next header - on a phone "Name" and
-		   "Type" landed on top of each other. Body cells already clip;
-		   headers must too. The resize grip is positioned outside the box,
-		   so clipping happens on the label, not the cell. */
+		/* The cell clips, because the label cannot shrink below its own
+		   padding: a fixed-layout column collapses to zero when no value has
+		   loaded yet (a phone mid-sync), and the label then painted "Name"
+		   straight under the next header's "Type". Body cells already clip;
+		   headers now do too. */
+		overflow: hidden;
 	}
 	th .head {
 		display: block;
+		box-sizing: border-box;
 		max-width: 100%;
 		overflow: hidden;
 		text-overflow: ellipsis;
@@ -748,7 +750,9 @@
 	.resize {
 		position: absolute;
 		top: 0;
-		right: -5px;
+		/* Inside the cell: the header clips its overflow now, so a grip
+		   hanging past the edge would be half invisible and unusable. */
+		right: 0;
 		width: 11px;
 		height: 100%;
 		cursor: col-resize;
