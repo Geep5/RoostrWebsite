@@ -8,6 +8,7 @@
 	import { store } from "$lib/data.svelte";
 	import { CREATABLE_FORMATS, RESERVED_KEYS, createRelation, currentSpaceId, spaceRelations } from "$lib/relations";
 	import type { RelationDefJSON } from "$lib/types";
+	import TypeLimitPicker from "./TypeLimitPicker.svelte";
 
 	let {
 		x,
@@ -32,6 +33,7 @@
 	let query = $state("");
 	let creating = $state(false);
 	let createFormat = $state<string>("shorttext");
+	let createTypes = $state<string[]>([]);
 	let inputEl = $state<HTMLInputElement>();
 	let menuEl = $state<HTMLElement>();
 
@@ -55,9 +57,10 @@
 	const canCreate = $derived(query.trim() !== "" && !exactMatch);
 
 	async function create() {
-		const rel = await createRelation(query.trim(), createFormat);
+		const rel = await createRelation(query.trim(), createFormat, createTypes);
 		if (rel) onpick(rel);
 	}
+
 
 	const pos = $derived.by(() => {
 		const w = 280;
@@ -105,6 +108,9 @@
 				</select>
 				<button onclick={() => void create()}>Create</button>
 			</div>
+			{#if createFormat === "object"}
+				<TypeLimitPicker bind:selected={createTypes} />
+			{/if}
 		{/if}
 	{/if}
 	{#if filteredExtras.length > 0}

@@ -14,6 +14,7 @@
 	import { store } from "$lib/data.svelte";
 	import { RESERVED_KEYS, createRelation, currentSpaceId, spaceRelations } from "$lib/relations";
 	import type { RelationDefJSON } from "$lib/types";
+	import TypeLimitPicker from "./TypeLimitPicker.svelte";
 
 	export interface FlowItem {
 		key: string;
@@ -62,6 +63,7 @@
 	let editName = $state("");
 	let editFormat = $state<string | null>(null);
 	let formatMenu = $state(false);
+	let editTypes = $state<string[]>([]);
 	let menuEl = $state<HTMLElement>();
 	let queryEl = $state<HTMLInputElement>();
 	let nameEl = $state<HTMLInputElement>();
@@ -92,7 +94,7 @@
 
 	async function submitCreate() {
 		if (!editName.trim() || !editFormat) return;
-		const rel = await createRelation(editName.trim(), editFormat);
+		const rel = await createRelation(editName.trim(), editFormat, editTypes);
 		if (rel) {
 			onadd(rel);
 			onclose();
@@ -258,6 +260,9 @@
 					</div>
 				{/if}
 			</div>
+			{#if editFormat === "object"}
+				<TypeLimitPicker bind:selected={editTypes} />
+			{/if}
 			<button class="submit-btn" disabled={!editName.trim() || !editFormat} onclick={() => void submitCreate()}>Create</button>
 		</div>
 	{/if}

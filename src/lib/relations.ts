@@ -104,13 +104,18 @@ export function slugKey(name: string): string {
 /**
  * Create a relation object and refresh the store. Returns the def
  * (existing one when the key already exists).
+ *
+ * `objectTypes` are type object ids and apply to the `object` format only -
+ * Anytype's relationFormatObjectTypes: the value picker then offers those
+ * types alone. Empty means any object.
  */
-export async function createRelation(name: string, format: string): Promise<RelationDefJSON | undefined> {
+export async function createRelation(name: string, format: string, objectTypes: string[] = []): Promise<RelationDefJSON | undefined> {
 	const key = slugKey(name);
 	// Dedupe within THIS space only - another space's same-named
 	// property is a different property.
 	const existing = spaceRelations(store.relations, currentSpaceId()).find((r) => r.key === key);
 	if (existing) return existing;
+	const limits = format === "object" ? objectTypes : [];
 	await note.create(name, "relation", {
 		channel: { stringValue: currentSpaceId() },
 		key: { stringValue: key },
@@ -121,6 +126,7 @@ export async function createRelation(name: string, format: string): Promise<Rela
 		maxCount: { intValue: format === "status" ? 1 : 0 },
 		options: { valuesValue: { items: [] } },
 		bundled: { boolValue: false },
+		...(limits.length > 0 ? { object_types: { valuesValue: { items: limits.map((id) => ({ stringValue: id })) } } } : {}),
 	});
 	await refreshAll();
 	return spaceRelations(store.relations, currentSpaceId()).find((r) => r.key === key);
