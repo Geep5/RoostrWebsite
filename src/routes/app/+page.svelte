@@ -5,6 +5,7 @@
 	import { note } from "$lib/api";
 	import CheckboxIcon from "$lib/components/CheckboxIcon.svelte";
 	import RowContextMenu from "$lib/components/RowContextMenu.svelte";
+	import InstallComputer from "$lib/components/InstallComputer.svelte";
 	import { createTyped, creatableTypes, createCollection as libCreateCollection, createQuery as libCreateQuery } from "$lib/create";
 
 	const defaultChannelId = $derived(store.channels[0]?.id ?? "");
@@ -107,6 +108,8 @@
 </script>
 
 <svelte:window onmousedown={onPageMouseDown} onmousemove={onMarqueeMove} onmouseup={endMarquee} onkeydown={(e) => { if (e.key === "Escape") { selected = []; ctxMenu = null; } }} />
+
+<InstallComputer />
 
 <div class="actions">
 	<div class="picker-wrap">
