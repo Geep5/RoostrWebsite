@@ -10,6 +10,7 @@
 	import Machines from "./Machines.svelte";
 	import { goto } from "$app/navigation";
 	import { harnessFetch, pairedSession, onPairingChange } from "$lib/local-transport";
+	import { loadCards, type Card } from "$lib/cards";
 	import PairGate from "./PairGate.svelte";
 
 	let { onclose }: { onclose: () => void } = $props();
@@ -47,12 +48,19 @@
 	let holdups = $state<Holdup[]>([]);
 
 	// ── Credentials: service logins agents on this machine may use ──
+	//
+	// Two sources, deliberately split: the SHAPE (label, note, which inputs,
+	// which are secret, where to log in) is a descriptor card in the vault, so
+	// an unpaired browser or a phone can still describe what X needs; the
+	// ACTIVE state is machine-local, and only that machine can answer it.
+	// Secret values are written to the machine over the paired local API and
+	// never enter the DAG.
 	interface CredentialRow {
 		key: string;
 		label: string;
 		note: string;
 		loginUrl?: string;
-		passwordFields?: Array<{ key: string; label: string; secret: boolean }>;
+		passwordFields?: Array<{ key: string; label: string; secret: boolean; format?: string; note?: string }>;
 		active: { password: boolean; browser: boolean };
 		updatedAt?: number;
 	}
@@ -78,12 +86,52 @@
 	let googleAccountBusy = $state(false);
 	let googleRemoveConfirm = $state("");
 
+	/** A card's form, rendered generically: FieldSpec[] IS the form. */
+	function cardRow(card: Card, active: { password: boolean; browser: boolean }): CredentialRow {
+		const fields = card.fields.map((f) => ({
+			key: f.key,
+			label: f.label,
+			secret: f.secret,
+			format: f.format,
+			note: f.note,
+		}));
+		return {
+			key: card.key,
+			label: card.name,
+			note: card.description,
+			...(card.install?.docsUrl ? { loginUrl: card.install.docsUrl } : {}),
+			...(fields.length ? { passwordFields: fields } : {}),
+			active,
+		};
+	}
+
 	async function loadCredentials() {
-		if (!pairedSession()) return;
+		const integrations = (await loadCards()).filter((c) => c.kind === "integration");
+		if (!pairedSession()) {
+			// Unpaired: the cards still say what each login needs. Nothing is
+			// claimed about whether it is set up here - that is not knowable.
+			credentials = integrations.map((c) => cardRow(c, { password: false, browser: false }));
+			credError = integrations.length ? "" : "No machine has published its logins yet.";
+			return;
+		}
 		try {
 			const res = await harnessFetch("/credentials");
 			if (!res.ok) throw new Error(`HTTP ${res.status}`);
-			credentials = ((await res.json()) as { credentials: CredentialRow[] }).credentials;
+			const live = ((await res.json()) as { credentials: Array<{ key: string; active: { password: boolean; browser: boolean }; updatedAt?: number }> })
+				.credentials;
+			const activeOf = new Map(live.map((c) => [c.key, c]));
+			// Cards first, so a login this machine has not heard of still
+			// shows; then any key the machine reports without a card.
+			const rows = integrations.map((c) => {
+				const hit = activeOf.get(c.key);
+				const row = cardRow(c, hit?.active ?? { password: false, browser: false });
+				return hit?.updatedAt ? { ...row, updatedAt: hit.updatedAt } : row;
+			});
+			for (const c of live) {
+				if (integrations.some((card) => card.key === c.key)) continue;
+				rows.push({ key: c.key, label: c.key, note: "No card describes this login.", active: c.active });
+			}
+			credentials = rows;
 			credError = "";
 		} catch (error) {
 			credentials = null;
@@ -393,7 +441,8 @@
 										<label class="cred-field">
 											<span>{f.label}</span>
 											<input
-												type={f.secret ? "password" : "text"}
+												type={f.secret || f.format === "password" ? "password" : f.format === "email" ? "email" : f.format === "url" ? "url" : "text"}
+												placeholder={f.note ?? ""}
 												autocomplete="off"
 												value={credDraft[`${c.key}:${f.key}`] ?? ""}
 												oninput={(e) => (credDraft = { ...credDraft, [`${c.key}:${f.key}`]: e.currentTarget.value })}

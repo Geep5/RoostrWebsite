@@ -8,7 +8,8 @@
 	 */
 	import type { ObjectJSON } from "$lib/types";
 	import { note } from "$lib/api";
-	import { CAPABILITIES, capabilityLabel, machineName, resolveServing, servingCopy, type MachineRow, type Serving } from "$lib/serving";
+	import { capabilityLabel, machineName, resolveServing, servingCopy, type MachineRow, type Serving } from "$lib/serving";
+	import { capabilityCards, loadCards, type Card } from "$lib/cards";
 
 	let {
 		object,
@@ -20,6 +21,8 @@
 
 	let serving = $state<Serving | null>(null);
 	let machines = $state<MachineRow[]>([]);
+	/** What a machine can be asked for: the cards published in this vault. */
+	let capabilities = $state<Card[]>(capabilityCards());
 	let open = $state(false);
 	let busy = $state(false);
 	let error = $state("");
@@ -35,6 +38,8 @@
 				const out = await resolveServing(current);
 				serving = out.serving;
 				machines = out.machines;
+				await loadCards();
+				capabilities = capabilityCards();
 				error = "";
 			} catch (e) {
 				serving = null;
@@ -116,13 +121,16 @@
 				<span class="pop-name">Needs</span>
 			</div>
 			<div class="opts">
-				{#each CAPABILITIES as c (c.key)}
+				{#each capabilities as c (c.key)}
 					<label class="opt">
 						<input type="checkbox" disabled={busy} checked={serving.requires.includes(c.key)} onchange={() => toggleRequire(c.key)} />
-						<span class="opt-name">{c.label}</span>
+						<span class="opt-name">{c.name}</span>
 						<span class="opt-sub">{c.key}</span>
 					</label>
 				{/each}
+				{#if capabilities.length === 0}
+					<p class="none">No machine has published what it can do yet.</p>
+				{/if}
 			</div>
 			{#if copy?.warning}
 				<p class="warn overdue">{copy.text}</p>

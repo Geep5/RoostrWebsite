@@ -14,7 +14,8 @@
 	import { fetchObject, note } from "$lib/api";
 	import { store, refreshAll } from "$lib/data.svelte";
 	import { activeSpace } from "$lib/space.svelte";
-	import { fetchMachines, capabilityLabel, type MachineRow } from "$lib/serving";
+	import { fetchMachines, type MachineRow } from "$lib/serving";
+	import { loadCards, type Card } from "$lib/cards";
 	import { spaceComputer } from "$lib/space-computer";
 	import { isLocalBackend } from "$lib/client-backend";
 
@@ -29,9 +30,21 @@
 	const channelId = $derived(activeSpace.id || store.channels[0]?.id || "");
 	const decision = $derived(spaceComputer(machines, servedBy));
 
+	/**
+	 * Capability names come from the descriptor cards in the vault, which
+	 * arrive after first paint - so the lookup is derived state, not a bare
+	 * function call, or a key would render raw forever.
+	 */
+	let cardList = $state<Card[]>([]);
+	const labelOf = $derived.by(() => {
+		const names = new Map(cardList.map((c) => [c.key, c.name]));
+		return (key: string) => names.get(key) ?? key;
+	});
+
 	async function load() {
 		if (!channelId) return;
 		try {
+			cardList = await loadCards();
 			const [{ machines: rows }, channel] = await Promise.all([fetchMachines(), fetchObject(channelId)]);
 			machines = rows;
 			servedBy = channel.fields["served_by"]?.stringValue ?? "";
@@ -85,7 +98,7 @@
 					<button class="ic-machine" disabled={busy !== ""} onclick={() => void assign(m.machineId)}>
 						<span class="ic-name">{m.name || `${m.machineId.slice(0, 8)}…`}</span>
 						<span class="ic-caps">
-							{m.capabilities.length ? m.capabilities.map(capabilityLabel).join(", ") : "no capabilities yet"}
+							{m.capabilities.length ? m.capabilities.map(labelOf).join(", ") : "no capabilities yet"}
 						</span>
 						<span class="ic-go">{busy === m.machineId ? "…" : "Use this one"}</span>
 					</button>

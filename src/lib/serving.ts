@@ -27,21 +27,11 @@ export interface MachineRow {
 	capabilities: string[];
 }
 
-/**
- * Mirrors the harness catalogs (`harness/src/skillmgr.ts` CATALOG plus
- * `harness/src/credentials.ts` CREDENTIALS): the only capability keys a
- * machine can publish.
- */
-export const CAPABILITIES: Array<{ key: string; label: string }> = [
-	{ key: "browserless", label: "Headless Chrome" },
-	{ key: "google", label: "Google Workspace" },
-	{ key: "x", label: "X (Twitter)" },
-	{ key: "linkedin", label: "LinkedIn" },
-];
-
-export function capabilityLabel(key: string): string {
-	return CAPABILITIES.find((c) => c.key === key)?.label ?? key;
-}
+// Capability names come from descriptor cards in the vault (`$lib/cards`),
+// published by the harness from its catalogs. The list that used to live here
+// was a hand-copy of two files in another package, and it drifted.
+import { capabilityLabel } from "$lib/cards";
+export { capabilityLabel };
 
 /** Type keys whose objects are never served by a machine on their own row. */
 export const UNSERVED_TYPES: Record<string, true> = { channel: true, machine: true, agent: true, relation: true, type: true, skill: true };

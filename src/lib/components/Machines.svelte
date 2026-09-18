@@ -11,7 +11,8 @@
 	// not listed.
 	import { onMount } from "svelte";
 	import { fetchAllQuery, type QueryResultRow } from "$lib/api";
-	import { UNSERVED_TYPES, capabilityLabel, fetchMachines, resolveMany, type MachineRow } from "$lib/serving";
+	import { UNSERVED_TYPES, fetchMachines, resolveMany, type MachineRow } from "$lib/serving";
+	import { loadCards, type Card } from "$lib/cards";
 
 	const SERVES_SHOWN = 20;
 	interface MachineView extends MachineRow {
@@ -20,8 +21,20 @@
 	let machines = $state<MachineView[] | null>(null);
 	let machinesError = $state("");
 
+	/**
+	 * Capability names come from the descriptor cards in the vault, which
+	 * arrive after first paint - so the lookup is derived state, not a bare
+	 * function call, or a key would render raw forever.
+	 */
+	let cardList = $state<Card[]>([]);
+	const labelOf = $derived.by(() => {
+		const names = new Map(cardList.map((c) => [c.key, c.name]));
+		return (key: string) => names.get(key) ?? key;
+	});
+
 	async function loadMachines() {
 		try {
+			cardList = await loadCards();
 			const [{ rows, machines: roster }, spaces, pinned, needing] = await Promise.all([
 				fetchMachines(),
 				fetchAllQuery({ type: "channel" }),
@@ -74,7 +87,7 @@
 				<div class="machine-row">
 					<span class="machine-name">🖥️ {m.name || `${m.machineId.slice(0, 8)}…`}</span>
 					{#each m.capabilities as c (c)}
-						<span class="chip on">{capabilityLabel(c)}</span>
+						<span class="chip on">{labelOf(c)}</span>
 					{/each}
 					{#if m.capabilities.length === 0}
 						<span class="chip">no capabilities</span>
