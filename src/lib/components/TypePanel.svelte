@@ -81,7 +81,9 @@
 				skip.add(bid);
 				for (const c of byId.get(bid)?.childrenIds ?? []) markSkip(c);
 			};
-			markSkip("__discussion__");
+			for (const b of tpl.blocks) {
+				if (b.content.custom?.contentType === "discussion") markSkip(b.id);
+			}
 			const lines: Array<{ kind: string; text: string }> = [];
 			for (const b of tpl.blocks) {
 				if (skip.has(b.id) || lines.length >= 7) continue;

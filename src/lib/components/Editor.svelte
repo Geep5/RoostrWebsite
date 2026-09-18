@@ -24,7 +24,16 @@
 	const rootIds = $derived.by(() => {
 		const referenced = new Set<string>();
 		for (const b of object.blocks) for (const c of b.childrenIds) referenced.add(c);
-		return object.blocks.filter((b) => !referenced.has(b.id) && b.id !== "__content__" && b.id !== "__discussion__").map((b) => b.id);
+		return object.blocks
+			.filter((b) => {
+				if (referenced.has(b.id) || b.id === "__content__") return false;
+				// Conversations are not body content. An object now holds many
+				// of them (the human thread plus the agents'), so the test is
+				// the block's KIND, not the one legacy id - filtering by id
+				// left every new thread rendering as a stray chip.
+				return b.content?.custom?.contentType !== "discussion";
+			})
+			.map((b) => b.id);
 	});
 
 	/** Text blocks in document order, for prev/next navigation and merge. */

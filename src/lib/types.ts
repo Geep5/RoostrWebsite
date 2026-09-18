@@ -37,11 +37,30 @@ export interface BlockJSON {
 	backgroundColor?: string;
 }
 
+/**
+ * One conversation in an object, decoded by the core from the protobuf on its
+ * root block (`core/conversation.odin`). No client decodes it itself.
+ */
+export interface ConversationJSON {
+	id: string;
+	/** "human" | "a2a" | "agent_private"; "" from a newer writer. */
+	kind: string;
+	title: string;
+	participants: string[];
+	createdAt: number;
+	openedBy: string;
+	aboutMessageId: string;
+	closed: boolean;
+	messageCount: number;
+}
+
 export interface ObjectJSON {
 	id: string;
 	typeKey: string;
 	fields: Record<string, ValueJSON>;
 	blocks: BlockJSON[];
+	/** Absent when the object has never held a conversation. */
+	conversations?: ConversationJSON[];
 	deleted: boolean;
 	createdAt: number;
 	updatedAt: number;

@@ -4,8 +4,10 @@
 	 * object, opened from a button. Messages support replies
 	 * (replyToMessageId -> quoted preview above the message) and emoji
 	 * reactions (chips with author counts; toggle by identity; "+" opens the
-	 * emoji picker). Messages are blocks under "__discussion__" - see
-	 * mutate.odin chat_post/chat_react.
+	 * emoji picker). Messages are blocks under a conversation root - the
+	 * human thread is "__discussion__", an agent thread is "__thread__<id>"
+	 * carrying a Conversation in its block data - see mutate.odin
+	 * chat_post/conversation_open.
 	 */
 	import type { ObjectJSON } from "$lib/types";
 	import { chatMessages } from "$lib/chat";
@@ -21,10 +23,18 @@
 		object,
 		full = false,
 		pagemode = false,
+		threadId = "__discussion__",
 		onchanged,
-	}: { object: ObjectJSON; full?: boolean; pagemode?: boolean; onchanged: () => Promise<void> } = $props();
+	}: {
+		object: ObjectJSON;
+		full?: boolean;
+		pagemode?: boolean;
+		/** Which conversation in this object; the human thread by default. */
+		threadId?: string;
+		onchanged: () => Promise<void>;
+	} = $props();
 
-	const messages = $derived(chatMessages(object));
+	const messages = $derived(chatMessages(object, threadId));
 
 	const messageById = $derived(new Map(messages.map((m) => [m.id, m])));
 
@@ -220,7 +230,7 @@
 		sending = true;
 		sendError = "";
 		try {
-			await chat.post(object.id, text, reply);
+			await chat.post(object.id, text, reply, threadId === "__discussion__" ? "" : threadId);
 			// Cleared only once the change is committed: a failed write used
 			// to swallow the message - empty composer, nothing posted, no
 			// reason given.

@@ -12,7 +12,7 @@
 	import { fieldStr } from "$lib/types";
 	import { fetchObject } from "$lib/api";
 	import { discussionUI } from "$lib/data.svelte";
-	import { agoShort, lastMessage, loadAgentThreads, whoName, type AgentThread } from "$lib/conversations";
+	import { agoShort, lastMessage, loadAgentThreads, objectThreads, whoName, type AgentThread } from "$lib/conversations";
 	import Discussion from "./Discussion.svelte";
 
 	let {
@@ -38,28 +38,35 @@
 
 	const disc = $derived(lastMessage(object));
 	const isDiscussion = $derived(activeId === "__discussion__");
+	/** Threads inside THIS object: rendered from its own block tree. */
+	const inObject = $derived(objectThreads(object));
+	const rows = $derived([...inObject, ...threads]);
+	const activeInObject = $derived(inObject.find((t) => t.id === activeId));
 	const activeTitle = $derived(
-		isDiscussion ? "Discussion" : (threads.find((t) => t.id === activeId)?.title ?? "Conversation"),
+		isDiscussion ? "Discussion" : (rows.find((t) => t.id === activeId)?.title ?? "Conversation"),
 	);
 
 	async function load() {
 		threads = await loadAgentThreads(object.id);
-		discussionUI.convCount = threads.length + 1;
+		discussionUI.convCount = threads.length + inObject.length + 1;
 		if (!booted) {
 			booted = true;
 			// No menu of one: only the discussion exists → open it directly.
-			if (threads.length === 0) openThread("__discussion__");
+			if (threads.length === 0 && inObject.length === 0) openThread("__discussion__");
 		}
 	}
 
 	async function openThread(id: string) {
 		activeId = id;
 		view = "thread";
-		if (id !== "__discussion__") activeChat = await fetchObject(id);
+		// A thread in this object needs no fetch - it is already here. Only a
+		// separate chat OBJECT has to be loaded.
+		activeChat = undefined;
+		if (id !== "__discussion__" && !inObject.some((t) => t.id === id)) activeChat = await fetchObject(id);
 	}
 
 	async function refreshActive() {
-		if (isDiscussion) {
+		if (isDiscussion || activeInObject) {
 			await onchanged();
 		} else if (activeId) {
 			activeChat = await fetchObject(activeId);
@@ -135,9 +142,9 @@
 			</span>
 			{#if disc.count > 0}<span class="conv-count">{disc.count}</span>{/if}
 		</button>
-		{#each threads as t (t.id)}
+		{#each rows as t (t.id)}
 			<button class="conv" onclick={() => void openThread(t.id)}>
-				<span class="glyph">🤝</span>
+				<span class="glyph">{t.inObject ? (t.kind === "agent_private" ? "🧠" : "🤝") : "🤝"}</span>
 				<span class="conv-main">
 					<span class="conv-top">
 						<span class="conv-title">{t.title}</span>
@@ -155,6 +162,8 @@
 	<div class="dd-body">
 		{#if isDiscussion}
 			<Discussion {object} full onchanged={refreshActive} />
+		{:else if activeInObject}
+			<Discussion {object} full threadId={activeId} onchanged={refreshActive} />
 		{:else if activeChat}
 			<Discussion object={activeChat} full onchanged={refreshActive} />
 		{:else}

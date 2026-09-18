@@ -8,6 +8,8 @@
 import { fetchObject, fetchQuery } from "$lib/api";
 import { lastChatMessage } from "$lib/chat";
 import { store } from "$lib/data.svelte";
+import type { ObjectJSON } from "$lib/types";
+import { authorLabel, objectThreads as pureObjectThreads } from "$lib/threads";
 
 export interface AgentThread {
 	id: string;
@@ -16,16 +18,23 @@ export interface AgentThread {
 	last: number;
 	snippet: string;
 	snippetWho: string;
+	/** True for a thread inside THIS object; false for a separate chat object. */
+	inObject?: boolean;
+	kind?: string;
+	participants?: string[];
+	closed?: boolean;
 }
 
-/** meta.author is an agent uuid; resolve a short display name. */
 export function whoName(author: string): string {
-	if (!author || author.length !== 36) return "you";
-	return store.summaries.find((s) => s.id === author)?.name || "agent";
+	return authorLabel(author, (id) => store.summaries.find((s) => s.id === id)?.name ?? "");
 }
 
 /** Last chat message of an object's block tree (discussion or chat). */
 export const lastMessage = lastChatMessage;
+
+/** The object's own threads, named through the loaded summaries. */
+export const objectThreads = (object: ObjectJSON): AgentThread[] =>
+	pureObjectThreads(object, (id) => store.summaries.find((s) => s.id === id)?.name ?? "");
 
 export async function loadAgentThreads(objectId: string): Promise<AgentThread[]> {
 	// This object's bound agent, if one has been minted.

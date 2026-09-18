@@ -184,8 +184,12 @@ export const settings = {
 };
 
 export const chat = {
-	post: (objectId: string, text: string, replyTo = "") =>
-		mutate("chat_post", { object_id: objectId, text, reply_to: replyTo }) as Promise<{ id: string }>,
+	/** `threadId` empty = the human thread, which is every existing caller. */
+	post: (objectId: string, text: string, replyTo = "", threadId = "") =>
+		mutate("chat_post", { object_id: objectId, text, reply_to: replyTo, thread_id: threadId }) as Promise<{
+			id: string;
+			threadId: string;
+		}>,
 	react: (objectId: string, messageId: string, emoji: string) =>
 		mutate("chat_react", { object_id: objectId, message_id: messageId, emoji }),
 };

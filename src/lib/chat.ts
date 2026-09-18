@@ -32,10 +32,16 @@ function parseReactions(raw: string): ChatMessage["reactions"] {
 	return out;
 }
 
-/** Chat blocks under `__discussion__`, in block (DAG merge) order. */
-export function chatBlocks(object: ObjectJSON): Array<{ id: string; block: BlockJSON }> {
+/**
+ * Chat blocks under one conversation root, in block (DAG merge) order.
+ *
+ * An object holds many conversations - the human thread plus the agents' -
+ * so the root is a parameter. `__discussion__` is the human thread, which is
+ * what every caller that does not care about threads wants.
+ */
+export function chatBlocks(object: ObjectJSON, rootId = "__discussion__"): Array<{ id: string; block: BlockJSON }> {
 	const byId = new Map(object.blocks.map((b) => [b.id, b]));
-	const root = byId.get("__discussion__");
+	const root = byId.get(rootId);
 	if (!root) return [];
 	const out: Array<{ id: string; block: BlockJSON }> = [];
 	for (const cid of root.childrenIds) {
@@ -48,8 +54,8 @@ export function chatBlocks(object: ObjectJSON): Array<{ id: string; block: Block
 }
 
 /** The object's messages, oldest first by timestamp. */
-export function chatMessages(object: ObjectJSON): ChatMessage[] {
-	return chatBlocks(object)
+export function chatMessages(object: ObjectJSON, rootId = "__discussion__"): ChatMessage[] {
+	return chatBlocks(object, rootId)
 		.map(({ id, block }, index) => {
 			const meta = block.content.custom?.meta ?? {};
 			return {
@@ -72,8 +78,11 @@ export function chatMessages(object: ObjectJSON): ChatMessage[] {
 }
 
 /** Newest message plus counts - the drawer/inbox preview. */
-export function lastChatMessage(object: ObjectJSON): { text: string; author: string; count: number; last: number } {
-	const msgs = chatMessages(object);
+export function lastChatMessage(
+	object: ObjectJSON,
+	rootId = "__discussion__",
+): { text: string; author: string; count: number; last: number } {
+	const msgs = chatMessages(object, rootId);
 	const newest = msgs[msgs.length - 1];
 	return {
 		text: (newest?.text ?? "").slice(0, 90),
