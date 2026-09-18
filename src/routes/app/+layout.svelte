@@ -1175,6 +1175,16 @@
 				</div>
 			</div>
 
+			<!-- The space's own conversation: its front door. It used to be a
+			     `chat` OBJECT pinned here; the chat is a thread inside the
+			     space now (harness/src/migrate-chats.ts), so this is a fixed
+			     row rather than a pin a human could accidentally remove. -->
+			{#if current}
+				<a class="space-chat" class:current={page.url.pathname === `/app/chat/${current.id}`} href="/app/chat/{current.id}">
+					<span class="obj-icon">💬</span>
+					<span class="space-chat-name">Space chat</span>
+				</a>
+			{/if}
 			<!-- Anytype widgets: each pinned object is its OWN widget card with
 			     a 600-weight header row (widget/common.scss .head .clickable);
 			     sets render their current view beneath. No "Pinned" label. -->
@@ -1880,6 +1890,29 @@
 		background: var(--hl-med);
 	}
 	.widget-name {
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+	/* The space's own conversation sits where its pinned chat object used to,
+	   so it reads as one of the widget rows rather than a new kind of thing. */
+	.space-chat {
+		display: flex;
+		align-items: center;
+		gap: 6px;
+		height: 28px;
+		padding: 0 8px 0 4px;
+		border-radius: 6px;
+		font-size: 14px;
+		font-weight: 600;
+		line-height: 22px;
+		overflow: hidden;
+	}
+	.space-chat:hover,
+	.space-chat.current {
+		background: var(--hl-med);
+	}
+	.space-chat-name {
 		white-space: nowrap;
 		overflow: hidden;
 		text-overflow: ellipsis;
