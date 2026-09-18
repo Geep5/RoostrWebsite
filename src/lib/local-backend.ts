@@ -6,6 +6,17 @@ import { localJSON, streamLocalEvents, pairedSession, unpairLocal, onPairingChan
 export interface NativeSettings { hasKey: boolean; relays: string[]; authorId: string; npub?: string }
 const post = (body: unknown): RequestInit => ({ method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
 
+/**
+ * A relation arrives over a wire this build does not control - an older
+ * daemon, a third-party host. `options` is declared non-optional and indexed
+ * directly by ten call sites, so an absent array is a blank page, not a
+ * missing chip: fill it here, once, where the data enters.
+ */
+export function normalizeRelations(rows: RelationDefJSON[]): RelationDefJSON[] {
+	for (const row of rows) if (!Array.isArray(row.options)) row.options = [];
+	return rows;
+}
+
 /** The daemon owns persistence, signing, replay and publication in local mode. */
 export class LocalBackend {
 	author = "";
@@ -62,7 +73,7 @@ export class LocalBackend {
 	fetchObject(id: string): Promise<ObjectJSON> { return localJSON(`/api/objects/${encodeURIComponent(id)}`); }
 	fetchObjects(): Promise<ObjectSummary[]> { return localJSON("/api/objects"); }
 	fetchChannels(): Promise<SpaceJSON[]> { return localJSON("/api/channels"); }
-	fetchRelations(): Promise<RelationDefJSON[]> { return localJSON("/api/relations"); }
+	async fetchRelations(): Promise<RelationDefJSON[]> { return normalizeRelations(await localJSON<RelationDefJSON[]>("/api/relations")); }
 	fetchQuery(body: QueryBody): Promise<{ total: number; records: never[] }> { return localJSON("/api/query", post(body)); }
 	syncDigest(): Promise<{ digest: string; objects: number; changes: number }> { return localJSON("/api/sync/digest"); }
 	async mutate(action: string, params: Record<string, unknown>): Promise<Record<string, unknown>> {

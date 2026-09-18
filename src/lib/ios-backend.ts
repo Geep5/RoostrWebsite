@@ -1,3 +1,4 @@
+import { normalizeRelations } from "./local-backend";
 import type { ObjectJSON, ObjectSummary, SpaceJSON, RelationDefJSON } from "./types";
 import type { QueryBody } from "./engine/contracts";
 import type { SyncStatus } from "./engine/backend";
@@ -140,7 +141,7 @@ export class IOSBackend {
 	fetchObject(id: string): Promise<ObjectJSON> { return call("fetchObject", id); }
 	fetchObjects(): Promise<ObjectSummary[]> { return call("fetchObjects"); }
 	fetchChannels(): Promise<SpaceJSON[]> { return call("fetchChannels"); }
-	fetchRelations(): Promise<RelationDefJSON[]> { return call("fetchRelations"); }
+	async fetchRelations(): Promise<RelationDefJSON[]> { return normalizeRelations(await call<RelationDefJSON[]>("fetchRelations")); }
 	fetchQuery(body: QueryBody): Promise<{ total: number; records: never[] }> { return call("fetchQuery", body); }
 	syncDigest(): Promise<{ digest: string; objects: number; changes: number }> { return call("syncDigest"); }
 	mutate(action: string, params: Record<string, unknown>): Promise<Record<string, unknown>> { return call("mutate", action, params); }
