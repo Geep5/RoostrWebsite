@@ -342,6 +342,10 @@ class WebBackend {
 		const out: ObjectSummary[] = [];
 		for (const o of this.states.values()) {
 			if (o.deleted || WebBackend.HIDDEN_LIST_TYPES.has(o.typeKey)) continue;
+			// Same rule as the daemon's handle_list_objects: an agent's own
+			// chat transcribes object discussions, so listing it duplicates
+			// every object it speaks for. Pair chats have no `agent` field.
+			if (o.typeKey === "chat" && fstr(o.fields, "agent")) continue;
 			out.push({
 				id: o.id,
 				typeKey: o.typeKey,
