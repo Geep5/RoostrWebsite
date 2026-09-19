@@ -1,18 +1,12 @@
 <script lang="ts">
-	/**
-	 * The drawer's two levels: a LIST of every conversation this object is
-	 * in (its own discussion pinned first, then the agent's A2A chats),
-	 * and a THREAD filling the drawer when a row is clicked - ‹ returns to
-	 * the list, Esc goes up one level (thread → list → closed). With only
-	 * the discussion to show, the list is skipped and the thread opens
-	 * directly - no menu of one.
-	 */
 	import { onMount } from "svelte";
-	import type { ObjectJSON } from "$lib/types";
+	import type { AgentMessage, ObjectJSON } from "$lib/types";
 	import { fieldStr } from "$lib/types";
-	import { fetchObject } from "$lib/api";
+	import { mailbox } from "$lib/api";
 	import { discussionUI } from "$lib/data.svelte";
-	import { agoShort, lastMessage, loadAgentThreads, objectThreads, whoName, type AgentThread } from "$lib/conversations";
+	import { agoShort, lastMessage, loadObjectAgents, objectThreads, whoName } from "$lib/conversations";
+	import type { ObjectAgentOption } from "$lib/threads";
+	import { objectIcon } from "$lib/icons";
 	import Discussion from "./Discussion.svelte";
 
 	let {
@@ -30,68 +24,106 @@
 		ondock?: () => void;
 	} = $props();
 
-	let view = $state<"list" | "thread">("list");
+	let view = $state<"list" | "thread" | "new">("list");
 	let activeId = $state("");
-	let threads = $state<AgentThread[]>([]);
-	let activeChat = $state<ObjectJSON | undefined>();
-	let booted = $state(false);
+	let options = $state<ObjectAgentOption[]>([]);
+	let selected = $state<string[]>([]);
+	let search = $state("");
+	let title = $state("");
+	let draft = $state("");
+	let requestReply = $state(true);
+	let loading = $state(false);
+	let sending = $state(false);
+	let error = $state("");
+	let refreshError = $state("");
+	let pendingSend: AgentMessage | undefined;
 
 	const disc = $derived(lastMessage(object));
+	const rows = $derived(objectThreads(object));
 	const isDiscussion = $derived(activeId === "__discussion__");
-	/** Threads inside THIS object: rendered from its own block tree. */
-	const inObject = $derived(objectThreads(object));
-	const rows = $derived([...inObject, ...threads]);
-	const activeInObject = $derived(inObject.find((t) => t.id === activeId));
-	const activeTitle = $derived(
-		isDiscussion ? "Discussion" : (rows.find((t) => t.id === activeId)?.title ?? "Conversation"),
-	);
+	const activeTitle = $derived(isDiscussion ? "Discussion" : rows.find((t) => t.id === activeId)?.title ?? "Conversation");
+	const visibleOptions = $derived(options.filter((option) => `${option.name} ${option.agentName}`.toLowerCase().includes(search.toLowerCase())));
+	$effect(() => { discussionUI.convCount = rows.length + 1; });
 
-	async function load() {
-		threads = await loadAgentThreads(object.id);
-		discussionUI.convCount = threads.length + inObject.length + 1;
-		if (!booted) {
-			booted = true;
-			// No menu of one: only the discussion exists → open it directly.
-			if (threads.length === 0 && inObject.length === 0) openThread("__discussion__");
+	function openThread(id: string) {
+		activeId = id;
+		view = "thread";
+	}
+
+	async function newExchange() {
+		view = "new";
+		error = "";
+		loading = true;
+		try {
+			options = await loadObjectAgents(object);
+			selected = selected.filter((id) => options.some((option) => option.endpoint.objectId === id));
+		} catch (err) {
+			error = err instanceof Error ? err.message : String(err);
+		} finally {
+			loading = false;
 		}
 	}
 
-	async function openThread(id: string) {
-		activeId = id;
-		view = "thread";
-		// A thread in this object needs no fetch - it is already here. Only a
-		// separate chat OBJECT has to be loaded.
-		activeChat = undefined;
-		if (id !== "__discussion__" && !inObject.some((t) => t.id === id)) activeChat = await fetchObject(id);
+	async function createExchange() {
+		if (sending || !draft.trim() || !selected.length) return;
+		const recipients = options.filter((option) => selected.includes(option.endpoint.objectId)).map((option) => option.endpoint);
+		if (!recipients.length) return;
+		sending = true;
+		error = "";
+		try {
+			const text = draft.trim();
+			const exchangeTitle = title.trim() || "Object exchange";
+			if (!pendingSend || pendingSend.text !== text || pendingSend.title !== exchangeTitle
+				|| pendingSend.requestReply !== requestReply || JSON.stringify(pendingSend.recipients) !== JSON.stringify(recipients)) {
+				pendingSend = {
+					id: crypto.randomUUID(), exchangeId: crypto.randomUUID(),
+					sender: { objectId: object.id, agentId: "" }, recipients,
+					text, title: exchangeTitle, replyTo: "", sentAt: Date.now(),
+					requestReply, historical: false, operation: "", author: "",
+				};
+			}
+			const sent = await mailbox.send(pendingSend);
+			pendingSend = undefined;
+			draft = "";
+			title = "";
+			selected = [];
+			openThread(sent.threadId);
+			await refreshActive();
+		} catch (err) {
+			error = err instanceof Error ? err.message : String(err);
+		} finally {
+			sending = false;
+		}
 	}
 
+	let refreshing = false;
 	async function refreshActive() {
-		if (isDiscussion || activeInObject) {
+		if (refreshing) return;
+		refreshing = true;
+		try {
 			await onchanged();
-		} else if (activeId) {
-			activeChat = await fetchObject(activeId);
+			refreshError = "";
+		} catch (err) {
+			refreshError = err instanceof Error ? err.message : String(err);
+		} finally {
+			refreshing = false;
 		}
 	}
 
 	function back() {
 		view = "list";
-		activeChat = undefined;
 		activeId = "";
 	}
 
 	function onKey(e: KeyboardEvent) {
-		if (e.key !== "Escape") return;
-		if (view === "thread") back();
+		if (e.key !== "Escape" || e.defaultPrevented) return;
+		if (view !== "list") back();
 		else discussionUI.open = false;
 	}
 
 	onMount(() => {
-		void load();
-		// Agent replies land asynchronously - keep the drawer breathing.
-		const timer = setInterval(() => {
-			void load();
-			if (view === "thread" && !isDiscussion) void refreshActive();
-		}, 8000);
+		if (!rows.length) openThread("__discussion__");
+		const timer = setInterval(() => void refreshActive(), 8000);
 		return () => clearInterval(timer);
 	});
 </script>
@@ -99,22 +131,22 @@
 <svelte:window onkeydown={onKey} />
 
 <header class="dd-head">
-	{#if view === "thread"}
+	{#if view !== "list"}
 		<button class="dd-back" data-tip="Back to conversations (Esc)" onclick={back}>‹</button>
 		<div class="dd-titles">
-			<span class="dd-title">{activeTitle}</span>
+			<span class="dd-title">{view === "new" ? "New exchange" : activeTitle}</span>
 			<span class="dd-sub">{fieldStr(object.fields, "name") || "Untitled"}</span>
 		</div>
-		{#if !isDiscussion && activeId}
-			<a class="dd-jump" href="/app/object/{activeId}" data-tip="Open chat page">↗</a>
-		{/if}
 	{:else}
-		<span class="dd-icon">💬</span>
+		<span class="dd-icon">{objectIcon("", "chat")}</span>
 		<div class="dd-titles">
 			<span class="dd-title">Conversations</span>
 			<span class="dd-sub">{fieldStr(object.fields, "name") || "Untitled"}</span>
 		</div>
-		<span class="dd-count">{threads.length + 1}</span>
+		<span class="dd-count">{rows.length + 1}</span>
+	{/if}
+	{#if view !== "new"}
+		<button class="dd-back" aria-label="New exchange" title="New exchange or group" onclick={() => void newExchange()}>+</button>
 	{/if}
 	<!-- Affixed is the default; popping out hands the pane to the pointer as
 	     a card that can be dragged anywhere. Subtle on purpose: it sits with
@@ -127,10 +159,13 @@
 	<button class="dd-close" data-tip="Close" onclick={() => (discussionUI.open = false)}>»</button>
 </header>
 
+{#if refreshError}
+	<p class="dd-error" role="status">{refreshError} <button onclick={() => void refreshActive()}>Refresh</button></p>
+{/if}
 {#if view === "list"}
 	<div class="dd-list">
 		<button class="conv" onclick={() => void openThread("__discussion__")}>
-			<span class="glyph">💬</span>
+			<span class="glyph">{objectIcon("", "chat")}</span>
 			<span class="conv-main">
 				<span class="conv-top">
 					<span class="conv-title">Discussion</span>
@@ -144,7 +179,7 @@
 		</button>
 		{#each rows as t (t.id)}
 			<button class="conv" onclick={() => void openThread(t.id)}>
-				<span class="glyph">{t.inObject ? (t.kind === "agent_private" ? "🧠" : "🤝") : "🤝"}</span>
+				<span class="glyph">{objectIcon("", "agent")}</span>
 				<span class="conv-main">
 					<span class="conv-top">
 						<span class="conv-title">{t.title}</span>
@@ -153,22 +188,42 @@
 					<span class="conv-snippet">
 						{#if t.snippet}<b>{t.snippetWho}:</b> {t.snippet}{:else}No messages yet{/if}
 					</span>
+					{#if t.legacy}<span class="conv-snippet">Read-only · awaiting migration</span>{/if}
+					{#if t.problems}<span class="conv-problem">{t.problems} delivery or processing problem{t.problems === 1 ? "" : "s"}</span>{/if}
 				</span>
 				<span class="conv-count">{t.count}</span>
 			</button>
 		{/each}
 	</div>
+{:else if view === "new"}
+	<form class="dd-compose" onsubmit={(event) => { event.preventDefault(); void createExchange(); }}>
+		<label>Exchange name<input bind:value={title} placeholder="What is this group discussing?" disabled={sending} /></label>
+		<label>Find object agents<input type="search" bind:value={search} placeholder="Search existing agents" disabled={sending} /></label>
+		<p class="compose-hint">Choose one or more existing object agents. You can include this object's own agent.</p>
+		<div class="recipient-list">
+			{#each visibleOptions as option (option.endpoint.objectId)}
+				<label class="recipient">
+					<input type="checkbox" bind:group={selected} value={option.endpoint.objectId} disabled={sending} />
+					<span class="glyph">{objectIcon(option.icon, "agent")}</span>
+					<span><b>{option.name}</b><small>{option.agentName}{option.endpoint.objectId === object.id ? " · this object" : ""}</small></span>
+				</label>
+			{/each}
+			{#if loading}<p class="compose-hint">Loading object agents…</p>
+			{:else if !options.length}<p class="compose-hint">No existing agents in this space. Add an agent to an object first.</p>
+			{:else if !visibleOptions.length}<p class="compose-hint">No matching object agents.</p>{/if}
+		</div>
+		<span class="compose-hint">{selected.length} recipient{selected.length === 1 ? "" : "s"} selected</span>
+		<label>Message<textarea bind:value={draft} rows={4} placeholder="Write the first message…" disabled={sending}></textarea></label>
+		<label class="request-reply"><input type="checkbox" bind:checked={requestReply} disabled={sending} /> Ask agents to respond</label>
+		{#if error}<p class="dd-error" role="alert">{error}</p>{/if}
+		{#if !loading && !options.length}<button type="button" onclick={() => void newExchange()}>Reload agents</button>{/if}
+		<button class="create-exchange" type="submit" disabled={sending || loading || !draft.trim() || !selected.length}>{sending ? "Sending…" : "Start exchange"}</button>
+	</form>
 {:else}
 	<div class="dd-body">
-		{#if isDiscussion}
-			<Discussion {object} full onchanged={refreshActive} />
-		{:else if activeInObject}
-			<Discussion {object} full threadId={activeId} onchanged={refreshActive} />
-		{:else if activeChat}
-			<Discussion object={activeChat} full onchanged={refreshActive} />
-		{:else}
-			<p class="dd-loading">Loading…</p>
-		{/if}
+		{#key activeId}
+			<Discussion {object} full threadId={activeId} onchanged={refreshActive} onexchange={openThread} />
+		{/key}
 	</div>
 {/if}
 
@@ -224,19 +279,6 @@
 		font-size: 12px;
 		color: var(--muted);
 		flex: none;
-	}
-	.dd-jump {
-		color: var(--muted);
-		text-decoration: none;
-		font-size: 13px;
-		flex: none;
-		padding: 2px 5px;
-		border: 1px solid var(--border);
-		border-radius: 7px;
-	}
-	.dd-jump:hover {
-		color: var(--fg);
-		border-color: var(--muted);
 	}
 	.dd-close,
 	.dd-affix {
@@ -341,11 +383,53 @@
 		display: flex;
 		flex-direction: column;
 	}
-	.dd-loading {
-		color: var(--muted);
-		font-size: 13px;
+	.dd-compose {
+		display: flex;
+		flex: 1;
+		min-height: 0;
+		flex-direction: column;
+		gap: 12px;
 		padding: 14px;
+		overflow-y: auto;
 	}
+	.dd-compose label {
+		display: flex;
+		flex-direction: column;
+		gap: 5px;
+		font-size: 12px;
+		color: var(--muted);
+	}
+	.dd-compose input:not([type="checkbox"]),
+	.dd-compose textarea {
+		width: 100%;
+		box-sizing: border-box;
+		background: var(--panel);
+		border: 1px solid var(--border);
+		border-radius: 7px;
+		padding: 8px;
+		color: var(--fg);
+		font: inherit;
+	}
+	.dd-compose textarea { resize: vertical; }
+	.compose-hint { color: var(--muted); font-size: 12px; margin: 0; }
+	.recipient-list { max-height: 240px; overflow-y: auto; }
+	.dd-compose .recipient,
+	.dd-compose .request-reply { flex-direction: row; align-items: center; gap: 8px; }
+	.recipient { padding: 7px 0; }
+	.recipient b { color: var(--fg); font-weight: 500; }
+	.recipient small { display: block; margin-top: 2px; }
+	.create-exchange {
+		background: var(--accent);
+		color: #fff;
+		border: none;
+		border-radius: 7px;
+		padding: 9px 12px;
+		cursor: pointer;
+	}
+	.create-exchange:disabled { opacity: 0.4; cursor: default; }
+	.dd-error,
+	.conv-problem { color: var(--orange, #ff9f0a); font-size: 12px; }
+	.dd-error { padding: 0 14px; overflow-wrap: anywhere; }
 	/* The full-variant Discussion fills the drawer: messages scroll,
 	   composer pinned at the bottom. */
 	.dd-body :global(.discussion.full) {

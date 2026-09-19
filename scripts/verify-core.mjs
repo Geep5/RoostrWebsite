@@ -7,7 +7,7 @@ const root = fileURLToPath(new URL("../", import.meta.url));
 const hash = (bytes) => createHash("sha256").update(bytes).digest("hex");
 try {
 	const manifest = JSON.parse(await readFile(resolve(root, "static/engine-core.json"), "utf8"));
-	if (manifest.abiVersion !== 1 || manifest.target !== "js_wasm32" || manifest.artifact !== "engine.wasm") {
+	if (manifest.abiVersion !== 2 || manifest.target !== "js_wasm32" || manifest.artifact !== "engine.wasm") {
 		throw new Error("Shared core manifest ABI/target mismatch");
 	}
 	const bytes = await readFile(resolve(root, "static/engine.wasm"));

@@ -1,18 +1,10 @@
 <script lang="ts">
-	/**
-	 * Anytype's object discussion (block/chat): a chat at the bottom of every
-	 * object, opened from a button. Messages support replies
-	 * (replyToMessageId -> quoted preview above the message) and emoji
-	 * reactions (chips with author counts; toggle by identity; "+" opens the
-	 * emoji picker). Messages are blocks under a conversation root - the
-	 * human thread is "__discussion__", an agent thread is "__thread__<id>"
-	 * carrying a Conversation in its block data - see mutate.odin
-	 * chat_post/conversation_open.
-	 */
-	import type { ObjectJSON } from "$lib/types";
-	import { chatMessages } from "$lib/chat";
+	/** Human/private chat stays local; exchanges send immutable mailbox envelopes. */
+	import type { AgentEndpoint, AgentMessage, ObjectJSON } from "$lib/types";
+	import { chatMessages, isLegacyExchange, replyRecipients, uniqueEndpoints } from "$lib/chat";
+	import { endpointName } from "$lib/conversations";
 	import { goto } from "$app/navigation";
-	import { chat, settings } from "$lib/api";
+	import { chat, mailbox, settings } from "$lib/api";
 	import { store } from "$lib/data.svelte";
 	import EmojiPicker from "./EmojiPicker.svelte";
 	import { renderMarkdown } from "$lib/markdown";
@@ -25,6 +17,7 @@
 		pagemode = false,
 		threadId = "__discussion__",
 		onchanged,
+		onexchange,
 	}: {
 		object: ObjectJSON;
 		full?: boolean;
@@ -32,9 +25,17 @@
 		/** Which conversation in this object; the human thread by default. */
 		threadId?: string;
 		onchanged: () => Promise<void>;
+		onexchange?: (threadId: string) => void;
 	} = $props();
 
 	const messages = $derived(chatMessages(object, threadId));
+	const conversation = $derived(object.conversations?.find((c) => c.id === threadId));
+	const legacy = $derived(isLegacyExchange(object, threadId));
+	const isExchange = $derived(legacy || conversation?.kind === "a2a" || messages.some((m) => m.mailbox));
+	const readOnly = $derived(legacy || (isExchange && !!conversation?.closed)
+		|| (threadId !== "__discussion__" && !conversation && !messages.length));
+	const members = $derived(uniqueEndpoints(messages.flatMap((m) => m.mailbox ? [m.mailbox.message.sender, ...m.mailbox.message.recipients] : [])));
+	const exchangeTitle = $derived(conversation?.title || messages.find((m) => m.mailbox)?.mailbox?.message.title || "Exchange");
 
 	const messageById = $derived(new Map(messages.map((m) => [m.id, m])));
 
@@ -73,7 +74,7 @@
 	 */
 	let landedOn = "";
 	$effect(() => {
-		const id = object.id;
+		const id = `${object.id}:${threadId}`;
 		if (!isOpen) {
 			landedOn = "";
 			return;
@@ -104,6 +105,14 @@
 	let sendError = $state("");
 	let me = $state("");
 	let identityError = $state("");
+	let privateRecipient = $state("");
+	let requestReply = $state(true);
+	let retryError = $state("");
+	let retrying = $state<string[]>([]);
+	let pendingSend: AgentMessage | undefined;
+	const replyMessage = $derived((replyTo ? messageById.get(replyTo) : messages[messages.length - 1])?.mailbox?.message);
+	const replyAll = $derived(replyMessage ? replyRecipients(replyMessage, { objectId: object.id, agentId: "" }) : []);
+	const audience = $derived(privateRecipient ? replyAll.filter((endpoint) => endpoint.objectId === privateRecipient) : replyAll);
 
 	async function loadIdentity() {
 		try {
@@ -145,7 +154,7 @@
 	}
 	let presence = $state<AgentPresence[]>([]);
 	$effect(() => {
-		if (!isOpen || !paired) {
+		if (!isOpen || !paired || isExchange) {
 			presence = [];
 			presenceError = "";
 			return;
@@ -194,6 +203,23 @@
 		return author.slice(0, 6);
 	}
 
+	function memberName(endpoint: AgentEndpoint): string {
+		if (endpoint.objectId === object.id) {
+			const objectName = object.fields["name"]?.stringValue || "This object";
+			const agentName = store.agents.find((agent) => agent.id === endpoint.agentId)?.name;
+			return agentName && agentName !== objectName ? `${objectName} · ${agentName}` : objectName;
+		}
+		return endpointName(endpoint);
+	}
+
+	function startReply(messageId: string, privately = false) {
+		replyTo = messageId;
+		const target = messageById.get(messageId)?.mailbox?.message;
+		privateRecipient = privately && target ? replyRecipients(target, { objectId: object.id, agentId: "" })
+			.find((endpoint) => endpoint.objectId === target.sender.objectId)?.objectId ?? "" : "";
+		composerEl?.focus();
+	}
+
 	function originName(id: string): string {
 		return store.summaries.find((s) => s.id === id)?.name || "object";
 	}
@@ -225,11 +251,35 @@
 
 	async function send() {
 		const text = draft.trim();
-		if (!text) return;
+		if (sending || readOnly || !text || (isExchange && !audience.length)) return;
 		const reply = replyTo;
 		sending = true;
 		sendError = "";
 		try {
+			if (isExchange) {
+				if (!replyMessage) throw new Error("Reload this exchange before replying.");
+				const title = privateRecipient ? `Private: ${exchangeTitle}` : exchangeTitle;
+				const parentId = reply || replyMessage.id;
+				const recipients = audience;
+				if (!pendingSend || pendingSend.text !== text || pendingSend.replyTo !== parentId || pendingSend.title !== title
+					|| pendingSend.requestReply !== requestReply || JSON.stringify(pendingSend.recipients) !== JSON.stringify(recipients)) {
+					pendingSend = {
+						id: crypto.randomUUID(),
+						exchangeId: privateRecipient ? crypto.randomUUID() : replyMessage.exchangeId,
+						sender: { objectId: object.id, agentId: "" }, recipients,
+						text, replyTo: parentId, sentAt: Date.now(), title,
+						requestReply, historical: false, operation: "", author: "",
+					};
+				}
+				const sent = await mailbox.send(pendingSend);
+				pendingSend = undefined;
+				draft = "";
+				replyTo = "";
+				privateRecipient = "";
+				await onchanged();
+				if (sent.threadId !== threadId) onexchange?.(sent.threadId);
+				return;
+			}
 			await chat.post(object.id, text, reply, threadId === "__discussion__" ? "" : threadId);
 			// Cleared only once the change is committed: a failed write used
 			// to swallow the message - empty composer, nothing posted, no
@@ -244,7 +294,23 @@
 		}
 	}
 
+	async function retry(messageId: string, stage: "delivery" | "processing", recipientObjectId = "") {
+		const key = `${messageId}:${stage}:${recipientObjectId}`;
+		if (retrying.includes(key)) return;
+		retrying = [...retrying, key];
+		retryError = "";
+		try {
+			await mailbox.retry(object.id, messageId, stage, recipientObjectId || undefined);
+			await onchanged();
+		} catch (err) {
+			retryError = err instanceof Error ? err.message : String(err);
+		} finally {
+			retrying = retrying.filter((id) => id !== key);
+		}
+	}
+
 	async function toggleReaction(messageId: string, emoji: string) {
+		if (readOnly || isExchange) return;
 		pickerFor = "";
 		sendError = "";
 		try {
@@ -270,7 +336,7 @@
 			<!-- Anytype commentSection: a SHORT rule, then the 600-weight title. -->
 			<div class="rule"></div>
 			<div class="head">
-				<span class="head-title">Discussion</span>
+				<span class="head-title">{isExchange ? exchangeTitle : "Discussion"}</span>
 				<button class="collapse" title="Collapse" onclick={() => (open = false)}>×</button>
 			</div>
 		{/if}
@@ -278,11 +344,24 @@
 			<p class="presence error" role="status">Cannot load your discussion identity: {identityError}</p>
 			<button onclick={() => void loadIdentity()}>Retry discussion identity</button>
 		{/if}
-		{#if !paired}
+		{#if !isExchange && !paired}
 			<p class="presence">Pair under This machine to see live agent status. Discussion history and comments remain available.</p>
-		{:else if presenceError}
+		{:else if !isExchange && presenceError}
 			<p class="presence error" role="status">{presenceError} Check that the paired native app and harness are running. Discussion remains available.</p>
 		{/if}
+		{#if members.length}
+			<div class="members" aria-label="Exchange participants">
+				<span>Participants</span>
+				{#each members as member (member.objectId)}
+					<a href="/app/object/{member.objectId}">{memberName(member)}</a>
+				{/each}
+			</div>
+		{:else if isExchange && conversation?.participants.length}
+			<p class="presence">Participants: {conversation.participants.map(who).join(", ")}</p>
+		{/if}
+		{#if legacy}<p class="presence" role="status">This shared exchange is read-only, awaiting migration to object inboxes.</p>{/if}
+		{#if isExchange && conversation?.closed}<p class="presence">This exchange is closed.</p>{/if}
+		{#if retryError}<p class="presence error" role="alert">Retry failed: {retryError}</p>{/if}
 		<div class="messages" bind:this={messagesEl}>
 			{#each messages as m (m.id)}
 				<div class="msg" class:own={m.author === me} id="msg-{m.id}">
@@ -311,12 +390,41 @@
 							<span class="time">{when(m.ts)}</span>
 						</div>
 						<div class="text md">{@html renderMarkdown(m.text)}</div>
+						{#if m.mailbox}
+							{@const entry = m.mailbox}
+							<div class="receipts">
+								<span>To {entry.message.recipients.map(memberName).join(", ")}</span>
+								{#if entry.outgoing}
+									{#each entry.deliveries as delivery (delivery.recipient.objectId)}
+										<div class="receipt" class:failed={delivery.status === "failed"}>
+											<span>{memberName(delivery.recipient)} · {delivery.status}{delivery.status === "delivered" ? " to inbox" : ""}</span>
+											{#if delivery.error}<span>{delivery.error}</span>{/if}
+											{#if delivery.status === "failed"}
+												<button disabled={retrying.includes(`${m.id}:delivery:${delivery.recipient.objectId}`)} onclick={() => void retry(m.id, "delivery", delivery.recipient.objectId)}>Retry delivery</button>
+											{/if}
+										</div>
+									{/each}
+								{/if}
+								{#if entry.incoming && (entry.message.operation || entry.message.recipients.some((recipient) => recipient.objectId === object.id && recipient.agentId))}
+									<div class="receipt" class:failed={entry.processing.status === "failed"}>
+										<span>Local processing · {entry.processing.status.replaceAll("_", " ")}</span>
+										{#if entry.processing.error}<span>{entry.processing.error}</span>{/if}
+										{#if entry.processing.status === "failed"}
+											<button disabled={retrying.includes(`${m.id}:processing:`)} onclick={() => void retry(m.id, "processing")}>Retry processing</button>
+										{:else if entry.processing.status === "awaiting_approval"}
+											<span>Approve on the installation's owning machine.</span>
+										{/if}
+									</div>
+								{/if}
+							</div>
+						{/if}
 						{#if m.reactions.length > 0 || pickerFor === m.id}
 							<div class="reactions">
 								{#each m.reactions as r (r.emoji)}
 									<button
 										class="chip"
 										class:mine={r.authors.includes(me)}
+										disabled={readOnly || isExchange}
 										title={r.authors.map(who).join(", ")}
 										onclick={() => void toggleReaction(m.id, r.emoji)}
 									>
@@ -326,10 +434,15 @@
 							</div>
 						{/if}
 					</div>
-					<div class="actions">
-						<button title="Add reaction" onclick={() => (pickerFor = pickerFor === m.id ? "" : m.id)}>😀</button>
-						<button title="Reply" onclick={() => (replyTo = m.id)}>↩</button>
-					</div>
+					{#if !readOnly}
+						<div class="actions">
+							{#if !isExchange}<button title="Add reaction" onclick={() => (pickerFor = pickerFor === m.id ? "" : m.id)}>😀</button>{/if}
+							<button title={isExchange ? "Reply to all" : "Reply"} onclick={() => startReply(m.id)}>↩</button>
+							{#if m.mailbox && m.mailbox.message.sender.objectId !== object.id}
+								<button class="private-reply" title="Reply privately in a separate exchange" onclick={() => startReply(m.id, true)}>Private</button>
+							{/if}
+						</div>
+					{/if}
 					{#if pickerFor === m.id}
 						<div class="picker-wrap">
 							<EmojiPicker onpick={(e) => void toggleReaction(m.id, e)} onclose={() => (pickerFor = "")} />
@@ -358,25 +471,41 @@
 				</div>
 			{/if}
 		</div>
-		{#if replyTo && messageById.has(replyTo)}
+		{#if !readOnly && replyTo && messageById.has(replyTo)}
 			{@const target = messageById.get(replyTo)!}
 			<div class="replying">
 				<span class="q-author">Replying to {who(target.author)}</span>
 				<span class="q-text">{target.text.slice(0, 60)}</span>
-				<button title="Cancel reply" onclick={() => (replyTo = "")}>×</button>
+				<button title="Cancel reply" onclick={() => { replyTo = ""; privateRecipient = ""; }}>×</button>
 			</div>
 		{/if}
 		{#if sendError}
-			<p class="presence error" role="alert">Not sent: {sendError} — your text is still in the box; tap send again.</p>
+			<p class="presence error" role="alert">{sendError}</p>
+		{/if}
+		{#if !readOnly}
+		{#if isExchange}
+			<div class="audience">
+				<label>Reply audience
+					<select bind:value={privateRecipient} disabled={sending}>
+						<option value="">Reply to all ({replyAll.length})</option>
+						{#each replyAll as recipient (recipient.objectId)}
+							<option value={recipient.objectId}>Private · {memberName(recipient)}</option>
+						{/each}
+					</select>
+				</label>
+				<span>{privateRecipient ? "New private exchange. Only this recipient receives your message." : `To ${audience.map(memberName).join(", ") || "no recipients"}`}</span>
+				<label class="request-reply"><input type="checkbox" bind:checked={requestReply} disabled={sending} /> Ask agents to respond</label>
+			</div>
 		{/if}
 		<!-- Anytype commentForm: rounded highlight box, content area on top,
 		     toolbar row with the send control at the right. -->
 		<div class="composer">
 			<textarea
 				bind:this={composerEl}
-				placeholder="Write a comment… (markdown supported)"
+				placeholder={isExchange ? "Write a message… (markdown supported)" : "Write a comment… (markdown supported)"}
 				bind:value={draft}
 				rows={1}
+				disabled={sending}
 				oninput={(e) => {
 					const el = e.currentTarget as HTMLTextAreaElement;
 					el.style.height = "auto";
@@ -387,16 +516,17 @@
 						e.preventDefault();
 						void send();
 					}
-					if (e.key === "Escape") replyTo = "";
+					if (e.key === "Escape") { e.preventDefault(); replyTo = ""; privateRecipient = ""; }
 				}}
 			></textarea>
 			<div class="form-toolbar">
 				<span class="toolbar-side"></span>
-				<button class="send" disabled={sending || !draft.trim()} aria-label="Send" onclick={() => void send()}>
+				<button class="send" disabled={sending || !draft.trim() || (isExchange && !audience.length)} aria-label="Send" onclick={() => void send()}>
 					<svg viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M10 16V5M10 5L5 10M10 5l5 5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" /></svg>
 				</button>
 			</div>
 		</div>
+		{/if}
 	{/if}
 </section>
 
@@ -901,4 +1031,38 @@
 	.pagemode .composer {
 		flex: none;
 	}
+	.members, .audience, .receipts {
+		font-size: 11px;
+		color: var(--muted);
+		line-height: 1.5;
+		overflow-wrap: anywhere;
+	}
+	.members { display: flex; flex-wrap: wrap; gap: 5px 8px; padding: 8px 0; }
+	.members a { color: var(--fg); text-decoration: none; }
+	.receipts { display: flex; flex-direction: column; gap: 3px; padding: 3px 2px; }
+	.receipt { display: flex; flex-wrap: wrap; align-items: baseline; gap: 3px 6px; }
+	.receipt.failed { color: var(--orange, #ff9f0a); }
+	.receipt button {
+		background: none;
+		border: 1px solid var(--border);
+		border-radius: 5px;
+		color: inherit;
+		cursor: pointer;
+		font: inherit;
+		padding: 1px 5px;
+	}
+	.receipt button:disabled { opacity: 0.5; }
+	.audience { margin-top: 10px; display: flex; flex-direction: column; gap: 5px; }
+	.audience label { display: flex; align-items: center; gap: 7px; }
+	.audience select {
+		min-width: 0;
+		max-width: 100%;
+		background: var(--panel);
+		color: var(--fg);
+		border: 1px solid var(--border);
+		border-radius: 5px;
+		padding: 4px;
+		font: inherit;
+	}
+	.msg .actions .private-reply { color: var(--muted); font-size: 11px; }
 </style>

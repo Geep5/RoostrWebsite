@@ -1,71 +1,33 @@
-/**
- * Conversation discovery for an object: every A2A chat its bound agent
- * participates in (or that links the object), as compact inbox rows.
- * One chat object is one conversation - object pages and the drawer are
- * projections of it, never copies.
- */
-
-import { fetchObject, fetchQuery } from "$lib/api";
+/** Names and recipient discovery for the local object mailbox. */
+import { fetchAllQuery } from "$lib/api";
 import { lastChatMessage } from "$lib/chat";
 import { store } from "$lib/data.svelte";
-import type { ObjectJSON } from "$lib/types";
-import { authorLabel, objectThreads as pureObjectThreads } from "$lib/threads";
+import type { AgentEndpoint, ObjectJSON } from "$lib/types";
+import { authorLabel, objectAgentOptions, objectThreads as pureObjectThreads, type AgentThread, type ObjectAgentOption } from "$lib/threads";
 
-export interface AgentThread {
-	id: string;
-	title: string;
-	count: number;
-	last: number;
-	snippet: string;
-	snippetWho: string;
-	/** True for a thread inside THIS object; false for a separate chat object. */
-	inObject?: boolean;
-	kind?: string;
-	participants?: string[];
-	closed?: boolean;
+function nameOf(id: string): string {
+	return store.summaries.find((s) => s.id === id)?.name
+		|| store.channels.find((s) => s.id === id)?.name
+		|| store.agents.find((s) => s.id === id)?.name || "";
 }
 
 export function whoName(author: string): string {
-	return authorLabel(author, (id) => store.summaries.find((s) => s.id === id)?.name ?? "");
+	return authorLabel(author, nameOf);
 }
 
-/** Last chat message of an object's block tree (discussion or chat). */
+export function endpointName(endpoint: AgentEndpoint): string {
+	const objectName = nameOf(endpoint.objectId) || endpoint.objectId.slice(0, 8);
+	const agentName = endpoint.agentId ? nameOf(endpoint.agentId) : "";
+	return agentName && agentName !== objectName ? `${objectName} · ${agentName}` : objectName;
+}
+
 export const lastMessage = lastChatMessage;
+export const objectThreads = (object: ObjectJSON): AgentThread[] => pureObjectThreads(object, nameOf);
 
-/** The object's own threads, named through the loaded summaries. */
-export const objectThreads = (object: ObjectJSON): AgentThread[] =>
-	pureObjectThreads(object, (id) => store.summaries.find((s) => s.id === id)?.name ?? "");
-
-export async function loadAgentThreads(objectId: string): Promise<AgentThread[]> {
-	// This object's bound agent, if one has been minted.
-	const agentRes = await fetchQuery({
-		type: "agent",
-		filters: [{ key: "bound_object", condition: "equal", value: objectId }],
-		limit: 1,
-	});
-	const agentId = agentRes.records[0]?.id ?? "";
-
-	const res = await fetchQuery({ type: "chat", filters: [{ key: "a2a_pair", condition: "notEmpty" }], limit: 500 });
-	const mine = res.records.filter((r) => {
-		const linksMe = (r.fields["objects"]?.valuesValue?.items ?? []).some((i) => i.linkValue?.targetId === objectId);
-		const participates =
-			!!agentId && (r.fields["participants"]?.valuesValue?.items ?? []).some((i) => i.stringValue === agentId);
-		return linksMe || participates;
-	});
-	const out: AgentThread[] = [];
-	for (const r of mine.slice(0, 30)) {
-		const chat = await fetchObject(r.id);
-		const m = lastMessage(chat);
-		out.push({
-			id: r.id,
-			title: r.fields["name"]?.stringValue ?? "Agents",
-			count: m.count,
-			last: m.last,
-			snippet: m.text,
-			snippetWho: whoName(m.author),
-		});
-	}
-	return out.toSorted((a, b) => b.last - a.last);
+export async function loadObjectAgents(object: ObjectJSON): Promise<ObjectAgentOption[]> {
+	const spaceId = object.typeKey === "channel" ? object.id : object.fields["channel"]?.stringValue ?? "";
+	const agents = await fetchAllQuery({ type: "agent", filters: [{ key: "channel", condition: "equal", value: spaceId }] });
+	return objectAgentOptions(agents, spaceId, (id) => id === object.id ? object.fields["name"]?.stringValue ?? "" : nameOf(id));
 }
 
 export function agoShort(ts: number): string {

@@ -26,7 +26,7 @@ export interface BlockJSON {
 	childrenIds: string[];
 	content: {
 		text?: { text: string; style: number; marks?: MarkJSON[]; checked?: boolean; color?: string };
-		custom?: { contentType: string; meta?: Record<string, string> };
+		custom?: { contentType: string; meta?: Record<string, string>; data?: string };
 		layout?: { style: number };
 		table?: Record<string, never>;
 		tableColumn?: Record<string, never>;
@@ -54,6 +54,50 @@ export interface ConversationJSON {
 	messageCount: number;
 }
 
+export interface AgentEndpoint {
+	objectId: string;
+	agentId: string;
+}
+
+export interface AgentMessage {
+	id: string;
+	exchangeId: string;
+	sender: AgentEndpoint;
+	recipients: AgentEndpoint[];
+	text: string;
+	replyTo: string;
+	sentAt: number;
+	title: string;
+	requestReply: boolean;
+	historical: boolean;
+	operation: string;
+	author: string;
+	unknown?: string;
+}
+
+export interface MessageDelivery {
+	recipient: AgentEndpoint;
+	status: "pending" | "delivered" | "failed";
+	error: string;
+	at: number;
+}
+
+export interface MessageProcessing {
+	status: "pending" | "awaiting_approval" | "processing" | "processed" | "failed";
+	owner: string;
+	error: string;
+	at: number;
+}
+
+export interface MailboxEntry {
+	message: AgentMessage;
+	threadId: string;
+	incoming: boolean;
+	outgoing: boolean;
+	deliveries: MessageDelivery[];
+	processing: MessageProcessing;
+}
+
 export interface ObjectJSON {
 	id: string;
 	typeKey: string;
@@ -61,6 +105,8 @@ export interface ObjectJSON {
 	blocks: BlockJSON[];
 	/** Absent when the object has never held a conversation. */
 	conversations?: ConversationJSON[];
+	/** Envelopes and local receipts decoded by the core, never by the UI. */
+	mailbox?: MailboxEntry[];
 	deleted: boolean;
 	createdAt: number;
 	updatedAt: number;

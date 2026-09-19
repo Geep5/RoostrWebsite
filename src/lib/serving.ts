@@ -14,7 +14,7 @@ import type { ObjectJSON } from "$lib/types";
 export interface Serving {
 	/** "" when no space default exists and nothing qualifies. */
 	machineId: string;
-	reason: "pinned" | "pinned-uncapable" | "space" | "space-capable" | "capability" | "unsatisfied";
+	reason: "self" | "pinned" | "pinned-uncapable" | "space" | "space-capable" | "capability" | "unsatisfied";
 	requires: string[];
 	/** Machine ids whose capabilities cover `requires`, sorted. */
 	candidates: string[];

@@ -63,6 +63,20 @@ retry events survive reload. Logout refuses unpublished work unless it is
 explicitly exported. Clearing browser storage is not a safe way to discard an
 outbox or reset the shared dataset.
 
+## Object exchanges
+
+An object's discussion pane shows exchanges from that object's mailbox. **New
+exchange** selects object agents; selecting several creates a group by
+delivering to each object's own history. **Reply to all** preserves the
+audience; **Private** starts a separate exchange. Delivery and local processing
+status are displayed separately. The shared exchange ID is a UI grouping key,
+not a shared conversation object.
+
+Machine capability and authentication requests also use object mailboxes.
+**This machine → Capability requests** shows requests waiting for local
+approval and failed operations. Credentials are entered only into the paired
+machine's local approval form, never into a message or synced object property.
+
 ## Verification
 
 ```sh

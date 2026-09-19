@@ -27,11 +27,11 @@
 		return object.blocks
 			.filter((b) => {
 				if (referenced.has(b.id) || b.id === "__content__") return false;
-				// Conversations are not body content. An object now holds many
-				// of them (the human thread plus the agents'), so the test is
-				// the block's KIND, not the one legacy id - filtering by id
-				// left every new thread rendering as a stray chip.
-				return b.content?.custom?.contentType !== "discussion";
+				// Keep mailbox envelopes and receipts out of the body even if
+				// a partially synced tree has not linked their parent yet.
+				const kind = b.content?.custom?.contentType;
+				return kind !== "discussion" && kind !== "agent_message"
+					&& kind !== "message_delivery" && kind !== "message_processing";
 			})
 			.map((b) => b.id);
 	});

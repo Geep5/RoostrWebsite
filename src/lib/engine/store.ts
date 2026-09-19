@@ -210,21 +210,29 @@ export class ChangeStore implements ChangeStoreApi {
 	}
 
 	/**
+	 * Complete protobuf histories, grouped by the stored object id rather than
+	 * decoding or serialising changes. A corpus batch must never split one.
+	 */
+	async allChangeHistories(): Promise<Uint8Array[][]> {
+		const store = this.handle().transaction(CHANGES, "readonly").objectStore(CHANGES);
+		const rows = (await req(store.getAll())) as ChangeRow[];
+		const histories = new Map<string, Uint8Array[]>();
+		for (const row of rows) {
+			if (!(row.bytes instanceof Uint8Array) || row.bytes.byteLength === 0) {
+				throw new Error(`Missing protobuf bytes for object ${row.objectId}`);
+			}
+			let history = histories.get(row.objectId);
+			if (!history) histories.set(row.objectId, (history = []));
+			history.push(row.bytes);
+		}
+		return [...histories.values()];
+	}
+
+	/**
 	 * objectId -> change count. A full key-cursor walk pays one microtask
 	 * round-trip PER ROW (tens of seconds at 20k+ changes), so instead:
 	 * unique-key walk (one step per object) + a parallel count() per id.
 	 */
-	/**
-	 * Every change's protobuf, for seeding the core's cache directly. The
-	 * JSON beside it is deliberately not read: the point of this path is that
-	 * nothing is serialised on the way in.
-	 */
-	async allChangeBytes(): Promise<Uint8Array[]> {
-		const store = this.handle().transaction(CHANGES, "readonly").objectStore(CHANGES);
-		const rows = (await req(store.getAll())) as ChangeRow[];
-		return rows.map((r) => r.bytes).filter((b): b is Uint8Array => b instanceof Uint8Array && b.byteLength > 0);
-	}
-
 	async changeCounts(): Promise<Map<string, number>> {
 		const ids = await this.objectIds();
 		const index = this.handle().transaction(CHANGES, "readonly").objectStore(CHANGES).index("objectId");

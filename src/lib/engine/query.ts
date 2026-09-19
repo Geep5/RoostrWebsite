@@ -124,6 +124,7 @@ export function runQuery(
  * the ABI, then re-marshalled and re-parsed per object into the cache region -
  * three serialisations each, and a hard failure past 16 MiB.
  *
+ * Each input history must contain all changes for one distinct object.
  * Frames are `[u32 little-endian length][change bytes]`, repeated. Self
  * describing, so the JSON request carries no length array.
  */
@@ -138,53 +139,58 @@ export interface CorpusLoad {
 	cached: number;
 }
 
-export function loadCorpus(changes: Iterable<Uint8Array>, reset = true): CorpusLoad {
-	// Two bounds, both learned by measurement: the blob buffer is 32 MiB, and
-	// a single push of ~20k objects exhausts the WASM heap even when its bytes
-	// are small - the cost per cached object is ~5.8 KB regardless of size.
-	const all = [...changes];
-	if (all.length > CORPUS_BATCH_CHANGES || byteLengthOf(all) > CORPUS_BATCH_BYTES) {
-		let out: CorpusLoad = { objects: 0, changes: 0, bytes: 0, skipped: 0, cached: 0 };
-		let batch: Uint8Array[] = [];
-		let size = 0;
-		let first = reset;
-		const flush = () => {
-			if (batch.length === 0) return;
-			const part = pushCorpus(batch, first);
-			first = false;
-			out = {
-				objects: out.objects + part.objects,
-				changes: out.changes + part.changes,
-				bytes: out.bytes + part.bytes,
-				skipped: out.skipped + part.skipped,
-				// The cache count is cumulative already, so the last batch's
-				// number is the truth - summing it would double-count.
-				cached: part.cached,
-			};
-			batch = [];
-			size = 0;
-		};
-		for (const change of all) {
-			if (batch.length >= CORPUS_BATCH_CHANGES || size + change.byteLength > CORPUS_BATCH_BYTES) flush();
-			batch.push(change);
-			size += change.byteLength;
+export function loadCorpus(histories: Iterable<readonly Uint8Array[]>, reset = true): CorpusLoad {
+	const out: CorpusLoad = { objects: 0, changes: 0, bytes: 0, skipped: 0, cached: 0 };
+	let batch: Uint8Array[] = [];
+	let size = 0;
+	let objects = 0;
+	let first = reset;
+	const flush = () => {
+		if (batch.length === 0) return;
+		const part = pushCorpus(batch, first);
+		first = false;
+		out.objects += part.objects;
+		out.changes += part.changes;
+		out.bytes += part.bytes;
+		out.skipped += part.skipped;
+		out.cached = part.cached;
+		batch = [];
+		size = 0;
+		objects = 0;
+	};
+	try {
+		for (const history of histories) {
+			if (history.length === 0) continue;
+			const bytes = byteLengthOf(history);
+			// Never replay a prefix as a complete object. The backend can fall
+			// back to its computed JSON snapshot for an oversized history.
+			if (bytes > CORPUS_BATCH_BYTES) throw new Error("Object history exceeds the corpus batch limit");
+			if (objects >= CORPUS_BATCH_OBJECTS || size + bytes > CORPUS_BATCH_BYTES) flush();
+			for (const change of history) batch.push(change);
+			size += bytes;
+			objects++;
 		}
 		flush();
-		signatures = new Map();
-		generation = coreGeneration();
-		return out;
+		if (first) {
+			// Empty reset loads must clear the previous corpus too.
+			coreCall("query", { reset: true, upserts: [], removed: [], body: { limit: 1 }, nowMs: Date.now() });
+		}
+	} catch (error) {
+		// Earlier batches may already have committed. A subsequent JSON
+		// query must replace that partial corpus, not apply only a delta.
+		generation = -1;
+		throw error;
 	}
-	const out = pushCorpus(all, reset);
-	signatures = new Map();
+	signatures.clear();
 	generation = coreGeneration();
 	return out;
 }
 
-/** Changes per push, and bytes per push - both under the measured walls. */
-const CORPUS_BATCH_CHANGES = 4000;
+/** Object and framed-byte bounds; histories are indivisible. */
+const CORPUS_BATCH_OBJECTS = 4000;
 const CORPUS_BATCH_BYTES = 24 * 1024 * 1024;
 
-const byteLengthOf = (parts: Uint8Array[]): number => parts.reduce((sum, p) => sum + 4 + p.byteLength, 0);
+const byteLengthOf = (parts: readonly Uint8Array[]): number => parts.reduce((sum, p) => sum + 4 + p.byteLength, 0);
 
 /** True when the core has no corpus for this generation yet. */
 export const needsColdLoad = (): boolean => generation !== coreGeneration();

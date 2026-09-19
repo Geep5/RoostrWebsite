@@ -14,7 +14,7 @@
 	import ServingChip from "$lib/components/ServingChip.svelte";
 	import Discussion from "$lib/components/Discussion.svelte";
 	import ConversationDrawer from "$lib/components/ConversationDrawer.svelte";
-	import { loadAgentThreads } from "$lib/conversations";
+	import { objectThreads } from "$lib/conversations";
 	import SetTable from "$lib/components/SetTable.svelte";
 	import QueryControls from "$lib/components/QueryControls.svelte";
 	import KanbanView from "$lib/components/KanbanView.svelte";
@@ -282,7 +282,7 @@
 		return () => mq.removeEventListener("change", fn);
 	});
 	const hasDiscussion = $derived(
-		!!object && !isChannel && !isChat && !isAgent && !isType && !isTemplate && !isRelation && !isQuery && !isCollection,
+		!!object && (!!object.mailbox?.length || (!isChannel && !isChat && !isAgent && !isType && !isTemplate && !isRelation && !isQuery && !isCollection)),
 	);
 	$effect(() => {
 		discussionUI.available = hasDiscussion;
@@ -298,11 +298,7 @@
 		discussionUI.available = false;
 	});
 	$effect(() => {
-		if (!object || !hasDiscussion) return;
-		const id = object.id;
-		void loadAgentThreads(id).then((rows) => {
-			if (page.params.id === id) discussionUI.convCount = rows.length + 1;
-		});
+		discussionUI.convCount = object && hasDiscussion ? objectThreads(object).length + 1 : 0;
 	});
 	let drawerTop = $state(0);
 	$effect(() => {
@@ -659,6 +655,7 @@
 			}}
 		>
 			<div class="dd-resize" role="separator" aria-orientation="vertical" onpointerdown={drawerResizeStart}></div>
+			{#key object.id}
 			<ConversationDrawer
 				{object}
 				onchanged={refresh}
@@ -666,6 +663,7 @@
 				onpopout={drawerPopOut}
 				ondock={drawerDock}
 			/>
+			{/key}
 		</aside>
 	{/if}
 {:else if loadError}

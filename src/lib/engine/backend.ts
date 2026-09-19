@@ -60,6 +60,8 @@ class WebBackend {
 	private started = false;
 	private loggingOut = false;
 	private mutations = 0;
+	private mutationTail: Promise<void> = Promise.resolve();
+	private ensuring: Promise<void> | null = null;
 	private sharedRefreshes = 0;
 
 	async start(): Promise<void> {
@@ -234,7 +236,15 @@ class WebBackend {
 	 * cache and replays ONLY objects whose change count grew since it was
 	 * written - a warm boot does zero replay work.
 	 */
-	private async ensure(): Promise<void> {
+	private ensure(): Promise<void> {
+		if (this.ensuring) return this.ensuring;
+		this.ensuring = (async () => {
+			do { await this.rebuildStates(); } while (this.allDirty || this.dirty.size > 0);
+		})().finally(() => { this.ensuring = null; });
+		return this.ensuring;
+	}
+
+	private async rebuildStates(): Promise<void> {
 		let rebuilt = false;
 		if (this.allDirty) {
 			this.allDirty = false;
@@ -444,9 +454,12 @@ class WebBackend {
 			// Measured on this machine: 3x faster at 10k objects, and the
 			// payload is 1.4 MB where the JSON was 2.1 MB.
 			try {
-				loadCorpus(await this.store.allChangeBytes());
-				this.queryUpserted.clear();
-				this.queryRemoved.clear();
+				loadCorpus(await this.store.allChangeHistories());
+				// Raw history includes relay copies the vanish ledger excludes.
+				// Reapply the whole ledger, including after a core-only reset.
+				for (const id of this.vanished) this.queryRemoved.add(id);
+				// Keep pending deltas: another query or mutation may have
+				// replayed newer state while the IndexedDB read was pending.
 			} catch (error) {
 				// A refused corpus must not wedge querying: fall through to
 				// the JSON snapshot path, which is slower but independent.
@@ -465,6 +478,11 @@ class WebBackend {
 	async mutate(action: string, params: Record<string, unknown>): Promise<Record<string, unknown>> {
 		if (this.loggingOut) throw new Error("Logout in progress");
 		this.mutations++;
+		// A claim is a read/plan/commit transaction, not just one WASM call.
+		const previous = this.mutationTail;
+		const { promise, resolve } = Promise.withResolvers<void>();
+		this.mutationTail = promise;
+		await previous;
 		try {
 		const out = await runMutation(
 			{
@@ -527,6 +545,7 @@ class WebBackend {
 		return { ok: true, ...out };
 		} finally {
 			this.mutations--;
+			resolve();
 		}
 	}
 }

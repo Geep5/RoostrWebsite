@@ -6,7 +6,7 @@
 	// browserless and gws). Account-scoped things stay in Settings -
 	// this surface describes the box the harness runs on.
 	import { onMount } from "svelte";
-	import { fetchAllQuery } from "$lib/api";
+	import { fetchAllQuery, mailbox, note } from "$lib/api";
 	import Machines from "./Machines.svelte";
 	import { goto } from "$app/navigation";
 	import { harnessFetch, pairedSession, onPairingChange } from "$lib/local-transport";
@@ -67,7 +67,23 @@
 	let credentials = $state<CredentialRow[] | null>(null);
 	let credSetupFor = $state("");
 	let credDraft = $state<Record<string, string>>({});
-	let credBrowserPending = $state("");
+	interface CapabilityRequest {
+		objectId: string;
+		messageId: string;
+		key: string;
+		account: string;
+		operation: string;
+		sender: { objectId: string; agentId: string };
+		status: string;
+		error: string;
+		canApprove: boolean;
+		fields?: Array<{ key: string; label: string; secret: boolean }>;
+	}
+	let capabilityRequests = $state<CapabilityRequest[]>([]);
+	let requestError = $state("");
+	let requestNotice = $state("");
+	let requestBusy = $state("");
+	let requestPoll: ReturnType<typeof setInterval> | undefined;
 	let credRemoveConfirm = $state("");
 	let credError = $state("");
 	let credBusy = $state(false);
@@ -139,43 +155,86 @@
 		}
 	}
 
-	async function credCall(path: string, body: Record<string, unknown>): Promise<string> {
-		credBusy = true;
-		credError = "";
+	async function loadCapabilityRequests() {
+		if (!pairedSession()) return;
 		try {
-			const res = await harnessFetch(path, { method: "POST", body: JSON.stringify(body) });
-			const out = (await res.json()) as { error?: string; active?: boolean };
-			if (!res.ok || out.error) return (credError = out.error ?? `HTTP ${res.status}`);
-			await loadCredentials();
-			window.dispatchEvent(new Event("roostr:machines-changed"));
-			return "";
+			const res = await harnessFetch("/capability-requests");
+			if (!res.ok) throw new Error(`Cannot load approvals (HTTP ${res.status}).`);
+			const previous = capabilityRequests;
+			capabilityRequests = ((await res.json()) as { requests: CapabilityRequest[] }).requests;
+			if (previous.some((request) => request.status === "processing" && !capabilityRequests.some((next) => next.messageId === request.messageId && next.status === "processing"))) {
+				await Promise.all([loadCredentials(), loadGoogleAccounts(), loadSkills()]);
+				window.dispatchEvent(new Event("roostr:machines-changed"));
+			}
 		} catch (error) {
-			return (credError = error instanceof Error ? error.message : "Request failed.");
+			requestError = error instanceof Error ? error.message : "Cannot load approvals.";
+		}
+	}
+
+	/** The DAG carries only the intent. A separate paired click grants execution. */
+	async function requestOperation(key: string, operation: string, account = ""): Promise<boolean> {
+		if (requestBusy) return false;
+		requestBusy = `stage:${key}:${operation}`;
+		requestError = "";
+		requestNotice = "";
+		try {
+			const res = await harnessFetch("/machine");
+			if (!res.ok) throw new Error("Cannot identify the owning machine.");
+			const machine = (await res.json()) as { id: string };
+			const [installs, machines] = await Promise.all([fetchAllQuery({ type: "install" }), fetchAllQuery({ type: "machine" })]);
+			let installationId = installs.find((row) => row.fields["key"]?.stringValue === key && row.fields["machine_id"]?.stringValue === machine.id && (row.fields["account"]?.stringValue ?? "") === account)?.id;
+			if (!installationId && key === "google" && account) {
+				installationId = (await note.create(`Google ${account}`, "install", { key: { stringValue: key }, machine_id: { stringValue: machine.id }, account: { stringValue: account }, status: { stringValue: "missing" } })).id;
+			}
+			if (!installationId) throw new Error("This machine has not published the installation object yet.");
+			const source = machines.find((row) => row.fields["machine_id"]?.stringValue === machine.id);
+			if (!source) throw new Error("This machine has not published its object yet.");
+			if (capabilityRequests.some((request) => request.objectId === installationId && request.operation === operation && ["pending", "awaiting_approval", "processing"].includes(request.status))) {
+				requestNotice = "This request is already waiting below.";
+				return true;
+			}
+			await mailbox.send({ id: crypto.randomUUID(), exchangeId: crypto.randomUUID(), sender: { objectId: source.id, agentId: "" }, recipients: [{ objectId: installationId, agentId: "" }], text: `Request ${operation} for ${key}${account ? ` (${account})` : ""}.`, replyTo: "", sentAt: Date.now(), title: "Capability request", requestReply: true, historical: false, operation, author: "" });
+			requestNotice = "Request sent to its installation object. Approve it below when it arrives on this machine.";
+			await loadCapabilityRequests();
+			return true;
+		} catch (error) {
+			requestError = error instanceof Error ? error.message : "Cannot stage capability request.";
+			return false;
+		} finally {
+			requestBusy = "";
+		}
+	}
+
+	async function resolveRequest(request: CapabilityRequest, action: "approve" | "reject" | "finish-login") {
+		requestBusy = request.messageId;
+		requestError = "";
+		try {
+			const body: { objectId: string; messageId: string; fields?: Record<string, string> } = { objectId: request.objectId, messageId: request.messageId };
+			if (action === "approve" && request.operation === "auth.save") {
+				body.fields = Object.fromEntries((request.fields ?? []).map((field) => [field.key, credDraft[`${request.key}:${field.key}`] ?? ""]));
+			}
+			const res = await harnessFetch(`/capability-requests/${action}`, { method: "POST", body: JSON.stringify(body) });
+			const result = (await res.json()) as { error?: string; active?: boolean };
+			if (!res.ok || result.error) throw new Error(result.error ?? `HTTP ${res.status}`);
+			if (action === "finish-login" && !result.active) requestNotice = "Authentication is not confirmed yet. Finish signing in on this machine, then check again.";
+			else requestNotice = "";
+			if (body.fields) for (const field of request.fields ?? []) delete credDraft[`${request.key}:${field.key}`];
+			await Promise.all([loadCapabilityRequests(), loadCredentials(), loadGoogleAccounts(), loadSkills()]);
+			window.dispatchEvent(new Event("roostr:machines-changed"));
+		} catch (error) {
+			requestError = error instanceof Error ? error.message : "Approval failed.";
+		} finally {
+			requestBusy = "";
+		}
+	}
+
+	async function savePasswordCredential(key: string) {
+		credBusy = true;
+		try {
+			if (await requestOperation(key, "auth.save")) credSetupFor = "";
 		} finally {
 			credBusy = false;
 		}
-	}
-
-	async function savePasswordCredential(key: string, fields: Array<{ key: string; label: string; secret: boolean }>) {
-		const values: Record<string, string> = {};
-		for (const f of fields) values[f.key] = credDraft[`${key}:${f.key}`] ?? "";
-		if (!(await credCall("/credentials/password", { key, fields: values }))) credSetupFor = "";
-	}
-
-	async function startBrowserLogin(key: string) {
-		if (!(await credCall("/credentials/browser/start", { key }))) credBrowserPending = key;
-	}
-
-	async function finishBrowserLogin(key: string) {
-		const res = await harnessFetch("/credentials/browser/finish", { method: "POST", body: JSON.stringify({ key }) });
-		const out = (await res.json()) as { active?: boolean; error?: string };
-		if (!out.active) {
-			credError = "No login cookies yet - finish signing in in the Chrome window, then click Done.";
-			return;
-		}
-		credBrowserPending = "";
-		await loadCredentials();
-		window.dispatchEvent(new Event("roostr:machines-changed"));
 	}
 	let skillPromptDraft = $state<Record<string, string>>({});
 	let skillPromptSaved = $state<string>("");
@@ -201,15 +260,8 @@
 		const account = googleAccountDraft.trim().toLowerCase();
 		if (!account) return;
 		googleAccountBusy = true;
-		googleAccountError = "";
 		try {
-			const res = await harnessFetch("/google/accounts/add", { method: "POST", body: JSON.stringify({ account }) });
-			const out = (await res.json()) as { error?: string };
-			if (!res.ok || out.error) throw new Error(out.error ?? `HTTP ${res.status}`);
-			googleAccountDraft = "";
-			await loadGoogleAccounts();
-		} catch (error) {
-			googleAccountError = error instanceof Error ? error.message : "Cannot add Google account.";
+			if (await requestOperation("google", "auth.login", account)) googleAccountDraft = "";
 		} finally {
 			googleAccountBusy = false;
 		}
@@ -217,15 +269,8 @@
 
 	async function removeGoogleAccount(account: string) {
 		googleAccountBusy = true;
-		googleAccountError = "";
 		try {
-			const res = await harnessFetch("/google/accounts/remove", { method: "POST", body: JSON.stringify({ account }) });
-			const out = (await res.json()) as { error?: string };
-			if (!res.ok || out.error) throw new Error(out.error ?? `HTTP ${res.status}`);
-			googleRemoveConfirm = "";
-			await loadGoogleAccounts();
-		} catch (error) {
-			googleAccountError = error instanceof Error ? error.message : "Cannot remove Google account.";
+			if (await requestOperation("google", "auth.revoke", account)) googleRemoveConfirm = "";
 		} finally {
 			googleAccountBusy = false;
 		}
@@ -307,7 +352,8 @@
 
 	async function skillOp(key: string, op: "enable" | "disable" | "recheck" | "uninstall") {
 		skillConfirm = "";
-		await changeSkill(`/skills/${op}`, { key });
+		const operation = op === "recheck" ? "auth.check" : op === "enable" && !skillRows?.find((row) => row.key === key)?.installed ? "skill.install" : `skill.${op}`;
+		await requestOperation(key, operation);
 	}
 
 	async function changeSkill(path: string, body: Record<string, string>): Promise<boolean> {
@@ -333,6 +379,10 @@
 			holdups = [];
 			credentials = null;
 			harnessError = "";
+			capabilityRequests = [];
+			credDraft = {};
+			if (requestPoll) clearInterval(requestPoll);
+			requestPoll = undefined;
 			if (skillPoll) clearInterval(skillPoll);
 			skillPoll = undefined;
 			return;
@@ -340,6 +390,8 @@
 		void loadSkills();
 		void loadCredentials();
 		void loadGoogleAccounts();
+		void loadCapabilityRequests();
+		if (!requestPoll) requestPoll = setInterval(() => void loadCapabilityRequests(), 2000);
 	}
 
 	onMount(() => {
@@ -351,6 +403,7 @@
 		return () => {
 			unsubscribe();
 			if (skillPoll) clearInterval(skillPoll);
+			if (requestPoll) clearInterval(requestPoll);
 		};
 	});
 </script>
@@ -396,6 +449,43 @@
 
 		<Machines />
 
+		{#if paired}
+			<section>
+				<h3>Capability requests</h3>
+				<p class="hint">Requests arrive on the owning installation object. Nothing installs, signs in, or changes credentials until you approve it here.</p>
+				{#if requestError}<p class="hint" role="alert">{requestError}</p>{/if}
+				{#if requestNotice}<p class="hint" role="status">{requestNotice}</p>{/if}
+				{#if capabilityRequests.length === 0}<p class="hint">No waiting approvals or failed requests.</p>{/if}
+				{#each capabilityRequests as request (request.messageId)}
+					<div class="skill">
+						<div class="skill-row">
+							<span class="skill-name">{request.key}{request.account ? ` · ${request.account}` : ""}</span>
+							<span class="chip">{request.operation} · {request.status === "processing" && request.operation === "auth.login" ? "waiting for login" : request.status.replaceAll("_", " ")}</span>
+						</div>
+						<p class="hint">From object {request.sender.objectId}{request.sender.agentId ? ` · agent ${request.sender.agentId}` : ""}</p>
+						{#if request.error}<p class="hint" role="status">{request.error}</p>{/if}
+						{#if request.status === "pending" || request.status === "awaiting_approval"}
+							{#if request.operation === "auth.save" && request.canApprove}
+								<p class="hint">These values go only to this machine's local store, never into the request or object history.</p>
+								{#each request.fields ?? [] as field (field.key)}
+									<label class="cred-field">
+										<span>{field.label}</span>
+										<input type="password" autocomplete="off" value={credDraft[`${request.key}:${field.key}`] ?? ""} oninput={(e) => (credDraft[`${request.key}:${field.key}`] = e.currentTarget.value)} />
+									</label>
+								{/each}
+							{/if}
+							<button class="subtle-btn" disabled={!!requestBusy || !request.canApprove} onclick={() => void resolveRequest(request, "approve")}>{request.operation === "auth.save" ? "Approve & save locally" : "Approve on this machine"}</button>
+							<button class="subtle-btn" disabled={!!requestBusy} onclick={() => void resolveRequest(request, "reject")}>Reject</button>
+						{:else if request.status === "processing" && request.operation === "auth.login"}
+							<button class="subtle-btn" disabled={!!requestBusy} onclick={() => void resolveRequest(request, "finish-login")}>Done signing in — verify</button>
+						{:else if request.status === "failed"}
+							<button class="subtle-btn" disabled={!!requestBusy || !request.canApprove} onclick={() => void requestOperation(request.key, request.operation, request.account)}>Stage a new request</button>
+						{/if}
+					</div>
+				{/each}
+			</section>
+		{/if}
+
 		<section>
 			<h3>Integrations</h3>
 			{#if skillRows === null}
@@ -420,11 +510,11 @@
 									<button class="subtle-btn" disabled={credBusy} onclick={() => { credSetupFor = credSetupFor === c.key ? "" : c.key; credError = ""; }}>{c.active.password ? "Replace" : "Enter keys"}</button>
 								{/if}
 								{#if c.loginUrl && !c.active.browser}
-									<button class="subtle-btn" disabled={credBusy} onclick={() => void startBrowserLogin(c.key)}>Open login window</button>
+									<button class="subtle-btn" disabled={credBusy} onclick={() => void requestOperation(c.key, "auth.login")}>Request login</button>
 								{/if}
 								{#if c.active.password || c.active.browser}
 									{#if credRemoveConfirm === c.key}
-										<button class="subtle-btn reset-right" disabled={credBusy} onclick={async () => { if (!(await credCall("/credentials/remove", { key: c.key }))) credRemoveConfirm = ""; }}>Remove?</button>
+										<button class="subtle-btn reset-right" disabled={credBusy} onclick={async () => { if (await requestOperation(c.key, "auth.revoke")) credRemoveConfirm = ""; }}>Request removal?</button>
 										<button class="subtle-btn" onclick={() => (credRemoveConfirm = "")}>Cancel</button>
 									{:else}
 										<button class="remove-link" onclick={() => (credRemoveConfirm = c.key)}>Remove</button>
@@ -432,9 +522,6 @@
 								{/if}
 							</div>
 							<p class="hint cred-note">{c.note}</p>
-							{#if credBrowserPending === c.key}
-								<p class="hint cred-browser-note">A Chrome window opened on this Mac - sign in there, then come back and <button class="subtle-btn" onclick={() => void finishBrowserLogin(c.key)}>Done</button></p>
-							{/if}
 							{#if credSetupFor === c.key && c.passwordFields}
 								<div class="cred-form">
 									{#each c.passwordFields as f (f.key)}
@@ -450,7 +537,7 @@
 										</label>
 									{/each}
 									<div class="cred-actions">
-										<button class="subtle-btn" disabled={credBusy} onclick={() => void savePasswordCredential(c.key, c.passwordFields!)}>Save to this machine</button>
+										<button class="subtle-btn" disabled={credBusy} onclick={() => void savePasswordCredential(c.key)}>Request save to this machine</button>
 										<button class="subtle-btn" onclick={() => (credSetupFor = "")}>Cancel</button>
 									</div>
 								</div>
@@ -472,6 +559,8 @@
 								<span class="chip {account.authMethod !== "none" && account.authMethod !== "" ? "on" : account.clientConfigExists ? "needs-auth" : "failed"}">
 									{account.authMethod !== "none" && account.authMethod !== "" ? account.authMethod : account.clientConfigExists ? "auth needed" : "missing client"}
 								</span>
+								<button class="subtle-btn" disabled={googleAccountBusy} onclick={() => void requestOperation("google", "auth.login", account.account)}>Request login</button>
+								<button class="subtle-btn" disabled={googleAccountBusy} onclick={() => void requestOperation("google", "auth.check", account.account)}>Request check</button>
 								{#if googleRemoveConfirm === account.account}
 									<button class="subtle-btn reset-right" disabled={googleAccountBusy} onclick={() => void removeGoogleAccount(account.account)}>Remove?</button>
 									<button class="subtle-btn" onclick={() => (googleRemoveConfirm = "")}>Cancel</button>
@@ -487,7 +576,7 @@
 							}}
 						>
 							<input bind:value={googleAccountDraft} placeholder="support@matcherino.com" autocomplete="off" />
-							<button type="submit" disabled={googleAccountBusy || !googleAccountDraft.trim()}>Add Google account</button>
+							<button type="submit" disabled={googleAccountBusy || !googleAccountDraft.trim()}>Request Google login</button>
 						</form>
 						{#if googleAccountError}<p class="hint" role="alert">{googleAccountError}</p>{/if}
 					{/if}
@@ -874,6 +963,45 @@
 	}
 	.reset-right {
 		margin-left: auto;
+	}
+	.subtle-btn,
+	.danger-btn {
+		background: var(--bg);
+		border: 1px solid var(--border);
+		border-radius: 7px;
+		padding: 5px 12px;
+		font: inherit;
+		font-size: 12px;
+		cursor: pointer;
+	}
+	.subtle-btn:hover:not(:disabled),
+	.danger-btn:hover:not(:disabled) {
+		border-color: var(--accent);
+	}
+	.subtle-btn:disabled,
+	.danger-btn:disabled {
+		opacity: 0.5;
+		cursor: default;
+	}
+	.cred-field {
+		display: flex;
+		flex-direction: column;
+		gap: 4px;
+		margin: 8px 0;
+		font-size: 12px;
+	}
+	.cred-field input {
+		background: var(--panel);
+		border: 1px solid var(--border);
+		border-radius: 6px;
+		color: var(--fg);
+		padding: 6px 9px;
+		font: inherit;
+	}
+	.cred-field input:focus {
+		outline: none;
+		border-color: var(--accent);
+		box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 40%, transparent);
 	}
 	.subtle-btn {
 		color: var(--muted);

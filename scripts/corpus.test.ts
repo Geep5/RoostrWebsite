@@ -15,13 +15,16 @@
 
 import { readFileSync } from "node:fs";
 import { expect, test } from "bun:test";
-import { coreCall, initCore } from "../src/lib/engine/core";
-import { loadCorpus, needsColdLoad, runQuery } from "../src/lib/engine/query";
+import { coreCall, initCore, resetCore } from "../src/lib/engine/core";
+import { loadCorpus, runQuery } from "../src/lib/engine/query";
+import { ChangeStore, destroyDatabase } from "../src/lib/engine/store";
+import { backend } from "../src/lib/engine/backend";
+import type { ChangeJSON } from "../src/lib/engine/contracts";
 import type { ObjectJSON } from "../src/lib/types";
 
 await initCore({ wasmBytes: readFileSync(new URL("../static/engine.wasm", import.meta.url)) });
 
-const changeOf = (i: number, name: string) => ({
+const changeOf = (i: number, name: string): ChangeJSON => ({
 	id: "",
 	objectId: `obj-${i}`,
 	parentIds: [] as string[],
@@ -34,12 +37,12 @@ const changeOf = (i: number, name: string) => ({
 	],
 });
 
-function bytesOf(change: ReturnType<typeof changeOf>): Uint8Array {
+function bytesOf(change: ChangeJSON): Uint8Array {
 	const b64 = coreCall<string>("codec", { action: "encode", change });
 	return Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
 }
 
-function stateOf(change: ReturnType<typeof changeOf>): ObjectJSON {
+function stateOf(change: ChangeJSON): ObjectJSON {
 	const id = coreCall<string>("codec", { action: "hash", change });
 	return coreCall<ObjectJSON>("replay", { changes: [{ ...change, id }] });
 }
@@ -49,7 +52,7 @@ const body = { filters: [], limit: 500 };
 test("a vault loaded from bytes answers exactly like one loaded from JSON", () => {
 	const changes = Array.from({ length: 40 }, (_, i) => changeOf(i, `Note ${i}`));
 
-	const fromBytes = loadCorpus(changes.map(bytesOf), true);
+	const fromBytes = loadCorpus(changes.map((c) => [bytesOf(c)]));
 	expect(fromBytes.objects).toBe(40);
 	expect(fromBytes.changes).toBe(40);
 	expect(fromBytes.skipped).toBe(0);
@@ -65,9 +68,9 @@ test("a vault loaded from bytes answers exactly like one loaded from JSON", () =
 });
 
 test("a cached object survives the blob being reused", () => {
-	loadCorpus([bytesOf(changeOf(900, "Durable name"))], true);
+	loadCorpus([[bytesOf(changeOf(900, "Durable name"))]]);
 	// The next call writes different bytes into the same reservation.
-	loadCorpus([bytesOf(changeOf(901, "ZZZZZZZZ"))], false);
+	loadCorpus([[bytesOf(changeOf(901, "ZZZZZZZZ"))]], false);
 	const rows = runQuery([], { filters: [], limit: 10 }, { upserted: [], removed: [] });
 	expect(rows.records.map((r) => r.name).sort()).toEqual(["Durable name", "ZZZZZZZZ"]);
 });
@@ -76,7 +79,7 @@ test("a big vault loads in batches rather than failing", () => {
 	// 9,000 changes is past the per-push bound, so this exercises the
 	// batching AND the merge: a later batch must not wipe an earlier one.
 	const changes = Array.from({ length: 9000 }, (_, i) => changeOf(i, `Batch ${i}`));
-	const out = loadCorpus(changes.map(bytesOf), true);
+	const out = loadCorpus(changes.map((c) => [bytesOf(c)]));
 	expect(out.changes).toBe(9000);
 	// `cached` is the core's own count after the last batch - the number that
 	// says the merge worked, rather than what one push happened to see.
@@ -85,15 +88,133 @@ test("a big vault loads in batches rather than failing", () => {
 	expect(rows.total).toBe(9000);
 });
 
-test("damaged bytes are counted, and an empty load is refused", () => {
-	const out = loadCorpus([bytesOf(changeOf(1, "Good")), new Uint8Array([0xff, 0xff, 0xff]), bytesOf(changeOf(2, "Also good"))], true);
-	expect(out.objects).toBe(2);
+test("damaged changes are counted without discarding healthy objects", () => {
+	const out = loadCorpus([[bytesOf(changeOf(1, "Good"))], [new Uint8Array([0xff, 0xff, 0xff])], [bytesOf(changeOf(2, "Also good"))]]);
 	expect(out.skipped).toBe(1);
-	// No bytes is not an empty vault: the caller must not read it as one.
-	expect(loadCorpus([], true)).toEqual({ objects: 0, changes: 0, bytes: 0, skipped: 0, cached: 0 });
+	const rows = runQuery([], body, { upserted: [], removed: [] });
+	expect(rows.records.map((r) => r.name).sort()).toEqual(["Also good", "Good"]);
 });
 
-test("a completed load clears the cold-start debt", () => {
-	loadCorpus([bytesOf(changeOf(7, "Loaded"))], true);
-	expect(needsColdLoad()).toBe(false);
+test("an empty reset load replaces the previous vault", () => {
+	loadCorpus([[bytesOf(changeOf(7, "Previous vault"))]]);
+	loadCorpus([]);
+	expect(runQuery([], body, { upserted: [], removed: [] }).total).toBe(0);
+});
+
+test("hash-ordered storage keeps complete histories across corpus batches", async () => {
+	const name = `corpus-histories-${crypto.randomUUID()}`;
+	const store = new ChangeStore(name);
+	await store.open();
+	try {
+		const creation = changeOf(9000, "Original");
+		creation.id = coreCall<string>("codec", { action: "hash", change: creation });
+		const update: ChangeJSON = {
+			...creation,
+			id: "",
+			parentIds: [creation.id],
+			timestamp: creation.timestamp + 1,
+			ops: [{ fieldSet: { key: "name", value: { stringValue: "Updated" } } }],
+		};
+		const changes = [creation, ...Array.from({ length: 4001 }, (_, i) => changeOf(i, `Filler ${i}`)), update];
+		await store.addChanges(changes.map((change) => {
+			change.id = coreCall<string>("codec", { action: "hash", change });
+			return { change, bytes: bytesOf(change) };
+		}));
+		loadCorpus(await store.allChangeHistories());
+		const rows = runQuery([], { type: "note", filters: [{ key: "id", condition: "equal", value: creation.objectId }] }, { upserted: [], removed: [] });
+		expect(rows.records).toMatchObject([{
+			id: creation.objectId, typeKey: "note", name: "Updated", createdAt: creation.timestamp,
+			fields: { done: { boolValue: true } },
+		}]);
+		expect(rows.total).toBe(1);
+	} finally {
+		store.close();
+		await destroyDatabase(name);
+	}
+});
+
+test("one long object history is never split at a change-count boundary", () => {
+	const creation = changeOf(1, "Long history");
+	creation.id = coreCall<string>("codec", { action: "hash", change: creation });
+	const history = [bytesOf(creation)];
+	let parent = creation.id;
+	for (let i = 0; i < 4001; i++) {
+		const change: ChangeJSON = {
+			...creation, id: "", parentIds: [parent], timestamp: creation.timestamp + i + 1,
+			ops: [{ fieldSet: { key: "revision", value: { intValue: i } } }],
+		};
+		parent = coreCall<string>("codec", { action: "hash", change });
+		history.push(bytesOf(change));
+	}
+	loadCorpus([history]);
+	const rows = runQuery([], { type: "note" }, { upserted: [], removed: [] });
+	expect(rows.records).toMatchObject([{
+		id: creation.objectId, name: "Long history", createdAt: creation.timestamp,
+		fields: { revision: { intValue: 4000 } },
+	}]);
+	expect(rows.total).toBe(1);
+});
+
+test("a refused later history leaves JSON fallback owing a full reset", () => {
+	const histories = Array.from({ length: 4001 }, (_, i) => [bytesOf(changeOf(i, `Partial ${i}`))]);
+	// Framing counts toward the byte limit too. Never split an oversized object.
+	histories.push([new Uint8Array(24 * 1024 * 1024)]);
+	expect(() => loadCorpus(histories)).toThrow("Object history exceeds the corpus batch limit");
+	const survivor = stateOf(changeOf(8000, "Authoritative snapshot"));
+	const rows = runQuery([survivor], body, { upserted: [], removed: [] });
+	expect(rows.records.map((r) => r.name)).toEqual(["Authoritative snapshot"]);
+});
+
+test("cold queries and core resets cannot resurrect vanished objects", async () => {
+	// The backend exposes a singleton; isolate its store and restore every
+	// touched field so this scenario can share a process with other tests.
+	interface Internals {
+		store: ChangeStore;
+		states: Map<string, ObjectJSON>;
+		dirty: Set<string>;
+		vanished: Set<string>;
+		queryUpserted: Set<string>;
+		queryRemoved: Set<string>;
+		allDirty: boolean;
+	}
+	const internals = backend as unknown as Internals;
+	const saved = {
+		store: internals.store, states: internals.states, dirty: internals.dirty, vanished: internals.vanished,
+		queryUpserted: internals.queryUpserted, queryRemoved: internals.queryRemoved, allDirty: internals.allDirty,
+	};
+	const name = `corpus-vanished-${crypto.randomUUID()}`;
+	const store = new ChangeStore(name);
+	await store.open();
+	resetCore();
+	try {
+		const gone = changeOf(1, "Must stay vanished");
+		const live = changeOf(2, "Survivor");
+		const ledger: ChangeJSON = {
+			id: "", objectId: "__vanished__", parentIds: [], timestamp: 100, author: "test",
+			ops: [{ objectCreate: { typeKey: "vanish_log" } }, {
+				fieldSet: { key: `vanished:${gone.objectId}`, value: { intValue: 100 } },
+			}],
+		};
+		const changes = [gone, live, ledger];
+		await store.addChanges(changes.map((change) => {
+			change.id = coreCall<string>("codec", { action: "hash", change });
+			return { change, bytes: bytesOf(change) };
+		}));
+		// Exercise a warm database: there are no replay upserts to mask an
+		// incorrectly seeded corpus.
+		for (const change of changes) await store.putState(change.objectId, 1, stateOf(change));
+		Object.assign(internals, {
+			store, states: new Map(), dirty: new Set(), vanished: new Set(),
+			queryUpserted: new Set(), queryRemoved: new Set(), allDirty: true,
+		});
+		expect((await backend.fetchObjects()).map((o) => o.name)).toEqual(["Survivor"]);
+		expect((await backend.fetchQuery(body)).records.map((r: { name: string }) => r.name)).toEqual(["Survivor"]);
+		resetCore();
+		expect((await backend.fetchQuery(body)).records.map((r: { name: string }) => r.name)).toEqual(["Survivor"]);
+	} finally {
+		Object.assign(internals, saved);
+		resetCore();
+		store.close();
+		await destroyDatabase(name);
+	}
 });

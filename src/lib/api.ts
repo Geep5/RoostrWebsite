@@ -5,7 +5,7 @@
  * publish them to relays (the home daemon imports them like any device).
  */
 
-import type { ObjectJSON, ObjectSummary, SpaceJSON, RelationDefJSON, BlockJSON, ValueJSON, RepeatRuleJSON } from "$lib/types";
+import type { AgentMessage, ObjectJSON, ObjectSummary, SpaceJSON, RelationDefJSON, BlockJSON, ValueJSON, RepeatRuleJSON } from "$lib/types";
 import { backend, isLocalBackend } from "$lib/client-backend";
 import { IOSBackend } from "$lib/ios-backend";
 import { localJSON } from "$lib/local-transport";
@@ -192,4 +192,15 @@ export const chat = {
 		}>,
 	react: (objectId: string, messageId: string, emoji: string) =>
 		mutate("chat_react", { object_id: objectId, message_id: messageId, emoji }),
+};
+
+export const mailbox = {
+	send: (message: AgentMessage) =>
+		mutate("message_send", { object_id: message.sender.objectId, message }) as Promise<{
+			id: string;
+			exchangeId: string;
+			threadId: string;
+		}>,
+	retry: (objectId: string, messageId: string, stage: "delivery" | "processing", recipientObjectId?: string) =>
+		mutate("message_retry", { object_id: objectId, message_id: messageId, stage, recipient_object_id: recipientObjectId }),
 };
