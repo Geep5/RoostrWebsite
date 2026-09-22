@@ -11,29 +11,17 @@
 	 * store through the requirements step.
 	 */
 	import { onMount } from "svelte";
-	import { fetchAllQuery, fetchChannels, fetchObject, note } from "$lib/api";
+	import { fetchChannels, note } from "$lib/api";
 	import { backend, isLocalBackend } from "$lib/client-backend";
-	import { harnessFetch, pairedSession, onPairingChange } from "$lib/local-transport";
+	import { pairedSession, onPairingChange } from "$lib/local-transport";
 	import { loadKey } from "$lib/engine/keys";
 	import { fetchMachines, type MachineRow } from "$lib/serving";
-	import { cardOf, type Card, type DescribedObject } from "$lib/card-shape";
+	import type { Card } from "$lib/card-shape";
+	import { adoptLocally, agentCreateFields, loadKinds, localMachineId as fetchLocalMachineId, sv, type KindCard } from "$lib/agent-kinds";
 	import type { SpaceJSON, ValueJSON } from "$lib/types";
 	import PairGate from "$lib/components/PairGate.svelte";
 	import KeyGate from "$lib/components/KeyGate.svelte";
 	import SetupRequirements from "$lib/components/SetupRequirements.svelte";
-
-	/** Contract 1: the decoded card's `agent` block, present only on kind === "agent" cards. */
-	interface AgentSpec {
-		system: string;
-		model: string;
-		requires: string[];
-		skills: string[];
-		responsibleTypes: string[];
-	}
-	interface KindCard {
-		card: Card;
-		agent: AgentSpec;
-	}
 
 	const STEPS = ["pair", "computer", "kind", "requirements", "fields", "done"] as const;
 	type Step = (typeof STEPS)[number];
@@ -67,32 +55,9 @@
 	const kind = $derived(kinds.find((k) => k.card.key === kindKey));
 	const stepIndex = $derived(STEPS.indexOf(step));
 
-	/** A card older than Contract 1 has no `agent`; it is still a kind, with empty defaults. */
-	function agentSpecOf(object: DescribedObject): AgentSpec {
-		const raw = (object.descriptor as { agent?: Partial<AgentSpec> } | undefined)?.agent;
-		return {
-			system: raw?.system ?? "",
-			model: raw?.model ?? "",
-			requires: raw?.requires ?? [],
-			skills: raw?.skills ?? [],
-			responsibleTypes: raw?.responsibleTypes ?? [],
-		};
-	}
-
 	async function load() {
 		try {
-			const [{ machines: roster }, descriptors, channels] = await Promise.all([fetchMachines(), fetchAllQuery({ type: "descriptor" }), fetchChannels()]);
-			const objects = await Promise.all(descriptors.map((r) => fetchObject(r.id) as Promise<DescribedObject>));
-			const next: Card[] = [];
-			const nextKinds: KindCard[] = [];
-			for (const o of objects) {
-				const card = cardOf(o);
-				if (!card) continue;
-				next.push(card);
-				if (card.kind === "agent") nextKinds.push({ card, agent: agentSpecOf(o) });
-			}
-			next.sort((a, b) => a.name.localeCompare(b.name));
-			nextKinds.sort((a, b) => a.card.name.localeCompare(b.card.name));
+			const [{ machines: roster }, { cards: next, kinds: nextKinds }, channels] = await Promise.all([fetchMachines(), loadKinds(), fetchChannels()]);
 			machines = roster;
 			cards = next;
 			kinds = nextKinds;
@@ -104,14 +69,7 @@
 		} catch (e) {
 			loadError = e instanceof Error ? e.message : String(e);
 		}
-		if (isLocalBackend && pairedSession()) {
-			try {
-				const res = await harnessFetch("/machine");
-				localMachineId = res.ok ? ((await res.json()) as { id: string }).id : "";
-			} catch {
-				localMachineId = "";
-			}
-		}
+		localMachineId = await fetchLocalMachineId();
 	}
 
 	async function boot() {
@@ -171,23 +129,13 @@
 		return false;
 	});
 
-	const sv = (s: string): ValueJSON => ({ stringValue: s });
-	const lv = (items: string[]): ValueJSON => ({ valuesValue: { items: items.map((s) => ({ stringValue: s })) } });
-
 	/** Contract 2: one `agent` object; secret FieldSpec values are never written here. */
 	async function create() {
 		if (!machine || !kind || creating) return;
 		creating = true;
 		createError = "";
 		try {
-			const fields: Record<string, ValueJSON> = {
-				kind: sv(kind.card.key),
-				served_by: sv(machine.machineId),
-				requires: lv(kind.agent.requires),
-				responsible_types: lv(kind.agent.responsibleTypes),
-			};
-			// A card without a model (older codec) leaves the harness default in force.
-			if (kind.agent.model) fields.model = sv(kind.agent.model);
+			const fields: Record<string, ValueJSON> = agentCreateFields(kind.card.key, machine.machineId, kind);
 			if (spaceId) fields.channel = sv(spaceId);
 			for (const f of kind.card.fields) {
 				if (f.secret) continue;
@@ -197,15 +145,8 @@
 			const { id } = await note.create(name.trim() || kind.card.name, "agent", fields);
 			createdId = id;
 			// The harness adopts by served_by; when that harness is the one this
-			// tab is paired with, claim it on the local roster now as well, the
-			// way SpaceAgents does, so it answers before the next converge.
-			runsHere = false;
-			if (localMachineId && localMachineId === machine.machineId) {
-				try {
-					const res = await harnessFetch("/agents/toggle", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id, enabled: true }) });
-					runsHere = res.ok;
-				} catch { /* served_by still stands; the harness converge picks it up */ }
-			}
+			// tab is paired with, claim it on the local roster now as well.
+			runsHere = localMachineId !== "" && localMachineId === machine.machineId && (await adoptLocally(id));
 			step = "done";
 		} catch (e) {
 			createError = e instanceof Error ? e.message : String(e);

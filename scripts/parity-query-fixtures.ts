@@ -10,7 +10,7 @@ type Fixture = {
 	objects: ObjectJSON[];
 	cases: { name: string; body: QueryBody; ids: string[]; total: number; snippet?: string }[];
 };
-const fixture: Fixture = await Bun.file(new URL("../../glonOdin/fixtures/query-parity.json", import.meta.url)).json();
+const fixture: Fixture = await Bun.file(new URL("../../Roostr/fixtures/query-parity.json", import.meta.url)).json();
 await initCore({ wasmBytes: await Bun.file(new URL("../static/engine.wasm", import.meta.url)).arrayBuffer() });
 const originalNow = Date.now;
 Date.now = () => fixture.nowMs;

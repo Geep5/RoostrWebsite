@@ -14,7 +14,7 @@ import { sha256 } from "@noble/hashes/sha2.js";
 import { decodeChange, changeId } from "../src/lib/engine/proto";
 import { computeObject } from "../src/lib/engine/replay";
 import { initCore } from "../src/lib/engine/core";
-import { API as SERVER, apiFetch } from "../../glonOdin/harness/src/api";
+import { API as SERVER, apiFetch } from "../../Roostr/harness/src/api";
 
 await initCore({ wasmBytes: readFileSync(new URL("../static/engine.wasm", import.meta.url)) });
 
@@ -93,7 +93,7 @@ const failures: string[] = [];
 
 /**
  * Content address over RAW WIRE BYTES, exactly as the Odin server's
- * importer verifies it (glonOdin/src/sync.odin): every writer emits the
+ * importer verifies it (Roostr/src/sync.odin): every writer emits the
  * id as the leading field (0x0a 0x20 + 32 bytes); the address is
  * sha256(`0a 00` + rest). Re-encoding through any codec can't reproduce
  * legacy writers' explicit-empty-field bytes — bytes are the truth.

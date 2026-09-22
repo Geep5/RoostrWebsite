@@ -22,7 +22,7 @@ interface MutationResult {
 }
 
 await initCore({ wasmBytes: readFileSync(new URL("../static/engine.wasm", import.meta.url)) });
-const fixtureUrl = new URL("../../glonOdin/core/mutation_fixtures.json", import.meta.url);
+const fixtureUrl = new URL("../../Roostr/core/mutation_fixtures.json", import.meta.url);
 const fixtures = JSON.parse(readFileSync(fixtureUrl, "utf8")) as MutationFixture[];
 for (const fixture of fixtures) {
 	if (fixture.error) {

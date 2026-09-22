@@ -7,6 +7,7 @@
 	import { fetchQuery, note } from "$lib/api";
 	import { applyTemplate } from "$lib/create";
 	import { store } from "$lib/data.svelte";
+	import { adoptLocally, agentCreateFields, loadKinds, localMachineId } from "$lib/agent-kinds";
 
 	/**
 	 * View configuration for a query object — source types, filter rules,
@@ -329,7 +330,18 @@
 			if (viewType === "calendar" && dateKey) {
 				fields[dateKey] = { intValue: Date.now() };
 			}
+			// A new agent on a paired tab starts on this computer as the default
+			// kind, the way /setup would; a hosted or unpaired tab creates a
+			// bare agent the object page finishes.
+			const me = typeKey === "agent" ? await localMachineId() : "";
+			if (me) {
+				fields["served_by"] = { stringValue: me };
+				const { kinds } = await loadKinds();
+				const kind = kinds.find((k) => k.card.key === "assistant") ?? kinds[0];
+				if (kind) Object.assign(fields, agentCreateFields(kind.card.key, me, kind));
+			}
 			const { id } = await note.create(name, typeKey, fields);
+			if (me) await adoptLocally(id);
 			// Templates: an explicit pick wins (null = Blank, skip); else the
 			// type's default pre-fills - type pages read their own field,
 			// queries resolve the source type's default from the store.

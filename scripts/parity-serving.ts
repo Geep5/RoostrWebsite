@@ -15,7 +15,7 @@ interface ResolveFixture {
 // Native serving_test.odin embeds this same corpus: every host resolves the
 // serving machine for an object through one engine rule (docs/object-serving.md).
 const fixtures: { resolve: ResolveFixture[] } = JSON.parse(readFileSync(
-	new URL("../../glonOdin/core/serving_fixtures.json", import.meta.url), "utf8",
+	new URL("../../Roostr/core/serving_fixtures.json", import.meta.url), "utf8",
 ));
 await initCore({ wasmBytes: readFileSync(new URL("../static/engine.wasm", import.meta.url)) });
 

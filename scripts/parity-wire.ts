@@ -18,7 +18,7 @@ interface WireFixtures {
 // that used to live in sync.ts); the core must reproduce every byte. Native
 // wire_test.odin pins the same file.
 const fixtures: WireFixtures = JSON.parse(readFileSync(
-	new URL("../../glonOdin/core/wire_fixtures.json", import.meta.url), "utf8",
+	new URL("../../Roostr/core/wire_fixtures.json", import.meta.url), "utf8",
 ));
 await initCore({ wasmBytes: readFileSync(new URL("../static/engine.wasm", import.meta.url)) });
 

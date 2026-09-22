@@ -21,6 +21,7 @@
 	import CalendarView from "$lib/components/CalendarView.svelte";
 	import GalleryView from "$lib/components/GalleryView.svelte";
 	import SpaceManage from "$lib/components/SpaceManage.svelte";
+	import AgentSetup from "$lib/components/AgentSetup.svelte";
 	import TypePanel from "$lib/components/TypePanel.svelte";
 	import PropertyPanel from "$lib/components/PropertyPanel.svelte";
 	import EmojiPicker from "$lib/components/EmojiPicker.svelte";
@@ -74,16 +75,6 @@
 		}
 		{
 			if (page.params.id !== id) return;
-			// Agents have no page of their own — they're managed in channel
-			// settings (and deleting the object there once looked like
-			// deleting "all agents").
-			if (o.typeKey === "agent") {
-				const ch = o.fields["channel"]?.stringValue || store.channels[0]?.id;
-				if (ch) {
-					void goto(`/app/object/${ch}`, { replaceState: true });
-					return;
-				}
-			}
 			// Anytype's phone idiom: a chat object IS its discussion -
 			// open the full-screen chat page on mobile.
 			if (o.typeKey === "chat" && matchMedia("(max-width: 720px)").matches) {
@@ -546,6 +537,8 @@
 			<SpaceManage {object} {spaceInfo} onchanged={refresh} />
 		{:else if isChat}
 			<Discussion {object} full onchanged={refresh} />
+		{:else if isAgent}
+			<AgentSetup {object} onchanged={refresh} />
 		{:else if isType}
 			<TypePanel {object} onchanged={refresh} />
 			<div class="dataview">

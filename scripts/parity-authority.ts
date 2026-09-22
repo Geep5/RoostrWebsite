@@ -29,7 +29,7 @@ interface AuthorityFixtures {
 // Native authority_test.odin embeds this same hand-authored corpus, so every
 // replica's gate is checked against one set of expected outcomes.
 const fixtures: AuthorityFixtures = JSON.parse(readFileSync(
-	new URL("../../glonOdin/core/authority_fixtures.json", import.meta.url), "utf8",
+	new URL("../../Roostr/core/authority_fixtures.json", import.meta.url), "utf8",
 ));
 await initCore({ wasmBytes: readFileSync(new URL("../static/engine.wasm", import.meta.url)) });
 

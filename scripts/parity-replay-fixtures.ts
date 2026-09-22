@@ -14,7 +14,7 @@ interface ReplayFixture {
 // The native test embeds this exact corpus; neither side derives expected
 // state from its current replay implementation.
 const fixtures: ReplayFixture[] = JSON.parse(readFileSync(
-	new URL("../../glonOdin/core/replay_fixtures.json", import.meta.url), "utf8",
+	new URL("../../Roostr/core/replay_fixtures.json", import.meta.url), "utf8",
 ));
 await initCore({ wasmBytes: readFileSync(new URL("../static/engine.wasm", import.meta.url)) });
 

@@ -10,7 +10,7 @@
 import { runQuery } from "../src/lib/engine/query";
 import type { ObjectJSON } from "../src/lib/types";
 import { initCore } from "../src/lib/engine/core";
-import { API as BASE, apiFetch } from "../../glonOdin/harness/src/api";
+import { API as BASE, apiFetch } from "../../Roostr/harness/src/api";
 
 await initCore({ wasmBytes: await Bun.file(new URL("../static/engine.wasm", import.meta.url)).arrayBuffer() });
 
