@@ -12,6 +12,7 @@
 	import EmojiPicker from "./EmojiPicker.svelte";
 	import { goto } from "$app/navigation";
 	import { fetchQuery, note, chat, fetchAllQuery } from "$lib/api";
+	import { AGENTLESS_TYPES } from "$lib/agent-field";
 	import { store } from "$lib/data.svelte";
 	import { typeGlyph } from "$lib/create";
 	import { harnessFetch, pairedSession, onPairingChange } from "$lib/local-transport";
@@ -42,13 +43,21 @@
 		role: string;
 		/** What the harness last actually assembled and sent, section by section. */
 		effective: SystemPart[];
-		/** Object-bound agents: the object this agent belongs to. */
-		bound: string;
-		boundName: string;
+		updatedAt: number;
+	}
+
+	/** An object of this space whose `agent` field names the agent that answers it. */
+	interface AssignedRow {
+		id: string;
+		name: string;
+		icon: string;
+		agentId: string;
+		agentName: string;
 		updatedAt: number;
 	}
 
 	let agents = $state<AgentRow[]>([]);
+	let assigned = $state<AssignedRow[]>([]);
 	let roster = $state<string[] | null>(null); // null = no local daemon
 	/** agentId → hostnames of every machine claiming it (2+ = the bug shape). */
 	let claimedBy = $state<Record<string, string[]>>({});
@@ -75,15 +84,18 @@
 
 	const defaultChannelId = $derived(store.channels[0]?.id ?? "");
 
+	function inThisSpace(ch: string): boolean {
+		return ch === channelId || (ch === "" && channelId === defaultChannelId);
+	}
+
 	async function load() {
 		await loadOwnSkills();
-		const records = await fetchAllQuery({ type: "agent" });
+		const [records, pointing] = await Promise.all([
+			fetchAllQuery({ type: "agent" }),
+			fetchAllQuery({ filters: [{ key: "agent", condition: "notEmpty" }] }),
+		]);
 		agents = records
-			.filter((r) => {
-				if (r.fields["spawn_parent"]?.stringValue) return false; // subagents are ephemeral
-				const ch = r.fields["channel"]?.stringValue ?? "";
-				return ch === channelId || (ch === "" && channelId === defaultChannelId);
-			})
+			.filter((r) => !r.fields["spawn_parent"]?.stringValue && inThisSpace(r.fields["channel"]?.stringValue ?? "")) // subagents are ephemeral
 			.map((r) => ({
 				id: r.id,
 				name: r.fields["name"]?.stringValue || "Agent",
@@ -93,10 +105,23 @@
 				system: r.fields["system"]?.stringValue ?? "",
 				role: r.fields["role"]?.stringValue ?? "",
 				effective: parseEffective(r.fields["system_effective"]?.stringValue ?? ""),
-				bound: r.fields["bound_object"]?.stringValue ?? "",
-				boundName: "",
 				updatedAt: r.updatedAt,
 			}));
+		const agentName = (id: string) => agents.find((a) => a.id === id)?.name || store.agents.find((a) => a.id === id)?.name || `${id.slice(0, 8)}…`;
+		assigned = pointing
+			.filter((r) => !AGENTLESS_TYPES[r.typeKey] && inThisSpace(r.fields["channel"]?.stringValue ?? ""))
+			.map((r) => {
+				const agentId = r.fields["agent"]?.stringValue ?? "";
+				return {
+					id: r.id,
+					name: r.fields["name"]?.stringValue || `${r.id.slice(0, 8)}…`,
+					icon: r.fields["iconEmoji"]?.stringValue ?? "",
+					agentId,
+					agentName: agentName(agentId),
+					updatedAt: r.updatedAt,
+				};
+			})
+			.sort((a, b) => b.updatedAt - a.updatedAt);
 		// Claims and last-activity, both already in the DAG. Machines publish a
 		// claim when it changes; activity is the agent's own conversation's
 		// updatedAt, so neither costs a write. Two machines claiming one agent
@@ -120,12 +145,6 @@
 			if (owner) active[owner] = Math.max(active[owner] ?? 0, c.updatedAt);
 		}
 		lastActive = active;
-		// Object agents list under their object's name.
-		for (const a of agents) {
-			if (!a.bound) continue;
-			const o = store.summaries.find((x) => x.id === a.bound);
-			a.boundName = o?.name || "";
-		}
 		// Definitions nudge: how many defs in this space say nothing.
 		const [types, props] = await Promise.all([
 			fetchAllQuery({ type: "type", filters: [{ key: "channel", condition: "equal", value: channelId }] }),
@@ -135,23 +154,15 @@
 		undefinedProps = props.filter((t) => !(t.fields["description"]?.stringValue ?? "").trim() && !(t.fields["hidden"]?.boolValue === true)).length;
 	}
 
-	let undefinedTypes = $state(0);
-	let undefinedProps = $state(0);
-	const spaceAgents = $derived(agents.filter((a) => !a.bound));
-	const boundAgents = $derived(agents.filter((a) => a.bound).toSorted((a, b) => b.updatedAt - a.updatedAt));
-
-	/** Retire an object agent: the agent and its holistic chat go; the
-	 *  object and any pair chats (shared history) stay. */
-	async function retire(a: AgentRow) {
-		if (!confirm(`Retire the agent of "${a.boundName || a.name}"? Its private chat goes with it; the object and shared conversations stay.`)) return;
-		const chats = await fetchQuery({ type: "chat", filters: [{ key: "agent", condition: "equal", value: a.id }], limit: 10 });
-		for (const c of chats.records) {
-			if (c.fields["a2a_pair"]?.stringValue) continue;
-			await note.del(c.id);
-		}
-		await note.del(a.id);
+	/** Back to the space default: clears the object's `agent` field; the agent and the object both stay. */
+	async function unassign(o: AssignedRow) {
+		if (!confirm(`Let the space agent answer "${o.name}" instead of ${o.agentName}?`)) return;
+		await note.deleteField(o.id, "agent");
 		await load();
 	}
+
+	let undefinedTypes = $state(0);
+	let undefinedProps = $state(0);
 
 	/** The harness publishes this as a JSON string field; a stale shape must
 	 * never break the panel. */
@@ -555,7 +566,7 @@
 {/if}
 {#if actionError}<p class="auth-warn" role="alert">{actionError}</p>{/if}
 
-{#each spaceAgents as a (a.id)}
+{#each agents as a (a.id)}
 	{@const runsHere = roster?.includes(a.id) ?? false}
 	{@const blocked = roster === null ? "" : authBlock(a.model)}
 	{@const claims = claimedBy[a.id] ?? []}
@@ -741,24 +752,19 @@
 	<p class="hint">No agents in this space yet.</p>
 {/if}
 
-{#if boundAgents.length > 0}
-	<details class="bound-agents">
-		<summary>Object agents · {boundAgents.length}</summary>
-		<p class="hint">Minted when you start a discussion on an object. Idle ones cost nothing.</p>
-		{#each boundAgents as a (a.id)}
-			{@const claims = claimedBy[a.id] ?? []}
-			<div class="bound-row">
-				<a class="bound-link" href="/app/object/{a.bound}">
-					<span class="obj-icon">{a.icon || "🛰️"}</span>{a.boundName || a.name}
+{#if assigned.length > 0}
+	<details class="assigned-objects" data-testid="assigned-objects">
+		<summary>Assigned objects · {assigned.length}</summary>
+		<p class="hint">Objects answered by a specific agent instead of the space's default. Set from the agent chip on the object.</p>
+		{#each assigned as o (o.id)}
+			<div class="assigned-row" data-testid="assigned-row-{o.id}">
+				<a class="assigned-link" href="/app/object/{o.id}">
+					{#if o.icon}<span class="obj-icon">{o.icon}</span>{/if}{o.name}
 				</a>
-				<!-- Bound agents are where a double claim actually bites: each one
-				     answers its own object's discussion, so two machines serving it
-				     answer the human twice. -->
-				<span class="claim" class:contested={claims.length > 1}>
-					{#if claims.length > 1}⚠ {claims.join(" and ")}{:else if claims.length === 1}{claims[0]}{:else}unclaimed{/if}
-				</span>
-				<span class="bound-when">{new Date(a.updatedAt).toLocaleDateString()}</span>
-				<button class="danger" onclick={() => void retire(a)}>Retire</button>
+				<span class="assigned-arrow">→</span>
+				<a class="assigned-link agent" href="/app/object/{o.agentId}">{o.agentName}</a>
+				<span class="assigned-when">{new Date(o.updatedAt).toLocaleDateString()}</span>
+				<button class="danger" onclick={() => void unassign(o)}>Unassign</button>
 			</div>
 		{/each}
 	</details>
@@ -1039,19 +1045,19 @@
 		position: relative;
 		margin: 4px 0 8px 24px;
 	}
-	.bound-agents {
+	.assigned-objects {
 		margin-top: 14px;
 		border: 1px solid var(--border);
 		border-radius: 10px;
 		padding: 8px 12px;
 	}
-	.bound-agents summary {
+	.assigned-objects summary {
 		cursor: pointer;
 		font-size: 13px;
 		font-weight: 600;
 		color: var(--fg);
 	}
-	.bound-row {
+	.assigned-row {
 		display: flex;
 		align-items: center;
 		gap: 10px;
@@ -1059,10 +1065,10 @@
 		border-top: 1px solid var(--border);
 		font-size: 13px;
 	}
-	.bound-row:first-of-type {
+	.assigned-row:first-of-type {
 		border-top: none;
 	}
-	.bound-link {
+	.assigned-link {
 		flex: 1;
 		color: var(--fg);
 		text-decoration: none;
@@ -1070,14 +1076,19 @@
 		text-overflow: ellipsis;
 		white-space: nowrap;
 	}
-	.bound-link:hover {
+	.assigned-link.agent {
+		flex: 0 1 auto;
+		color: var(--muted);
+	}
+	.assigned-link:hover {
 		text-decoration: underline;
 	}
-	.bound-when {
+	.assigned-arrow,
+	.assigned-when {
 		color: var(--muted);
 		font-size: 12px;
 	}
-	.bound-row .danger {
+	.assigned-row .danger {
 		background: none;
 		border: 1px solid var(--border);
 		border-radius: 7px;

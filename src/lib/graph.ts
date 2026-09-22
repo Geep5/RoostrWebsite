@@ -14,7 +14,7 @@ export interface GraphNode {
 	radius: number;
 	color: [number, number, number];
 	cluster: number;
-	/** An object-bound agent lives here (faint ring in the render). */
+	/** The object names an agent of its own (faint ring in the render). */
 	hasAgent: boolean;
 	x: number;
 	y: number;
@@ -169,19 +169,8 @@ export async function buildGraph(channelId: string, isDefaultChannel: boolean): 
 	for (const [i, n] of nodes.entries()) {
 		// Small flat dots (Anytype scale): channels stand out, degree adds a little.
 		n.radius = n.kind === "channel" ? 14 : 5 + 1.6 * Math.sqrt(degree[i]);
-	}
-
-	// Presence: objects with their own agent get a marker.
-	try {
-		const agents = await fetchQuery({ type: "agent", limit: 500 });
-		for (const a of agents.records) {
-			const b = a.fields["bound_object"]?.stringValue;
-			if (!b) continue;
-			const i = index.get(b);
-			if (i !== undefined) nodes[i].hasAgent = true;
-		}
-	} catch {
-		/* no presence markers */
+		// Presence: an object naming its own agent gets a marker.
+		n.hasAgent = !!rows[i].fields["agent"]?.stringValue;
 	}
 
 	// ── Type clustering: every kind gets a home on a ring sized by the

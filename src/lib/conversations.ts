@@ -1,5 +1,6 @@
 /** Names and recipient discovery for the local object mailbox. */
 import { fetchAllQuery } from "$lib/api";
+import { AGENTLESS_TYPES } from "$lib/agent-field";
 import { lastChatMessage } from "$lib/chat";
 import { store } from "$lib/data.svelte";
 import type { AgentEndpoint, ObjectJSON } from "$lib/types";
@@ -26,8 +27,13 @@ export const objectThreads = (object: ObjectJSON): AgentThread[] => pureObjectTh
 
 export async function loadObjectAgents(object: ObjectJSON): Promise<ObjectAgentOption[]> {
 	const spaceId = object.typeKey === "channel" ? object.id : object.fields["channel"]?.stringValue ?? "";
-	const agents = await fetchAllQuery({ type: "agent", filters: [{ key: "channel", condition: "equal", value: spaceId }] });
-	return objectAgentOptions(agents, spaceId, (id) => id === object.id ? object.fields["name"]?.stringValue ?? "" : nameOf(id));
+	const inSpace = { key: "channel", condition: "equal", value: spaceId };
+	// The space's agents, plus every object in it that names one as its agent.
+	const [agents, assigned] = await Promise.all([
+		fetchAllQuery({ type: "agent", filters: [inSpace] }),
+		fetchAllQuery({ filters: [inSpace, { key: "agent", condition: "notEmpty" }] }),
+	]);
+	return objectAgentOptions([...agents, ...assigned.filter((r) => !AGENTLESS_TYPES[r.typeKey])], spaceId, (id) => id === object.id ? object.fields["name"]?.stringValue ?? "" : nameOf(id));
 }
 
 export function agoShort(ts: number): string {

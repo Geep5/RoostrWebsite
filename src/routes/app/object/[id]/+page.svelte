@@ -12,6 +12,7 @@
 	import FeaturedProps from "$lib/components/FeaturedProps.svelte";
 	import Repeat from "$lib/components/Repeat.svelte";
 	import ServingChip from "$lib/components/ServingChip.svelte";
+	import AgentChip from "$lib/components/AgentChip.svelte";
 	import Discussion from "$lib/components/Discussion.svelte";
 	import ConversationDrawer from "$lib/components/ConversationDrawer.svelte";
 	import { objectThreads } from "$lib/conversations";
@@ -528,6 +529,7 @@
 		{/if}
 		{#if !UNSERVED_TYPES[object.typeKey]}
 			<ServingChip {object} onchanged={refresh} />
+			<AgentChip {object} onchanged={refresh} />
 		{/if}
 		{#if !isChannel && !isChat && !isType && !isRelation && !isTemplate && !isQuery && !isCollection && !isAgent}
 			<Repeat {object} onchanged={refresh} />

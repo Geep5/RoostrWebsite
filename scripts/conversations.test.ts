@@ -182,19 +182,22 @@ test("reply-all keeps the human sender's own agent but excludes the responding a
 	expect(message.recipients).toEqual([homeAgent, other, third]);
 });
 
-test("existing recipient agents resolve to bound objects, space objects, or their own object without crossing spaces", () => {
+test("existing recipient agents resolve to assigned objects, space objects, or their own object without crossing spaces", () => {
 	const record = (id: string, values: Record<string, string>) => ({
 		id, fields: Object.fromEntries(Object.entries(values).map(([key, value]) => [key, { stringValue: value }])),
 	});
 	const records = [
-		record("agent-b", { channel: "space", bound_object: "obj", name: "Duplicate" }),
-		record("agent-a", { channel: "space", bound_object: "obj", name: "Bound" }),
+		record("obj", { channel: "space", agent: "agent-a", name: "Bound" }),
+		record("agent-a", { channel: "space", name: "Free" }),
 		record("space-agent", { channel: "space", space_default: "space", name: "Space" }),
 		record("unbound", { channel: "space", name: "Unbound" }),
-		record("foreign", { channel: "elsewhere", bound_object: "foreign-object" }),
+		record("foreign", { channel: "elsewhere", name: "Foreign" }),
+		record("foreign-object", { channel: "elsewhere", agent: "agent-a" }),
+		record("stray", { channel: "space", agent: "foreign" }),
 	];
 	const options = objectAgentOptions(records, "space", (id) => id);
 	expect(options.map((option) => option.endpoint)).toEqual([
+		{ objectId: "agent-a", agentId: "agent-a" },
 		{ objectId: "obj", agentId: "agent-a" },
 		{ objectId: "space", agentId: "space-agent" },
 		{ objectId: "unbound", agentId: "unbound" },

@@ -101,7 +101,7 @@ describe("shared authority", () => {
 		expect(permits(edit, null)).toBe(false);
 	});
 	test("protects administrative fields, control types and channel deletion", () => {
-		for (const key of ["members", "owner", "keyId", "key", "keys", "served_by", "machine", "machine_id", "machineId", "bound_object"]) {
+		for (const key of ["members", "owner", "keyId", "key", "keys", "served_by", "machine", "machine_id", "machineId"]) {
 			expect(permits(change("doc", [{ fieldSet: { key, value: { stringValue: "attack" } } }]))).toBe(false);
 			expect(permits(change("doc", [{ fieldDelete: { key } }]))).toBe(false);
 		}

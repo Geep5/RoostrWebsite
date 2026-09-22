@@ -31,24 +31,41 @@ export function authorLabel(author: string, nameOf: (id: string) => string): str
 	return author.length > 12 ? `${author.slice(0, 12)}…` : author;
 }
 
-/** Existing agents only; space agents receive mail on the space object. */
+/**
+ * Existing agents only; space agents receive mail on the space object.
+ * `records` mixes the space's agents with objects whose `agent` field
+ * names one of them; an agent never carries `agent` itself, so that field
+ * is what tells the two apart. Objects and agents outside `spaceId` are
+ * dropped, as is an object pointing at an agent from another space.
+ */
 export function objectAgentOptions(
 	records: Array<{ id: string; fields: Record<string, ValueJSON> }>,
 	spaceId: string,
 	nameOf: (id: string) => string,
 ): ObjectAgentOption[] {
+	const inSpace = [...records]
+		.filter((record) => (record.fields["channel"]?.stringValue ?? "") === spaceId)
+		.sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+	const agents = new Map(inSpace.filter((record) => !record.fields["agent"]?.stringValue).map((record) => [record.id, record]));
 	const byObject = new Map<string, ObjectAgentOption>();
-	for (const record of [...records].sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0)) {
-		if ((record.fields["channel"]?.stringValue ?? "") !== spaceId) continue;
-		const objectId = record.fields["bound_object"]?.stringValue || record.fields["space_default"]?.stringValue || record.id;
-		if (byObject.has(objectId)) continue;
-		const agentName = record.fields["name"]?.stringValue || "Agent";
+	const add = (objectId: string, agent: { id: string; fields: Record<string, ValueJSON> }) => {
+		if (byObject.has(objectId)) return;
+		const agentName = agent.fields["name"]?.stringValue || "Agent";
 		byObject.set(objectId, {
-			endpoint: { objectId, agentId: record.id },
+			endpoint: { objectId, agentId: agent.id },
 			name: nameOf(objectId) || agentName,
 			agentName,
-			icon: record.fields["iconEmoji"]?.stringValue ?? "",
+			icon: agent.fields["iconEmoji"]?.stringValue ?? "",
 		});
+	};
+	for (const record of inSpace) {
+		const pointedAt = record.fields["agent"]?.stringValue;
+		if (pointedAt) {
+			const agent = agents.get(pointedAt);
+			if (agent) add(record.id, agent);
+		} else {
+			add(record.fields["space_default"]?.stringValue || record.id, record);
+		}
 	}
 	return [...byObject.values()].sort((a, b) => a.name.localeCompare(b.name) || a.endpoint.objectId.localeCompare(b.endpoint.objectId));
 }

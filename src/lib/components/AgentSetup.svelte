@@ -6,7 +6,7 @@
 	 * through `note.setField`; secrets never land on the agent.
 	 */
 	import { onMount } from "svelte";
-	import { note } from "$lib/api";
+	import { fetchQuery, note } from "$lib/api";
 	import { fetchMachines, type MachineRow } from "$lib/serving";
 	import type { Card } from "$lib/card-shape";
 	import { adoptLocally, agentCreateFields, loadKinds, localMachineId as fetchLocalMachineId, sv, type KindCard } from "$lib/agent-kinds";
@@ -24,21 +24,28 @@
 	let saveError = $state("");
 	let satisfied = $state(false);
 	let draft = $state<Record<string, string>>({});
+	/** Objects whose `agent` field names this one: what it answers for. */
+	let answersFor = $state<Array<{ id: string; name: string }>>([]);
 
 	const servedBy = $derived(object.fields["served_by"]?.stringValue ?? "");
 	const kindKey = $derived(object.fields["kind"]?.stringValue ?? "");
-	/** Bound and space-default agents follow their object's or space's serving; no picker. */
-	const follows = $derived(!!object.fields["bound_object"]?.stringValue || !!object.fields["space_default"]?.stringValue);
+	/** Space-default agents follow their space's serving; no picker. */
+	const follows = $derived(!!object.fields["space_default"]?.stringValue);
 	const machine = $derived(machines.find((m) => m.machineId === servedBy));
 	const kind = $derived(kinds.find((k) => k.card.key === kindKey));
 	const runsHere = $derived(!!servedBy && servedBy === localMachineId);
 
 	async function load() {
 		try {
-			const [{ machines: roster }, { cards: next, kinds: nextKinds }] = await Promise.all([fetchMachines(), loadKinds()]);
+			const [{ machines: roster }, { cards: next, kinds: nextKinds }, assigned] = await Promise.all([
+				fetchMachines(),
+				loadKinds(),
+				fetchQuery({ filters: [{ key: "agent", condition: "equal", value: object.id }], limit: 200 }),
+			]);
 			machines = roster;
 			cards = next;
 			kinds = nextKinds;
+			answersFor = assigned.records.map((r) => ({ id: r.id, name: r.fields["name"]?.stringValue || r.id.slice(0, 8) }));
 			loadError = "";
 		} catch (e) {
 			loadError = e instanceof Error ? e.message : String(e);
@@ -97,7 +104,7 @@
 <section class="agent-setup" data-testid="agent-setup">
 	<p class="status" data-testid="agent-status">
 		{#if follows}
-			Serving follows the {object.fields["bound_object"]?.stringValue ? "object" : "space"} this agent belongs to.
+			Serving follows the space this agent belongs to.
 		{:else if machine}
 			Runs on <strong>{nameOf(machine)}</strong>{runsHere ? " · this one" : ""}{kind?.agent.model ? ` · model ${kind.agent.model}` : ""}
 		{:else if servedBy}
@@ -121,6 +128,17 @@
 					</button>
 				{/each}
 			</div>
+		</div>
+	{/if}
+
+	{#if answersFor.length > 0}
+		<div class="sec" data-testid="agent-answers-for">
+			<div class="sec-name">Answers for</div>
+			<ul class="answers">
+				{#each answersFor as o (o.id)}
+					<li><a href="/app/object/{o.id}">{o.name}</a></li>
+				{/each}
+			</ul>
 		</div>
 	{/if}
 
@@ -203,5 +221,8 @@
 	.field input:focus { border-color: var(--accent); outline: none; }
 	.field input:disabled { opacity: 0.5; }
 	.note { color: var(--muted); font-size: 12px; }
+	.answers { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 4px; font-size: 13px; }
+	.answers a { color: var(--fg); text-decoration: none; }
+	.answers a:hover { text-decoration: underline; }
 	.error { margin: 0; color: #ff6961; font-size: 13px; }
 </style>
