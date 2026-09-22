@@ -29,6 +29,8 @@ export interface Card {
 	auths: string[];
 	check?: { command: string; expectContains: string; timeoutMs: number };
 	install?: { prompt: string; uninstallPrompt: string; docsUrl: string };
+	/** Present only on `kind === "agent"` cards: what an agent of this kind is. */
+	agent?: { system: string; model: string; requires: string[]; skills: string[]; responsibleTypes: string[] };
 	version: string;
 	author: string;
 }
@@ -56,6 +58,7 @@ export function cardOf(object: DescribedObject): Card | undefined {
 		auths: card.auths ?? [],
 		check: card.check,
 		install: card.install,
+		agent: card.agent,
 		version: card.version ?? "",
 		author: card.author ?? "",
 	};

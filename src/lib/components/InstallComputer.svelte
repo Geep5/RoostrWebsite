@@ -104,7 +104,7 @@
 					</button>
 				{/each}
 			</div>
-			<p class="ic-note">Any computer signed in with your key can serve this space. You can change it later in space settings.</p>
+			<p class="ic-note">Any computer signed in with your key can serve this space. You can change it later in space settings. <a href="/setup">Set up an agent on one, step by step.</a></p>
 		{:else}
 			<ol class="ic-steps">
 				<li>

@@ -21,6 +21,7 @@ type Descriptor = {
 	fields: Array<{ key: string; label: string; secret: boolean; format: string; note: string }>;
 	auths: string[];
 	check?: { command: string; expectContains: string; timeoutMs: number };
+	agent?: { system: string; model: string; requires: string[]; skills: string[]; responsibleTypes: string[] };
 	unknown?: string;
 };
 
@@ -59,18 +60,40 @@ test("a client renders a login form it has never seen", () => {
 });
 
 test("a descriptor from a newer writer survives this host", () => {
-	// Field 11 (length-delimited) does not exist in this build: tag 0x5A,
-	// length 8, payload "unknown!" = Wgh1bmtub3duIQ==. Decode, hand it back, and the
+	// Field 12 (length-delimited) does not exist in this build: tag 0x62,
+	// length 8, payload "unknown!" = Ygh1bmtub3duIQ==. Decode, hand it back, and the
 	// bytes must be identical - otherwise every old client is data loss.
 	const original = coreCall<string>("descriptor", {
 		action: "encode",
 		type: "descriptor",
-		value: { key: "future", name: "Next year", kind: "skill", fields: [], auths: [], unknown: "Wgh1bmtub3duIQ==" },
+		value: { key: "future", name: "Next year", kind: "skill", fields: [], auths: [], unknown: "Ygh1bmtub3duIQ==" },
 	});
 	const decoded = coreCall<Descriptor>("descriptor", { action: "decode", type: "descriptor", bytes: original });
-	expect(decoded.unknown).toBe("Wgh1bmtub3duIQ==");
+	expect(decoded.unknown).toBe("Ygh1bmtub3duIQ==");
 	const again = coreCall<string>("descriptor", { action: "encode", type: "descriptor", value: decoded });
 	expect(again).toBe(original);
+});
+
+test("an agent card says what the kind is", () => {
+	// A kind picker copies `requires` onto the agent it mints; every list has
+	// to come back intact, or the agent lands on a machine that cannot run it.
+	const agent = { system: "You are Marco.", model: "kimi-k2-0905-preview", requires: ["matcherino-dev", "discord-bot"], skills: [], responsibleTypes: ["task"] };
+	const wire = coreCall<string>("descriptor", {
+		action: "encode",
+		type: "descriptor",
+		value: { key: "marco", name: "Marco", kind: "agent", fields: [], auths: [], agent },
+	});
+	const d = coreCall<Descriptor>("descriptor", { action: "decode", type: "descriptor", bytes: wire });
+	expect(d.kind).toBe("agent");
+	expect(d.agent).toEqual(agent);
+	expect(coreCall<string>("descriptor", { action: "encode", type: "descriptor", value: d })).toBe(wire);
+	// The key's presence is how a client tells an agent card from the rest.
+	const plain = coreCall<Descriptor>("descriptor", {
+		action: "decode",
+		type: "descriptor",
+		bytes: coreCall<string>("descriptor", { action: "encode", type: "descriptor", value: { key: "browserless", name: "", kind: "skill", fields: [], auths: [] } }),
+	});
+	expect(plain.agent).toBeUndefined();
 });
 
 test("a client names a thread's participants from its root bytes", () => {
