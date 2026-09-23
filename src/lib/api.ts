@@ -94,12 +94,10 @@ export const note = {
 		mutate("vanish", Array.isArray(objectIds) ? { object_ids: objectIds } : { object_id: objectIds }),
 };
 
-/** Recurring objects: the engine owns the rule and the occurrence math; a recurring object is never `done`. */
+/** Recurring objects: the engine owns the rule and the occurrence math; a recurring object is never `done`. Advancing an occurrence is the agent's `occurrence_complete` tool, not a UI action. */
 export const repeat = {
 	set: (objectId: string, rule: RepeatRuleJSON) => mutate("repeat_set", { object_id: objectId, rule }) as Promise<{ next: number }>,
 	clear: (objectId: string) => mutate("repeat_clear", { object_id: objectId }),
-	complete: (objectId: string) => mutate("occurrence_complete", { object_id: objectId }) as Promise<{ next: number }>,
-	skip: (objectId: string) => mutate("occurrence_skip", { object_id: objectId }) as Promise<{ next: number }>,
 };
 
 export const table = {

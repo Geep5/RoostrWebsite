@@ -1,10 +1,9 @@
 <script lang="ts">
 	/**
 	 * Recurring objects. The engine owns the rule (`object.fields.repeat`)
-	 * and the occurrence math; this component renders it and issues the
-	 * `repeat_*` / `occurrence_*` mutations. A recurring object is never
-	 * `done` - ticking its checkbox completes the current occurrence and the
-	 * engine advances `next`.
+	 * and the occurrence math; this component renders when it next runs and
+	 * lets a person edit the cadence or turn repeating off. Advancing an
+	 * occurrence is the agent's job (`occurrence_complete`), never a button.
 	 *
 	 * The rule is deliberately small: every N <unit>, on <weekdays | day of
 	 * month>, at <time of day>, counted from an anchor day.
@@ -266,6 +265,9 @@
 				Does not repeat
 			{/if}
 		</button>
+		{#if rule}
+			<button class="act" disabled={busy} onclick={() => void clear()}>Turn off repeating</button>
+		{/if}
 	</div>
 
 	{#if rule}
@@ -274,11 +276,8 @@
 				<span>runs on {servingName || "the machine serving this space"}{isIOSBackend ? " · not on this device" : ""}{#if servingWarning}<span class="overdue"> · {servingWarning}</span>{/if}</span>
 			</p>
 		{/if}
-		{#if rule.last_done !== undefined || rule.fired_at !== undefined || rule.last_run}
+		{#if rule.fired_at !== undefined || rule.last_run}
 			<p class="meta">
-				{#if rule.last_done !== undefined}
-					<span>last done {fmtLong(rule.last_done)} · {rule.count ?? 0} {rule.count === 1 ? "time" : "times"}</span>
-				{/if}
 				{#if rule.fired_at !== undefined}
 					<span>fired {fmtLong(rule.fired_at)}{rule.fired_by ? ` by ${rule.fired_by}` : ""}</span>
 				{/if}
@@ -289,10 +288,6 @@
 				{/if}
 			</p>
 		{/if}
-		<div class="actions">
-			<button class="act primary" disabled={busy} onclick={() => void run(() => repeat.complete(object.id))}>✓ Complete this occurrence</button>
-			<button class="act" disabled={busy} onclick={() => void run(() => repeat.skip(object.id))}>Skip</button>
-		</div>
 	{/if}
 	{#if error}<p class="err">{error}</p>{/if}
 
@@ -412,13 +407,6 @@
 		font-size: 11.5px;
 		color: var(--muted);
 	}
-	.actions {
-		display: flex;
-		align-items: center;
-		flex-wrap: wrap;
-		gap: 6px;
-		padding-left: 4px;
-	}
 	.act {
 		border: 1px solid var(--border);
 		background: none;
@@ -434,11 +422,6 @@
 	.act:disabled {
 		opacity: 0.5;
 		cursor: default;
-	}
-	.act.primary {
-		background: var(--accent);
-		border-color: var(--accent);
-		color: #fff;
 	}
 	.err {
 		margin: 0;

@@ -260,7 +260,6 @@ export interface RepeatJSON extends Omit<RepeatRuleJSON, "anchor_ms"> {
 	fired_at?: number;
 	fired_by?: string;
 	last_done?: number;
-	last_skipped?: number;
 	count?: number;
 	last_run?: { at: number; machine: string; conversation: string; error?: string };
 }
@@ -292,7 +291,6 @@ export function repeatOf(fields: Record<string, ValueJSON>): RepeatJSON | null {
 		fired_at: int(e["fired_at"]),
 		fired_by: str(e["fired_by"]),
 		last_done: int(e["last_done"]),
-		last_skipped: int(e["last_skipped"]),
 		count: int(e["count"]),
 		last_run: run && runAt !== undefined ? { at: runAt, machine: str(run["machine"]) ?? "", conversation: str(run["conversation"]) ?? "", error: str(run["error"]) } : undefined,
 	};
