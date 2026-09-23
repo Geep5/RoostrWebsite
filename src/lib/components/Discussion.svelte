@@ -2,7 +2,8 @@
 	/** Human/private chat stays local; exchanges send immutable mailbox envelopes. */
 	import type { AgentEndpoint, AgentMessage, ObjectJSON } from "$lib/types";
 	import { chatMessages, isLegacyExchange, replyRecipients, uniqueEndpoints } from "$lib/chat";
-	import { endpointName } from "$lib/conversations";
+	import { endpointName, loadObjectAgents } from "$lib/conversations";
+	import type { ObjectAgentOption } from "$lib/threads";
 	import { goto } from "$app/navigation";
 	import { chat, mailbox, settings } from "$lib/api";
 	import { store } from "$lib/data.svelte";
@@ -110,6 +111,84 @@
 	let retryError = $state("");
 	let retrying = $state<string[]>([]);
 	let pendingSend: AgentMessage | undefined;
+
+	// ── @-mentions: Discord-style agent tag menu above the composer ──
+	// A channel's own discussion wakes no agent on its own (the harness
+	// routes those events to serving convergence, not a turn): the only way
+	// to reach an agent from chat is an addressed mailbox envelope, and the
+	// @ menu is how you address one. The roster is the same source as the
+	// exchange picker's: the space's agents plus objects that name one.
+	let tagOptions = $state<ObjectAgentOption[] | null>(null);
+	let mention = $state<{ start: number; query: string } | null>(null);
+	let mentionIndex = $state(0);
+	/** Agents tagged for the next send; a deleted @Name untags at send time. */
+	let tagged = $state<ObjectAgentOption[]>([]);
+
+	async function ensureTagOptions(): Promise<void> {
+		if (tagOptions) return;
+		try {
+			tagOptions = await loadObjectAgents(object);
+		} catch {
+			tagOptions = [];
+		}
+	}
+
+	const mentionMatches = $derived.by(() => {
+		if (!mention || !tagOptions) return [];
+		const q = mention.query.toLowerCase();
+		return tagOptions
+			.filter((option) => !tagged.some((t) => t.endpoint.objectId === option.endpoint.objectId))
+			.filter((option) => !q || option.agentName.toLowerCase().includes(q) || option.name.toLowerCase().includes(q))
+			.slice(0, 8);
+	});
+
+	/** Open/refresh/close the menu from the caret: a `@…` token ends at the caret. */
+	function updateMention() {
+		const el = composerEl;
+		if (!el) return;
+		const caret = el.selectionStart ?? 0;
+		const hit = /(?:^|\s)@([^@\n]*)$/.exec(draft.slice(0, caret));
+		if (!hit) {
+			mention = null;
+			return;
+		}
+		const query = hit[1];
+		// Text has no chips: a completed tag is only `@Name ` in the draft.
+		// Once the caret moves past it the token still matches, so close
+		// explicitly or the menu trails the rest of the message.
+		if (tagged.some((option) => query.startsWith(`${option.agentName} `))) {
+			mention = null;
+			return;
+		}
+		if (!mention || mention.query !== query) mentionIndex = 0;
+		mention = { start: caret - query.length - 1, query };
+		void ensureTagOptions();
+	}
+
+	function pickMention(option: ObjectAgentOption) {
+		const el = composerEl;
+		const at = mention;
+		if (!el || !at) return;
+		const caret = el.selectionStart ?? at.start;
+		const label = `@${option.agentName}`;
+		// One trailing space so the next word doesn't glue onto the tag.
+		const after = draft.slice(caret).startsWith(" ") ? draft.slice(caret) : ` ${draft.slice(caret)}`;
+		draft = `${draft.slice(0, at.start)}${label}${after}`;
+		if (!tagged.some((t) => t.endpoint.objectId === option.endpoint.objectId)) tagged = [...tagged, option];
+		mention = null;
+		requestAnimationFrame(() => {
+			el.focus();
+			const pos = at.start + label.length + 1;
+			el.setSelectionRange(pos, pos);
+			el.style.height = "auto";
+			el.style.height = `${el.scrollHeight}px`;
+		});
+	}
+
+	/** Tags whose @Name survived editing and are present in this text. */
+	function liveTags(text: string): ObjectAgentOption[] {
+		return tagged.filter((option) => text.includes(`@${option.agentName}`));
+	}
 	const replyMessage = $derived((replyTo ? messageById.get(replyTo) : messages[messages.length - 1])?.mailbox?.message);
 	const replyAll = $derived(replyMessage ? replyRecipients(replyMessage, { objectId: object.id, agentId: "" }) : []);
 	const audience = $derived(privateRecipient ? replyAll.filter((endpoint) => endpoint.objectId === privateRecipient) : replyAll);
@@ -251,7 +330,8 @@
 
 	async function send() {
 		const text = draft.trim();
-		if (sending || readOnly || !text || (isExchange && !audience.length)) return;
+		const mentions = liveTags(text);
+		if (sending || readOnly || !text || (isExchange && !audience.length && !mentions.length)) return;
 		const reply = replyTo;
 		sending = true;
 		sendError = "";
@@ -260,7 +340,7 @@
 				if (!replyMessage) throw new Error("Reload this exchange before replying.");
 				const title = privateRecipient ? `Private: ${exchangeTitle}` : exchangeTitle;
 				const parentId = reply || replyMessage.id;
-				const recipients = audience;
+				const recipients = uniqueEndpoints([...audience, ...mentions.map((option) => option.endpoint)]);
 				if (!pendingSend || pendingSend.text !== text || pendingSend.replyTo !== parentId || pendingSend.title !== title
 					|| pendingSend.requestReply !== requestReply || JSON.stringify(pendingSend.recipients) !== JSON.stringify(recipients)) {
 					pendingSend = {
@@ -276,8 +356,27 @@
 				draft = "";
 				replyTo = "";
 				privateRecipient = "";
+				tagged = [];
 				await onchanged();
 				if (sent.threadId !== threadId) onexchange?.(sent.threadId);
+				return;
+			}
+			if (mentions.length) {
+				// A tagged agent is an addressee: only an addressed envelope
+				// wakes it (a plain discussion post wakes nobody by name), so
+				// the message goes out as an exchange to the tagged endpoints.
+				const sent = await mailbox.send({
+					id: crypto.randomUUID(), exchangeId: crypto.randomUUID(),
+					sender: { objectId: object.id, agentId: "" },
+					recipients: uniqueEndpoints(mentions.map((option) => option.endpoint)),
+					text, title: exchangeTitle || "Object exchange", replyTo: "", sentAt: Date.now(),
+					requestReply: true, historical: false, operation: "", author: "",
+				});
+				draft = "";
+				replyTo = "";
+				tagged = [];
+				await onchanged();
+				onexchange?.(sent.threadId);
 				return;
 			}
 			await chat.post(object.id, text, reply, threadId === "__discussion__" ? "" : threadId);
@@ -500,9 +599,33 @@
 		<!-- Anytype commentForm: rounded highlight box, content area on top,
 		     toolbar row with the send control at the right. -->
 		<div class="composer">
+			{#if mention && mentionMatches.length}
+				<div class="mention-menu" role="listbox" aria-label="Tag an agent">
+					{#each mentionMatches as option, i (option.endpoint.objectId)}
+						<button
+							type="button"
+							role="option"
+							aria-selected={i === mentionIndex}
+							class:active={i === mentionIndex}
+							onmouseenter={() => (mentionIndex = i)}
+							onmousedown={(e) => { e.preventDefault(); pickMention(option); }}
+						>
+							{#if option.icon}
+								<span class="m-icon">{option.icon}</span>
+							{:else}
+								<span class="m-icon m-dot" style="background: hsl({hue(option.endpoint.agentId)}, 45%, 35%)">{option.agentName.slice(0, 2)}</span>
+							{/if}
+							<span class="m-name">@{option.agentName}</span>
+							{#if option.name !== option.agentName}<span class="m-where">{option.name}</span>{/if}
+						</button>
+					{/each}
+				</div>
+			{:else if mention && tagOptions && !mentionMatches.length}
+				<div class="mention-menu empty">No agent matches “{mention.query}”.</div>
+			{/if}
 			<textarea
 				bind:this={composerEl}
-				placeholder={isExchange ? "Write a message… (markdown supported)" : "Write a comment… (markdown supported)"}
+				placeholder={isExchange ? "Write a message… (@ to tag an agent)" : "Write a comment… (@ to tag an agent)"}
 				bind:value={draft}
 				rows={1}
 				disabled={sending}
@@ -510,8 +633,18 @@
 					const el = e.currentTarget as HTMLTextAreaElement;
 					el.style.height = "auto";
 					el.style.height = `${el.scrollHeight}px`;
+					updateMention();
 				}}
+				onclick={updateMention}
+				onkeyup={(e) => { if (e.key.startsWith("Arrow") && !mention) updateMention(); }}
+				onblur={() => { mention = null; }}
 				onkeydown={(e) => {
+					if (mention && mentionMatches.length) {
+						if (e.key === "ArrowDown") { e.preventDefault(); mentionIndex = (mentionIndex + 1) % mentionMatches.length; return; }
+						if (e.key === "ArrowUp") { e.preventDefault(); mentionIndex = (mentionIndex + mentionMatches.length - 1) % mentionMatches.length; return; }
+						if (e.key === "Enter" || e.key === "Tab") { e.preventDefault(); pickMention(mentionMatches[Math.min(mentionIndex, mentionMatches.length - 1)]); return; }
+						if (e.key === "Escape") { e.preventDefault(); mention = null; return; }
+					}
 					if (e.key === "Enter" && !e.shiftKey) {
 						e.preventDefault();
 						void send();
@@ -914,6 +1047,7 @@
 	}
 	/* Anytype commentForm: rounded shape-highlight-light box. */
 	.composer {
+		position: relative;
 		display: flex;
 		flex-direction: column;
 		background: var(--panel);
@@ -921,6 +1055,54 @@
 		border-radius: 10px;
 		margin-top: 10px;
 	}
+	.mention-menu {
+		position: absolute;
+		bottom: 100%;
+		left: 0;
+		right: 0;
+		margin-bottom: 6px;
+		background: var(--panel);
+		border: 1px solid var(--border);
+		border-radius: 10px;
+		box-shadow: 0 6px 24px rgba(0, 0, 0, 0.35);
+		padding: 4px;
+		display: flex;
+		flex-direction: column;
+		max-height: 260px;
+		overflow-y: auto;
+		z-index: 30;
+		font-size: 13px;
+		color: var(--muted);
+	}
+	.mention-menu.empty { padding: 10px 12px; }
+	.mention-menu button {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		width: 100%;
+		padding: 7px 8px;
+		background: none;
+		border: none;
+		border-radius: 6px;
+		color: var(--fg);
+		font: inherit;
+		text-align: left;
+		cursor: pointer;
+	}
+	.mention-menu button.active { background: var(--border); }
+	.mention-menu .m-icon {
+		width: 20px;
+		height: 20px;
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		border-radius: 50%;
+		font-size: 13px;
+		flex: none;
+	}
+	.mention-menu .m-dot { color: #fff; font-size: 9px; text-transform: uppercase; }
+	.mention-menu .m-name { font-weight: 500; }
+	.mention-menu .m-where { color: var(--muted); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 	.composer textarea {
 		background: none;
 		border: none;
