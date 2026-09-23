@@ -1,5 +1,5 @@
 import type { ObjectJSON } from "$lib/types";
-import type { QueryBody, QueryResultRowJSON } from "./contracts";
+import type { ObjectHistory, QueryBody, QueryResultRowJSON } from "./contracts";
 import { coreCall, coreCallWithBlob, coreGeneration } from "./core";
 
 export type QueryRow = QueryResultRowJSON & { name: string; snippet?: string };
@@ -124,9 +124,11 @@ export function runQuery(
  * the ABI, then re-marshalled and re-parsed per object into the cache region -
  * three serialisations each, and a hard failure past 16 MiB.
  *
- * Each input history must contain all changes for one distinct object.
- * Frames are `[u32 little-endian length][change bytes]`, repeated. Self
- * describing, so the JSON request carries no length array.
+ * Each input history must contain all changes for one distinct object, plus
+ * its checkpoint when it holds one. Frames are `[u32 little-endian length]
+ * [bytes]`, repeated; a checkpoint frame sets CORPUS_CHECKPOINT_FLAG (bit 31)
+ * in its length word (core/corpus.odin). Self describing, so the JSON
+ * request carries no length array.
  */
 export interface CorpusLoad {
 	/** Objects this load replayed, summed across batches. */
@@ -139,9 +141,9 @@ export interface CorpusLoad {
 	cached: number;
 }
 
-export function loadCorpus(histories: Iterable<readonly Uint8Array[]>, reset = true): CorpusLoad {
+export function loadCorpus(histories: Iterable<ObjectHistory>, reset = true): CorpusLoad {
 	const out: CorpusLoad = { objects: 0, changes: 0, bytes: 0, skipped: 0, cached: 0 };
-	let batch: Uint8Array[] = [];
+	let batch: CorpusFrame[] = [];
 	let size = 0;
 	let objects = 0;
 	let first = reset;
@@ -160,13 +162,14 @@ export function loadCorpus(histories: Iterable<readonly Uint8Array[]>, reset = t
 	};
 	try {
 		for (const history of histories) {
-			if (history.length === 0) continue;
+			if (history.changes.length === 0 && !history.checkpoint) continue;
 			const bytes = byteLengthOf(history);
 			// Never replay a prefix as a complete object. The backend can fall
 			// back to its computed JSON snapshot for an oversized history.
 			if (bytes > CORPUS_BATCH_BYTES) throw new Error("Object history exceeds the corpus batch limit");
 			if (objects >= CORPUS_BATCH_OBJECTS || size + bytes > CORPUS_BATCH_BYTES) flush();
-			for (const change of history) batch.push(change);
+			if (history.checkpoint) batch.push({ bytes: history.checkpoint, checkpoint: true });
+			for (const change of history.changes) batch.push({ bytes: change, checkpoint: false });
 			size += bytes;
 			objects++;
 		}
@@ -189,24 +192,35 @@ export function loadCorpus(histories: Iterable<readonly Uint8Array[]>, reset = t
 /** Object and framed-byte bounds; histories are indivisible. */
 const CORPUS_BATCH_OBJECTS = 4000;
 const CORPUS_BATCH_BYTES = 24 * 1024 * 1024;
+/** Length-word bit marking a Checkpoint frame; mirrors core/corpus.odin. */
+const CORPUS_CHECKPOINT_FLAG = 0x8000_0000;
 
-const byteLengthOf = (parts: readonly Uint8Array[]): number => parts.reduce((sum, p) => sum + 4 + p.byteLength, 0);
+interface CorpusFrame {
+	bytes: Uint8Array;
+	checkpoint: boolean;
+}
+
+const byteLengthOf = (history: ObjectHistory): number => {
+	let total = history.checkpoint ? 4 + history.checkpoint.byteLength : 0;
+	for (const change of history.changes) total += 4 + change.byteLength;
+	return total;
+};
 
 /** True when the core has no corpus for this generation yet. */
 export const needsColdLoad = (): boolean => generation !== coreGeneration();
 
-function pushCorpus(parts: Uint8Array[], reset: boolean): CorpusLoad {
+function pushCorpus(frames: CorpusFrame[], reset: boolean): CorpusLoad {
 	let total = 0;
-	for (const part of parts) total += 4 + part.byteLength;
+	for (const frame of frames) total += 4 + frame.bytes.byteLength;
 	if (total === 0) return { objects: 0, changes: 0, bytes: 0, skipped: 0, cached: 0 };
 	const blob = new Uint8Array(total);
 	const header = new DataView(blob.buffer);
 	let offset = 0;
-	for (const part of parts) {
-		header.setUint32(offset, part.byteLength, true);
+	for (const frame of frames) {
+		header.setUint32(offset, frame.bytes.byteLength | (frame.checkpoint ? CORPUS_CHECKPOINT_FLAG : 0), true);
 		offset += 4;
-		blob.set(part, offset);
-		offset += part.byteLength;
+		blob.set(frame.bytes, offset);
+		offset += frame.bytes.byteLength;
 	}
 	// The corpus IS the snapshot the signature diff would have built, so the
 	// caller drops the stale signatures once the last batch lands.

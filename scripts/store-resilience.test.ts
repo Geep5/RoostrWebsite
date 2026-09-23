@@ -73,6 +73,8 @@ test("a database that stops answering is retried, not silently dropped", async (
 	internals.store = {
 		changeCounts: async () => new Map([...rows].map(([id, list]) => [id, list.length])),
 		getStates: async () => new Map(),
+		allCheckpoints: async () => new Map(),
+		getCheckpoint: async () => undefined,
 		changesFor: async (id: string) => {
 			if (id === "flaky" && failures-- > 0) throw new StorageUnavailableError("local storage stopped responding (read); reload the page");
 			return rows.get(id) ?? [];

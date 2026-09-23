@@ -45,9 +45,9 @@ async function storeFixture() {
 	cleanup.push(async () => { store.close(); await destroyDatabase(name); });
 	return store;
 }
-interface Received { bytes: Uint8Array; change: ChangeJSON; provenance?: SharedProvenance }
+interface Received { objectId: string; bytes: Uint8Array; b64: string; change: ChangeJSON; provenance?: SharedProvenance }
 interface SyncInternals {
-	eventToChange(event: Event): Promise<Received | null>;
+	ingestEvent(event: Event): Promise<Received | null>;
 	importBatch(batch: Received[]): Promise<void>;
 	handleLiveEvent(event: Event): Promise<void>;
 	backfill(since: number): Promise<boolean>;
@@ -73,6 +73,7 @@ async function stopSettled(sync: RelaySync, internals: SyncInternals): Promise<v
 /** Open chunk groups now live in the core session (the receive state machine moved out of RelaySync). */
 const openGroups = () => coreCall<{ groups: number }>("sync", { action: "state" }).groups;
 const base64 = (c: ChangeJSON) => Buffer.from(encodeChange(c)).toString("base64");
+const received = (change: ChangeJSON, provenance?: SharedProvenance): Received => ({ objectId: change.objectId, change, bytes: encodeChange(change), b64: base64(change), provenance });
 function event(part: string, sk = memberSk, tags: string[][] = [], key = spaceKey): Event {
 	return finalizeEvent({ kind: 1078, created_at: 100, content: nip44.encrypt(part, key), tags: [["h", blindShared(bytesToHex(key), "space:space")], ...tags] }, sk);
 }
@@ -128,8 +129,8 @@ describe("shared authority", () => {
 		const removal = change("space", [{ fieldSet: { key: "members", value: { valuesValue: { items: [] } } } }]);
 		removal.parentIds = [createSpace.id]; removal.id = changeId(removal);
 		await internals.importBatch([
-			{ change: removal, bytes: encodeChange(removal), provenance: { ...provenance, signer: owner } },
-			{ change: edit, bytes: encodeChange(edit), provenance },
+			received(removal, { ...provenance, signer: owner }),
+			received(edit, provenance),
 		]);
 		expect((await store.changesFor("space")).length).toBe(2);
 		expect((await store.changesFor("doc")).length).toBe(1);
@@ -158,40 +159,40 @@ describe("encrypted chunk provenance", () => {
 		expect(await store.rawChangesFor("absent")).toEqual([]);
 		const tampered = legacy.slice();
 		tampered[2] ^= 1;
-		expect(await internals.eventToChange(event(Buffer.from(tampered).toString("base64"), ownerSk))).toBeNull();
+		expect(await internals.ingestEvent(event(Buffer.from(tampered).toString("base64"), ownerSk))).toBeNull();
 	});
 	test("requires valid outer signatures and own signer for personal encryption", async () => {
 		const { internals } = syncFixture(await storeFixture());
 		const personalKey = nip44.getConversationKey(ownerSk, owner);
-		expect(await internals.eventToChange(event(base64(createDoc), strangerSk, [], personalKey))).toBeNull();
+		expect(await internals.ingestEvent(event(base64(createDoc), strangerSk, [], personalKey))).toBeNull();
 		const valid = event(base64(createDoc));
-		expect((await internals.eventToChange(valid))?.provenance).toEqual(provenance);
-		expect(await internals.eventToChange(JSON.parse(JSON.stringify({ ...valid, content: valid.content + "x" })) as Event)).toBeNull();
+		expect((await internals.ingestEvent(valid))?.provenance).toEqual(provenance);
+		expect(await internals.ingestEvent(JSON.parse(JSON.stringify({ ...valid, content: valid.content + "x" })) as Event)).toBeNull();
 	});
 	test("never assembles across signers, space IDs or key versions", async () => {
 		const { sync, internals } = syncFixture(await storeFixture());
 		const { parts, gid } = chunks();
 		const tags = (i: number) => [["c", gid, String(i), "2"]];
-		expect(await internals.eventToChange(event(parts[0], memberSk, tags(0)))).toBeNull();
-		expect(await internals.eventToChange(event(parts[1], ownerSk, tags(1)))).toBeNull();
+		expect(await internals.ingestEvent(event(parts[0], memberSk, tags(0)))).toBeNull();
+		expect(await internals.ingestEvent(event(parts[1], ownerSk, tags(1)))).toBeNull();
 		sync.setSharedSpaces([{ ...space, keyId: 2 }]);
-		expect(await internals.eventToChange(event(parts[1], memberSk, tags(1)))).toBeNull();
+		expect(await internals.ingestEvent(event(parts[1], memberSk, tags(1)))).toBeNull();
 		sync.setSharedSpaces([{ ...space, spaceId: "other" }]);
-		expect(await internals.eventToChange(event(parts[1], memberSk, tags(1)))).toBeNull();
+		expect(await internals.ingestEvent(event(parts[1], memberSk, tags(1)))).toBeNull();
 		sync.setSharedSpaces([space]);
-		expect((await internals.eventToChange(event(parts[1], memberSk, tags(1))))?.change.id).toBe(createDoc.id);
+		expect((await internals.ingestEvent(event(parts[1], memberSk, tags(1))))?.change.id).toBe(createDoc.id);
 	});
 	test("rejects malformed indices, inconsistent totals and expired partial groups", async () => {
 		const { internals } = syncFixture(await storeFixture());
 		const { parts, gid } = chunks();
-		for (const index of ["-1", "2", "1x", "0.5", ""]) expect(await internals.eventToChange(event(parts[0], memberSk, [["c", gid, index, "2"]]))).toBeNull();
-		expect(await internals.eventToChange(event(parts[0], memberSk, [["c", gid, "0", "2"]]))).toBeNull();
-		expect(await internals.eventToChange(event(parts[1], memberSk, [["c", gid, "1", "3"]]))).toBeNull();
-		expect(await internals.eventToChange(event(parts[1], memberSk, [["c", gid, "1", "2"]]))).toBeNull();
+		for (const index of ["-1", "2", "1x", "0.5", ""]) expect(await internals.ingestEvent(event(parts[0], memberSk, [["c", gid, index, "2"]]))).toBeNull();
+		expect(await internals.ingestEvent(event(parts[0], memberSk, [["c", gid, "0", "2"]]))).toBeNull();
+		expect(await internals.ingestEvent(event(parts[1], memberSk, [["c", gid, "1", "3"]]))).toBeNull();
+		expect(await internals.ingestEvent(event(parts[1], memberSk, [["c", gid, "1", "2"]]))).toBeNull();
 		const clock = spyOn(Date, "now").mockReturnValue(Date.now() + 300_001);
 		try {
-			expect(await internals.eventToChange(event(parts[0], memberSk, [["c", gid, "0", "2"]]))).toBeNull();
-			expect((await internals.eventToChange(event(parts[1], memberSk, [["c", gid, "1", "2"]])))?.change.id).toBe(createDoc.id);
+			expect(await internals.ingestEvent(event(parts[0], memberSk, [["c", gid, "0", "2"]]))).toBeNull();
+			expect((await internals.ingestEvent(event(parts[1], memberSk, [["c", gid, "1", "2"]])))?.change.id).toBe(createDoc.id);
 		} finally { clock.mockRestore(); }
 	});
 	test("caps active groups and preserves the cursor floor after expiration", async () => {
@@ -291,7 +292,8 @@ describe("history completion", () => {
 		expect(repair.mock.calls.every(([, filter]) => filter.since === 0)).toBe(true);
 		expect(await store.getCursor()).toBe(100);
 		expect(await store.getReplayGroups()).toEqual([]);
-		expect(pages).toHaveBeenCalledTimes(2);
+		// One relay, two scopes, two kinds each; the original walker never ran again.
+		expect(pages).toHaveBeenCalledTimes(4);
 	});
 	test("import failure preserves recovery across reload and a later successful scan retires it", async () => {
 		const store = await storeFixture();
@@ -319,7 +321,8 @@ describe("history completion", () => {
 		internals.cursor = 200;
 		const { parts, gid } = chunks();
 		const pages = spyOn(internals, "queryRelayPage").mockImplementation(async (_relay, filter) => {
-			if (filter["#h"]) {
+			// Inject once: the space's change filter (its checkpoint filter walks concurrently).
+			if (filter["#h"] && (filter.kinds as number[])[0] === 1078) {
 				await internals.handleLiveEvent(event(parts[0], ownerSk, [["c", gid, "0", "2"]]));
 				await internals.handleLiveEvent(event(parts[1], ownerSk, [["c", gid, "1", "3"]]));
 			}
@@ -392,7 +395,7 @@ describe("history completion", () => {
 		const pages = spyOn(internals, "queryRelayPage").mockResolvedValue([]);
 		const setCursor = store.setCursor.bind(store);
 		const commits = spyOn(store, "setCursor").mockImplementation(async (value, groups) => {
-			if (value === 200) await internals.eventToChange(history[0]);
+			if (value === 200) await internals.ingestEvent(history[0]);
 			await setCursor(value, groups);
 		});
 		expect(await internals.backfill(100)).toBe(false);

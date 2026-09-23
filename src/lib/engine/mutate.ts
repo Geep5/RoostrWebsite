@@ -4,11 +4,18 @@ import type { ValueJSON, BlockJSON, ObjectJSON } from "$lib/types";
 import { spaceKeyGet, spaceKeyRotate, spaceKeyEnsure } from "./spacekeys";
 import { coreCall, initCore } from "./core";
 import { packCoreValueMaps, unpackCoreValueMaps } from "./core-values";
+import { bytesToBase64 } from "./proto";
+
+/** Everything the DAG holds for one object: stored changes plus its checkpoint, if any. */
+export interface ObjectDag {
+	changes: ChangeJSON[];
+	checkpoint?: Uint8Array;
+}
 
 export interface MutateCtx {
 	/** This device's key-derived author id. */
 	author: string;
-	changesFor(objectId: string): Promise<ChangeJSON[]>;
+	dagFor(objectId: string): Promise<ObjectDag>;
 	getObject(objectId: string): Promise<{ blocks: BlockJSON[]; fields?: Record<string, ValueJSON>; typeKey?: string } | null>;
 	instancesOf(typeKey: string, channel: string): Promise<string[]>;
 	objectsWithField(key: string, channel: string): Promise<string[]>;
@@ -18,9 +25,11 @@ export interface MutateCtx {
 	commit(change: ChangeJSON): Promise<string>;
 }
 
-/** Head change ids: changes no other change lists as a parent. */
-export function headsOf(changes: ChangeJSON[]): string[] {
-	return coreCall<string[]>("mutation", packCoreValueMaps({ action: "heads", changes }));
+/** Head change ids: changes no other change lists as a parent, plus checkpoint heads nothing built on. */
+export function headsOf(dag: ObjectDag): string[] {
+	const payload: Record<string, unknown> = { action: "heads", changes: dag.changes };
+	if (dag.checkpoint) payload.checkpoint = bytesToBase64(dag.checkpoint);
+	return coreCall<string[]>("mutation", packCoreValueMaps(payload));
 }
 
 interface MutationPlan {
@@ -53,7 +62,7 @@ export async function runMutation(
 	// Key material stays in the host; invalid domain requests never rotate keys.
 	if (rotating) spaceKeyRotate(channelId);
 	async function commit(change: ChangeJSON): Promise<void> {
-		change.parentIds = headsOf(await ctx.changesFor(change.objectId));
+		change.parentIds = headsOf(await ctx.dagFor(change.objectId));
 		await ctx.commit(change);
 	}
 	for (const [index, change] of plan.changes.entries()) {

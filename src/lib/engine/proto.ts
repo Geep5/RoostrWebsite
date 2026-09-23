@@ -5,16 +5,24 @@ import { coreCall } from "./core";
 import { packCoreValueMaps, unpackCoreValueMaps } from "./core-values";
 import type { ChangeJSON, ProtoApi } from "./contracts";
 
-function base64ToBytes(base64: string): Uint8Array {
+export function base64ToBytes(base64: string): Uint8Array {
 	const binary = atob(base64);
-	return Uint8Array.from(binary, (character) => character.charCodeAt(0));
+	const out = new Uint8Array(binary.length);
+	for (let i = 0; i < binary.length; i++) out[i] = binary.charCodeAt(i);
+	return out;
+}
+
+export function bytesToBase64(bytes: Uint8Array): string {
+	let binary = "";
+	for (let i = 0; i < bytes.length; i += 0x8000) {
+		binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+	}
+	return btoa(binary);
 }
 
 export function decodeChange(bytes: Uint8Array): ChangeJSON | null {
-	let binary = "";
-	for (const byte of bytes) binary += String.fromCharCode(byte);
 	try {
-		return unpackCoreValueMaps<ChangeJSON>(coreCall("codec", { action: "decode", bytes: btoa(binary) }));
+		return unpackCoreValueMaps<ChangeJSON>(coreCall("codec", { action: "decode", bytes: bytesToBase64(bytes) }));
 	} catch {
 		return null;
 	}

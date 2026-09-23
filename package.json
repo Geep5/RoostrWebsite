@@ -7,7 +7,7 @@
 		"dev": "vite dev",
 		"dev:local": "VITE_ROOSTR_BACKEND=local vite dev --host 127.0.0.1 --port 5190",
 		"build": "node scripts/verify-core.mjs && vite build",
-		"build:core": "node ../glonOdin/build-wasm.mjs .",
+		"build:core": "node ../Roostr/build-wasm.mjs .",
 		"verify:core": "node scripts/verify-core.mjs",
 		"preview": "vite preview",
 		"prepare": "svelte-kit sync || echo ''",

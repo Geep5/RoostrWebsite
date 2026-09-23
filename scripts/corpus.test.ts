@@ -52,7 +52,7 @@ const body = { filters: [], limit: 500 };
 test("a vault loaded from bytes answers exactly like one loaded from JSON", () => {
 	const changes = Array.from({ length: 40 }, (_, i) => changeOf(i, `Note ${i}`));
 
-	const fromBytes = loadCorpus(changes.map((c) => [bytesOf(c)]));
+	const fromBytes = loadCorpus(changes.map((c) => ({ changes: [bytesOf(c)] })));
 	expect(fromBytes.objects).toBe(40);
 	expect(fromBytes.changes).toBe(40);
 	expect(fromBytes.skipped).toBe(0);
@@ -68,9 +68,9 @@ test("a vault loaded from bytes answers exactly like one loaded from JSON", () =
 });
 
 test("a cached object survives the blob being reused", () => {
-	loadCorpus([[bytesOf(changeOf(900, "Durable name"))]]);
+	loadCorpus([{ changes: [bytesOf(changeOf(900, "Durable name"))] }]);
 	// The next call writes different bytes into the same reservation.
-	loadCorpus([[bytesOf(changeOf(901, "ZZZZZZZZ"))]], false);
+	loadCorpus([{ changes: [bytesOf(changeOf(901, "ZZZZZZZZ"))] }], false);
 	const rows = runQuery([], { filters: [], limit: 10 }, { upserted: [], removed: [] });
 	expect(rows.records.map((r) => r.name).sort()).toEqual(["Durable name", "ZZZZZZZZ"]);
 });
@@ -79,7 +79,7 @@ test("a big vault loads in batches rather than failing", () => {
 	// 9,000 changes is past the per-push bound, so this exercises the
 	// batching AND the merge: a later batch must not wipe an earlier one.
 	const changes = Array.from({ length: 9000 }, (_, i) => changeOf(i, `Batch ${i}`));
-	const out = loadCorpus(changes.map((c) => [bytesOf(c)]));
+	const out = loadCorpus(changes.map((c) => ({ changes: [bytesOf(c)] })));
 	expect(out.changes).toBe(9000);
 	// `cached` is the core's own count after the last batch - the number that
 	// says the merge worked, rather than what one push happened to see.
@@ -89,14 +89,14 @@ test("a big vault loads in batches rather than failing", () => {
 });
 
 test("damaged changes are counted without discarding healthy objects", () => {
-	const out = loadCorpus([[bytesOf(changeOf(1, "Good"))], [new Uint8Array([0xff, 0xff, 0xff])], [bytesOf(changeOf(2, "Also good"))]]);
+	const out = loadCorpus([{ changes: [bytesOf(changeOf(1, "Good"))] }, { changes: [new Uint8Array([0xff, 0xff, 0xff])] }, { changes: [bytesOf(changeOf(2, "Also good"))] }]);
 	expect(out.skipped).toBe(1);
 	const rows = runQuery([], body, { upserted: [], removed: [] });
 	expect(rows.records.map((r) => r.name).sort()).toEqual(["Also good", "Good"]);
 });
 
 test("an empty reset load replaces the previous vault", () => {
-	loadCorpus([[bytesOf(changeOf(7, "Previous vault"))]]);
+	loadCorpus([{ changes: [bytesOf(changeOf(7, "Previous vault"))] }]);
 	loadCorpus([]);
 	expect(runQuery([], body, { upserted: [], removed: [] }).total).toBe(0);
 });
@@ -146,7 +146,7 @@ test("one long object history is never split at a change-count boundary", () => 
 		parent = coreCall<string>("codec", { action: "hash", change });
 		history.push(bytesOf(change));
 	}
-	loadCorpus([history]);
+	loadCorpus([{ changes: history }]);
 	const rows = runQuery([], { type: "note" }, { upserted: [], removed: [] });
 	expect(rows.records).toMatchObject([{
 		id: creation.objectId, name: "Long history", createdAt: creation.timestamp,
@@ -156,9 +156,9 @@ test("one long object history is never split at a change-count boundary", () => 
 });
 
 test("a refused later history leaves JSON fallback owing a full reset", () => {
-	const histories = Array.from({ length: 4001 }, (_, i) => [bytesOf(changeOf(i, `Partial ${i}`))]);
+	const histories = Array.from({ length: 4001 }, (_, i) => ({ changes: [bytesOf(changeOf(i, `Partial ${i}`))] }));
 	// Framing counts toward the byte limit too. Never split an oversized object.
-	histories.push([new Uint8Array(24 * 1024 * 1024)]);
+	histories.push({ changes: [new Uint8Array(24 * 1024 * 1024)] });
 	expect(() => loadCorpus(histories)).toThrow("Object history exceeds the corpus batch limit");
 	const survivor = stateOf(changeOf(8000, "Authoritative snapshot"));
 	const rows = runQuery([survivor], body, { upserted: [], removed: [] });
@@ -202,7 +202,7 @@ test("cold queries and core resets cannot resurrect vanished objects", async () 
 		}));
 		// Exercise a warm database: there are no replay upserts to mask an
 		// incorrectly seeded corpus.
-		for (const change of changes) await store.putState(change.objectId, 1, stateOf(change));
+		for (const change of changes) await store.putState(change.objectId, 1, "", stateOf(change));
 		Object.assign(internals, {
 			store, states: new Map(), dirty: new Set(), vanished: new Set(),
 			queryUpserted: new Set(), queryRemoved: new Set(), allDirty: true,

@@ -28,18 +28,26 @@
 
 import { SimplePool, finalizeEvent, getPublicKey, nip19, nip44, verifyEvent, type Event } from "nostr-tools";
 import { unwrapEvent, wrapEvent } from "nostr-tools/nip59";
-import { bytesToHex } from "@noble/hashes/utils.js";
-import type { ChangeJSON, ChangeStoreApi, PendingPublish, RelaySyncApi, SharedProvenance, SyncEvents } from "./contracts";
+import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
+import type { ChangeJSON, ChangeStoreApi, CheckpointRow, PendingPublish, RelaySyncApi, SharedProvenance, SyncEvents } from "./contracts";
 import type { ObjectJSON } from "$lib/types";
 import { computeObject } from "./replay";
 import { CoreError, coreCall } from "./core";
 import { unpackCoreValueMaps } from "./core-values";
+import { base64ToBytes, bytesToBase64 } from "./proto";
 import { loadKey } from "./keys";
 import { spaceKeyGet, spaceKeyImport } from "./spacekeys";
 
 export const DEFAULT_RELAYS = ["wss://roostr-relay.fly.dev"];
 
 const CHANGE_KIND = 1078;
+/** Kind-1079 checkpoint: one sealed Checkpoint protobuf per object (docs/checkpoint-sync.md). */
+const CHECKPOINT_KIND = 1079;
+/** Replaceable manifest the checkpoint publisher stamps once every object is covered. */
+const MANIFEST_KIND = 30079;
+const MANIFEST_D = "roostr-checkpoint";
+/** Every relay filter that pulls DAG events; the core session ingests both kinds. */
+const DAG_KINDS = [CHANGE_KIND, CHECKPOINT_KIND];
 const ALLOWLIST_KIND = 30100;
 const ALLOWLIST_D = "roostr-allowlist";
 /** NIP-59 gift wrap: space-key invites and join requests, addressed by npub. */
@@ -141,10 +149,20 @@ interface SharedSpace extends SharedSpaceInfo {
  */
 export function authorizeSharedChange(change: ChangeJSON, provenance: SharedProvenance, space: SharedSpaceInfo,
 	localPk: string, trustedSpace: ObjectJSON | null, existing: ObjectJSON | null): boolean {
+	return authorizeShared({ action: "authorize", change }, provenance, space, localPk, trustedSpace, existing);
+}
+
+/** Same gate for a checkpoint: only the space owner may checkpoint a shared object. `checkpoint` is the base64 protobuf. */
+export function authorizeSharedCheckpoint(checkpoint: string, provenance: SharedProvenance, space: SharedSpaceInfo,
+	localPk: string, trustedSpace: ObjectJSON | null, existing: ObjectJSON | null): boolean {
+	return authorizeShared({ action: "authorizeCheckpoint", checkpoint }, provenance, space, localPk, trustedSpace, existing);
+}
+
+function authorizeShared(candidate: Record<string, unknown>, provenance: SharedProvenance, space: SharedSpaceInfo,
+	localPk: string, trustedSpace: ObjectJSON | null, existing: ObjectJSON | null): boolean {
 	try {
 		return coreCall<{ ok: boolean; reason: string }>("sync", {
-			action: "authorize",
-			change,
+			...candidate,
 			provenance,
 			space: { spaceId: space.spaceId, keyId: space.keyId, owner: space.owner || localPk },
 			trustedSpace,
@@ -156,9 +174,22 @@ export function authorizeSharedChange(change: ChangeJSON, provenance: SharedProv
 	}
 }
 
+/** What the core session reports about a decoded kind-1079 payload. */
+interface CheckpointSummary {
+	objectId: string;
+	headIds: string[];
+	covered: number;
+	hash: string;
+}
+
+/** One decrypted relay payload: a change (kind 1078) or a checkpoint (kind 1079). */
 interface ImportItem {
+	objectId: string;
 	bytes: Uint8Array;
-	change: ChangeJSON;
+	/** `bytes` as the core handed them over; the checkpoint gate takes them back verbatim. */
+	b64: string;
+	change?: ChangeJSON;
+	checkpoint?: CheckpointSummary;
 	provenance?: SharedProvenance;
 	chunkKey?: string;
 }
@@ -177,7 +208,7 @@ interface SyncSessionState {
 
 interface IngestResult {
 	cursor: number;
-	item?: { bytes: string; change: unknown; chunkKey?: string; provenance?: SharedProvenance };
+	item?: { bytes: string; change?: unknown; checkpoint?: CheckpointSummary; chunkKey?: string; provenance?: SharedProvenance };
 	faultAt?: number;
 	replayGroups?: Array<[string, number]>;
 	decryptFailure?: boolean;
@@ -232,21 +263,6 @@ function sleep(ms: number): Promise<void> {
 	return promise;
 }
 
-function b64ToBytes(b64: string): Uint8Array {
-	const bin = atob(b64);
-	const out = new Uint8Array(bin.length);
-	for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
-	return out;
-}
-
-function bytesToB64(bytes: Uint8Array): string {
-	let bin = "";
-	for (let i = 0; i < bytes.length; i += 0x8000) {
-		bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
-	}
-	return btoa(bin);
-}
-
 export interface RelaySyncOptions {
 	/** A gift-wrapped space key arrived and was imported. */
 	onSpaceKey?: () => void;
@@ -261,6 +277,8 @@ export interface SyncStats {
 	decryptFailures: number;
 	decodeFailures: number;
 	imported: number;
+	/** Checkpoints accepted into the store (superseding or first). */
+	checkpoints: number;
 	blindedTags: Set<string>;
 }
 
@@ -287,7 +305,7 @@ interface OutboxNext {
 }
 
 export class RelaySync implements RelaySyncApi {
-	readonly stats: SyncStats = { events: 0, decryptFailures: 0, decodeFailures: 0, imported: 0, blindedTags: new Set() };
+	readonly stats: SyncStats = { events: 0, decryptFailures: 0, decodeFailures: 0, imported: 0, checkpoints: 0, blindedTags: new Set() };
 
 	private readonly pk: string;
 	private pool = new SimplePool();
@@ -409,7 +427,7 @@ export class RelaySync implements RelaySyncApi {
 		}
 		this.spaceSub = null;
 		if (tags.length > 0) {
-			this.spaceSub = this.pool.subscribeMany(this.relays, { kinds: [CHANGE_KIND], "#h": tags, since: this.cursor + 1 }, {
+			this.spaceSub = this.pool.subscribeMany(this.relays, { kinds: DAG_KINDS, "#h": tags, since: this.cursor + 1 }, {
 				onevent: (event) => {
 					this.liveChain = this.liveChain.then(() => this.handleLiveEvent(event)).catch(() => {});
 				},
@@ -608,7 +626,7 @@ export class RelaySync implements RelaySyncApi {
 		}
 		this.sub = this.pool.subscribeMany(
 			this.relays,
-			{ kinds: [CHANGE_KIND], authors: [this.pk], since: this.cursor + 1 },
+			{ kinds: DAG_KINDS, authors: [this.pk], since: this.cursor + 1 },
 			{
 				onevent: (event) => {
 					this.liveChain = this.liveChain.then(() => this.handleLiveEvent(event)).catch(() => {});
@@ -617,7 +635,7 @@ export class RelaySync implements RelaySyncApi {
 		);
 		const spaceTags = [...this.sharedSpaces.values()].map((sp) => sp.spaceTag);
 		this.spaceSub = spaceTags.length > 0
-			? this.pool.subscribeMany(this.relays, { kinds: [CHANGE_KIND], "#h": spaceTags, since: this.cursor + 1 }, {
+			? this.pool.subscribeMany(this.relays, { kinds: DAG_KINDS, "#h": spaceTags, since: this.cursor + 1 }, {
 					onevent: (event) => {
 						this.liveChain = this.liveChain.then(() => this.handleLiveEvent(event)).catch(() => {});
 					},
@@ -660,9 +678,9 @@ export class RelaySync implements RelaySyncApi {
 			}
 			const spaceTags = [...this.sharedSpaces.values()].map((sp) => sp.spaceTag);
 			const query = Promise.all([
-				this.pool.querySync(this.relays, { kinds: [CHANGE_KIND], authors: [this.pk], limit: 1 }),
+				this.pool.querySync(this.relays, { kinds: DAG_KINDS, authors: [this.pk], limit: 1 }),
 				spaceTags.length > 0
-					? this.pool.querySync(this.relays, { kinds: [CHANGE_KIND], "#h": spaceTags, limit: 1 })
+					? this.pool.querySync(this.relays, { kinds: DAG_KINDS, "#h": spaceTags, limit: 1 })
 					: Promise.resolve([] as Event[]),
 			]);
 			const res = await Promise.race([query, new Promise<null>((r) => setTimeout(() => r(null), 15_000))]);
@@ -787,17 +805,41 @@ export class RelaySync implements RelaySyncApi {
 		const seen = new Set<string>();
 		const importPage = async (page: Event[]): Promise<void> => {
 			const batch: ImportItem[] = [];
-			for (const event of [...page].sort((a, b) => a.created_at - b.created_at || a.id.localeCompare(b.id))) {
+			// Checkpoints first within a page: a change the checkpoint already
+			// folds in then lands as covered tail, never as a solitary orphan.
+			for (const event of [...page].sort((a, b) => a.created_at - b.created_at || b.kind - a.kind || a.id.localeCompare(b.id))) {
 				if (seen.has(event.id)) continue;
 				seen.add(event.id);
-				const item = await this.eventToChange(event);
+				const item = await this.ingestEvent(event);
 				if (item) batch.push(item);
 			}
 			if (batch.length > 0) await this.importBatch(batch, true);
 		};
 		let complete = this.relays.length > 0;
-		const filters: Array<Parameters<SimplePool["querySync"]>[1]> = [{ kinds: [CHANGE_KIND], authors: [this.pk], since }];
-		for (const sp of this.sharedSpaces.values()) filters.push({ kinds: [CHANGE_KIND], "#h": [sp.spaceTag], since });
+		// A full walk pulls kind-1078 only from the publisher's manifest cursor
+		// on: everything older is folded into a kind-1079 checkpoint, which is
+		// walked unbounded. Resolved once per scope and remembered, so a later
+		// repair walk never widens back to event zero (docs/checkpoint-sync.md).
+		const full = since <= 1;
+		const floors = full ? await this.store.getCheckpointFloors() : {};
+		const changeSince = async (scope: string, space: SharedSpace | null): Promise<number> => {
+			if (!full) return since;
+			let floor = floors[scope];
+			if (floor === undefined) {
+				floor = (await this.fetchManifest(space))?.cursor ?? 0;
+				floors[scope] = floor;
+				await this.store.setCheckpointFloor(scope, floor);
+			}
+			return Math.max(since, floor);
+		};
+		const filters: Array<Parameters<SimplePool["querySync"]>[1]> = [
+			{ kinds: [CHANGE_KIND], authors: [this.pk], since: await changeSince("", null) },
+			{ kinds: [CHECKPOINT_KIND], authors: [this.pk], since },
+		];
+		for (const sp of this.sharedSpaces.values()) {
+			filters.push({ kinds: [CHANGE_KIND], "#h": [sp.spaceTag], since: await changeSince(sp.spaceTag, sp) });
+			filters.push({ kinds: [CHECKPOINT_KIND], "#h": [sp.spaceTag], since });
+		}
 		await Promise.all(this.relays.flatMap((relay) => filters.map(async (filter) => {
 			let until: number | undefined = resumeUntil;
 			for (;;) {
@@ -838,6 +880,15 @@ export class RelaySync implements RelaySyncApi {
 				await sleep(Math.min(PAGE_SPACING_MS, Math.max(MIN_PAGE_SPACING_MS, Date.now() - pageStarted)));
 			}
 		})));
+		// Every relay answered EOSE for every filter and nothing faulted: a
+		// CHECKPOINT group still open is missing parts no relay holds (NIP-09
+		// took a superseded checkpoint's chunks; the newer one covers the
+		// object). The core retires only those - a change group stays until a
+		// covering repair, since a missing change is missing data.
+		if (complete && !this.stopped && this.activeLiveEvents === 0 && this.activeImports === 0 && this.replayFaultGeneration === checkpoint && this.sessionOpen) {
+			const r = coreCall<{ replayGroups?: Array<[string, number]> }>("sync", { action: "retire", since: full ? 0 : since });
+			if (r.replayGroups) this.replayGroups = new Map(r.replayGroups);
+		}
 		this.historyComplete = complete && !this.stopped && this.replayGroups.size === 0 &&
 			this.activeLiveEvents === 0 && this.activeImports === 0 &&
 			this.replayFaultGeneration === checkpoint && since <= this.discardedChunkFloor;
@@ -880,15 +931,43 @@ export class RelaySync implements RelaySyncApi {
 		}
 	}
 
-	// ── Event → change ─────────────────────────────────────────────
+	// ── Checkpoint manifest ────────────────────────────────────────
+
+	/**
+	 * Newest checkpoint manifest for a scope, or null. Personal: ours.
+	 * Shared: the space owner's, sealed under the space key. `cursor` is the
+	 * kind-1078 created_at from which changes are not yet folded into a
+	 * published checkpoint.
+	 */
+	private async fetchManifest(space: SharedSpace | null): Promise<{ cursor: number; objects: number } | null> {
+		const author = space ? space.owner || this.pk : this.pk;
+		const d = space ? `${MANIFEST_D}/${space.spaceTag}` : MANIFEST_D;
+		try {
+			const events = await this.pool.querySync(this.relays, { kinds: [MANIFEST_KIND], authors: [author], "#d": [d] });
+			events.sort((a, b) => b.created_at - a.created_at);
+			const key = space ? nip44.getConversationKey(hexToBytes(space.keyHex), this.pk) : hexToBytes(this.conversationKey);
+			for (const event of events) {
+				if (!verifyEvent(event)) continue;
+				const parsed = JSON.parse(nip44.decrypt(event.content, key)) as { cursor?: unknown; objects?: unknown };
+				if (typeof parsed.cursor !== "number" || !Number.isSafeInteger(parsed.cursor) || parsed.cursor < 0) continue;
+				return { cursor: parsed.cursor, objects: typeof parsed.objects === "number" ? parsed.objects : 0 };
+			}
+		} catch {
+			/* unreachable or garbled: the walk starts from zero */
+		}
+		return null;
+	}
+
+	// ── Event → change / checkpoint ────────────────────────────────
 
 	/** Feed one signature-verified relay event to the core session; returns the
-	 * decoded change when a full change (possibly reassembled from chunks) is
-	 * available. The core owns reassembly, the cursor and replay bookkeeping. */
-	private async eventToChange(event: Event): Promise<ImportItem | null> {
+	 * decoded payload when a full change or checkpoint (possibly reassembled
+	 * from chunks) is available. The core owns reassembly, the cursor and
+	 * replay bookkeeping. */
+	private async ingestEvent(event: Event): Promise<ImportItem | null> {
 		this.stats.events++;
 		this.onRawEvent?.(event);
-		if (event.kind !== CHANGE_KIND || !verifyEvent(event)) return null;
+		if ((event.kind !== CHANGE_KIND && event.kind !== CHECKPOINT_KIND) || !verifyEvent(event)) return null;
 		await this.ensureSession();
 		if (!this.sessionOpen) return null; // stopped
 		const r = coreCall<IngestResult>("sync", {
@@ -903,12 +982,60 @@ export class RelaySync implements RelaySyncApi {
 		if (r.faultAt !== undefined) this.recordReplayFault(r.faultAt);
 		if (r.replayGroups) this.replayGroups = new Map(r.replayGroups);
 		if (!r.item) return null;
-		return {
-			bytes: b64ToBytes(r.item.bytes),
-			change: unpackCoreValueMaps<ChangeJSON>(r.item.change),
+		const item: ImportItem = {
+			objectId: "",
+			bytes: base64ToBytes(r.item.bytes),
+			b64: r.item.bytes,
 			chunkKey: r.item.chunkKey,
 			provenance: r.item.provenance,
 		};
+		if (r.item.checkpoint) {
+			item.checkpoint = r.item.checkpoint;
+			item.objectId = r.item.checkpoint.objectId;
+		} else {
+			item.change = unpackCoreValueMaps<ChangeJSON>(r.item.change);
+			item.objectId = item.change.objectId;
+		}
+		return item;
+	}
+
+	/** Everything the store holds for one object, replayed the way the backend does it. */
+	private async existingState(objectId: string): Promise<ObjectJSON | null> {
+		const [changes, checkpoint] = await Promise.all([this.store.changesFor(objectId), this.store.getCheckpoint(objectId)]);
+		return computeObject(changes, checkpoint?.bytes);
+	}
+
+	/**
+	 * Shared authority for either payload kind. Existing scope and privileges
+	 * come from what this replica already holds, never from the candidate.
+	 */
+	private async authorized(item: ImportItem, p: SharedProvenance): Promise<boolean> {
+		const space = this.sharedSpaces.get(p.spaceId);
+		if (!space) return false;
+		const [trustedSpace, existing] = await Promise.all([this.existingState(p.spaceId), this.existingState(item.objectId)]);
+		return item.checkpoint
+			? authorizeSharedCheckpoint(item.b64, p, space, this.pk, trustedSpace, existing)
+			: authorizeSharedChange(item.change!, p, space, this.pk, trustedSpace, existing);
+	}
+
+	/**
+	 * Keep a checkpoint when it beats the one held (more covered, then hash).
+	 * A superseded copy is still a clean import: re-scanning would only
+	 * produce it again. The signer was already checked: the core session
+	 * only opens personal payloads from this key, and `authorized` holds
+	 * shared ones to the space owner.
+	 */
+	private async importCheckpoint(item: ImportItem, summary: CheckpointSummary): Promise<void> {
+		const row: CheckpointRow = {
+			objectId: summary.objectId,
+			bytes: item.bytes,
+			hash: summary.hash,
+			heads: [...summary.headIds].sort(),
+			covered: summary.covered,
+		};
+		if (!(await this.store.putCheckpoint(row))) return;
+		this.stats.checkpoints++;
+		this.pendingObjects.add(summary.objectId);
 	}
 
 	/** Report a reassembled group's import outcome to the core session. */
@@ -923,22 +1050,20 @@ export class RelaySync implements RelaySyncApi {
 		const imported = new Set<string>();
 		const run = this.importChain.then(async () => {
 			for (const item of batch) {
-				if (item.provenance) {
+				if (item.provenance && !(await this.authorized(item, item.provenance))) continue;
+				if (item.checkpoint) {
+					await this.importCheckpoint(item, item.checkpoint);
+				} else {
+					const change = item.change!;
+					this.stats.imported += await this.store.addChanges([{ bytes: item.bytes, change }]);
 					const p = item.provenance;
-					const space = this.sharedSpaces.get(p.spaceId);
-					if (!space) continue;
-					const trustedSpace = computeObject(await this.store.changesFor(p.spaceId));
-					const existing = computeObject(await this.store.changesFor(item.change.objectId));
-					if (!authorizeSharedChange(item.change, p, space, this.pk, trustedSpace, existing)) continue;
+					await this.store.markPublished(p ? `${p.spaceId}/${p.keyId}/${change.id}` : change.id);
+					this.pendingObjects.add(change.objectId);
 				}
-				this.stats.imported += await this.store.addChanges([item]);
-				const p = item.provenance;
-				await this.store.markPublished(p ? `${p.spaceId}/${p.keyId}/${item.change.id}` : item.change.id);
 				if (item.chunkKey) {
 					imported.add(item.chunkKey);
 					this.settle(item.chunkKey, true);
 				}
-				this.pendingObjects.add(item.change.objectId);
 			}
 			if (immediateNotify) this.flushObjectNotify();
 			else this.scheduleObjectNotify();
@@ -978,7 +1103,7 @@ export class RelaySync implements RelaySyncApi {
 	private async handleLiveEvent(event: Event): Promise<void> {
 		this.activeLiveEvents++;
 		try {
-			const item = await this.eventToChange(event);
+			const item = await this.ingestEvent(event);
 			if (item) await this.importBatch([item]);
 		} catch (err) {
 			this.recordReplayFault(1);
@@ -1051,7 +1176,7 @@ export class RelaySync implements RelaySyncApi {
 				key: pending.key,
 				objectId: pending.objectId,
 				changeId: pending.changeId,
-				bytes: bytesToB64(pending.bytes),
+				bytes: bytesToBase64(pending.bytes),
 				spaceId: pending.spaceId,
 				keyId: pending.keyId,
 				hasEvents: !!pending.events,

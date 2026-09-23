@@ -2,28 +2,42 @@
  * store.ts — IndexedDB change cache (ChangeStoreApi).
  *
  * Database 'roostr':
- *   changes  keyed by change id (hex content address) →
- *            { objectId, bytes, json }, with an 'objectId' index.
- *   meta     keyed by string → cursor at 'cursor', published change ids
- *            as individual 'published:<id>' keys.
- *   states   keyed by objectId → { n: change count, state: ObjectJSON } -
- *            the replayed object, persisted so boots don't re-replay the
- *            whole vault; invalidated per object when its change count
- *            grows (changes are append-only and content-addressed).
+ *   changes      keyed by change id (hex content address) →
+ *                { objectId, bytes, json }, with an 'objectId' index.
+ *   checkpoints  keyed by objectId → { objectId, bytes, hash, heads, covered }:
+ *                the one kind-1079 checkpoint held per object (more covered
+ *                wins, then the larger hash - core.checkpoint_supersedes).
+ *   meta         keyed by string → cursor at 'cursor', published change ids
+ *                as individual 'published:<id>' keys, 'checkpoint-floors'.
+ *   states       keyed by objectId → { n: change count, cp: checkpoint hash,
+ *                state: ObjectJSON } - the replayed object, persisted so
+ *                boots don't re-replay the whole vault; invalidated per
+ *                object when its change count grows or its checkpoint moves
+ *                (changes are append-only and content-addressed).
  *
  * Runs on raw IndexedDB. Under bun (no global indexedDB) it lazily pulls
  * fake-indexeddb; the specifier goes through a variable so Vite never
  * bundles the dev dependency.
  */
 
-import type { ChangeJSON, ChangeStoreApi, PendingPublish } from "./contracts";
+import type { ChangeJSON, ChangeStoreApi, CheckpointRow, ObjectHistory, PendingPublish } from "./contracts";
 
 const DB_NAME = "roostr";
-const DB_VERSION = 2;
+const DB_VERSION = 3;
 const CHANGES = "changes";
+const CHECKPOINTS = "checkpoints";
 const META = "meta";
 const STATES = "states";
 const CURSOR_KEY = "cursor";
+const CHECKPOINT_FLOORS_KEY = "checkpoint-floors";
+
+/** Persisted replay memo; see getStates/putState. */
+export interface StateMemo<T> {
+	n: number;
+	/** Checkpoint hash the state was replayed on top of; "" for none. */
+	cp: string;
+	state: T;
+}
 
 interface ChangeRow {
 	objectId: string;
@@ -98,6 +112,7 @@ export class ChangeStore implements ChangeStoreApi {
 				const store = db.createObjectStore(CHANGES);
 				store.createIndex("objectId", "objectId", { unique: false });
 			}
+			if (!db.objectStoreNames.contains(CHECKPOINTS)) db.createObjectStore(CHECKPOINTS);
 			if (!db.objectStoreNames.contains(META)) db.createObjectStore(META);
 			if (!db.objectStoreNames.contains(STATES)) db.createObjectStore(STATES);
 		};
@@ -188,44 +203,97 @@ export class ChangeStore implements ChangeStoreApi {
 	}
 
 	async objectIds(): Promise<string[]> {
+		const ids = new Set<string>(await this.checkpointObjectIds());
 		// WebKit throws "Unable to open cursor" for a nextunique cursor on an
 		// index with no entries (dexie/Dexie.js#1030, still present on iOS 17+),
 		// which is exactly a fresh vault on a new origin. Nothing to iterate anyway.
-		if ((await req(this.handle().transaction(CHANGES, "readonly").objectStore(CHANGES).count())) === 0) return [];
+		if ((await req(this.handle().transaction(CHANGES, "readonly").objectStore(CHANGES).count())) === 0) return [...ids];
 		const index = this.handle().transaction(CHANGES, "readonly").objectStore(CHANGES).index("objectId");
 		const { promise, resolve, reject } = Promise.withResolvers<string[]>();
-		const ids: string[] = [];
 		const cursorReq = index.openKeyCursor(null, "nextunique");
 		cursorReq.onsuccess = () => {
 			const cursor = cursorReq.result;
 			if (!cursor) {
-				resolve(ids);
+				resolve([...ids]);
 				return;
 			}
-			ids.push(String(cursor.key));
+			ids.add(String(cursor.key));
 			cursor.continue();
 		};
 		cursorReq.onerror = () => reject(cursorReq.error);
 		return promise;
 	}
 
+	private async checkpointObjectIds(): Promise<string[]> {
+		const keys = await req(this.handle().transaction(CHECKPOINTS, "readonly").objectStore(CHECKPOINTS).getAllKeys());
+		return keys.map(String);
+	}
+
 	/**
 	 * Complete protobuf histories, grouped by the stored object id rather than
 	 * decoding or serialising changes. A corpus batch must never split one.
+	 * An object's checkpoint rides along; the core decides whether it seeds
+	 * the replay or IS the history (core.checkpoint_for_replay).
 	 */
-	async allChangeHistories(): Promise<Uint8Array[][]> {
-		const store = this.handle().transaction(CHANGES, "readonly").objectStore(CHANGES);
-		const rows = (await req(store.getAll())) as ChangeRow[];
-		const histories = new Map<string, Uint8Array[]>();
+	async allChangeHistories(): Promise<ObjectHistory[]> {
+		const tx = this.handle().transaction([CHANGES, CHECKPOINTS], "readonly");
+		const [rows, checkpoints] = await Promise.all([
+			req(tx.objectStore(CHANGES).getAll()) as Promise<ChangeRow[]>,
+			req(tx.objectStore(CHECKPOINTS).getAll()) as Promise<CheckpointRow[]>,
+		]);
+		const histories = new Map<string, ObjectHistory>();
+		const historyOf = (objectId: string): ObjectHistory => {
+			let history = histories.get(objectId);
+			if (!history) histories.set(objectId, (history = { changes: [] }));
+			return history;
+		};
+		for (const cp of checkpoints) historyOf(cp.objectId).checkpoint = cp.bytes;
 		for (const row of rows) {
 			if (!(row.bytes instanceof Uint8Array) || row.bytes.byteLength === 0) {
 				throw new Error(`Missing protobuf bytes for object ${row.objectId}`);
 			}
-			let history = histories.get(row.objectId);
-			if (!history) histories.set(row.objectId, (history = []));
-			history.push(row.bytes);
+			historyOf(row.objectId).changes.push(row.bytes);
 		}
 		return [...histories.values()];
+	}
+
+	async getCheckpoint(objectId: string): Promise<CheckpointRow | undefined> {
+		return (await req(this.handle().transaction(CHECKPOINTS, "readonly").objectStore(CHECKPOINTS).get(objectId))) as CheckpointRow | undefined;
+	}
+
+	async allCheckpoints(): Promise<Map<string, CheckpointRow>> {
+		const rows = (await req(this.handle().transaction(CHECKPOINTS, "readonly").objectStore(CHECKPOINTS).getAll())) as CheckpointRow[];
+		return new Map(rows.map((row) => [row.objectId, row]));
+	}
+
+	/**
+	 * Keep `row` when it beats the stored checkpoint: more covered changes
+	 * wins, then the larger hash (core.checkpoint_supersedes). Never
+	 * created_at - the relay is transport, not authority. Returns stored.
+	 */
+	async putCheckpoint(row: CheckpointRow): Promise<boolean> {
+		const tx = this.handle().transaction(CHECKPOINTS, "readwrite");
+		const store = tx.objectStore(CHECKPOINTS);
+		const existing = (await req(store.get(row.objectId))) as CheckpointRow | undefined;
+		if (existing && !(row.covered > existing.covered || (row.covered === existing.covered && row.hash > existing.hash))) {
+			return false;
+		}
+		store.put(row, row.objectId);
+		await txDone(tx);
+		return true;
+	}
+
+	async getCheckpointFloors(): Promise<Record<string, number>> {
+		const value = await req(this.handle().transaction(META, "readonly").objectStore(META).get(CHECKPOINT_FLOORS_KEY));
+		return value && typeof value === "object" ? (value as Record<string, number>) : {};
+	}
+
+	async setCheckpointFloor(scope: string, v: number): Promise<void> {
+		const tx = this.handle().transaction(META, "readwrite");
+		const store = tx.objectStore(META);
+		const current = ((await req(store.get(CHECKPOINT_FLOORS_KEY))) ?? {}) as Record<string, number>;
+		store.put({ ...current, [scope]: v }, CHECKPOINT_FLOORS_KEY);
+		await txDone(tx);
 	}
 
 	/**
@@ -240,17 +308,20 @@ export class ChangeStore implements ChangeStoreApi {
 		return new Map(ids.map((id, i) => [id, counts[i]]));
 	}
 
-	async getStates<T>(): Promise<Map<string, { n: number; state: T }>> {
+	async getStates<T>(): Promise<Map<string, StateMemo<T>>> {
 		const store = this.handle().transaction(STATES, "readonly").objectStore(STATES);
 		const [keys, values] = await Promise.all([req(store.getAllKeys()), req(store.getAll())]);
-		const out = new Map<string, { n: number; state: T }>();
-		keys.forEach((k, i) => out.set(String(k), values[i] as { n: number; state: T }));
+		const out = new Map<string, StateMemo<T>>();
+		keys.forEach((k, i) => {
+			const memo = values[i] as Partial<StateMemo<T>> & { n: number; state: T };
+			out.set(String(k), { n: memo.n, cp: memo.cp ?? "", state: memo.state });
+		});
 		return out;
 	}
 
-	async putState<T>(objectId: string, n: number, state: T): Promise<void> {
+	async putState<T>(objectId: string, n: number, cp: string, state: T): Promise<void> {
 		const tx = this.handle().transaction(STATES, "readwrite");
-		tx.objectStore(STATES).put({ n, state }, objectId);
+		tx.objectStore(STATES).put({ n, cp, state } satisfies StateMemo<T>, objectId);
 		await txDone(tx);
 	}
 

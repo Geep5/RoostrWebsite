@@ -233,8 +233,8 @@ class WebBackend {
 
 	/**
 	 * Recompute dirty object states. Boot path loads the persisted replay
-	 * cache and replays ONLY objects whose change count grew since it was
-	 * written - a warm boot does zero replay work.
+	 * cache and replays ONLY objects whose change count grew or whose
+	 * checkpoint moved since it was written - a warm boot does zero replay work.
 	 */
 	private ensure(): Promise<void> {
 		if (this.ensuring) return this.ensuring;
@@ -250,10 +250,12 @@ class WebBackend {
 			this.allDirty = false;
 			rebuilt = true;
 			this.states.clear();
-			const [counts, cached] = await Promise.all([this.store.changeCounts(), this.store.getStates<ObjectJSON>()]);
-			for (const [id, n] of counts) {
+			const [counts, cached, checkpoints] = await Promise.all([this.store.changeCounts(), this.store.getStates<ObjectJSON>(), this.store.allCheckpoints()]);
+			// An object may exist only as a checkpoint (its covered changes were
+			// never stored here), so the scan covers both key sets.
+			for (const id of new Set([...counts.keys(), ...checkpoints.keys()])) {
 				const hit = cached.get(id);
-				if (hit && hit.n === n) this.states.set(id, hit.state);
+				if (hit && hit.n === (counts.get(id) ?? 0) && hit.cp === (checkpoints.get(id)?.hash ?? "")) this.states.set(id, hit.state);
 				else this.dirty.add(id);
 			}
 		}
@@ -261,13 +263,13 @@ class WebBackend {
 		this.dirty.clear();
 		for (const [index, id] of ids.entries()) {
 			try {
-				const changes = await this.store.changesFor(id);
-				if (changes.length === 0) continue;
-				const obj = computeObject(changes);
+				const [changes, checkpoint] = await Promise.all([this.store.changesFor(id), this.store.getCheckpoint(id)]);
+				if (changes.length === 0 && !checkpoint) continue;
+				const obj = computeObject(changes, checkpoint?.bytes);
 				if (obj) {
 					this.states.set(id, obj);
 					this.queryUpserted.add(id);
-					void this.store.putState(id, changes.length, obj);
+					void this.store.putState(id, changes.length, checkpoint?.hash ?? "", obj);
 				}
 			} catch (err) {
 				// Two different failures used to share one silent `continue`:
@@ -491,7 +493,10 @@ class WebBackend {
 					return [...this.states.values()];
 				},
 				author: this.author,
-				changesFor: (id) => this.store.changesFor(id),
+				dagFor: async (id) => {
+					const [changes, checkpoint] = await Promise.all([this.store.changesFor(id), this.store.getCheckpoint(id)]);
+					return { changes, checkpoint: checkpoint?.bytes };
+				},
 				getObject: async (id) => {
 					await this.ensure();
 					return this.states.get(id) ?? null;

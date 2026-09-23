@@ -72,9 +72,12 @@ export interface ReplayApi {
 	/**
 	 * Replay an object's full change set (any order; topological sort +
 	 * hex-id tie-break inside) into the same ObjectJSON the Odin server
-	 * serves from /api/objects/:id.
+	 * serves from /api/objects/:id. With `checkpoint` (raw kind-1079
+	 * Checkpoint protobuf) the core replays only the uncovered tail on top
+	 * of it, or ignores it when every covered change is present and the
+	 * replay order diverged (core.checkpoint_for_replay).
 	 */
-	computeObject(changes: ChangeJSON[]): ObjectJSON | null;
+	computeObject(changes: ChangeJSON[], checkpoint?: Uint8Array): ObjectJSON | null;
 }
 
 // ── query.ts ──────────────────────────────────────────────────────
@@ -121,6 +124,25 @@ export interface PendingPublish {
 	events?: Event[];
 }
 
+/** The one checkpoint held per object (docs/checkpoint-sync.md). */
+export interface CheckpointRow {
+	objectId: string;
+	/** Raw Checkpoint protobuf, exactly as received. */
+	bytes: Uint8Array;
+	/** sha256 hex of `bytes`: dedup and tie-break, never a trust anchor. */
+	hash: string;
+	/** Sorted hex head ids the checkpoint state sits at. */
+	heads: string[];
+	/** Number of change ids folded in. */
+	covered: number;
+}
+
+/** One object's raw history for a corpus load. */
+export interface ObjectHistory {
+	checkpoint?: Uint8Array;
+	changes: Uint8Array[];
+}
+
 export interface ChangeStoreApi {
 	open(): Promise<void>;
 	/** Add raw changes (idempotent by content address). Returns # new. */
@@ -134,8 +156,19 @@ export interface ChangeStoreApi {
 	changesFor(objectId: string): Promise<ChangeJSON[]>;
 	/** Exact stored protobuf bytes with decoded metadata, without re-encoding. */
 	rawChangesFor(objectId: string): Promise<Array<{ bytes: Uint8Array; change: ChangeJSON }>>;
-	/** Every known object id. */
+	/** Every known object id, including checkpoint-only objects. */
 	objectIds(): Promise<string[]>;
+	getCheckpoint(objectId: string): Promise<CheckpointRow | undefined>;
+	/** Store when it supersedes the held one (covered, then hash). Returns stored. */
+	putCheckpoint(row: CheckpointRow): Promise<boolean>;
+	allCheckpoints(): Promise<Map<string, CheckpointRow>>;
+	/**
+	 * Oldest kind-1078 created_at a full walk still needs, per scope ("" =
+	 * personal, else the blinded space tag): the manifest cursor it first
+	 * walked from, or 0 when no manifest existed. Set once per scope.
+	 */
+	getCheckpointFloors(): Promise<Record<string, number>>;
+	setCheckpointFloor(scope: string, v: number): Promise<void>;
 	/** Relay cursor (unix seconds of newest imported event). */
 	getCursor(): Promise<number>;
 	/** Atomically save recovery identities with the cursor when supplied. */
