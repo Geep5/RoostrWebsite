@@ -38,4 +38,9 @@ export function encodeChange(change: ChangeJSON): Uint8Array {
 	return base64ToBytes(coreCall<string>("codec", { action: "encode", change: packCoreValueMaps(change) }));
 }
 
+/** The one store rule for checkpoints (core.checkpoint_supersedes): `candidate` covers a strict superset, or the same set with the larger hash. */
+export function checkpointSupersedes(candidate: Uint8Array, existing: Uint8Array): boolean {
+	return coreCall<boolean>("codec", { action: "checkpoint_supersedes", candidate: bytesToBase64(candidate), existing: bytesToBase64(existing) });
+}
+
 export const proto: ProtoApi = { decodeChange, encodeChange, changeId };

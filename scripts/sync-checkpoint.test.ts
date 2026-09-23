@@ -2,6 +2,7 @@ import { afterEach, beforeAll, describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { finalizeEvent, getPublicKey, nip19, nip44, type Event } from "nostr-tools";
 import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
+import { sha256 } from "@noble/hashes/sha2.js";
 import { initCore, resetCore } from "../src/lib/engine/core";
 import { blindShared, RelaySync, type SharedSpaceInfo } from "../src/lib/engine/sync";
 import { ChangeStore, destroyDatabase } from "../src/lib/engine/store";
@@ -76,7 +77,7 @@ async function storeFixture() {
 	return store;
 }
 interface SyncInternals {
-	ingestEvent(event: Event): Promise<{ objectId: string; checkpoint?: { covered: number; hash: string } } | null>;
+	ingestEvent(event: Event): Promise<{ objectId: string; checkpoint?: { hash: string } } | null>;
 	importBatch(batch: unknown[]): Promise<void>;
 	backfillChain: Promise<boolean>;
 }
@@ -112,19 +113,27 @@ describe("checkpoint replay", () => {
 });
 
 describe("checkpoint import", () => {
-	test("personal checkpoints land in the store and only a wider one supersedes", async () => {
+	test("personal checkpoints land in the store and only a covering one supersedes", async () => {
 		const store = await storeFixture();
 		const { sync, internals } = syncFixture(store);
 		expect(await importEvent(internals, checkpointEvent(c2, false))).toBe(true);
 		const held = (await store.getCheckpoint("doc"))!;
-		expect(held).toMatchObject({ objectId: "doc", covered: 2, heads: [edit.id] });
+		expect(held).toMatchObject({ objectId: "doc", heads: [edit.id] });
 		expect(sync.stats.checkpoints).toBe(1);
 		// The narrower, older-generation checkpoint arrives late: a clean no-op.
 		expect(await importEvent(internals, checkpointEvent(c1, false))).toBe(true);
 		expect((await store.getCheckpoint("doc"))!.hash).toBe(held.hash);
 		expect(sync.stats.checkpoints).toBe(1);
-		// Same width, different bytes: the higher hash wins on every replica.
-		const rival: CheckpointRow = { objectId: "doc", bytes: c2, hash: held.hash < "ff" ? "ff".repeat(32) : "00".repeat(32), heads: held.heads, covered: 2 };
+		// Another device checkpointed a different branch of equal width: neither
+		// covers the other, so the held one stays no matter the hash.
+		const fork = change("doc", [name("fork")], [createDoc.id]);
+		const forkBytes = checkpointBytes("doc", "note", { channel: "space", name: "fork" }, [fork.id], [createDoc.id, fork.id], 2);
+		const forkRow: CheckpointRow = { objectId: "doc", bytes: forkBytes, hash: "ff".repeat(32), heads: [fork.id] };
+		expect(await store.putCheckpoint(forkRow)).toBe(false);
+		// Same covered set, different bytes: the higher (real) hash wins on every replica.
+		const rivalBytes = checkpointBytes("doc", "note", { channel: "space", name: "v2" }, [edit.id], [createDoc.id, edit.id], 9);
+		const rival: CheckpointRow = { objectId: "doc", bytes: rivalBytes, hash: bytesToHex(sha256(rivalBytes)), heads: held.heads };
+		expect(held.hash).toBe(bytesToHex(sha256(c2)));
 		expect(await store.putCheckpoint(rival)).toBe(rival.hash > held.hash);
 	});
 	test("shared checkpoints are accepted from the space owner only", async () => {
@@ -134,7 +143,7 @@ describe("checkpoint import", () => {
 		expect(await importEvent(internals, checkpointEvent(c2, true, memberSk))).toBe(true);
 		expect(await store.getCheckpoint("doc")).toBeUndefined();
 		expect(await importEvent(internals, checkpointEvent(c2, true, ownerSk))).toBe(true);
-		expect((await store.getCheckpoint("doc"))?.covered).toBe(2);
+		expect((await store.getCheckpoint("doc"))?.heads).toEqual([edit.id]);
 		// An owner's checkpoint cannot pull an object from another scope into this space.
 		const foreign = checkpointBytes("elsewhere", "note", { channel: "other", name: "x" }, [edit.id], [edit.id], 1);
 		expect(await importEvent(internals, checkpointEvent(foreign, true, ownerSk))).toBe(true);

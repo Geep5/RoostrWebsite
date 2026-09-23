@@ -58,6 +58,9 @@ interface SyncInternals {
 	queryRelayPage(url: string, filter: Record<string, unknown>): Promise<Event[]>;
 	backfillChain: Promise<boolean>;
 }
+interface StoreInternals {
+	handle(): IDBDatabase;
+}
 function syncFixture(store: ChangeStore, relays: string[] = []) {
 	const sync = new RelaySync(ownerSk, relays, store, { onObjects() {}, onStatus() {} });
 	const internals = sync as unknown as SyncInternals;
@@ -292,8 +295,8 @@ describe("history completion", () => {
 		expect(repair.mock.calls.every(([, filter]) => filter.since === 0)).toBe(true);
 		expect(await store.getCursor()).toBe(100);
 		expect(await store.getReplayGroups()).toEqual([]);
-		// One relay, two scopes, two kinds each; the original walker never ran again.
-		expect(pages).toHaveBeenCalledTimes(4);
+		// One relay, two scopes (one DAG filter each); the original walker never ran again.
+		expect(pages).toHaveBeenCalledTimes(2);
 	});
 	test("import failure preserves recovery across reload and a later successful scan retires it", async () => {
 		const store = await storeFixture();
@@ -383,10 +386,10 @@ describe("history completion", () => {
 		// The live subscription replays the same event the walk would; it is mid-commit at EOSE.
 		const live = internals.handleLiveEvent(event(base64(createDoc), ownerSk));
 		await entered.promise;
-		// Every filter's EOSE has been queried once all four pages were asked for; release the commit then.
+		// Every filter's EOSE has been queried once both scopes' pages were asked for; release the commit then.
 		let asked = 0;
 		spyOn(internals, "queryRelayPage").mockImplementation(async () => {
-			if (++asked === 4) release.resolve();
+			if (++asked === 2) release.resolve();
 			return [];
 		});
 		const scan = internals.backfill(201);
@@ -397,28 +400,68 @@ describe("history completion", () => {
 		expect((await store.changesFor("doc")).length).toBe(1);
 		writes.mockRestore();
 	});
-	test("a fresh device subscribes live from the manifest cursor instead of event zero", async () => {
+	test("a device that bootstrapped from a manifest floor walks the whole history again and forgets the floor", async () => {
 		const store = await storeFixture();
+		// State a pre-cache-contract build left behind: walked kind-1078 from 500, marked bootstrapped.
+		// Written through the private handle: the store no longer has an API for floors.
+		const storeInternals = store as unknown as StoreInternals;
+		const db = storeInternals.handle();
+		await new Promise<void>((resolve, reject) => {
+			const tx = db.transaction("meta", "readwrite");
+			tx.objectStore("meta").put({ "": 500, [blindShared(bytesToHex(spaceKey), "space:space")]: 0 }, "checkpoint-floors");
+			tx.objectStore("meta").put(true, "bootstrapped");
+			tx.objectStore("meta").put(700, "cursor");
+			tx.oncomplete = () => resolve();
+			tx.onerror = () => reject(tx.error);
+		});
 		const { sync, internals } = syncFixture(store, ["wss://invalid.test"]);
-		const personalKey = nip44.getConversationKey(ownerSk, owner);
-		const manifest = finalizeEvent({ kind: 30079, created_at: 900, tags: [["d", "roostr-checkpoint"]], content: nip44.encrypt(JSON.stringify({ cursor: 500, objects: 3 }), personalKey) }, ownerSk);
 		const live: Array<Record<string, unknown>> = [];
 		internals.pool = {
 			publish: () => [Promise.resolve("ok")],
-			querySync: (async (_relays: string[], filter: { kinds?: number[] }) => (filter.kinds?.includes(30079) ? [manifest] : [])) as SyncInternals["pool"]["querySync"],
+			querySync: (async () => []) as SyncInternals["pool"]["querySync"],
 			subscribeMany: ((_relays: string[], filter: Record<string, unknown>) => { live.push(filter); return { close() {} }; }) as SyncInternals["pool"]["subscribeMany"],
 			close() {},
 		};
 		const pages = spyOn(internals, "queryRelayPage").mockResolvedValue([]);
 		await sync.start();
 		await internals.backfillChain;
-		const personal = live.find((filter) => Array.isArray(filter.authors))!;
-		expect(personal.since).toBe(500);
-		// The space's owner published no manifest: its live stream still starts at the cursor.
-		expect(live.find((filter) => filter["#h"])!.since).toBe(1);
-		expect(pages.mock.calls.find(([, filter]) => filter.authors && (filter.kinds as number[])[0] === 1078)![1].since).toBe(500);
-		expect(pages.mock.calls.find(([, filter]) => filter.authors && (filter.kinds as number[])[0] === 1079)![1].since).toBe(1);
-		expect(await store.getCheckpointFloors()).toEqual({ "": 500, [blindShared(bytesToHex(spaceKey), "space:space")]: 0 });
+		// Both scopes, changes and checkpoints together, from event zero - not cursor+1.
+		expect(pages.mock.calls.map(([, filter]) => filter.since)).toEqual([1, 1]);
+		expect(pages.mock.calls.every(([, filter]) => (filter.kinds as number[]).join() === "1078,1079")).toBe(true);
+		expect(live.find((filter) => Array.isArray(filter.authors))!.since).toBe(701);
+		expect(await store.getBootstrapped()).toBe(true); // the clean walk re-earned it
+		// Starting again is an ordinary incremental walk: the floor record is gone.
+		const again = syncFixture(store, ["wss://invalid.test"]);
+		again.internals.pool = internals.pool;
+		const later = spyOn(again.internals, "queryRelayPage").mockResolvedValue([]);
+		await again.sync.start();
+		await again.internals.backfillChain;
+		expect(later.mock.calls.every(([, filter]) => filter.since === 701)).toBe(true);
+	});
+	test("a newly joined space is walked from event zero even when the space list is set again at once", async () => {
+		const store = await storeFixture();
+		await store.setCursor(200);
+		await store.setBootstrapped();
+		const sync = new RelaySync(ownerSk, ["wss://invalid.test"], store, { onObjects() {}, onStatus() {} });
+		const internals = sync as unknown as SyncInternals;
+		cleanup.push(() => stopSettled(sync, internals));
+		internals.pool = {
+			publish: () => [Promise.resolve("ok")],
+			querySync: (async () => []) as SyncInternals["pool"]["querySync"],
+			subscribeMany: (() => ({ close() {} })) as SyncInternals["pool"]["subscribeMany"],
+			close() {},
+		};
+		const pages = spyOn(internals, "queryRelayPage").mockResolvedValue([]);
+		await sync.start();
+		await internals.backfillChain;
+		pages.mockClear();
+		// The space list re-renders twice in one tick after a join.
+		sync.setSharedSpaces([space]);
+		sync.setSharedSpaces([space]);
+		await internals.backfillChain;
+		const spaceWalks = pages.mock.calls.filter(([, filter]) => filter["#h"]);
+		expect(spaceWalks.length).toBe(1);
+		expect(spaceWalks[0][1].since).toBe(1);
 	});
 	test("a suffix-first repair and later duplicate suffixes do not recreate partial groups", async () => {
 		const store = await storeFixture();

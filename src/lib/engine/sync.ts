@@ -41,11 +41,8 @@ import { spaceKeyGet, spaceKeyImport } from "./spacekeys";
 export const DEFAULT_RELAYS = ["wss://roostr-relay.fly.dev"];
 
 const CHANGE_KIND = 1078;
-/** Kind-1079 checkpoint: one sealed Checkpoint protobuf per object (docs/checkpoint-sync.md). */
+/** Kind-1079 checkpoint: one sealed Checkpoint protobuf per object, a replay cache (docs/checkpoint-sync.md). */
 const CHECKPOINT_KIND = 1079;
-/** Replaceable manifest the checkpoint publisher stamps once every object is covered. */
-const MANIFEST_KIND = 30079;
-const MANIFEST_D = "roostr-checkpoint";
 /** Every relay filter that pulls DAG events; the core session ingests both kinds. */
 const DAG_KINDS = [CHANGE_KIND, CHECKPOINT_KIND];
 const ALLOWLIST_KIND = 30100;
@@ -178,7 +175,6 @@ function authorizeShared(candidate: Record<string, unknown>, provenance: SharedP
 interface CheckpointSummary {
 	objectId: string;
 	headIds: string[];
-	covered: number;
 	hash: string;
 }
 
@@ -340,14 +336,6 @@ export class RelaySync implements RelaySyncApi {
 	private bootstrapping = false;
 	private cursorChain: Promise<void> = Promise.resolve();
 	private backfillChain: Promise<boolean> = Promise.resolve(false);
-	/**
-	 * Per-scope kind-1078 floors ("" = personal, else spaceTag): the
-	 * publisher's manifest cursor, below which every change is folded into a
-	 * checkpoint. Mirror of the store; resolved once per scope and remembered.
-	 */
-	private floors: Record<string, number> = {};
-	private floorFetches = new Map<string, Promise<number>>();
-
 	/** Mirror of the core outbox's queued-not-in-flight count, for the status dot. */
 	private pendingCount = 0;
 	private queueRunning = false;
@@ -425,36 +413,25 @@ export class RelaySync implements RelaySyncApi {
 			coreCall("sync", { action: "spaces", spaces: [...next.values()].map((sp) => ({ spaceId: sp.spaceId, keyHex: sp.keyHex, keyId: sp.keyId })) });
 		}
 		const tags = [...next.values()].map((sp) => sp.spaceTag);
-		const fresh = [...next.values()].filter((sp) => !prevTags.has(sp.spaceTag));
+		const fresh = [...next.values()].some((sp) => !prevTags.has(sp.spaceTag));
 		if (this.stopped || !this.sub) return; // start() wires subscriptions itself
-		const resubscribe = () => {
-			try {
-				this.spaceSub?.close();
-			} catch {
-				/* already closed */
-			}
-			this.spaceSub = null;
-			if (tags.length > 0) {
-				this.spaceSub = this.pool.subscribeMany(this.relays, { kinds: DAG_KINDS, "#h": tags, since: this.liveSince(tags) }, {
-					onevent: (event) => {
-						this.liveChain = this.liveChain.then(() => this.handleLiveEvent(event)).catch(() => {});
-					},
-				});
-			}
-		};
-		if (fresh.length === 0) {
-			resubscribe();
-			return;
+		try {
+			this.spaceSub?.close();
+		} catch {
+			/* already closed */
 		}
-		// A newly joined space's floor is unknown until its owner's manifest is
-		// read; subscribing before that would replay the space from event zero.
-		void Promise.all(fresh.map((sp) => this.checkpointFloor(sp.spaceTag, sp)))
-			.then(() => {
-				if (this.stopped || this.sharedSpaces !== next) return; // a later call owns the subscription
-				resubscribe();
-				return this.backfill(1);
-			})
-			.catch((err) => this.events.onStatus({ phase: "error", detail: String(err) }));
+		this.spaceSub = null;
+		if (tags.length > 0) {
+			this.spaceSub = this.pool.subscribeMany(this.relays, { kinds: DAG_KINDS, "#h": tags, since: this.cursor + 1 }, {
+				onevent: (event) => {
+					this.liveChain = this.liveChain.then(() => this.handleLiveEvent(event)).catch(() => {});
+				},
+			});
+		}
+		// A newly joined space's whole stream is unseen. The walk is queued
+		// synchronously so a second call in the same tick (the space list
+		// re-rendering) cannot cancel it - it only ever adds another.
+		if (fresh) void this.backfill(1).catch((err) => this.events.onStatus({ phase: "error", detail: String(err) }));
 	}
 
 
@@ -586,8 +563,10 @@ export class RelaySync implements RelaySyncApi {
 
 	async start(): Promise<void> {
 		await this.store.open();
+		// A device that walked from a manifest floor never held the older
+		// history: this also clears its bootstrapped flag, so it walks from zero.
+		await this.store.forgetCheckpointFloors();
 		this.cursor = await this.store.getCursor();
-		this.floors = await this.store.getCheckpointFloors();
 		await this.openSession();
 		for (const pending of await this.store.pendingPublishes()) this.offerToOutbox(pending);
 		this.events.onStatus({ phase: "backfill", imported: 0 });
@@ -621,13 +600,6 @@ export class RelaySync implements RelaySyncApi {
 			});
 
 		if (this.stopped) return;
-		// Live subscriptions on a fresh device would otherwise replay every
-		// change from event zero alongside the walk - the exact download
-		// checkpoints exist to avoid. One manifest query per scope first.
-		if (!bootstrapped) {
-			await Promise.all([this.checkpointFloor("", null), ...[...this.sharedSpaces.values()].map((sp) => this.checkpointFloor(sp.spaceTag, sp))]);
-			if (this.stopped) return;
-		}
 		// Gift wraps addressed to us: created_at is randomized, so no
 		// cursor - the seen-set dedupes.
 		try {
@@ -655,7 +627,7 @@ export class RelaySync implements RelaySyncApi {
 		}
 		this.sub = this.pool.subscribeMany(
 			this.relays,
-			{ kinds: DAG_KINDS, authors: [this.pk], since: this.liveSince([""]) },
+			{ kinds: DAG_KINDS, authors: [this.pk], since: this.cursor + 1 },
 			{
 				onevent: (event) => {
 					this.liveChain = this.liveChain.then(() => this.handleLiveEvent(event)).catch(() => {});
@@ -664,7 +636,7 @@ export class RelaySync implements RelaySyncApi {
 		);
 		const spaceTags = [...this.sharedSpaces.values()].map((sp) => sp.spaceTag);
 		this.spaceSub = spaceTags.length > 0
-			? this.pool.subscribeMany(this.relays, { kinds: DAG_KINDS, "#h": spaceTags, since: this.liveSince(spaceTags) }, {
+			? this.pool.subscribeMany(this.relays, { kinds: DAG_KINDS, "#h": spaceTags, since: this.cursor + 1 }, {
 					onevent: (event) => {
 						this.liveChain = this.liveChain.then(() => this.handleLiveEvent(event)).catch(() => {});
 					},
@@ -681,34 +653,6 @@ export class RelaySync implements RelaySyncApi {
 			},
 		});
 		this.liveUp = true;
-	}
-
-	/**
-	 * Live `since` for a set of scopes: past the cursor, and never below the
-	 * lowest checkpoint floor among them. A checkpoint's created_at is at or
-	 * after the manifest cursor it is stamped with (the publisher builds
-	 * checkpoints, then stamps at most the pass start), so nothing that can
-	 * still arrive live sits below the floor.
-	 */
-	private liveSince(scopes: string[]): number {
-		return Math.max(this.cursor + 1, Math.min(...scopes.map((scope) => this.floors[scope] ?? 0)));
-	}
-
-	/** The scope's 1078 floor: remembered, else the publisher's manifest cursor (0 when none), persisted. */
-	private checkpointFloor(scope: string, space: SharedSpace | null): Promise<number> {
-		const known = this.floors[scope];
-		if (known !== undefined) return Promise.resolve(known);
-		let pending = this.floorFetches.get(scope);
-		if (!pending) {
-			pending = (async () => {
-				const floor = (await this.fetchManifest(space))?.cursor ?? 0;
-				this.floors[scope] = floor;
-				await this.store.setCheckpointFloor(scope, floor);
-				return floor;
-			})().finally(() => this.floorFetches.delete(scope));
-			this.floorFetches.set(scope, pending);
-		}
-		return pending;
 	}
 
 	/**
@@ -862,8 +806,8 @@ export class RelaySync implements RelaySyncApi {
 		const seen = new Set<string>();
 		const importPage = async (page: Event[]): Promise<void> => {
 			const batch: ImportItem[] = [];
-			// Checkpoints first within a page: a change the checkpoint already
-			// folds in then lands as covered tail, never as a solitary orphan.
+			// Checkpoints first within a page: an object renders from its cache
+			// while the changes it folds in stream in behind it.
 			for (const event of [...page].sort((a, b) => a.created_at - b.created_at || b.kind - a.kind || a.id.localeCompare(b.id))) {
 				if (seen.has(event.id)) continue;
 				seen.add(event.id);
@@ -873,21 +817,12 @@ export class RelaySync implements RelaySyncApi {
 			if (batch.length > 0) await this.importBatch(batch, true);
 		};
 		let complete = this.relays.length > 0;
-		// A full walk pulls kind-1078 only from the publisher's manifest cursor
-		// on: everything older is folded into a kind-1079 checkpoint, which is
-		// walked unbounded. Resolved once per scope and remembered, so a later
-		// repair walk never widens back to event zero (docs/checkpoint-sync.md).
+		// Checkpoints (1079) never shorten the walk: they are replay caches,
+		// and the kind-1078 history - including the vanish ledger - is what
+		// this device must hold in full (docs/checkpoint-sync.md).
 		const full = since <= 1;
-		const changeSince = async (scope: string, space: SharedSpace | null): Promise<number> =>
-			full ? Math.max(since, await this.checkpointFloor(scope, space)) : since;
-		const filters: Array<Parameters<SimplePool["querySync"]>[1]> = [
-			{ kinds: [CHANGE_KIND], authors: [this.pk], since: await changeSince("", null) },
-			{ kinds: [CHECKPOINT_KIND], authors: [this.pk], since },
-		];
-		for (const sp of this.sharedSpaces.values()) {
-			filters.push({ kinds: [CHANGE_KIND], "#h": [sp.spaceTag], since: await changeSince(sp.spaceTag, sp) });
-			filters.push({ kinds: [CHECKPOINT_KIND], "#h": [sp.spaceTag], since });
-		}
+		const filters: Array<Parameters<SimplePool["querySync"]>[1]> = [{ kinds: DAG_KINDS, authors: [this.pk], since }];
+		for (const sp of this.sharedSpaces.values()) filters.push({ kinds: DAG_KINDS, "#h": [sp.spaceTag], since });
 		await Promise.all(this.relays.flatMap((relay) => filters.map(async (filter) => {
 			let until: number | undefined = resumeUntil;
 			for (;;) {
@@ -935,9 +870,9 @@ export class RelaySync implements RelaySyncApi {
 		// full second walk 60s later.
 		await this.drainInflight();
 		// Every relay answered EOSE for every filter and nothing faulted: a
-		// CHECKPOINT group still open is missing parts no relay holds (NIP-09
-		// took a superseded checkpoint's chunks; the newer one covers the
-		// object). The core retires only those - a change group stays until a
+		// CHECKPOINT group still open is missing parts no relay holds (a chunk
+		// dropped, or a publish that never finished). A checkpoint is only a
+		// cache, so the core retires those - a change group stays until a
 		// covering repair, since a missing change is missing data.
 		if (complete && !this.stopped && this.replayFaultGeneration === checkpoint && this.sessionOpen) {
 			const r = coreCall<{ replayGroups?: Array<[string, number]> }>("sync", { action: "retire", since: full ? 0 : since });
@@ -990,33 +925,6 @@ export class RelaySync implements RelaySyncApi {
 			sub.receivedEose(); // Cancel nostr-tools' synthetic EOSE timer.
 			sub.close();
 		}
-	}
-
-	// ── Checkpoint manifest ────────────────────────────────────────
-
-	/**
-	 * Newest checkpoint manifest for a scope, or null. Personal: ours.
-	 * Shared: the space owner's, sealed under the space key. `cursor` is the
-	 * kind-1078 created_at from which changes are not yet folded into a
-	 * published checkpoint.
-	 */
-	private async fetchManifest(space: SharedSpace | null): Promise<{ cursor: number; objects: number } | null> {
-		const author = space ? space.owner || this.pk : this.pk;
-		const d = space ? `${MANIFEST_D}/${space.spaceTag}` : MANIFEST_D;
-		try {
-			const events = await this.pool.querySync(this.relays, { kinds: [MANIFEST_KIND], authors: [author], "#d": [d] });
-			events.sort((a, b) => b.created_at - a.created_at);
-			const key = space ? nip44.getConversationKey(hexToBytes(space.keyHex), this.pk) : hexToBytes(this.conversationKey);
-			for (const event of events) {
-				if (!verifyEvent(event)) continue;
-				const parsed = JSON.parse(nip44.decrypt(event.content, key)) as { cursor?: unknown; objects?: unknown };
-				if (typeof parsed.cursor !== "number" || !Number.isSafeInteger(parsed.cursor) || parsed.cursor < 0) continue;
-				return { cursor: parsed.cursor, objects: typeof parsed.objects === "number" ? parsed.objects : 0 };
-			}
-		} catch {
-			/* unreachable or garbled: the walk starts from zero */
-		}
-		return null;
 	}
 
 	// ── Event → change / checkpoint ────────────────────────────────
@@ -1080,11 +988,11 @@ export class RelaySync implements RelaySyncApi {
 	}
 
 	/**
-	 * Keep a checkpoint when it beats the one held (more covered, then hash).
-	 * A superseded copy is still a clean import: re-scanning would only
-	 * produce it again. The signer was already checked: the core session
-	 * only opens personal payloads from this key, and `authorized` holds
-	 * shared ones to the space owner.
+	 * Keep a checkpoint when it beats the one held (covers a superset, then
+	 * hash - the store asks the core). A superseded or incomparable copy is
+	 * still a clean import: re-scanning would only produce it again. The
+	 * signer was already checked: the core session only opens personal
+	 * payloads from this key, and `authorized` holds shared ones to the owner.
 	 */
 	private async importCheckpoint(item: ImportItem, summary: CheckpointSummary): Promise<void> {
 		const row: CheckpointRow = {
@@ -1092,7 +1000,6 @@ export class RelaySync implements RelaySyncApi {
 			bytes: item.bytes,
 			hash: summary.hash,
 			heads: [...summary.headIds].sort(),
-			covered: summary.covered,
 		};
 		if (!(await this.store.putCheckpoint(row))) return;
 		this.stats.checkpoints++;

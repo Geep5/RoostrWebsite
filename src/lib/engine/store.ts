@@ -4,11 +4,11 @@
  * Database 'roostr':
  *   changes      keyed by change id (hex content address) →
  *                { objectId, bytes, json }, with an 'objectId' index.
- *   checkpoints  keyed by objectId → { objectId, bytes, hash, heads, covered }:
- *                the one kind-1079 checkpoint held per object (more covered
+ *   checkpoints  keyed by objectId → { objectId, bytes, hash, heads }: the
+ *                one kind-1079 checkpoint held per object (covers a superset
  *                wins, then the larger hash - core.checkpoint_supersedes).
  *   meta         keyed by string → cursor at 'cursor', published change ids
- *                as individual 'published:<id>' keys, 'checkpoint-floors'.
+ *                as individual 'published:<id>' keys.
  *   states       keyed by objectId → { n: change count, cp: checkpoint hash,
  *                state: ObjectJSON } - the replayed object, persisted so
  *                boots don't re-replay the whole vault; invalidated per
@@ -21,6 +21,7 @@
  */
 
 import type { ChangeJSON, ChangeStoreApi, CheckpointRow, ObjectHistory, PendingPublish } from "./contracts";
+import { checkpointSupersedes } from "./proto";
 
 const DB_NAME = "roostr";
 const DB_VERSION = 3;
@@ -29,6 +30,7 @@ const CHECKPOINTS = "checkpoints";
 const META = "meta";
 const STATES = "states";
 const CURSOR_KEY = "cursor";
+/** Pre-cache-contract manifest floors; see forgetCheckpointFloors. */
 const CHECKPOINT_FLOORS_KEY = "checkpoint-floors";
 
 /** Persisted replay memo; see getStates/putState. */
@@ -267,32 +269,29 @@ export class ChangeStore implements ChangeStoreApi {
 	}
 
 	/**
-	 * Keep `row` when it beats the stored checkpoint: more covered changes
-	 * wins, then the larger hash (core.checkpoint_supersedes). Never
-	 * created_at - the relay is transport, not authority. Returns stored.
+	 * Keep `row` when it beats the stored checkpoint (core.checkpoint_supersedes:
+	 * covers a superset of the held change ids, then the larger hash). Never
+	 * created_at - the relay is transport, not authority - and never a bare
+	 * count: an incomparable fork from another device must not evict the held
+	 * one. Returns stored.
 	 */
 	async putCheckpoint(row: CheckpointRow): Promise<boolean> {
 		const tx = this.handle().transaction(CHECKPOINTS, "readwrite");
 		const store = tx.objectStore(CHECKPOINTS);
 		const existing = (await req(store.get(row.objectId))) as CheckpointRow | undefined;
-		if (existing && !(row.covered > existing.covered || (row.covered === existing.covered && row.hash > existing.hash))) {
-			return false;
-		}
+		if (existing && (existing.hash === row.hash || !checkpointSupersedes(row.bytes, existing.bytes))) return false;
 		store.put(row, row.objectId);
 		await txDone(tx);
 		return true;
 	}
 
-	async getCheckpointFloors(): Promise<Record<string, number>> {
-		const value = await req(this.handle().transaction(META, "readonly").objectStore(META).get(CHECKPOINT_FLOORS_KEY));
-		return value && typeof value === "object" ? (value as Record<string, number>) : {};
-	}
-
-	async setCheckpointFloor(scope: string, v: number): Promise<void> {
+	async forgetCheckpointFloors(): Promise<void> {
 		const tx = this.handle().transaction(META, "readwrite");
 		const store = tx.objectStore(META);
-		const current = ((await req(store.get(CHECKPOINT_FLOORS_KEY))) ?? {}) as Record<string, number>;
-		store.put({ ...current, [scope]: v }, CHECKPOINT_FLOORS_KEY);
+		const floors = await req(store.get(CHECKPOINT_FLOORS_KEY));
+		if (floors === undefined) return;
+		store.delete(CHECKPOINT_FLOORS_KEY);
+		if (Object.values((floors ?? {}) as Record<string, number>).some((v) => v > 0)) store.delete("bootstrapped");
 		await txDone(tx);
 	}
 

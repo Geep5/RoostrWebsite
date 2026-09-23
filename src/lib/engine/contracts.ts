@@ -124,7 +124,7 @@ export interface PendingPublish {
 	events?: Event[];
 }
 
-/** The one checkpoint held per object (docs/checkpoint-sync.md). */
+/** The one checkpoint held per object (docs/checkpoint-sync.md): a replay cache, never authority. */
 export interface CheckpointRow {
 	objectId: string;
 	/** Raw Checkpoint protobuf, exactly as received. */
@@ -133,8 +133,6 @@ export interface CheckpointRow {
 	hash: string;
 	/** Sorted hex head ids the checkpoint state sits at. */
 	heads: string[];
-	/** Number of change ids folded in. */
-	covered: number;
 }
 
 /** One object's raw history for a corpus load. */
@@ -159,16 +157,16 @@ export interface ChangeStoreApi {
 	/** Every known object id, including checkpoint-only objects. */
 	objectIds(): Promise<string[]>;
 	getCheckpoint(objectId: string): Promise<CheckpointRow | undefined>;
-	/** Store when it supersedes the held one (covered, then hash). Returns stored. */
+	/** Store when it supersedes the held one (core.checkpoint_supersedes: covers a superset, then hash). Returns stored. */
 	putCheckpoint(row: CheckpointRow): Promise<boolean>;
 	allCheckpoints(): Promise<Map<string, CheckpointRow>>;
 	/**
-	 * Oldest kind-1078 created_at a full walk still needs, per scope ("" =
-	 * personal, else the blinded space tag): the manifest cursor it first
-	 * walked from, or 0 when no manifest existed. Set once per scope.
+	 * One-time migration: builds before the cache contract walked kind-1078
+	 * from a publisher's manifest cursor and never held the older history.
+	 * Drops that record and, when it shortened a walk, the bootstrapped flag
+	 * with it, so the next start walks from event zero.
 	 */
-	getCheckpointFloors(): Promise<Record<string, number>>;
-	setCheckpointFloor(scope: string, v: number): Promise<void>;
+	forgetCheckpointFloors(): Promise<void>;
 	/** Relay cursor (unix seconds of newest imported event). */
 	getCursor(): Promise<number>;
 	/** Atomically save recovery identities with the cursor when supplied. */
