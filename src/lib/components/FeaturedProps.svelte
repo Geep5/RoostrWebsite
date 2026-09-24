@@ -1,10 +1,10 @@
 <script lang="ts">
 	/**
-	 * Anytype's featured-relations row (block/featured.tsx): properties render
-	 * inline under the title as bullet-separated cells, not in a panel. Each
-	 * cell shows the value (name as tooltip), click-to-edit in a popover.
-	 * Order: the object's `featuredRelations` key list first, then the rest
-	 * of the set fields. "+" appends a new property.
+	 * Featured properties render inline under the title as badges: a soft
+	 * tint of the option's colour, a leading glyph that says what kind of
+	 * state it is, the value as the label (name on hover). Click-to-edit in a
+	 * popover. Order: the object's `featuredRelations` key list first, then
+	 * the rest of the set fields. "+" appends a new property.
 	 */
 	import type { ObjectJSON, RelationDefJSON, ValueJSON } from "$lib/types";
 	import { note } from "$lib/api";
@@ -13,7 +13,8 @@
 	import PropertyValue from "./PropertyValue.svelte";
 	import CheckboxIcon from "./CheckboxIcon.svelte";
 	import { objectIcon } from "$lib/icons";
-	import { tagStyle, colorHex } from "$lib/options";
+	import { badgeStyle, statusIcon, type BadgeIcon } from "$lib/options";
+	import PropIcon from "./PropIcon.svelte";
 	import { fetchBacklinks, type Backlink } from "$lib/backlinks";
 
 	let {
@@ -96,24 +97,40 @@
 	function closeAll() {
 		editing = null;
 	}
+
+	/** Glyph + palette for a non-option property; options carry their own colour. Plain text has no glyph. */
+	function badgeFor(rel: RelationDefJSON): { icon: BadgeIcon | null; color: string } {
+		const v = object.fields[rel.key];
+		switch (rel.format) {
+			case "checkbox": return { icon: plain(v, "checkbox") === true ? "check" : "dashed", color: plain(v, "checkbox") === true ? "lime" : "" };
+			case "date": {
+				const ms = v?.intValue ?? v?.floatValue;
+				const overdue = !!ms && ms < Date.now() && object.fields["done"]?.boolValue !== true && rel.key === "due_date";
+				return { icon: "calendar", color: overdue ? "red" : "" };
+			}
+			case "url": return { icon: "link", color: "blue" };
+			case "email": return { icon: "at", color: "blue" };
+			case "phone": return { icon: "phone", color: "blue" };
+			default: return { icon: null, color: "" };
+		}
+	}
 </script>
 
 {#if shown.length > 0 || typeName}
 	<div class="featured">
 		<span class="cell-wrap">
 			<button
-				class="cell type-cell"
+				class="badge"
+				style={badgeStyle("")}
 				title="Type"
 				onclick={() => { if (typeDef) location.href = `/app/object/${typeDef.id}`; }}
-			>{typeName}</button>
-			<span class="bullet">•</span>
+			>{#if typeDef?.icon}<span class="emoji">{typeDef.icon}</span>{:else}<PropIcon icon="dot" />{/if}{typeName}</button>
 		</span>
 		{#if backlinks.length > 0}
 			<span class="cell-wrap">
-				<button class="cell" title="Backlinks" onclick={() => { editing = null; showBacklinks = !showBacklinks; }}>
-					{backlinks.length} backlink{backlinks.length === 1 ? "" : "s"}
+				<button class="badge" style={badgeStyle("")} title="Backlinks" onclick={() => { editing = null; showBacklinks = !showBacklinks; }}>
+					<PropIcon icon="link" />{backlinks.length} backlink{backlinks.length === 1 ? "" : "s"}
 				</button>
-				<span class="bullet">•</span>
 				{#if showBacklinks}
 					<div class="pop">
 						<div class="pop-head"><span class="pop-name">Linked from</span></div>
@@ -127,48 +144,40 @@
 				{/if}
 			</span>
 		{/if}
-		{#each shown as rel, i (rel.key)}
+		{#each shown as rel (rel.key)}
 			{@const v = object.fields[rel.key]}
+			{@const empty = display(rel) === ""}
 			<span class="cell-wrap">
-				<button
-					class="cell"
-					class:empty={display(rel) === ""}
-					title={rel.name || rel.key}
-					onclick={() => {
-						// Checkbox cells toggle in place, like the table's - no popover.
-						if (rel.format === "checkbox") {
-							void saveValue(rel.key, { boolValue: plain(object.fields[rel.key], "checkbox") !== true });
-							return;
-						}
-						editing = editing === rel.key ? null : rel.key;
-					}}
-				>
-					{#if rel.format === "tag" && (plain(v, "tag") as string[]).length > 0}
-						{#each plain(v, "tag") as string[] as t (t)}
-							{@const opt = rel.options.find((o) => o.text === t)}
-							<span class="tag" style={tagStyle(opt?.color ?? "")}>{t}</span>
-						{/each}
-					{:else if rel.format === "status" && display(rel)}
-						<!-- Anytype status: colored text, no pill. -->
-						{@const opt = rel.options.find((o) => o.text === display(rel))}
-						<span style={opt?.color ? `color:${colorHex(opt.color)}` : ""}>{display(rel)}</span>
-					{:else if rel.format === "checkbox"}
-						<!-- Anytype cellContent.c-checkbox, same as the table cells:
-						     20px icon, secondary until checked, click toggles. -->
-						<span class="cell-check" class:on={plain(v, "checkbox") === true}><CheckboxIcon checked={plain(v, "checkbox") === true} size={20} /></span>
-						{rel.name || rel.key}
-					{:else if rel.format === "object" && (plain(v, "object") as string[]).length > 0}
-						{#each plain(v, "object") as string[] as id (id)}
-							{@const o = store.summaries.find((x) => x.id === id)}
-							<span class="obj-chip"><span class="chip-icon">{#if o && layoutOf(o.typeKey) === "task"}<span class="li-check" class:on={o.done === true}><CheckboxIcon checked={o.done === true} size={13} /></span>{:else}{objectIcon(o?.icon, o?.typeKey ?? "")}{/if}</span>{o?.name || "Untitled"}</span>
-						{/each}
-					{:else if (rel.format === "url" || rel.format === "email" || rel.format === "phone") && display(rel)}
-						<span class="linkish">{display(rel)}</span>
-					{:else}
-						{display(rel) || rel.name || rel.key}
-					{/if}
-				</button>
-				{#if i < shown.length - 1}<span class="bullet">•</span>{/if}
+				{#if rel.format === "tag" && (plain(v, "tag") as string[]).length > 0}
+					{#each plain(v, "tag") as string[] as t (t)}
+						{@const opt = rel.options.find((o) => o.text === t)}
+						<button class="badge" style={badgeStyle(opt?.color ?? "")} title={rel.name || rel.key} onclick={() => (editing = editing === rel.key ? null : rel.key)}>
+							<PropIcon icon="dot" />{t}
+						</button>
+					{/each}
+				{:else if rel.format === "status" && !empty}
+					{@const opt = rel.options.find((o) => o.text === display(rel))}
+					<button class="badge" style={badgeStyle(opt?.color ?? "")} title={rel.name || rel.key} onclick={() => (editing = editing === rel.key ? null : rel.key)}>
+						<PropIcon icon={statusIcon(display(rel))} />{display(rel)}
+					</button>
+				{:else if rel.format === "checkbox"}
+					{@const on = plain(v, "checkbox") === true}
+					<button class="badge" style={badgeStyle(on ? "lime" : "")} title={rel.name || rel.key} onclick={() => void saveValue(rel.key, { boolValue: !on })}>
+						<PropIcon icon={on ? "check" : "dashed"} />{rel.name || rel.key}
+					</button>
+				{:else if rel.format === "object" && (plain(v, "object") as string[]).length > 0}
+					{#each plain(v, "object") as string[] as id (id)}
+						{@const o = store.summaries.find((x) => x.id === id)}
+						<button class="badge" style={badgeStyle("")} title={rel.name || rel.key} onclick={() => (editing = editing === rel.key ? null : rel.key)}>
+							{#if o && layoutOf(o.typeKey) === "task"}<span class="li-check" class:on={o.done === true}><CheckboxIcon checked={o.done === true} size={14} /></span>{:else}<span class="emoji">{objectIcon(o?.icon, o?.typeKey ?? "")}</span>{/if}{o?.name || "Untitled"}
+						</button>
+					{/each}
+				{:else}
+					{@const b = badgeFor(rel)}
+					<button class="badge" class:empty class:plain={!b.icon} style={badgeStyle(b.color)} title={rel.name || rel.key} onclick={() => (editing = editing === rel.key ? null : rel.key)}>
+						{#if b.icon}<PropIcon icon={b.icon} />{/if}{display(rel) || rel.name || rel.key}
+					</button>
+				{/if}
 				{#if editing === rel.key}
 					<div class="pop">
 						<div class="pop-head">
@@ -189,8 +198,47 @@
 {/if}
 
 <style>
-	.type-cell {
-		color: var(--muted);
+	.badge {
+		display: inline-flex;
+		align-items: center;
+		gap: 6px;
+		height: 26px;
+		padding: 0 10px 0 6px;
+		border: none;
+		border-radius: 8px;
+		background: var(--badge-bg);
+		color: var(--badge-fg);
+		font: inherit;
+		font-size: 13px;
+		font-weight: 500;
+		line-height: 1;
+		white-space: nowrap;
+		cursor: pointer;
+		transition: filter 120ms;
+	}
+	.badge:hover {
+		filter: brightness(1.18);
+	}
+	.badge.empty {
+		opacity: 0.6;
+		font-weight: 400;
+	}
+	.badge.plain {
+		padding-left: 10px;
+		font-weight: 400;
+	}
+	.emoji {
+		font-size: 14px;
+		line-height: 1;
+		width: 16px;
+		text-align: center;
+	}
+	.li-check {
+		display: inline-flex;
+		color: var(--badge-icon);
+	}
+	.li-check.on {
+		color: var(--green);
 	}
 	.backlink {
 		display: flex;
@@ -219,7 +267,7 @@
 		display: flex;
 		flex-wrap: wrap;
 		align-items: center;
-		gap: 2px 6px;
+		gap: 6px;
 		margin: 2px 0 14px 48px;
 		font-size: 13px;
 	}
@@ -228,74 +276,6 @@
 		display: inline-flex;
 		align-items: center;
 		gap: 6px;
-	}
-	.cell {
-		border: none;
-		background: none;
-		color: var(--muted);
-		padding: 2px 4px;
-		border-radius: 6px;
-		cursor: pointer;
-		display: inline-flex;
-		align-items: center;
-		gap: 4px;
-		font-size: 13px;
-	}
-	.cell:hover {
-		background: var(--hover);
-		color: var(--fg, inherit);
-	}
-	.cell.empty {
-		opacity: 0.6;
-	}
-	.bullet {
-		color: var(--border);
-		font-size: 10px;
-	}
-	/* Anytype cellContent.c-checkbox: 20px icon, secondary until checked. */
-	.cell-check {
-		display: inline-flex;
-		color: var(--muted);
-	}
-	.cell-check.on {
-		color: var(--fg);
-	}
-	/* Anytype's object-relation cell: icon + name chip. */
-	.obj-chip {
-		display: inline-flex;
-		align-items: center;
-		gap: 4px;
-		background: rgba(255, 255, 255, 0.07);
-		border-radius: 6px;
-		padding: 1px 7px 1px 4px;
-		font-size: 12.5px;
-		color: var(--fg);
-	}
-	.li-check {
-		display: inline-flex;
-		color: var(--muted);
-	}
-	.li-check.on {
-		color: var(--fg);
-	}
-	.chip-icon {
-		font-size: 12px;
-	}
-	.linkish {
-		color: var(--accent);
-		text-decoration: underline;
-		text-decoration-color: rgba(120, 150, 255, 0.4);
-		text-underline-offset: 2px;
-	}
-	/* Anytype tagItem.isSmall: filled pill, pale text, no border. */
-	.tag {
-		display: inline-block;
-		border-radius: 10px;
-		padding: 0 6px;
-		font-size: 12px;
-		line-height: 20px;
-		height: 20px;
-		margin-right: 3px;
 	}
 	.pop {
 		position: absolute;

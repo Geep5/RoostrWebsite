@@ -52,6 +52,34 @@ export function tagStyle(name: string): string {
 	return `background:${c.bg}; color:${c.text}`;
 }
 
+/** Glyphs a property badge can lead with (`PropIcon.svelte`). */
+export type BadgeIcon = "check" | "half" | "clock" | "x" | "dashed" | "dot" | "calendar" | "link" | "at" | "phone";
+
+/**
+ * Status options are matched to a glyph by keyword so a human's "Approved"
+ * and an agent's "done" land in the same bucket. Unknown text → a plain dot.
+ */
+export function statusIcon(text: string): BadgeIcon {
+	const t = text.toLowerCase();
+	if (/\b(done|approved|complete|completed|resolved|shipped|closed)\b/.test(t)) return "check";
+	if (/\b(in progress|progress|doing|active|working|ongoing)\b/.test(t)) return "half";
+	if (/\b(pending|waiting|review|in review|on hold|paused)\b/.test(t)) return "clock";
+	if (/\b(cancel|cancelled|canceled|blocked|failed|rejected|dropped)\b/.test(t)) return "x";
+	if (/\b(not started|todo|to do|backlog|new|open)\b/.test(t)) return "dashed";
+	return "dot";
+}
+
+/**
+ * Inline CSS variables for a property badge: soft tint of the option's vivid
+ * tone over the panel, its pale label, and the vivid tone for the icon.
+ * Unnamed/unknown → neutral grey tint with primary text.
+ */
+export function badgeStyle(name: string): string {
+	const c = TAG_COLORS.find((x) => x.name === name);
+	if (!c) return "--badge-bg: color-mix(in srgb, var(--muted) 14%, var(--panel)); --badge-fg: var(--fg); --badge-icon: var(--muted)";
+	return `--badge-bg: color-mix(in srgb, ${c.hex} 18%, var(--panel)); --badge-fg: ${c.text}; --badge-icon: ${c.hex}`;
+}
+
 function serialize(options: TagOption[]): ValueJSON {
 	return {
 		valuesValue: {

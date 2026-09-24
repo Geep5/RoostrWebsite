@@ -265,9 +265,6 @@
 				Does not repeat
 			{/if}
 		</button>
-		{#if rule}
-			<button class="act" disabled={busy} onclick={() => void clear()}>Turn off repeating</button>
-		{/if}
 	</div>
 
 	{#if rule}
@@ -295,7 +292,6 @@
 		<div class="pop">
 			<div class="pop-head">
 				<span class="pop-name">Repeat</span>
-				{#if rule}<button class="pop-rm" onclick={() => void clear()}>Clear</button>{/if}
 			</div>
 
 			<div class="field">
@@ -344,6 +340,8 @@
 			</div>
 
 			<div class="pop-foot">
+				{#if rule}<button class="pop-rm" disabled={busy} onclick={() => void clear()}>Turn off repeating</button>{/if}
+				<span class="spacer"></span>
 				<button class="act" onclick={() => (open = false)}>Cancel</button>
 				<button class="act primary" disabled={busy} onclick={() => void save()}>{rule ? "Update" : "Repeat"}</button>
 			</div>
@@ -559,8 +557,11 @@
 	}
 	.pop-foot {
 		display: flex;
-		justify-content: flex-end;
+		align-items: center;
 		gap: 6px;
+	}
+	.spacer {
+		flex: 1;
 	}
 	.backdrop {
 		position: fixed;
