@@ -11,6 +11,7 @@
 	import { layoutOf, store } from "$lib/data.svelte";
 	import { RESERVED_KEYS, emptyValueFor } from "$lib/relations";
 	import { AGENTLESS_TYPES } from "$lib/agent-field";
+	import { resolveServing, servingCopy, machineName, capabilityLabel, type MachineRow, type Serving } from "$lib/serving";
 	import PropertyValue from "./PropertyValue.svelte";
 	import CheckboxIcon from "./CheckboxIcon.svelte";
 	import { objectIcon } from "$lib/icons";
@@ -35,7 +36,8 @@
 	 * empty - it is how a person invites an agent here.
 	 */
 	const shown = $derived.by(() => {
-		const present = relations.filter((r) => !r.hidden && !RESERVED_KEYS[r.key] && (r.key in object.fields || (r.key === "agent" && !AGENTLESS_TYPES[object.typeKey])));
+		const alwaysShow = ["agent", "served_by", "requires"].includes.bind(["agent", "served_by", "requires"]);
+		const present = relations.filter((r) => !RESERVED_KEYS[r.key] && (alwaysShow(r.key) && !AGENTLESS_TYPES[object.typeKey] || (!r.hidden && r.key in object.fields)));
 		const rank = new Map(featuredKeys.map((k, i) => [k, i]));
 		return present.toSorted((a, b) => (rank.get(a.key) ?? 999) - (rank.get(b.key) ?? 999));
 	});
@@ -43,6 +45,27 @@
 	// ── Anytype's leading featured cells: object type + backlinks count ──
 	const typeDef = $derived(store.types.find((t) => t.key === object.typeKey));
 	const typeName = $derived(typeDef?.name || object.typeKey);
+
+	// ── Serving (the retired chip): resolved once per object so the
+	// served_by badge can name the machine and carry the warning, and
+	// requires can label its keys. served_by/requires always show, even
+	// empty - they are how a person moves this object or asks for more.
+	let servingState = $state<{ serving: Serving; machines: MachineRow[] } | null>(null);
+	$effect(() => {
+		const current = object;
+		void (async () => {
+			try {
+				servingState = await resolveServing(current);
+			} catch {
+				servingState = null;
+			}
+		})();
+	});
+	const serve = $derived.by(() => {
+		if (!servingState) return null;
+		const copy = servingCopy(servingState.serving, servingState.machines);
+		return { text: copy.text, warning: copy.warning, machines: servingState.machines, requires: servingState.serving.requires };
+	});
 
 	let backlinks = $state<Backlink[]>([]);
 	let showBacklinks = $state(false);
@@ -182,6 +205,24 @@
 					<button class="badge empty plain" style={badgeStyle("")} title="Agents you can @-mention here" onclick={() => (editing = editing === rel.key ? null : rel.key)}>
 						<span class="emoji">🤖</span>Add agent
 					</button>
+				{:else if rel.key === "served_by"}
+					{@const pinnedId = (plain(v, "object") as string[])[0] ?? ""}
+					{@const warn = serve?.warning}
+					<button class="badge" class:empty={!serve} class:plain={!pinnedId} style={warn ? badgeStyle("red") : badgeStyle("")} title={serve ? `Served by · ${serve.text}${warn ? " (cannot be honoured)" : ""}` : "Which machine serves this object"} onclick={() => (editing = editing === rel.key ? null : rel.key)}>
+						<span class="emoji">🖥️</span>{serve ? serve.text.replace(/^served by /, "") : "No machine yet"}
+					</button>
+				{:else if rel.key === "requires"}
+					{#if (plain(v, "tag") as string[]).length > 0}
+						{#each plain(v, "tag") as string[] as k (k)}
+							<button class="badge" style={badgeStyle("blue")} title={`Needs · ${k}`} onclick={() => (editing = editing === rel.key ? null : rel.key)}>
+								<PropIcon icon="dot" />{capabilityLabel(k)}
+							</button>
+						{/each}
+					{:else}
+						<button class="badge empty plain" style={badgeStyle("")} title="Capabilities this object needs from its serving machine" onclick={() => (editing = editing === rel.key ? null : rel.key)}>
+							<span class="emoji">🧩</span>Nothing needed
+						</button>
+					{/if}
 				{:else}
 					{@const b = badgeFor(rel)}
 					<button class="badge" class:empty class:plain={!b.icon} style={badgeStyle(b.color)} title={rel.name || rel.key} onclick={() => (editing = editing === rel.key ? null : rel.key)}>
