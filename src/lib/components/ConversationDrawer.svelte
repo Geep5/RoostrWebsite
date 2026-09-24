@@ -233,8 +233,18 @@
 		align-items: center;
 		gap: 10px;
 		padding: 12px 14px;
-		border-bottom: 1px solid var(--border);
 		flex: none;
+		position: relative;
+	}
+	/* The divider is inset like the object header's, not edge to edge. */
+	.dd-head::after {
+		content: "";
+		position: absolute;
+		left: 14px;
+		right: 14px;
+		bottom: 0;
+		height: 1px;
+		background: var(--border);
 	}
 	.dd-icon {
 		font-size: 16px;
