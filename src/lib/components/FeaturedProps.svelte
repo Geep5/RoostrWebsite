@@ -12,6 +12,7 @@
 	import { RESERVED_KEYS, emptyValueFor } from "$lib/relations";
 	import { AGENTLESS_TYPES } from "$lib/agent-field";
 	import { resolveServing, servingCopy, machineName, capabilityLabel, type MachineRow, type Serving } from "$lib/serving";
+	import { fetchAllQuery } from "$lib/api";
 	import PropertyValue from "./PropertyValue.svelte";
 	import CheckboxIcon from "./CheckboxIcon.svelte";
 	import { objectIcon } from "$lib/icons";
@@ -36,7 +37,7 @@
 	 * empty - it is how a person invites an agent here.
 	 */
 	const shown = $derived.by(() => {
-		const alwaysShow = ["agent", "served_by", "requires"].includes.bind(["agent", "served_by", "requires"]);
+		const alwaysShow = ["agent", "served_by", "requires", "install"].includes.bind(["agent", "served_by", "requires", "install"]);
 		const present = relations.filter((r) => !RESERVED_KEYS[r.key] && (alwaysShow(r.key) && !AGENTLESS_TYPES[object.typeKey] || (!r.hidden && r.key in object.fields)));
 		const rank = new Map(featuredKeys.map((k, i) => [k, i]));
 		return present.toSorted((a, b) => (rank.get(a.key) ?? 999) - (rank.get(b.key) ?? 999));
@@ -66,6 +67,37 @@
 		const copy = servingCopy(servingState.serving, servingState.machines);
 		return { text: copy.text, warning: copy.warning, machines: servingState.machines, requires: servingState.serving.requires };
 	});
+
+	// ── Credentials (the retired modal's login list): every install row in
+	// the vault, keyed by machine, so an `install` property badge can read a
+	// credential's live status on the machine that would run this object.
+	let installs = $state<Map<string, Array<{ key: string; account: string; status: string; auth: string }>>>(new Map());
+	let installsById = $state<Map<string, { key: string; account: string; status: string; auth: string; machine: string }>>(new Map());
+	$effect(() => {
+		void (async () => {
+			try {
+				const rows = await fetchAllQuery({ type: "install" });
+				const byMachine = new Map<string, Array<{ key: string; account: string; status: string; auth: string }>>();
+				const byId = new Map<string, { key: string; account: string; status: string; auth: string; machine: string }>();
+				for (const r of rows) {
+					const m = r.fields["machine_id"]?.stringValue ?? "";
+					const row = { key: r.fields["key"]?.stringValue ?? "", account: r.fields["account"]?.stringValue ?? "", status: r.fields["status"]?.stringValue ?? "", auth: r.fields["auth"]?.stringValue ?? "" };
+					if (m) (byMachine.get(m) ?? byMachine.set(m, []).get(m)!).push(row);
+					byId.set(r.id, { ...row, machine: m });
+				}
+				installs = byMachine;
+				installsById = byId;
+			} catch { /* credentials are optional context */ }
+		})();
+	});
+	/** The resolved machine's install rows, or every row when none is chosen. */
+	const creds = $derived.by(() => {
+		const chosen = servingState?.serving.machineId;
+		if (chosen) return installs.get(chosen) ?? [];
+		return [...installs.values()].flat();
+	});
+	const credState = (key: string, account: string): { status: string; auth: string } =>
+		creds.find((c) => c.key === key && c.account === (account ?? "")) ?? { status: "missing", auth: "" };
 
 	let backlinks = $state<Backlink[]>([]);
 	let showBacklinks = $state(false);
@@ -193,6 +225,32 @@
 					<button class="badge" style={badgeStyle(on ? "lime" : "")} title={rel.name || rel.key} onclick={() => void saveValue(rel.key, { boolValue: !on })}>
 						<PropIcon icon={on ? "check" : "dashed"} />{rel.name || rel.key}
 					</button>
+				{:else if rel.key === "served_by"}
+					{@const pinnedId = (plain(v, "object") as string[])[0] ?? ""}
+					{@const warn = serve?.warning}
+					<button class="badge" class:empty={!serve} class:plain={!pinnedId} style={warn ? badgeStyle("red") : badgeStyle("")} title={serve ? `Served by · ${serve.text}${warn ? " (cannot be honoured)" : ""}` : "Which machine serves this object"} onclick={() => (editing = editing === rel.key ? null : rel.key)}>
+						<span class="emoji">🖥️</span>{serve ? serve.text.replace(/^served by /, "") : "No machine yet"}
+					</button>
+				{:else if rel.key === "install"}
+					{#if (plain(v, "object") as string[]).length > 0}
+						{#each plain(v, "object") as string[] as id (id)}
+							{@const row = installsById.get(id)}
+							{@const live = row ? (servingState?.serving.machineId && row.machine && row.machine !== servingState.serving.machineId ? { ...row, status: "other machine" } : row) : null}
+							{@const ok = live?.status === "active"}
+							{@const warn = live && !ok}
+							<button class="badge" style={badgeStyle(ok ? "lime" : warn ? "red" : "")} title={live ? `Credentials · ${live.key}${live.account ? ` (${live.account})` : ""} · ${live.status}${live.auth ? ` · ${live.auth}` : ""}` : "Credentials"} onclick={() => (editing = editing === rel.key ? null : rel.key)}>
+								<span class="emoji">🔌</span>{live ? `${live.key}${live.account ? ` · ${live.account}` : ""}${ok ? "" : ` (${live.status.replaceAll("_", " ")})`}` : id.slice(0, 8)}
+							</button>
+						{/each}
+					{:else}
+						<button class="badge empty plain" style={badgeStyle("")} title="Logins and accounts this object's work uses" onclick={() => (editing = editing === rel.key ? null : rel.key)}>
+							<span class="emoji">🔌</span>No credentials
+						</button>
+					{/if}
+				{:else if rel.key === "agent"}
+					<button class="badge empty plain" style={badgeStyle("")} title="Agents you can @-mention here" onclick={() => (editing = editing === rel.key ? null : rel.key)}>
+						<span class="emoji">🤖</span>Add agent
+					</button>
 				{:else if rel.format === "object" && (plain(v, "object") as string[]).length > 0}
 					{#each plain(v, "object") as string[] as id (id)}
 						{@const o = store.summaries.find((x) => x.id === id)}
@@ -201,16 +259,6 @@
 							{#if o && layoutOf(o.typeKey) === "task"}<span class="li-check" class:on={o.done === true}><CheckboxIcon checked={o.done === true} size={14} /></span>{:else}<span class="emoji">{a ? (a.icon || "🤖") : objectIcon(o?.icon, o?.typeKey ?? "")}</span>{/if}{o?.name || a?.name || "Untitled"}
 						</button>
 					{/each}
-				{:else if rel.key === "agent"}
-					<button class="badge empty plain" style={badgeStyle("")} title="Agents you can @-mention here" onclick={() => (editing = editing === rel.key ? null : rel.key)}>
-						<span class="emoji">🤖</span>Add agent
-					</button>
-				{:else if rel.key === "served_by"}
-					{@const pinnedId = (plain(v, "object") as string[])[0] ?? ""}
-					{@const warn = serve?.warning}
-					<button class="badge" class:empty={!serve} class:plain={!pinnedId} style={warn ? badgeStyle("red") : badgeStyle("")} title={serve ? `Served by · ${serve.text}${warn ? " (cannot be honoured)" : ""}` : "Which machine serves this object"} onclick={() => (editing = editing === rel.key ? null : rel.key)}>
-						<span class="emoji">🖥️</span>{serve ? serve.text.replace(/^served by /, "") : "No machine yet"}
-					</button>
 				{:else if rel.key === "requires"}
 					{#if (plain(v, "tag") as string[]).length > 0}
 						{#each plain(v, "tag") as string[] as k (k)}
