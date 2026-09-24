@@ -248,9 +248,18 @@
 						</button>
 					{/if}
 				{:else if rel.key === "agent"}
-					<button class="badge empty plain" style={badgeStyle("")} title="Agents you can @-mention here" onclick={() => (editing = editing === rel.key ? null : rel.key)}>
-						<span class="emoji">🤖</span>Add agent
-					</button>
+					{#if (plain(v, "object") as string[]).length > 0}
+						{#each plain(v, "object") as string[] as id (id)}
+							{@const a = store.agents.find((x) => x.id === id)}
+							<button class="badge" style={badgeStyle(a ? "blue" : "red")} title={a ? `${a.name} · agent` : `Agent ${id.slice(0, 8)}… (no longer exists — remove)`} onclick={() => (editing = editing === rel.key ? null : rel.key)}>
+								<span class="emoji">{a ? (a.icon || "🤖") : "⚠️"}</span>{a?.name || `${id.slice(0, 8)}…`}
+							</button>
+						{/each}
+					{:else}
+						<button class="badge empty plain" style={badgeStyle("")} title="Agents you can @-mention here" onclick={() => (editing = editing === rel.key ? null : rel.key)}>
+							<span class="emoji">🤖</span>Add agent
+						</button>
+					{/if}
 				{:else if rel.format === "object" && (plain(v, "object") as string[]).length > 0}
 					{#each plain(v, "object") as string[] as id (id)}
 						{@const o = store.summaries.find((x) => x.id === id)}
