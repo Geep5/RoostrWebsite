@@ -217,12 +217,16 @@
 		if (isType) {
 			const key = object.fields["key"]?.stringValue;
 			if (!key) return null;
+			// A type page names its own type: never apply the unsourced-query
+			// system exclusion (typeKey notIn [… agent/machine …]) - it would
+			// hide agent/capability/install/computer instances from their own page.
+			const typeFilters = engineFilters.filter((f) => !(f.key === "typeKey" && f.condition === "notIn" && Array.isArray(f.value) && (f.value as unknown[]).includes(key)));
 			// Agent / capability / install / computer are vault infrastructure
 			// (the pickers and guest lists see them across spaces), so their type
 			// pages list every instance, not just this space's. Content types
 			// (note, task, person, …) stay space-scoped.
 			const INFRA: Record<string, true> = { agent: true, capability: true, install: true, machine: true };
-			const filters = INFRA[key] ? engineFilters : [...engineFilters, spaceFilter];
+			const filters = INFRA[key] ? typeFilters : [...typeFilters, spaceFilter];
 			return { type: key, filters, servingFilters: servingRules, ...text };
 		}
 		if (isCollection) {
