@@ -21,6 +21,7 @@
 	import GalleryView from "$lib/components/GalleryView.svelte";
 	import SpaceManage from "$lib/components/SpaceManage.svelte";
 	import AgentSetup from "$lib/components/AgentSetup.svelte";
+	import CapabilitySetup from "$lib/components/CapabilitySetup.svelte";
 	import TypePanel from "$lib/components/TypePanel.svelte";
 	import PropertyPanel from "$lib/components/PropertyPanel.svelte";
 	import EmojiPicker from "$lib/components/EmojiPicker.svelte";
@@ -149,6 +150,7 @@
 
 	const isChat = $derived(object?.typeKey === "chat");
 	const isAgent = $derived(object?.typeKey === "agent");
+	const isCapability = $derived(object?.typeKey === "capability");
 	const isType = $derived(object?.typeKey === "type");
 	const isTemplate = $derived(object?.typeKey === "template");
 	const isRelation = $derived(object?.typeKey === "relation");
@@ -535,6 +537,8 @@
 			<Discussion {object} full onchanged={refresh} />
 		{:else if isAgent}
 			<AgentSetup {object} onchanged={refresh} />
+		{:else if isCapability}
+			<CapabilitySetup {object} onchanged={refresh} />
 		{:else if isType}
 			<TypePanel {object} onchanged={refresh} />
 			<div class="dataview">

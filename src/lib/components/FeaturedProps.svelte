@@ -37,8 +37,16 @@
 	 * empty - it is how a person invites an agent here.
 	 */
 	const shown = $derived.by(() => {
-		const alwaysShow = ["agent", "served_by", "requires", "install"].includes.bind(["agent", "served_by", "requires", "install"]);
-		const present = relations.filter((r) => !RESERVED_KEYS[r.key] && (alwaysShow(r.key) && !AGENTLESS_TYPES[object.typeKey] || (!r.hidden && r.key in object.fields)));
+		// served_by is a machine fact: it shows by default only on the objects
+		// that are tied to a machine (agent, capability, install). agent /
+		// requires / install stay always-on for objects that can take a guest.
+		const MACHINE_BOUND = ["agent", "capability", "install"].includes(object.typeKey);
+		const present = relations.filter((r) => {
+			if (RESERVED_KEYS[r.key]) return false;
+			if (r.key === "served_by") return MACHINE_BOUND || r.key in object.fields;
+			if (["agent", "requires", "install"].includes(r.key)) return !AGENTLESS_TYPES[object.typeKey] || r.key in object.fields;
+			return !r.hidden && r.key in object.fields;
+		});
 		const rank = new Map(featuredKeys.map((k, i) => [k, i]));
 		return present.toSorted((a, b) => (rank.get(a.key) ?? 999) - (rank.get(b.key) ?? 999));
 	});
@@ -73,10 +81,11 @@
 	// credential's live status on the machine that would run this object.
 	let installs = $state<Map<string, Array<{ key: string; account: string; status: string; auth: string }>>>(new Map());
 	let installsById = $state<Map<string, { key: string; account: string; status: string; auth: string; machine: string }>>(new Map());
+	let capabilitiesById = $state<Map<string, { key: string; machine: string; machineName: string; status: string }>>(new Map());
 	$effect(() => {
 		void (async () => {
 			try {
-				const rows = await fetchAllQuery({ type: "install" });
+				const [rows, caps] = await Promise.all([fetchAllQuery({ type: "install" }), fetchAllQuery({ type: "capability" })]);
 				const byMachine = new Map<string, Array<{ key: string; account: string; status: string; auth: string }>>();
 				const byId = new Map<string, { key: string; account: string; status: string; auth: string; machine: string }>();
 				for (const r of rows) {
@@ -87,6 +96,14 @@
 				}
 				installs = byMachine;
 				installsById = byId;
+				const byCapId = new Map<string, { key: string; machine: string; machineName: string; status: string }>();
+				for (const c of caps) {
+					const m = c.fields["served_by"]?.linkValue?.targetId ?? c.fields["served_by"]?.stringValue ?? "";
+					const instId = c.fields["install"]?.linkValue?.targetId ?? c.fields["install"]?.stringValue ?? "";
+					const inst = byId.get(instId);
+					byCapId.set(c.id, { key: c.fields["key"]?.stringValue ?? "", machine: m, machineName: m ? (servingState?.machines.find((x) => x.machineId === m)?.name ?? `${m.slice(0, 8)}…`) : "", status: inst?.status ?? "missing" });
+				}
+				capabilitiesById = byCapId;
 			} catch { /* credentials are optional context */ }
 		})();
 	});
@@ -260,6 +277,20 @@
 							<span class="emoji">🤖</span>Add agent
 						</button>
 					{/if}
+				{:else if rel.key === "requires"}
+					{#if (plain(v, "object") as string[]).length > 0}
+						{#each plain(v, "object") as string[] as id (id)}
+							{@const cap = capabilitiesById.get(id)}
+							{@const ok = cap?.status === "active" && !!cap?.machine}
+							<button class="badge" style={badgeStyle(ok ? "lime" : cap ? "red" : "")} title={cap ? `Needs · ${cap.key} · ${cap.machine ? `${cap.machineName} · ` : ""}${cap.status ?? "missing install"}` : "Needs"} onclick={() => (editing = editing === rel.key ? null : rel.key)}>
+								<span class="emoji">🧩</span>{cap ? `${cap.key}${cap.machine ? ` · ${cap.machineName}` : ""}${ok ? "" : ` (${(cap.status ?? "not set up").replaceAll("_", " ")})`}` : id.slice(0, 8)}
+							</button>
+						{/each}
+					{:else}
+						<button class="badge empty plain" style={badgeStyle("")} title="Capabilities this object needs" onclick={() => (editing = editing === rel.key ? null : rel.key)}>
+							<span class="emoji">🧩</span>Nothing needed
+						</button>
+					{/if}
 				{:else if rel.format === "object" && (plain(v, "object") as string[]).length > 0}
 					{#each plain(v, "object") as string[] as id (id)}
 						{@const o = store.summaries.find((x) => x.id === id)}
@@ -268,18 +299,6 @@
 							{#if o && layoutOf(o.typeKey) === "task"}<span class="li-check" class:on={o.done === true}><CheckboxIcon checked={o.done === true} size={14} /></span>{:else}<span class="emoji">{a ? (a.icon || "🤖") : objectIcon(o?.icon, o?.typeKey ?? "")}</span>{/if}{o?.name || a?.name || "Untitled"}
 						</button>
 					{/each}
-				{:else if rel.key === "requires"}
-					{#if (plain(v, "tag") as string[]).length > 0}
-						{#each plain(v, "tag") as string[] as k (k)}
-							<button class="badge" style={badgeStyle("blue")} title={`Needs · ${k}`} onclick={() => (editing = editing === rel.key ? null : rel.key)}>
-								<PropIcon icon="dot" />{capabilityLabel(k)}
-							</button>
-						{/each}
-					{:else}
-						<button class="badge empty plain" style={badgeStyle("")} title="Capabilities this object needs from its serving machine" onclick={() => (editing = editing === rel.key ? null : rel.key)}>
-							<span class="emoji">🧩</span>Nothing needed
-						</button>
-					{/if}
 				{:else}
 					{@const b = badgeFor(rel)}
 					<button class="badge" class:empty class:plain={!b.icon} style={badgeStyle(b.color)} title={rel.name || rel.key} onclick={() => (editing = editing === rel.key ? null : rel.key)}>
