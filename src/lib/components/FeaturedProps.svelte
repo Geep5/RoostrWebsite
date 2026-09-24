@@ -10,6 +10,7 @@
 	import { note } from "$lib/api";
 	import { layoutOf, store } from "$lib/data.svelte";
 	import { RESERVED_KEYS, emptyValueFor } from "$lib/relations";
+	import { AGENTLESS_TYPES } from "$lib/agent-field";
 	import PropertyValue from "./PropertyValue.svelte";
 	import CheckboxIcon from "./CheckboxIcon.svelte";
 	import { objectIcon } from "$lib/icons";
@@ -28,9 +29,13 @@
 		return items.map((i) => i.stringValue).filter((s): s is string => typeof s === "string");
 	});
 
-	/** Present, editable properties: featured order first, then the rest. */
+	/**
+	 * Present, editable properties: featured order first, then the rest. The
+	 * guest list (`agent`) always shows on objects that can have one, even
+	 * empty - it is how a person invites an agent here.
+	 */
 	const shown = $derived.by(() => {
-		const present = relations.filter((r) => !r.hidden && !RESERVED_KEYS[r.key] && r.key in object.fields);
+		const present = relations.filter((r) => !r.hidden && !RESERVED_KEYS[r.key] && (r.key in object.fields || (r.key === "agent" && !AGENTLESS_TYPES[object.typeKey])));
 		const rank = new Map(featuredKeys.map((k, i) => [k, i]));
 		return present.toSorted((a, b) => (rank.get(a.key) ?? 999) - (rank.get(b.key) ?? 999));
 	});
@@ -52,7 +57,7 @@
 	let editing = $state<string | null>(null);
 
 	function plain(v: ValueJSON | undefined, format: string): string | number | boolean | string[] {
-		if (!v) return format === "checkbox" ? false : format === "tag" ? [] : "";
+		if (!v) return format === "checkbox" ? false : format === "tag" || format === "object" ? [] : "";
 		if (v.stringValue !== undefined) return v.stringValue;
 		if (v.intValue !== undefined) return v.intValue;
 		if (v.floatValue !== undefined) return v.floatValue;
@@ -168,10 +173,15 @@
 				{:else if rel.format === "object" && (plain(v, "object") as string[]).length > 0}
 					{#each plain(v, "object") as string[] as id (id)}
 						{@const o = store.summaries.find((x) => x.id === id)}
-						<button class="badge" style={badgeStyle("")} title={rel.name || rel.key} onclick={() => (editing = editing === rel.key ? null : rel.key)}>
-							{#if o && layoutOf(o.typeKey) === "task"}<span class="li-check" class:on={o.done === true}><CheckboxIcon checked={o.done === true} size={14} /></span>{:else}<span class="emoji">{objectIcon(o?.icon, o?.typeKey ?? "")}</span>{/if}{o?.name || "Untitled"}
+						{@const a = o ? undefined : store.agents.find((x) => x.id === id)}
+						<button class="badge" style={badgeStyle(a ? "blue" : "")} title={rel.name || rel.key} onclick={() => (editing = editing === rel.key ? null : rel.key)}>
+							{#if o && layoutOf(o.typeKey) === "task"}<span class="li-check" class:on={o.done === true}><CheckboxIcon checked={o.done === true} size={14} /></span>{:else}<span class="emoji">{a ? (a.icon || "🤖") : objectIcon(o?.icon, o?.typeKey ?? "")}</span>{/if}{o?.name || a?.name || "Untitled"}
 						</button>
 					{/each}
+				{:else if rel.key === "agent"}
+					<button class="badge empty plain" style={badgeStyle("")} title="Agents you can @-mention here" onclick={() => (editing = editing === rel.key ? null : rel.key)}>
+						<span class="emoji">🤖</span>Add agent
+					</button>
 				{:else}
 					{@const b = badgeFor(rel)}
 					<button class="badge" class:empty class:plain={!b.icon} style={badgeStyle(b.color)} title={rel.name || rel.key} onclick={() => (editing = editing === rel.key ? null : rel.key)}>

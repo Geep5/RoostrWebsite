@@ -5,7 +5,7 @@
  */
 
 import { fetchQuery, type QueryResultRow } from "$lib/api";
-import type { ValueJSON } from "$lib/types";
+import { guestAgents, type ValueJSON } from "$lib/types";
 
 export interface GraphNode {
 	id: string;
@@ -170,7 +170,7 @@ export async function buildGraph(channelId: string, isDefaultChannel: boolean): 
 		// Small flat dots (Anytype scale): channels stand out, degree adds a little.
 		n.radius = n.kind === "channel" ? 14 : 5 + 1.6 * Math.sqrt(degree[i]);
 		// Presence: an object naming its own agent gets a marker.
-		n.hasAgent = !!rows[i].fields["agent"]?.stringValue;
+		n.hasAgent = guestAgents(rows[i].fields).length > 0;
 	}
 
 	// ── Type clustering: every kind gets a home on a ring sized by the

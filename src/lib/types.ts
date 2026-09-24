@@ -233,6 +233,18 @@ export function fieldStr(fields: Record<string, ValueJSON>, key: string): string
 	return typeof v?.stringValue === "string" ? v.stringValue : "";
 }
 
+/**
+ * The object's guest list: agent ids its `agent` property names. Reads the
+ * link list and the single string the field held before it became one.
+ */
+export function guestAgents(fields: Record<string, ValueJSON>): string[] {
+	const v = fields["agent"];
+	if (!v) return [];
+	if (v.stringValue) return [v.stringValue];
+	if (v.linkValue?.targetId) return [v.linkValue.targetId];
+	return (v.valuesValue?.items ?? []).flatMap((i) => (i.stringValue ? [i.stringValue] : i.linkValue?.targetId ? [i.linkValue.targetId] : []));
+}
+
 export type RepeatFreq = "day" | "week" | "month" | "year";
 
 /** `repeat_set` rule params. `anchor_ms` (epoch ms on the day the cadence counts from) defaults to today. */

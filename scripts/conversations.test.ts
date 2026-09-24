@@ -182,27 +182,21 @@ test("reply-all keeps the human sender's own agent but excludes the responding a
 	expect(message.recipients).toEqual([homeAgent, other, third]);
 });
 
-test("existing recipient agents resolve to assigned objects, space objects, or their own object without crossing spaces", () => {
-	const record = (id: string, values: Record<string, string>) => ({
-		id, fields: Object.fromEntries(Object.entries(values).map(([key, value]) => [key, { stringValue: value }])),
+test("@-addressable agents are exactly the object's guest list; a space object lists its own agents", () => {
+	const agent = (id: string, name: string, extra: Record<string, string> = {}) => ({
+		id, fields: Object.fromEntries(Object.entries({ channel: "space", name, ...extra }).map(([key, value]) => [key, { stringValue: value }])),
 	});
-	const records = [
-		record("obj", { channel: "space", agent: "agent-a", name: "Bound" }),
-		record("agent-a", { channel: "space", name: "Free" }),
-		record("space-agent", { channel: "space", space_default: "space", name: "Space" }),
-		record("unbound", { channel: "space", name: "Unbound" }),
-		record("foreign", { channel: "elsewhere", name: "Foreign" }),
-		record("foreign-object", { channel: "elsewhere", agent: "agent-a" }),
-		record("stray", { channel: "space", agent: "foreign" }),
-	];
-	const options = objectAgentOptions(records, "space", (id) => id);
-	expect(options.map((option) => option.endpoint)).toEqual([
-		{ objectId: "agent-a", agentId: "agent-a" },
-		{ objectId: "obj", agentId: "agent-a" },
-		{ objectId: "space", agentId: "space-agent" },
-		{ objectId: "unbound", agentId: "unbound" },
-	]);
-	expect(objectAgentOptions(records.toReversed(), "space", (id) => id)).toEqual(options);
+	const agents = [agent("zed", "Zed"), agent("amy", "Amy"), agent("sub", "Sub", { spawn_parent: "amy" }), agent("foreign", "Foreign", { channel: "elsewhere" })];
+	const list = { id: "obj", typeKey: "task", fields: { agent: { valuesValue: { items: [{ stringValue: "zed" }, { stringValue: "amy" }, { stringValue: "missing" }] } } } };
+	expect(objectAgentOptions(list, agents, (id) => id).map((o) => [o.endpoint.objectId, o.agentName])).toEqual([["obj", "Amy"], ["obj", "Zed"]]);
+	// The pre-list single string still reads as a one-agent guest list.
+	const single = { id: "obj", typeKey: "task", fields: { agent: { stringValue: "zed" } } };
+	expect(objectAgentOptions(single, agents, (id) => id).map((o) => o.endpoint)).toEqual([{ objectId: "obj", agentId: "zed" }]);
+	// No guests → nobody to address; nothing falls back to a space default.
+	expect(objectAgentOptions({ id: "obj", typeKey: "task", fields: {} }, agents, (id) => id)).toEqual([]);
+	// A space's roster is its own non-sub agents, addressed on the space.
+	const space = { id: "space", typeKey: "channel", fields: {} };
+	expect(objectAgentOptions(space, agents, (id) => id).map((o) => o.endpoint.agentId)).toEqual(["amy", "zed"]);
 });
 
 test("shared A2A history is read-only until its own mailbox copy exists; human and private threads stay writable", () => {

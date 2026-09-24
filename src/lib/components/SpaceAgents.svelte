@@ -13,6 +13,7 @@
 	import { goto } from "$app/navigation";
 	import { fetchQuery, note, chat, fetchAllQuery } from "$lib/api";
 	import { AGENTLESS_TYPES } from "$lib/agent-field";
+	import { guestAgents } from "$lib/types";
 	import { store } from "$lib/data.svelte";
 	import { typeGlyph } from "$lib/create";
 	import { harnessFetch, pairedSession, onPairingChange } from "$lib/local-transport";
@@ -110,17 +111,14 @@
 		const agentName = (id: string) => agents.find((a) => a.id === id)?.name || store.agents.find((a) => a.id === id)?.name || `${id.slice(0, 8)}…`;
 		assigned = pointing
 			.filter((r) => !AGENTLESS_TYPES[r.typeKey] && inThisSpace(r.fields["channel"]?.stringValue ?? ""))
-			.map((r) => {
-				const agentId = r.fields["agent"]?.stringValue ?? "";
-				return {
-					id: r.id,
-					name: r.fields["name"]?.stringValue || `${r.id.slice(0, 8)}…`,
-					icon: r.fields["iconEmoji"]?.stringValue ?? "",
-					agentId,
-					agentName: agentName(agentId),
-					updatedAt: r.updatedAt,
-				};
-			})
+			.flatMap((r) => guestAgents(r.fields).map((agentId) => ({
+				id: r.id,
+				name: r.fields["name"]?.stringValue || `${r.id.slice(0, 8)}…`,
+				icon: r.fields["iconEmoji"]?.stringValue ?? "",
+				agentId,
+				agentName: agentName(agentId),
+				updatedAt: r.updatedAt,
+			})))
 			.sort((a, b) => b.updatedAt - a.updatedAt);
 		// Claims and last-activity, both already in the DAG. Machines publish a
 		// claim when it changes; activity is the agent's own conversation's

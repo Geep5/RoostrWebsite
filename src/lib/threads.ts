@@ -1,6 +1,6 @@
 /** Pure projections of conversations stored in this object's own DAG. */
 import { isLegacyExchange, lastChatMessage, mailboxEntries, uniqueEndpoints } from "$lib/chat";
-import type { AgentEndpoint, MailboxEntry, ObjectJSON, ValueJSON } from "$lib/types";
+import { guestAgents, type AgentEndpoint, type MailboxEntry, type ObjectJSON, type ValueJSON } from "$lib/types";
 
 export interface AgentThread {
 	id: string;
@@ -32,42 +32,27 @@ export function authorLabel(author: string, nameOf: (id: string) => string): str
 }
 
 /**
- * Existing agents only; space agents receive mail on the space object.
- * `records` mixes the space's agents with objects whose `agent` field
- * names one of them; an agent never carries `agent` itself, so that field
- * is what tells the two apart. Objects and agents outside `spaceId` are
- * dropped, as is an object pointing at an agent from another space.
+ * Who may be @-addressed on `object`: the agents on its guest list (its
+ * `agent` property), each as an endpoint on this object. A space object's
+ * guest list is its own agents. `records` are the agent objects to name.
  */
 export function objectAgentOptions(
+	object: { id: string; typeKey: string; fields: Record<string, ValueJSON> },
 	records: Array<{ id: string; fields: Record<string, ValueJSON> }>,
-	spaceId: string,
 	nameOf: (id: string) => string,
 ): ObjectAgentOption[] {
-	const inSpace = [...records]
-		.filter((record) => (record.fields["channel"]?.stringValue ?? "") === spaceId)
-		.sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
-	const agents = new Map(inSpace.filter((record) => !record.fields["agent"]?.stringValue).map((record) => [record.id, record]));
-	const byObject = new Map<string, ObjectAgentOption>();
-	const add = (objectId: string, agent: { id: string; fields: Record<string, ValueJSON> }) => {
-		if (byObject.has(objectId)) return;
+	const agents = new Map(records.map((record) => [record.id, record]));
+	const guests = object.typeKey === "channel"
+		? records.filter((r) => (r.fields["channel"]?.stringValue ?? "") === object.id && !r.fields["spawn_parent"]?.stringValue).map((r) => r.id)
+		: guestAgents(object.fields);
+	const out: ObjectAgentOption[] = [];
+	for (const agentId of new Set(guests)) {
+		const agent = agents.get(agentId);
+		if (!agent) continue;
 		const agentName = agent.fields["name"]?.stringValue || "Agent";
-		byObject.set(objectId, {
-			endpoint: { objectId, agentId: agent.id },
-			name: nameOf(objectId) || agentName,
-			agentName,
-			icon: agent.fields["iconEmoji"]?.stringValue ?? "",
-		});
-	};
-	for (const record of inSpace) {
-		const pointedAt = record.fields["agent"]?.stringValue;
-		if (pointedAt) {
-			const agent = agents.get(pointedAt);
-			if (agent) add(record.id, agent);
-		} else {
-			add(record.fields["space_default"]?.stringValue || record.id, record);
-		}
+		out.push({ endpoint: { objectId: object.id, agentId }, name: nameOf(object.id) || agentName, agentName, icon: agent.fields["iconEmoji"]?.stringValue ?? "" });
 	}
-	return [...byObject.values()].sort((a, b) => a.name.localeCompare(b.name) || a.endpoint.objectId.localeCompare(b.endpoint.objectId));
+	return out.sort((a, b) => a.agentName.localeCompare(b.agentName) || a.endpoint.agentId.localeCompare(b.endpoint.agentId));
 }
 
 /** Mailbox messages, not receipt blocks or legacy counts, define exchange rows. */

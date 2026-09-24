@@ -1,6 +1,6 @@
 <script lang="ts">
 	/** Human/private chat stays local; exchanges send immutable mailbox envelopes. */
-	import type { AgentEndpoint, AgentMessage, ObjectJSON } from "$lib/types";
+	import { guestAgents, type AgentEndpoint, type AgentMessage, type ObjectJSON } from "$lib/types";
 	import { chatMessages, isLegacyExchange, replyRecipients, uniqueEndpoints } from "$lib/chat";
 	import { endpointName, loadObjectAgents } from "$lib/conversations";
 	import type { ObjectAgentOption } from "$lib/threads";
@@ -277,8 +277,8 @@
 		if (agent) return agent.name || "Agent";
 		// A chat object's own id: the brain-chat surface.
 		if (author === object.id) return object.fields["name"]?.stringValue || "Agent";
-		if (author && author === object.fields["agent"]?.stringValue)
-			return object.fields["name"]?.stringValue || "Agent";
+		if (author && guestAgents(object.fields).includes(author))
+			return store.agents.find((a) => a.id === author)?.name || "Agent";
 		return author.slice(0, 6);
 	}
 

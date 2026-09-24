@@ -100,17 +100,21 @@
 	const allowedTypeKeys = $derived(
 		new Set((rel.objectTypes ?? []).map((id) => store.types.find((t) => t.id === id)?.key).filter((k): k is string => !!k)),
 	);
+	/** Agents are hidden infrastructure in `summaries`; a relation typed to them draws from `store.agents`. */
+	const wantsAgents = $derived(allowedTypeKeys.has("agent"));
 	const candidates = $derived.by(() => {
 		const q = objectQuery.trim().toLowerCase();
-		let pool = store.summaries.filter((s) => !items.includes(s.id) && !HIDDEN_TYPES[s.typeKey]);
+		let pool: Array<{ id: string; name: string; typeKey: string; icon?: string; done?: boolean }> = wantsAgents
+			? store.agents.filter((a) => !items.includes(a.id)).map((a) => ({ id: a.id, name: a.name, typeKey: "agent", icon: a.icon }))
+			: store.summaries.filter((s) => !items.includes(s.id) && !HIDDEN_TYPES[s.typeKey]);
 		if (rel.objectSource) pool = sourceIds ? pool.filter((s) => sourceIds!.has(s.id)) : [];
-		else if (allowedTypeKeys.size > 0) pool = pool.filter((s) => allowedTypeKeys.has(s.typeKey));
+		else if (!wantsAgents && allowedTypeKeys.size > 0) pool = pool.filter((s) => allowedTypeKeys.has(s.typeKey));
 		return pool
 			.filter((s) => !q || (s.name ?? "").toLowerCase().includes(q))
 			.slice(0, 8);
 	});
 	function nameOf(id: string): string {
-		return store.summaries.find((s) => s.id === id)?.name || id.slice(0, 8);
+		return store.summaries.find((s) => s.id === id)?.name || store.agents.find((a) => a.id === id)?.name || id.slice(0, 8);
 	}
 	async function toggleObject(id: string) {
 		const next = items.includes(id) ? items.filter((x) => x !== id) : [...items, id];
@@ -186,7 +190,7 @@
 							onclick={() => {
 								objectOpen = false;
 								void toggleObject(c.id);
-							}}><span class="obj-name">{#if layoutOf(c.typeKey) === "task"}<span class="li-check" class:on={c.done === true}><CheckboxIcon checked={c.done === true} size={15} /></span>{:else}{objectIcon(undefined, c.typeKey)}{/if} {c.name || "Untitled"}</span> <span class="tk">{c.typeKey}</span></button
+							}}><span class="obj-name">{#if layoutOf(c.typeKey) === "task"}<span class="li-check" class:on={c.done === true}><CheckboxIcon checked={c.done === true} size={15} /></span>{:else}{objectIcon(c.icon, c.typeKey)}{/if} {c.name || "Untitled"}</span> <span class="tk">{c.typeKey}</span></button
 						>
 					{/each}
 					{#if candidates.length === 0}<span class="tk pad">No matches</span>{/if}
