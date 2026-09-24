@@ -217,7 +217,13 @@
 		if (isType) {
 			const key = object.fields["key"]?.stringValue;
 			if (!key) return null;
-			return { type: key, filters: [...engineFilters, spaceFilter], servingFilters: servingRules, ...text };
+			// Agent / capability / install / computer are vault infrastructure
+			// (the pickers and guest lists see them across spaces), so their type
+			// pages list every instance, not just this space's. Content types
+			// (note, task, person, …) stay space-scoped.
+			const INFRA: Record<string, true> = { agent: true, capability: true, install: true, machine: true };
+			const filters = INFRA[key] ? engineFilters : [...engineFilters, spaceFilter];
+			return { type: key, filters, servingFilters: servingRules, ...text };
 		}
 		if (isCollection) {
 			if (memberIds.length === 0) return null;
@@ -864,7 +870,7 @@
 		box-sizing: border-box;
 		display: flex;
 		flex-direction: column;
-		background: var(--panel);
+		background: var(--bg);
 		border-left: 1px solid var(--border);
 		border-radius: 0;
 		overflow: hidden;
