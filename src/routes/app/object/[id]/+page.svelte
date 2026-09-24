@@ -651,7 +651,7 @@
 			class:floating={floatingNow}
 			style={floatingNow
 				? `width: ${drawerW}px; left: ${drawerPos?.x}px; top: ${drawerPos?.y}px; height: ${drawerPos?.h}px`
-				: `width: ${drawerW}px; top: ${drawerTop + 10}px`}
+				: `width: ${drawerW}px; top: 0px`}
 			onpointerdown={drawerDragStart}
 			ondblclick={(e) => {
 				if ((e.target as HTMLElement)?.closest(".dd-head")) drawerDock();
