@@ -2309,11 +2309,10 @@
 		grid-template-columns: auto 1fr auto;
 		align-items: center;
 		gap: 8px;
-		padding: 18px 0 8px;
+		padding: 18px 16px 8px;
 		border-bottom: 1px solid var(--border);
 		max-width: 920px;
 		margin: 0 auto;
-		margin-inline: max(calc((100% - 920px) / 2), 16px);
 		/* Stays put while content scrolls - the 💬 chip doubles as the
 		   drawer's close, so it must remain reachable. */
 		position: sticky;
