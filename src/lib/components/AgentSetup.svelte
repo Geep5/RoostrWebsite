@@ -29,8 +29,6 @@
 
 	const servedBy = $derived(object.fields["served_by"]?.stringValue ?? "");
 	const kindKey = $derived(object.fields["kind"]?.stringValue ?? "");
-	/** Space-default agents follow their space's serving; no picker. */
-	const follows = $derived(!!object.fields["space_default"]?.stringValue);
 	const machine = $derived(machines.find((m) => m.machineId === servedBy));
 	const kind = $derived(kinds.find((k) => k.card.key === kindKey));
 	const runsHere = $derived(!!servedBy && servedBy === localMachineId);
@@ -103,9 +101,7 @@
 
 <section class="agent-setup" data-testid="agent-setup">
 	<p class="status" data-testid="agent-status">
-		{#if follows}
-			Serving follows the space this agent belongs to.
-		{:else if machine}
+		{#if machine}
 			Runs on <strong>{nameOf(machine)}</strong>{runsHere ? " · this one" : ""}{kind?.agent.model ? ` · model ${kind.agent.model}` : ""}
 		{:else if servedBy}
 			Runs on <strong>{servedBy.slice(0, 8)}…</strong>{runsHere ? " · this one" : ""}, a computer that has not registered yet.
@@ -114,22 +110,20 @@
 		{/if}
 	</p>
 
-	{#if !follows}
-		<div class="sec">
-			<div class="sec-name">Computer</div>
-			{#if machines.length === 0}
-				<p class="muted">No computer has registered yet. Start <code>./glon-odin serve</code> and the harness on one; it appears here within seconds.</p>
-			{/if}
-			<div class="choices">
-				{#each machines as m (m.machineId)}
-					<button class="choice" class:picked={m.machineId === servedBy} data-testid={`agent-machine-${m.machineId}`} onclick={() => void chooseMachine(m.machineId)}>
-						<span class="choice-name">{nameOf(m)}{m.machineId === localMachineId ? " · this one" : ""}</span>
-						<span class="choice-sub">{m.capabilities.length ? m.capabilities.map((k) => cards.find((c) => c.key === k)?.name ?? k).join(", ") : "no capabilities yet"}</span>
-					</button>
-				{/each}
-			</div>
+	<div class="sec">
+		<div class="sec-name">Computer</div>
+		{#if machines.length === 0}
+			<p class="muted">No computer has registered yet. Start <code>./glon-odin serve</code> and the harness on one; it appears here within seconds.</p>
+		{/if}
+		<div class="choices">
+			{#each machines as m (m.machineId)}
+				<button class="choice" class:picked={m.machineId === servedBy} data-testid={`agent-machine-${m.machineId}`} onclick={() => void chooseMachine(m.machineId)}>
+					<span class="choice-name">{nameOf(m)}{m.machineId === localMachineId ? " · this one" : ""}</span>
+					<span class="choice-sub">{m.capabilities.length ? m.capabilities.map((k) => cards.find((c) => c.key === k)?.name ?? k).join(", ") : "no capabilities yet"}</span>
+				</button>
+			{/each}
 		</div>
-	{/if}
+	</div>
 
 	{#if answersFor.length > 0}
 		<div class="sec" data-testid="agent-answers-for">
