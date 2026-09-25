@@ -8,6 +8,7 @@
 	import { spaceRelations } from "$lib/relations";
 	import { fetchObject, fetchQuery, note } from "$lib/api";
 	import { discussionUI, store, refreshAll, onObjectEvent, layoutOf } from "$lib/data.svelte";
+	import { activeSpace } from "$lib/space.svelte";
 	import Editor from "$lib/components/Editor.svelte";
 	import FeaturedProps from "$lib/components/FeaturedProps.svelte";
 	import Repeat from "$lib/components/Repeat.svelte";
@@ -212,8 +213,9 @@
 		if (!object) return null;
 		const text = searchText.trim() ? { textQuery: searchText.trim() } : {};
 		// Spaces are self-contained: every set implicitly filters to the
-		// owning space's objects.
-		const spaceFilter = spaceFilterOf(object, store.channels[0]?.id ?? "");
+		// owning space's objects. A bundled type (channel "") owns no space,
+		// so its page anchors to the space being VIEWED, not the vault default.
+		const spaceFilter = spaceFilterOf(object, activeSpace.id || store.channels[0]?.id || "");
 		if (isQuery) return { setId: object.id, filters: [...engineFilters, spaceFilter], servingFilters: servingRules, ...text };
 		// A type page IS a set of its instances (Anytype's type view).
 		if (isType) {
@@ -223,12 +225,10 @@
 			// system exclusion (typeKey notIn [… agent/machine …]) - it would
 			// hide agent/capability/install/computer instances from their own page.
 			const typeFilters = engineFilters.filter((f) => !(f.key === "typeKey" && f.condition === "notIn" && Array.isArray(f.value) && (f.value as unknown[]).includes(key)));
-			// Agent / capability / install / computer are vault infrastructure
-			// (the pickers and guest lists see them across spaces), so their type
-			// pages list every instance, not just this space's. Content types
-			// (note, task, person, …) stay space-scoped.
-			const INFRA: Record<string, true> = { agent: true, capability: true, install: true, machine: true };
-			const filters = INFRA[key] ? typeFilters : [...typeFilters, spaceFilter];
+			// Infrastructure instances carry real channels like everything
+			// else, so type pages space-filter them too. Pickers and guest
+			// lists query across spaces on their own and are unaffected.
+			const filters = [...typeFilters, spaceFilter];
 			return { type: key, filters, servingFilters: servingRules, ...text };
 		}
 		if (isCollection) {
