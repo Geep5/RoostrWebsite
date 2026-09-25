@@ -13,8 +13,6 @@
 	// counts, live job phases, job logs) go through the paired harness.
 	import { onMount } from "svelte";
 	import { fetchAllQuery, fetchObject, mailbox, note, type QueryResultRow } from "$lib/api";
-	import Machines from "./Machines.svelte";
-	import { goto } from "$app/navigation";
 	import { harnessFetch, pairedSession, onPairingChange } from "$lib/local-transport";
 	import { loadCards, type Card } from "$lib/cards";
 	import { fieldStr, type ObjectJSON } from "$lib/types";
@@ -307,28 +305,6 @@
 		return `${Math.round(h / 24)}d ago`;
 	}
 
-	// ── Unassigned skills ───────────────────────────────────────────
-	//
-	// A hand-written skill belongs to one agent, set in that agent's
-	// prompt panel - these are the ones with no owner yet, so every agent
-	// still lists them.
-	interface GlobalSkill {
-		id: string;
-		name: string;
-		description: string;
-	}
-	let globalSkills = $state<GlobalSkill[]>([]);
-
-	async function loadGlobalSkills() {
-		const records = await fetchAllQuery({ type: "skill" });
-		globalSkills = records
-			.filter((r) => !(r.fields["agent"]?.stringValue ?? "") && r.fields["scope"]?.stringValue !== "global")
-			.map((r) => ({
-				id: r.id,
-				name: r.fields["name"]?.stringValue || "Untitled",
-				description: r.fields["description"]?.stringValue ?? "",
-			}));
-	}
 
 	async function resetSkillPrompt(key: string) {
 		skillResetConfirm = "";
@@ -400,9 +376,6 @@
 		// Statuses flip as the owning machine publishes; cards change only
 		// when a catalog is republished, so they stay cached.
 		const dagPoll = setInterval(() => void loadDag(), 10_000);
-		void loadGlobalSkills().catch((error) => {
-			dagError = error instanceof Error ? error.message : "Cannot load saved skills.";
-		});
 		const unsubscribe = onPairingChange(refreshPairing);
 		return () => {
 			unsubscribe();
@@ -450,7 +423,6 @@
 			{/if}
 		</section>
 
-		<Machines />
 
 		{#if paired}
 			<section>
@@ -678,24 +650,6 @@
 					{/if}
 				</div>
 			{/each}
-			<div class="gskills">
-				<p class="hint">
-					The integrations above are the global set — every agent lists them. Any other skill belongs
-					to one agent, assigned in that agent's prompt panel. These have no owner yet, so every agent
-					still lists them:
-				</p>
-				{#each globalSkills as g (g.id)}
-					<div class="gskill">
-						<button
-							class="skill-name"
-							onclick={() => {
-								onclose();
-								void goto(`/app/object/${g.id}`);
-							}}>{g.name}</button>
-						<span class="hint-inline">{g.description || "no description — agents pick skills by it"}</span>
-					</div>
-				{/each}
-			</div>
 		</section>
 	</div>
 </div>
