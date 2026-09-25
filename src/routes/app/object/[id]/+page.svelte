@@ -224,11 +224,13 @@
 			// A type page names its own type: never apply the unsourced-query
 			// system exclusion (typeKey notIn [… agent/machine …]) - it would
 			// hide agent/capability/install/computer instances from their own page.
-			const typeFilters = engineFilters.filter((f) => !(f.key === "typeKey" && f.condition === "notIn" && Array.isArray(f.value) && (f.value as unknown[]).includes(key)));
 			// Infrastructure instances carry real channels like everything
-			// else, so type pages space-filter them too. Pickers and guest
-			// lists query across spaces on their own and are unaffected.
-			const filters = [...typeFilters, spaceFilter];
+			// else, so type pages space-filter them too - with one exception:
+			// a computer is a device identity filed in the home space, but its
+			// type page is the vault-wide roster (the space settings panel
+			// shows the same list). Pickers query across spaces regardless.
+			const typeFilters = engineFilters.filter((f) => !(f.key === "typeKey" && f.condition === "notIn" && Array.isArray(f.value) && (f.value as unknown[]).includes(key)));
+			const filters = key === "machine" ? typeFilters : [...typeFilters, spaceFilter];
 			return { type: key, filters, servingFilters: servingRules, ...text };
 		}
 		if (isCollection) {
