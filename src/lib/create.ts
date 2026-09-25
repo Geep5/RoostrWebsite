@@ -7,6 +7,7 @@
 import { goto } from "$app/navigation";
 import { fetchAllQuery, fetchObject, note } from "$lib/api";
 import { thisMachineId } from "$lib/capability-actions";
+import { adoptLocally, agentCreateFields, loadKinds, localMachineId, sv } from "$lib/agent-kinds";
 import type { ValueJSON } from "$lib/types";
 import { TYPE_GLYPHS } from "$lib/icons";
 import { store } from "$lib/data.svelte";
@@ -81,8 +82,33 @@ async function createMachine(): Promise<string> {
 	await goto("/setup");
 	return "";
 }
+/**
+ * A new agent that WORKS: kind, the kind card's defaults, this machine
+ * pinned as its server, and roster adoption - the same contract /setup and
+ * `harness setup` write ($lib/agent-kinds), so the agent answers the moment
+ * it is addressed. Unpaired goes to setup: a serverless agent is the
+ * silent dead end this replaces.
+ */
+async function createAgent(channelId: string): Promise<string> {
+	const id = await localMachineId();
+	if (!id) {
+		await goto("/setup");
+		return "";
+	}
+	const { kinds } = await loadKinds();
+	const assistant = kinds.find((k) => k.card.key === "assistant");
+	const fields: Record<string, ValueJSON> = {
+		...channelField(channelId),
+		...(assistant ? agentCreateFields("assistant", id, assistant) : { kind: sv("assistant"), served_by: sv(id) }),
+	};
+	const { id: agentId } = await note.create("New agent", "agent", fields);
+	await adoptLocally(agentId);
+	await goto(`/app/object/${agentId}`);
+	return agentId;
+}
 export async function createTyped(typeKey: string, channelId: string, name = ""): Promise<string> {
 	const key = typeKey.trim().toLowerCase();
+	if (key === "agent") return createAgent(channelId);
 	if (key === "machine") return createMachine();
 	const { id } = await note.create(name, key, channelField(channelId));
 	const tplId = store.types.find((t) => t.key === key)?.defaultTemplateId;

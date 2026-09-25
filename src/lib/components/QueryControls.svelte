@@ -5,7 +5,7 @@
 	import { createRelation } from "$lib/relations";
 	import type { ObjectJSON, RelationDefJSON, ValueJSON } from "$lib/types";
 	import { fetchQuery, note } from "$lib/api";
-	import { applyTemplate } from "$lib/create";
+	import { applyTemplate, createTyped } from "$lib/create";
 	import { store } from "$lib/data.svelte";
 	import { adoptLocally, agentCreateFields, loadKinds, localMachineId } from "$lib/agent-kinds";
 
@@ -301,6 +301,12 @@
 		try {
 			// Type pages create their own kind; queries create their source.
 			const typeKey = mode === "type" ? object.fields["key"]?.stringValue || "note" : sources[0] || "note";
+			// Infra types are never bare records: a computer is adopted or set
+			// up, an agent is born with a kind and a server (create.ts).
+			if (typeKey === "machine" || typeKey === "agent") {
+				await createTyped(typeKey, channelId);
+				return;
+			}
 			const fields: Record<string, ValueJSON> = {};
 			if (channelId) fields["channel"] = { stringValue: channelId };
 			// Every equal/in filter seeds the matching field with a value of
