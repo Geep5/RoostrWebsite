@@ -11,7 +11,8 @@
 	 * in the paired approval body, never in the request or on an object.
 	 */
 	import { onMount } from "svelte";
-	import { fetchAllQuery, mailbox, type QueryResultRow } from "$lib/api";
+	import { fetchAllQuery, type QueryResultRow } from "$lib/api";
+	import { sendCapabilityRequest, resolveCapabilityRequest, type CapabilityRequest } from "$lib/capability-actions";
 	import { harnessFetch, pairedSession } from "$lib/local-transport";
 	import type { MachineRow } from "$lib/serving";
 	import type { Card } from "$lib/cards";
@@ -31,17 +32,6 @@
 		satisfied: boolean;
 	} = $props();
 
-	interface CapabilityRequest {
-		objectId: string;
-		messageId: string;
-		key: string;
-		account: string;
-		operation: string;
-		status: string;
-		error: string;
-		canApprove: boolean;
-		fields?: Array<{ key: string; label: string; secret: boolean }>;
-	}
 	interface Row {
 		key: string;
 		label: string;
@@ -109,7 +99,7 @@
 		return () => clearInterval(timer);
 	});
 
-	/** Mirrors Machine.svelte `requestOperation`: the DAG carries only the intent. */
+	/** Stage via the shared capability-action path ($lib/capability-actions). */
 	async function request(row: Row, operation: string): Promise<boolean> {
 		if (busy) return false;
 		busy = `${row.key}:${operation}`;
@@ -121,21 +111,8 @@
 				notice = "A request for this is already waiting.";
 				return true;
 			}
-			await mailbox.send({
-				id: crypto.randomUUID(),
-				exchangeId: crypto.randomUUID(),
-				sender: { objectId: machine.id, agentId: "" },
-				recipients: [{ objectId: row.installId, agentId: "" }],
-				text: `Request ${operation} for ${row.key}.`,
-				replyTo: "",
-				sentAt: Date.now(),
-				title: "Capability request",
-				requestReply: true,
-				historical: false,
-				operation,
-				author: "",
-			});
-			notice = canApproveHere ? "Request sent. Approve it below when it arrives." : `Request sent. Approve it in the machine panel on ${machine.name || "that machine"}.`;
+			await sendCapabilityRequest(machine.id, row.installId, row.key, operation);
+			notice = canApproveHere ? "Request sent. Approve it below when it arrives." : `Request sent. Approve it on the installation's page on ${machine.name || "that machine"}.`;
 			await load();
 			return true;
 		} catch (e) {
@@ -146,23 +123,17 @@
 		}
 	}
 
-	/** Mirrors Machine.svelte `resolveRequest`: the paired click that grants execution. */
+	/** The paired click that grants execution. */
 	async function resolve(row: Row, action: "approve" | "reject") {
 		const req = row.request;
 		if (!req) return;
 		busy = req.messageId;
 		error = "";
 		try {
-			const body: { objectId: string; messageId: string; fields?: Record<string, string> } = { objectId: req.objectId, messageId: req.messageId };
-			if (action === "approve" && req.operation === "auth.save") {
-				body.fields = Object.fromEntries((req.fields ?? []).map((f) => [f.key, credDraft[`${req.key}:${f.key}`] ?? ""]));
-			}
-			const res = await harnessFetch(`/capability-requests/${action}`, { method: "POST", body: JSON.stringify(body) });
-			const result = (await res.json()) as { error?: string };
-			if (!res.ok || result.error) throw new Error(result.error ?? `HTTP ${res.status}`);
-			if (body.fields) for (const f of req.fields ?? []) delete credDraft[`${req.key}:${f.key}`];
+			const fields = Object.fromEntries((req.fields ?? []).map((f) => [f.key, credDraft[`${req.key}:${f.key}`] ?? ""]));
+			await resolveCapabilityRequest(req, action, fields);
+			if (req.operation === "auth.save") for (const f of req.fields ?? []) delete credDraft[`${req.key}:${f.key}`];
 			notice = "";
-			window.dispatchEvent(new Event("roostr:machines-changed"));
 			await load();
 		} catch (e) {
 			error = e instanceof Error ? e.message : "Approval failed.";

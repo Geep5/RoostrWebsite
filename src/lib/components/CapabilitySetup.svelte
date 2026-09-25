@@ -7,8 +7,8 @@
 	 * paired click grants execution, the DAG only carries the intent.
 	 */
 	import { onMount } from "svelte";
-	import { fetchAllQuery, mailbox, note, type QueryResultRow } from "$lib/api";
-	import { harnessFetch } from "$lib/local-transport";
+	import { fetchAllQuery, note, type QueryResultRow } from "$lib/api";
+	import { stageCapabilityRequest } from "$lib/capability-actions";
 	import { fetchMachines, machineName, type MachineRow } from "$lib/serving";
 	import { loadCards, type Card } from "$lib/cards";
 	import type { ObjectJSON } from "$lib/types";
@@ -23,6 +23,7 @@
 	let requestBusy = $state("");
 	let requestError = $state("");
 	let requestNotice = $state("");
+	let accountDraft = $state("");
 
 	const key = $derived(object.fields["key"]?.stringValue ?? "");
 	const servedBy = $derived(object.fields["served_by"]?.stringValue ?? "");
@@ -33,6 +34,8 @@
 			installs.find((r) => r.fields["key"]?.stringValue === key && !!servedBy && r.fields["machine_id"]?.stringValue === servedBy),
 	);
 	const status = $derived(install?.fields["status"]?.stringValue ?? "");
+	/** Account-scoped installs (google's selectors) unlock the add-account form. */
+	const accountRows = $derived(installs.filter((r) => r.fields["key"]?.stringValue === key && (r.fields["account"]?.stringValue ?? "") !== ""));
 	const isActive = $derived(status === "active");
 
 	async function load() {
@@ -67,22 +70,16 @@
 	}
 
 	/** The DAG carries only the intent. A separate paired click grants execution. */
-	async function requestOperation(operation: string): Promise<boolean> {
+	async function requestOperation(operation: string, account = ""): Promise<boolean> {
 		if (requestBusy) return false;
 		requestBusy = `stage:${key}:${operation}`;
 		requestError = "";
 		requestNotice = "";
 		try {
-			const res = await harnessFetch("/machine");
-			if (!res.ok) throw new Error("Cannot identify the owning machine.");
-			const machine = (await res.json()) as { id: string };
-			const [installRows, machineRows] = await Promise.all([fetchAllQuery({ type: "install" }), fetchAllQuery({ type: "machine" })]);
-			const installationId = installRows.find((row) => row.fields["key"]?.stringValue === key && row.fields["machine_id"]?.stringValue === machine.id && (row.fields["account"]?.stringValue ?? "") === "")?.id;
-			if (!installationId) throw new Error("This machine has not published the installation object yet.");
-			const source = machineRows.find((row) => row.fields["machine_id"]?.stringValue === machine.id);
-			if (!source) throw new Error("This machine has not published its object yet.");
-			await mailbox.send({ id: crypto.randomUUID(), exchangeId: crypto.randomUUID(), sender: { objectId: source.id, agentId: "" }, recipients: [{ objectId: installationId, agentId: "" }], text: `Request ${operation} for ${key}.`, replyTo: "", sentAt: Date.now(), title: "Capability request", requestReply: true, historical: false, operation, author: "" });
-			requestNotice = "Request sent to its installation object. Approve it under This machine.";
+			await stageCapabilityRequest(key, operation, account);
+			requestNotice = account
+				? "Request staged. Approve it on the new installation's page once it appears."
+				: "Request staged. Approve it on the installation's page.";
 			return true;
 		} catch (error) {
 			requestError = error instanceof Error ? error.message : "Cannot stage capability request.";
@@ -131,7 +128,21 @@
 				<button class="subtle-btn" disabled={!!requestBusy} data-testid="capability-request-install" onclick={() => void requestOperation("skill.install")}>Request install</button>
 			{/if}
 		</div>
-		<p class="muted">Requests stage here and execute after approval - approve it under This machine.</p>
+		{#if accountRows.length > 0}
+			<form
+				class="actions"
+				onsubmit={(e) => {
+					e.preventDefault();
+					const account = accountDraft.trim().toLowerCase();
+					if (!account) return;
+					void requestOperation("auth.login", account).then((ok) => { if (ok) accountDraft = ""; });
+				}}
+			>
+				<input bind:value={accountDraft} placeholder="name@account.example" autocomplete="off" />
+				<button type="submit" disabled={!!requestBusy || !accountDraft.trim()}>Request login for another account</button>
+			</form>
+		{/if}
+		<p class="muted">Requests stage here and execute after approval - open the installation object to approve.</p>
 		{#if requestNotice}<p class="muted" data-testid="capability-request-notice">{requestNotice}</p>{/if}
 	</div>
 
