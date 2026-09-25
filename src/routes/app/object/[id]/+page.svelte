@@ -879,8 +879,8 @@
 		display: flex;
 		flex-direction: column;
 		background: var(--bg);
-		border-left: 1px solid var(--border);
-		border-radius: 0;
+		border: none;
+		border-radius: 16px 0 0 0;
 		overflow: hidden;
 	}
 	/* Popped out: a card again, floating wherever it was dragged. */

@@ -1766,6 +1766,9 @@
 		color: var(--fg);
 		background: var(--hl-med);
 	}
+	/* The space rail is a card; the other panes share that treatment so every
+	   pane is a rounded solid separated by background and a 6px gap, never a
+	   full-bleed line touching a window edge. */
 	.widgets {
 		position: relative;
 		padding: 10px 8px;
@@ -1773,6 +1776,9 @@
 		display: flex;
 		flex-direction: column;
 		gap: 8px;
+		margin: 6px 0;
+		background: var(--panel);
+		border-radius: 16px;
 	}
 	/* Invisible grab strip on the pane's right edge - only the cursor
 	   betrays it. Absolute top+bottom spans the full scroll content, so
