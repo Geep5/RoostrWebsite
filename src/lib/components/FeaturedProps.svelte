@@ -134,7 +134,7 @@
 		if (v.intValue !== undefined) return v.intValue;
 		if (v.floatValue !== undefined) return v.floatValue;
 		if (v.boolValue !== undefined) return v.boolValue;
-		if (v.valuesValue) return v.valuesValue.items.map((i) => i.stringValue ?? "");
+		if (v.valuesValue) return v.valuesValue.items.map((i) => i.stringValue ?? i.linkValue?.targetId ?? "").filter(Boolean);
 		if (v.listValue) return v.listValue.values;
 		return "";
 	}
@@ -150,7 +150,7 @@
 		}
 		if (rel.format === "object") {
 			const ids = p as string[];
-			return ids.map((id) => store.summaries.find((s) => s.id === id)?.name || id.slice(0, 6)).join(", ");
+			return ids.map((id) => store.summaries.find((s) => s.id === id)?.name || store.agents.find((a) => a.id === id)?.name || id.slice(0, 6)).join(", ");
 		}
 		if (Array.isArray(p)) return p.join(", ");
 		if (rel.format === "longtext") return String(p).slice(0, 60);

@@ -32,6 +32,8 @@
 	const num = $derived(value?.intValue ?? value?.floatValue);
 	const checked = $derived(value?.boolValue === true);
 	const items = $derived((value?.valuesValue?.items ?? []).map((i) => i.stringValue ?? "").filter(Boolean));
+	/** Object-format values are link lists (relation-stamped); legacy rows may be plain strings. */
+	const objectIds = $derived((value?.valuesValue?.items ?? []).map((i) => i.linkValue?.targetId ?? i.stringValue ?? "").filter(Boolean));
 
 	const sv = (s: string): ValueJSON => ({ stringValue: s });
 	const list = (xs: string[]): ValueJSON => ({ valuesValue: { items: xs.map(sv) } });
@@ -105,8 +107,8 @@
 	const candidates = $derived.by(() => {
 		const q = objectQuery.trim().toLowerCase();
 		let pool: Array<{ id: string; name: string; typeKey: string; icon?: string; done?: boolean }> = wantsAgents
-			? store.agents.filter((a) => !items.includes(a.id)).map((a) => ({ id: a.id, name: a.name, typeKey: "agent", icon: a.icon }))
-			: store.summaries.filter((s) => !items.includes(s.id) && !HIDDEN_TYPES[s.typeKey]);
+			? store.agents.filter((a) => !objectIds.includes(a.id)).map((a) => ({ id: a.id, name: a.name, typeKey: "agent", icon: a.icon }))
+			: store.summaries.filter((s) => !objectIds.includes(s.id) && !HIDDEN_TYPES[s.typeKey]);
 		if (rel.objectSource) pool = sourceIds ? pool.filter((s) => sourceIds!.has(s.id)) : [];
 		else if (!wantsAgents && allowedTypeKeys.size > 0) pool = pool.filter((s) => allowedTypeKeys.has(s.typeKey));
 		return pool
@@ -117,9 +119,9 @@
 		return store.summaries.find((s) => s.id === id)?.name || store.agents.find((a) => a.id === id)?.name || id.slice(0, 8);
 	}
 	async function toggleObject(id: string) {
-		const next = items.includes(id) ? items.filter((x) => x !== id) : [...items, id];
+		const next = objectIds.includes(id) ? objectIds.filter((x) => x !== id) : [...objectIds, id];
 		objectQuery = "";
-		await onsave(list(next));
+		await onsave({ valuesValue: { items: next.map((target) => ({ linkValue: { targetId: target, relationKey: rel.key } })) } });
 	}
 </script>
 
@@ -172,7 +174,7 @@
 	</span>
 {:else if rel.format === "object"}
 	<div class="objects">
-		{#each items as id (id)}
+		{#each objectIds as id (id)}
 			{@const s = store.summaries.find((x) => x.id === id)}
 			<span class="obj-chip">
 				<a href="/app/object/{id}">{#if s && layoutOf(s.typeKey) === "task"}<span class="li-check" class:on={s.done === true}><CheckboxIcon checked={s.done === true} size={14} /></span>{:else}{objectIcon(undefined, s?.typeKey ?? "note")}{/if} {nameOf(id)}</a>

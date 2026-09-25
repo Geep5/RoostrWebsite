@@ -8,7 +8,8 @@ import { goto } from "$app/navigation";
 import { fetchAllQuery, fetchObject, note } from "$lib/api";
 import { thisMachineId } from "$lib/capability-actions";
 import { adoptLocally, agentCreateFields, loadKinds, localMachineId, sv } from "$lib/agent-kinds";
-import type { ValueJSON } from "$lib/types";
+import { guestAgents, type ValueJSON } from "$lib/types";
+import { agentLinksValue } from "$lib/agent-field";
 import { TYPE_GLYPHS } from "$lib/icons";
 import { store } from "$lib/data.svelte";
 import { activeSpace } from "$lib/space.svelte";
@@ -36,7 +37,9 @@ export function typeGlyph(typeKey: string): string {
 /**
  * Copy a template's content blocks into a fresh object (Anytype: ObjectCreate
  * with type.defaultTemplateId). Ids are remapped; the discussion subtree and
- * template-identity fields stay behind.
+ * template-identity fields stay behind. The one property that DOES cross is
+ * `agent`: a template declares who answers what it spawns, normalized to the
+ * link-list shape regardless of how the template stored it.
  */
 export async function applyTemplate(objectId: string, templateId: string): Promise<void> {
 	const tpl = await fetchObject(templateId);
@@ -60,6 +63,8 @@ export async function applyTemplate(objectId: string, templateId: string): Promi
 			content: b.content,
 		});
 	}
+	const agents = guestAgents(tpl.fields);
+	if (agents.length > 0) await note.setField(objectId, "agent", agentLinksValue(agents));
 }
 
 
