@@ -135,6 +135,7 @@
 		if (v.floatValue !== undefined) return v.floatValue;
 		if (v.boolValue !== undefined) return v.boolValue;
 		if (v.valuesValue) return v.valuesValue.items.map((i) => i.stringValue ?? i.linkValue?.targetId ?? "").filter(Boolean);
+		if (v.linkValue) return [v.linkValue.targetId ?? ""].filter(Boolean);
 		if (v.listValue) return v.listValue.values;
 		return "";
 	}
@@ -149,7 +150,7 @@
 			return ms ? new Date(ms).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" }) : "";
 		}
 		if (rel.format === "object") {
-			const ids = p as string[];
+			const ids = (Array.isArray(p) ? p : p ? [String(p)] : []).filter(Boolean);
 			return ids.map((id) => store.summaries.find((s) => s.id === id)?.name || store.agents.find((a) => a.id === id)?.name || id.slice(0, 6)).join(", ");
 		}
 		if (Array.isArray(p)) return p.join(", ");

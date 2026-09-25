@@ -100,6 +100,10 @@
 </script>
 
 <section class="agent-setup" data-testid="agent-setup">
+	{#if object.fields["error"]?.stringValue}
+		<!-- The holdup reason the harness stamped: why this agent cannot run. -->
+		<p class="holdup-banner" role="alert" data-testid="agent-holdup">{object.fields["error"].stringValue}</p>
+	{/if}
 	<p class="status" data-testid="agent-status">
 		{#if machine}
 			Runs on <strong>{nameOf(machine)}</strong>{runsHere ? " · this one" : ""}{kind?.agent.model ? ` · model ${kind.agent.model}` : ""}
@@ -219,4 +223,5 @@
 	.answers a { color: var(--fg); text-decoration: none; }
 	.answers a:hover { text-decoration: underline; }
 	.error { margin: 0; color: #ff6961; font-size: 13px; }
+	.holdup-banner { margin: 0; color: #ff9f0a; background: rgb(255 159 10 / 0.1); border: 1px solid rgb(255 159 10 / 0.35); border-radius: 8px; padding: 8px 12px; font-size: 13px; line-height: 1.5; }
 </style>
