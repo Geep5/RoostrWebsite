@@ -5,12 +5,19 @@
 	// and couldn't proceed) and integrations (device capabilities like
 	// browserless and gws). Account-scoped things stay in Settings -
 	// this surface describes the box the harness runs on.
+	//
+	// Everything the panel SHOWS about capabilities is DAG data:
+	// descriptor cards say what each skill or login IS, installation
+	// objects say what is TRUE on a machine. Only execution (install,
+	// login, save, approve) and the machine's private ledger (holdup
+	// counts, live job phases, job logs) go through the paired harness.
 	import { onMount } from "svelte";
-	import { fetchAllQuery, mailbox, note } from "$lib/api";
+	import { fetchAllQuery, fetchObject, mailbox, note, type QueryResultRow } from "$lib/api";
 	import Machines from "./Machines.svelte";
 	import { goto } from "$app/navigation";
 	import { harnessFetch, pairedSession, onPairingChange } from "$lib/local-transport";
 	import { loadCards, type Card } from "$lib/cards";
+	import { fieldStr, type ObjectJSON } from "$lib/types";
 	import PairGate from "./PairGate.svelte";
 
 	let { onclose }: { onclose: () => void } = $props();
@@ -18,19 +25,16 @@
 	let paired = $state(pairedSession() !== null);
 	let harnessError = $state("");
 
-	interface SkillRow {
-		key: string;
-		name: string;
-		description: string;
-		phase: "off" | "installing" | "needs-auth" | "on" | "failed" | "uninstalling";
-		installed: boolean;
-		log: string;
-		authHint?: string;
-		/** Live prompt body from the skill object - what agents actually read. */
-		prompt: string;
-		/** Catalog stock prompt - the reset target. */
-		defaultPrompt: string;
-	}
+	// ── DAG state: cards (what a thing IS) + installs (what is TRUE here) ──
+	let cards = $state<Card[]>([]);
+	let installs = $state<QueryResultRow[]>([]);
+	/** This machine's stable id, from the paired harness ("" unpaired). */
+	let machineId = $state("");
+	/** Catalog skill prompt bodies, by skill key. */
+	let skillBodies = $state<Record<string, { id: string; text: string }>>({});
+	let dagError = $state("");
+
+	// ── The machine's private ledger (paired harness only) ──
 	interface Holdup {
 		id: string;
 		capability: string;
@@ -43,30 +47,10 @@
 		firstAt: number;
 		updatedAt: number;
 	}
-
-	let skillRows = $state<SkillRow[] | null>(null);
 	let holdups = $state<Holdup[]>([]);
+	let jobPhases = $state<Record<string, string>>({});
+	let jobLogs = $state<Record<string, string>>({});
 
-	// ── Credentials: service logins agents on this machine may use ──
-	//
-	// Two sources, deliberately split: the SHAPE (label, note, which inputs,
-	// which are secret, where to log in) is a descriptor card in the vault, so
-	// an unpaired browser or a phone can still describe what X needs; the
-	// ACTIVE state is machine-local, and only that machine can answer it.
-	// Secret values are written to the machine over the paired local API and
-	// never enter the DAG.
-	interface CredentialRow {
-		key: string;
-		label: string;
-		note: string;
-		loginUrl?: string;
-		passwordFields?: Array<{ key: string; label: string; secret: boolean; format?: string; note?: string }>;
-		active: { password: boolean; browser: boolean };
-		updatedAt?: number;
-	}
-	let credentials = $state<CredentialRow[] | null>(null);
-	let credSetupFor = $state("");
-	let credDraft = $state<Record<string, string>>({});
 	interface CapabilityRequest {
 		objectId: string;
 		messageId: string;
@@ -84,74 +68,127 @@
 	let requestNotice = $state("");
 	let requestBusy = $state("");
 	let requestPoll: ReturnType<typeof setInterval> | undefined;
+	let statePoll: ReturnType<typeof setInterval> | undefined;
 	let credRemoveConfirm = $state("");
 	let credError = $state("");
 	let credBusy = $state(false);
-	interface GoogleAccountRow {
-		account: string;
-		configured: boolean;
-		authMethod: string;
-		clientConfigExists: boolean;
-		credentialsExists: boolean;
-		storage: string;
-		error?: string;
-	}
-	let googleAccounts = $state<GoogleAccountRow[] | null>(null);
+	let credSetupFor = $state("");
+	let credDraft = $state<Record<string, string>>({});
 	let googleAccountDraft = $state("");
-	let googleAccountError = $state("");
 	let googleAccountBusy = $state(false);
 	let googleRemoveConfirm = $state("");
+	let skillPromptDraft = $state<Record<string, string>>({});
+	let skillPromptSaved = $state<string>("");
+	let skillOpen = $state<string>("");
+	let skillConfirm = $state<string>("");
+	let skillResetConfirm = $state<string>("");
 
-	/** A card's form, rendered generically: FieldSpec[] IS the form. */
-	function cardRow(card: Card, active: { password: boolean; browser: boolean }): CredentialRow {
-		const fields = card.fields.map((f) => ({
-			key: f.key,
-			label: f.label,
-			secret: f.secret,
-			format: f.format,
-			note: f.note,
-		}));
+	const integrations = $derived(cards.filter((c) => c.kind === "integration"));
+	const skillCards = $derived(cards.filter((c) => c.kind === "skill"));
+	const googleRows = $derived(
+		installs.filter((r) => fieldStr(r.fields, "key") === "google" && fieldStr(r.fields, "account") !== "" && fieldStr(r.fields, "machine_id") === machineId),
+	);
+
+	/** This machine's install row for a capability key (+ account). */
+	function installFor(key: string, account = ""): QueryResultRow | undefined {
+		return installs.find((r) => fieldStr(r.fields, "key") === key && fieldStr(r.fields, "machine_id") === machineId && fieldStr(r.fields, "account") === account);
+	}
+
+	/** Chip state for a skill card: live job phase wins, then the install row. */
+	function skillPhase(key: string): { phase: string; installed: boolean; error: string } {
+		const job = jobPhases[key];
+		if (job) return { phase: job, installed: true, error: "" };
+		const row = installFor(key);
+		if (!row) return { phase: "off", installed: false, error: "" };
+		const status = fieldStr(row.fields, "status");
+		const phase =
+			status === "active" ? "on"
+			: status === "needs_auth" ? "needs-auth"
+			: status === "broken" ? "failed"
+			: status === "processing" || status === "needs_approval" ? "installing"
+			: "off";
+		return { phase, installed: status !== "" && status !== "missing", error: fieldStr(row.fields, "error") };
+	}
+
+	/** Auth state of a login from its install row: the auth method is the badge. */
+	function loginBadges(key: string): { password: boolean; browser: boolean; status: string; error: string } {
+		const row = installFor(key);
+		if (!row) return { password: false, browser: false, status: "", error: "" };
+		const auth = fieldStr(row.fields, "auth");
 		return {
-			key: card.key,
-			label: card.name,
-			note: card.description,
-			...(card.install?.docsUrl ? { loginUrl: card.install.docsUrl } : {}),
-			...(fields.length ? { passwordFields: fields } : {}),
-			active,
+			password: auth === "api_key",
+			browser: auth === "browser_profile" || auth === "oauth",
+			status: fieldStr(row.fields, "status"),
+			error: fieldStr(row.fields, "error"),
 		};
 	}
 
-	async function loadCredentials() {
-		const integrations = (await loadCards()).filter((c) => c.kind === "integration");
-		if (!pairedSession()) {
-			// Unpaired: the cards still say what each login needs. Nothing is
-			// claimed about whether it is set up here - that is not knowable.
-			credentials = integrations.map((c) => cardRow(c, { password: false, browser: false }));
-			credError = integrations.length ? "" : "No machine has published its logins yet.";
-			return;
-		}
+	/** Plain-text body of a skill object (the prompt agents read). */
+	function objectText(obj: ObjectJSON): string {
+		const byId = new Map(obj.blocks.map((b) => [b.id, b]));
+		const referenced = new Set<string>();
+		for (const b of obj.blocks) for (const c of b.childrenIds) referenced.add(c);
+		const roots = obj.blocks.filter((b) => !referenced.has(b.id) && b.id !== "__discussion__");
+		const out: string[] = [];
+		const walk = (id: string) => {
+			const b = byId.get(id);
+			if (!b) return;
+			const kind = b.content.custom?.contentType;
+			if (kind === "chat" || kind === "discussion") return;
+			const line = b.content.text?.text ?? "";
+			if (line) out.push(line);
+			for (const c of b.childrenIds) walk(c);
+		};
+		for (const r of roots) walk(r.id);
+		return out.join("\n");
+	}
+
+	async function loadDag(forceCards = false) {
 		try {
-			const res = await harnessFetch("/credentials");
-			if (!res.ok) throw new Error(`HTTP ${res.status}`);
-			const live = ((await res.json()) as { credentials: Array<{ key: string; active: { password: boolean; browser: boolean }; updatedAt?: number }> })
-				.credentials;
-			const activeOf = new Map(live.map((c) => [c.key, c]));
-			// Cards first, so a login this machine has not heard of still
-			// shows; then any key the machine reports without a card.
-			const rows = integrations.map((c) => {
-				const hit = activeOf.get(c.key);
-				const row = cardRow(c, hit?.active ?? { password: false, browser: false });
-				return hit?.updatedAt ? { ...row, updatedAt: hit.updatedAt } : row;
-			});
-			for (const c of live) {
-				if (integrations.some((card) => card.key === c.key)) continue;
-				rows.push({ key: c.key, label: c.key, note: "No card describes this login.", active: c.active });
-			}
-			credentials = rows;
-			credError = "";
+			const [nextCards, nextInstalls, skillRows] = await Promise.all([
+				loadCards(forceCards),
+				fetchAllQuery({ type: "install" }),
+				fetchAllQuery({ type: "skill" }),
+			]);
+			cards = nextCards;
+			installs = nextInstalls;
+			const bodies: Record<string, { id: string; text: string }> = {};
+			await Promise.all(
+				skillRows
+					.filter((r) => fieldStr(r.fields, "scope") === "global")
+					.map(async (r) => {
+						const obj = await fetchObject(r.id);
+						bodies[(fieldStr(r.fields, "name") || r.id).toLowerCase()] = { id: r.id, text: objectText(obj) };
+					}),
+			);
+			skillBodies = bodies;
+			dagError = "";
 		} catch (error) {
-			credentials = null;
-			credError = error instanceof Error ? error.message : "Cannot load credentials.";
+			dagError = error instanceof Error ? error.message : "Cannot load capability data.";
+		}
+	}
+
+	async function loadMachineState() {
+		if (!pairedSession()) return;
+		try {
+			const res = await harnessFetch("/machine-state");
+			if (!res.ok) throw new Error(`Cannot load machine state (HTTP ${res.status}).`);
+			const out = (await res.json()) as { holdups?: Holdup[]; phases?: Record<string, string>; logs?: Record<string, string> };
+			if (!pairedSession()) return;
+			holdups = (out.holdups ?? []).sort((a, b) => b.updatedAt - a.updatedAt);
+			jobPhases = out.phases ?? {};
+			jobLogs = out.logs ?? {};
+			harnessError = "";
+			const busy = Object.keys(jobPhases).length > 0;
+			if (busy && !statePoll) statePoll = setInterval(() => void loadMachineState(), 2000);
+			if (!busy && statePoll) {
+				clearInterval(statePoll);
+				statePoll = undefined;
+			}
+		} catch (error) {
+			harnessError = error instanceof Error ? error.message : "The paired harness is unreachable.";
+			if (statePoll) clearInterval(statePoll);
+			statePoll = undefined;
 		}
 	}
 
@@ -163,7 +200,7 @@
 			const previous = capabilityRequests;
 			capabilityRequests = ((await res.json()) as { requests: CapabilityRequest[] }).requests;
 			if (previous.some((request) => request.status === "processing" && !capabilityRequests.some((next) => next.messageId === request.messageId && next.status === "processing"))) {
-				await Promise.all([loadCredentials(), loadGoogleAccounts(), loadSkills()]);
+				await Promise.all([loadDag(), loadMachineState()]);
 				window.dispatchEvent(new Event("roostr:machines-changed"));
 			}
 		} catch (error) {
@@ -181,8 +218,8 @@
 			const res = await harnessFetch("/machine");
 			if (!res.ok) throw new Error("Cannot identify the owning machine.");
 			const machine = (await res.json()) as { id: string };
-			const [installs, machines] = await Promise.all([fetchAllQuery({ type: "install" }), fetchAllQuery({ type: "machine" })]);
-			let installationId = installs.find((row) => row.fields["key"]?.stringValue === key && row.fields["machine_id"]?.stringValue === machine.id && (row.fields["account"]?.stringValue ?? "") === account)?.id;
+			const [installRows, machines] = await Promise.all([fetchAllQuery({ type: "install" }), fetchAllQuery({ type: "machine" })]);
+			let installationId = installRows.find((row) => row.fields["key"]?.stringValue === key && row.fields["machine_id"]?.stringValue === machine.id && (row.fields["account"]?.stringValue ?? "") === account)?.id;
 			if (!installationId && key === "google" && account) {
 				installationId = (await note.create(`Google ${account}`, "install", { key: { stringValue: key }, machine_id: { stringValue: machine.id }, account: { stringValue: account }, status: { stringValue: "missing" } })).id;
 			}
@@ -219,7 +256,7 @@
 			if (action === "finish-login" && !result.active) requestNotice = "Authentication is not confirmed yet. Finish signing in on this machine, then check again.";
 			else requestNotice = "";
 			if (body.fields) for (const field of request.fields ?? []) delete credDraft[`${request.key}:${field.key}`];
-			await Promise.all([loadCapabilityRequests(), loadCredentials(), loadGoogleAccounts(), loadSkills()]);
+			await Promise.all([loadCapabilityRequests(), loadDag(), loadMachineState()]);
 			window.dispatchEvent(new Event("roostr:machines-changed"));
 		} catch (error) {
 			requestError = error instanceof Error ? error.message : "Approval failed.";
@@ -234,25 +271,6 @@
 			if (await requestOperation(key, "auth.save")) credSetupFor = "";
 		} finally {
 			credBusy = false;
-		}
-	}
-	let skillPromptDraft = $state<Record<string, string>>({});
-	let skillPromptSaved = $state<string>("");
-	let skillOpen = $state<string>("");
-	let skillConfirm = $state<string>("");
-	let skillResetConfirm = $state<string>("");
-	let skillPoll: ReturnType<typeof setInterval> | undefined;
-
-	async function loadGoogleAccounts() {
-		if (!pairedSession()) return;
-		try {
-			const res = await harnessFetch("/google/accounts");
-			if (!res.ok) throw new Error(`HTTP ${res.status}`);
-			googleAccounts = ((await res.json()) as { accounts: GoogleAccountRow[] }).accounts;
-			googleAccountError = "";
-		} catch (error) {
-			googleAccounts = null;
-			googleAccountError = error instanceof Error ? error.message : "Cannot load Google accounts.";
 		}
 	}
 
@@ -276,30 +294,6 @@
 		}
 	}
 
-	async function loadSkills() {
-		if (!pairedSession()) return;
-		try {
-			const res = await harnessFetch("/skills");
-			if (!res.ok) throw new Error(`Cannot load integrations (HTTP ${res.status}).`);
-			const out = (await res.json()) as { skills: SkillRow[]; holdups?: Holdup[] };
-			if (!pairedSession()) return;
-			skillRows = out.skills;
-			holdups = (out.holdups ?? []).sort((a, b) => b.updatedAt - a.updatedAt);
-			harnessError = "";
-			const busy = skillRows.some((s) => s.phase === "installing" || s.phase === "uninstalling");
-			if (busy && !skillPoll) skillPoll = setInterval(() => void loadSkills(), 2000);
-			if (!busy && skillPoll) {
-				clearInterval(skillPoll);
-				skillPoll = undefined;
-			}
-		} catch (error) {
-			skillRows = null;
-			harnessError = error instanceof Error ? error.message : "The paired harness is unreachable.";
-			if (skillPoll) clearInterval(skillPoll);
-			skillPoll = undefined;
-		}
-	}
-
 	async function clearHoldup(id: string) {
 		await changeSkill("/skills/holdup-clear", { id });
 	}
@@ -315,10 +309,9 @@
 
 	// ── Unassigned skills ───────────────────────────────────────────
 	//
-	// The global set is hardcoded: exactly the catalog above, device
-	// capabilities every agent lists. A hand-written skill belongs to one
-	// agent, set in that agent's prompt panel — these are the ones with
-	// no owner yet, so every agent still lists them.
+	// A hand-written skill belongs to one agent, set in that agent's
+	// prompt panel - these are the ones with no owner yet, so every agent
+	// still lists them.
 	interface GlobalSkill {
 		id: string;
 		name: string;
@@ -352,7 +345,7 @@
 
 	async function skillOp(key: string, op: "enable" | "disable" | "recheck" | "uninstall") {
 		skillConfirm = "";
-		const operation = op === "recheck" ? "auth.check" : op === "enable" && !skillRows?.find((row) => row.key === key)?.installed ? "skill.install" : `skill.${op}`;
+		const operation = op === "recheck" ? "auth.check" : op === "enable" && !skillPhase(key).installed ? "skill.install" : `skill.${op}`;
 		await requestOperation(key, operation);
 	}
 
@@ -364,7 +357,7 @@
 				body: JSON.stringify(body),
 			});
 			if (!res.ok) throw new Error(`Harness operation failed (HTTP ${res.status}).`);
-			await loadSkills();
+			await Promise.all([loadDag(), loadMachineState()]);
 			return true;
 		} catch (error) {
 			harnessError = error instanceof Error ? error.message : "The paired harness is unreachable.";
@@ -375,34 +368,46 @@
 	function refreshPairing() {
 		paired = !!pairedSession();
 		if (!paired) {
-			skillRows = null;
+			machineId = "";
 			holdups = [];
-			credentials = null;
+			jobPhases = {};
+			jobLogs = {};
 			harnessError = "";
 			capabilityRequests = [];
 			credDraft = {};
 			if (requestPoll) clearInterval(requestPoll);
 			requestPoll = undefined;
-			if (skillPoll) clearInterval(skillPoll);
-			skillPoll = undefined;
+			if (statePoll) clearInterval(statePoll);
+			statePoll = undefined;
 			return;
 		}
-		void loadSkills();
-		void loadCredentials();
-		void loadGoogleAccounts();
-		void loadCapabilityRequests();
+		void (async () => {
+			try {
+				const res = await harnessFetch("/machine");
+				if (res.ok) machineId = ((await res.json()) as { id: string }).id;
+			} catch {
+				/* harness down: DAG rows still render, actions say so */
+			}
+			void loadMachineState();
+			void loadCapabilityRequests();
+		})();
 		if (!requestPoll) requestPoll = setInterval(() => void loadCapabilityRequests(), 2000);
 	}
 
 	onMount(() => {
 		refreshPairing();
+		void loadDag();
+		// Statuses flip as the owning machine publishes; cards change only
+		// when a catalog is republished, so they stay cached.
+		const dagPoll = setInterval(() => void loadDag(), 10_000);
 		void loadGlobalSkills().catch((error) => {
-			harnessError = error instanceof Error ? error.message : "Cannot load saved skills.";
+			dagError = error instanceof Error ? error.message : "Cannot load saved skills.";
 		});
 		const unsubscribe = onPairingChange(refreshPairing);
 		return () => {
 			unsubscribe();
-			if (skillPoll) clearInterval(skillPoll);
+			clearInterval(dagPoll);
+			if (statePoll) clearInterval(statePoll);
 			if (requestPoll) clearInterval(requestPoll);
 		};
 	});
@@ -419,14 +424,12 @@
 			<p class="hint">Pair with your native app to manage this machine. Saved skills remain available in browser mode.</p>
 		{/if}
 		{#if harnessError}<p class="hint" role="alert">{harnessError} Check that the paired native app and harness are running.</p>{/if}
-		{#if paired && skillRows === null}
-			<button class="subtle-btn" onclick={refreshPairing}>Retry harness connection</button>
-		{/if}
+		{#if dagError}<p class="hint" role="alert">{dagError}</p>{/if}
 
 		<section>
 			<h3>Holdups</h3>
-			{#if skillRows === null}
-				<p class="hint">{paired ? "Machine holdups are unavailable until the harness responds." : "Pair to view machine holdups."}</p>
+			{#if !paired}
+				<p class="hint">Pair to view machine holdups.</p>
 			{:else if holdups.length === 0}
 				<p class="hint">Nothing held up — no agent has been blocked on a machine capability.</p>
 			{:else}
@@ -488,191 +491,193 @@
 
 		<section>
 			<h3>Integrations</h3>
-			{#if skillRows === null}
-				<p class="hint">{paired ? "Machine integrations are unavailable until the harness responds." : "Pair to manage machine integrations."}</p>
-			{:else}
-				<p class="hint">
-					Device-local capabilities, brokered by the harness: every agent can use an enabled one
-					through its tools (web_fetch, …) without ever seeing this machine's credentials.
-				</p>
-				{#if credentials === null}
-					<p class="hint" role="alert">{credError || "Credentials are unavailable until the harness responds."}</p>
-				{:else if credentials}
-					{#each credentials as c (c.key)}
-						<div class="skill">
-							<div class="skill-row">
-								<span class="skill-name cred-label">{c.label}</span>
-								{#if c.active.password}<span class="chip on">password ✓</span>{/if}
-								{#if c.active.browser}<span class="chip on">browser ✓</span>{/if}
-								{#if !c.active.password && !c.active.browser}<span class="chip">not set up</span>{/if}
-								<span class="row-gap"></span>
-								{#if c.passwordFields}
-									<button class="subtle-btn" disabled={credBusy} onclick={() => { credSetupFor = credSetupFor === c.key ? "" : c.key; credError = ""; }}>{c.active.password ? "Replace" : "Enter keys"}</button>
-								{/if}
-								{#if c.loginUrl && !c.active.browser}
-									<button class="subtle-btn" disabled={credBusy} onclick={() => void requestOperation(c.key, "auth.login")}>Request login</button>
-								{/if}
-								{#if c.active.password || c.active.browser}
-									{#if credRemoveConfirm === c.key}
-										<button class="subtle-btn reset-right" disabled={credBusy} onclick={async () => { if (await requestOperation(c.key, "auth.revoke")) credRemoveConfirm = ""; }}>Request removal?</button>
-										<button class="subtle-btn" onclick={() => (credRemoveConfirm = "")}>Cancel</button>
-									{:else}
-										<button class="remove-link" onclick={() => (credRemoveConfirm = c.key)}>Remove</button>
-									{/if}
-								{/if}
-							</div>
-							<p class="hint cred-note">{c.note}</p>
-							{#if credSetupFor === c.key && c.passwordFields}
-								<div class="cred-form">
-									{#each c.passwordFields as f (f.key)}
-										<label class="cred-field">
-											<span>{f.label}</span>
-											<input
-												type={f.secret || f.format === "password" ? "password" : f.format === "email" ? "email" : f.format === "url" ? "url" : "text"}
-												placeholder={f.note ?? ""}
-												autocomplete="off"
-												value={credDraft[`${c.key}:${f.key}`] ?? ""}
-												oninput={(e) => (credDraft = { ...credDraft, [`${c.key}:${f.key}`]: e.currentTarget.value })}
-											/>
-										</label>
-									{/each}
-									<div class="cred-actions">
-										<button class="subtle-btn" disabled={credBusy} onclick={() => void savePasswordCredential(c.key)}>Request save to this machine</button>
-										<button class="subtle-btn" onclick={() => (credSetupFor = "")}>Cancel</button>
-									</div>
-								</div>
+			<p class="hint">
+				What each integration IS is a descriptor object; what is TRUE on this machine is its
+				installation object. Secrets stay on the machine - only requests and status enter the DAG.
+			</p>
+			{#if integrations.length === 0 && skillCards.length === 0}
+				<p class="hint">{dagError || "No machine has published its integrations yet."}</p>
+			{/if}
+			{#each integrations as c (c.key)}
+				{@const badges = loginBadges(c.key)}
+				<div class="skill">
+					<div class="skill-row">
+						<span class="skill-name cred-label">{c.name}</span>
+						{#if paired && machineId}
+							{#if badges.password}<span class="chip on">password ✓</span>{/if}
+							{#if badges.browser}<span class="chip on">browser ✓</span>{/if}
+							{#if badges.status === "needs_auth"}<span class="chip needs-auth">auth needed</span>{/if}
+							{#if badges.status === "broken"}<span class="chip failed">broken</span>{/if}
+							{#if !badges.password && !badges.browser && badges.status !== "needs_auth" && badges.status !== "broken"}<span class="chip">not set up</span>{/if}
+						{/if}
+						<span class="row-gap"></span>
+						{#if c.fields.length > 0}
+							<button class="subtle-btn" disabled={credBusy} onclick={() => { credSetupFor = credSetupFor === c.key ? "" : c.key; credError = ""; }}>{badges.password ? "Replace" : "Enter keys"}</button>
+						{/if}
+						{#if c.install?.docsUrl && !badges.browser}
+							<button class="subtle-btn" disabled={credBusy} onclick={() => void requestOperation(c.key, "auth.login")}>Request login</button>
+						{/if}
+						{#if badges.password || badges.browser}
+							{#if credRemoveConfirm === c.key}
+								<button class="subtle-btn reset-right" disabled={credBusy} onclick={async () => { if (await requestOperation(c.key, "auth.revoke")) credRemoveConfirm = ""; }}>Request removal?</button>
+								<button class="subtle-btn" onclick={() => (credRemoveConfirm = "")}>Cancel</button>
+							{:else}
+								<button class="remove-link" onclick={() => (credRemoveConfirm = c.key)}>Remove</button>
 							{/if}
-						</div>
-					{/each}
-					{#if credError}<p class="hint" role="alert">{credError}</p>{/if}
-				{/if}
-				<div class="gskills">
-					<p class="hint">
-						Google account selectors for <code>gws-as</code>. Secrets stay in each account's local config directory; agents choose the account explicitly.
-					</p>
-					{#if googleAccounts === null}
-						<p class="hint" role="alert">{googleAccountError || "Google accounts are unavailable until the harness responds."}</p>
-					{:else}
-						{#each googleAccounts as account (account.account)}
-							<div class="gskill">
-								<span class="skill-name cred-label">{account.account}</span>
-								<span class="chip {account.authMethod !== "none" && account.authMethod !== "" ? "on" : account.clientConfigExists ? "needs-auth" : "failed"}">
-									{account.authMethod !== "none" && account.authMethod !== "" ? account.authMethod : account.clientConfigExists ? "auth needed" : "missing client"}
-								</span>
-								<button class="subtle-btn" disabled={googleAccountBusy} onclick={() => void requestOperation("google", "auth.login", account.account)}>Request login</button>
-								<button class="subtle-btn" disabled={googleAccountBusy} onclick={() => void requestOperation("google", "auth.check", account.account)}>Request check</button>
-								{#if googleRemoveConfirm === account.account}
-									<button class="subtle-btn reset-right" disabled={googleAccountBusy} onclick={() => void removeGoogleAccount(account.account)}>Remove?</button>
-									<button class="subtle-btn" onclick={() => (googleRemoveConfirm = "")}>Cancel</button>
-								{:else}
-									<button class="remove-link" onclick={() => (googleRemoveConfirm = account.account)}>Remove</button>
-								{/if}
-							</div>
-						{/each}
-						<form
-							onsubmit={(e) => {
-								e.preventDefault();
-								void addGoogleAccount();
-							}}
-						>
-							<input bind:value={googleAccountDraft} placeholder="support@matcherino.com" autocomplete="off" />
-							<button type="submit" disabled={googleAccountBusy || !googleAccountDraft.trim()}>Request Google login</button>
-						</form>
-						{#if googleAccountError}<p class="hint" role="alert">{googleAccountError}</p>{/if}
-					{/if}
-				</div>
-				{#each skillRows as s (s.key)}
-					<div class="skill">
-						<div class="skill-row">
-							<button
-								class="skill-name"
-								onclick={() => {
-									skillOpen = skillOpen === s.key ? "" : s.key;
-									skillConfirm = "";
-								}}>{s.name}</button
-							>
-							<span class="chip {s.phase}">
-								{s.phase === "on"
-									? "on"
-									: s.phase === "installing"
-										? "installing…"
-										: s.phase === "uninstalling"
-											? "removing…"
-											: s.phase === "needs-auth"
-												? "auth needed"
-												: s.phase === "failed"
-													? "failed"
-													: "off"}
-							</span>
-							{#if s.phase === "needs-auth" || s.phase === "failed"}
-								<button class="subtle-btn" onclick={() => void skillOp(s.key, "recheck")}>Re-check</button>
-							{/if}
-							<label class="switch">
-								<input
-									type="checkbox"
-									checked={s.phase === "on" || s.phase === "installing"}
-									disabled={s.phase === "installing" || s.phase === "uninstalling"}
-									onchange={(e) =>
-										void skillOp(s.key, (e.currentTarget as HTMLInputElement).checked ? "enable" : "disable")}
-								/>
-								<span class="slider"></span>
-							</label>
-						</div>
-						{#if skillOpen === s.key}
-							<div class="skill-detail">
-								<p class="hint">{s.description}</p>
-								<p class="skill-install">Installation: {s.installed ? "done ✓" : s.phase === "installing" ? "running…" : "not installed"}</p>
-								{#if s.phase === "needs-auth" && s.authHint}
-									<p class="hint auth-hint">{s.authHint}</p>
-								{/if}
-								<div class="skill-prompt">
-									<div class="pname">
-										Prompt <span class="hint-inline">what the agent reads via skill_read</span>
-									</div>
-									<textarea
-										rows="6"
-										value={skillPromptDraft[s.key] ?? s.prompt}
-										oninput={(e) => (skillPromptDraft[s.key] = (e.currentTarget as HTMLTextAreaElement).value)}
-									></textarea>
-									<div class="skill-prompt-actions">
-										<button
-											class="subtle-btn"
-											disabled={(skillPromptDraft[s.key] ?? s.prompt) === s.prompt}
-											onclick={() => void saveSkillPrompt(s.key)}
-										>{skillPromptSaved === s.key ? "Saved" : "Save prompt"}</button>
-										{#if (skillPromptDraft[s.key] ?? s.prompt) !== s.prompt}
-											<button class="subtle-btn" onclick={() => { delete skillPromptDraft[s.key]; }}>Revert</button>
-										{/if}
-										{#if s.prompt.trim() !== s.defaultPrompt.trim()}
-											{#if skillResetConfirm === s.key}
-												<span class="hint-inline">Replace with the stock prompt?</span>
-												<button class="danger-btn" onclick={() => void resetSkillPrompt(s.key)}>Reset</button>
-												<button class="subtle-btn" onclick={() => (skillResetConfirm = "")}>Cancel</button>
-											{:else}
-												<button class="subtle-btn reset-right" onclick={() => (skillResetConfirm = s.key)}>Reset to default</button>
-											{/if}
-										{/if}
-									</div>
-								</div>
-								{#if s.log}
-									<pre class="skill-log">{s.log.slice(-2000)}</pre>
-								{/if}
-								{#if s.installed && s.phase !== "installing" && s.phase !== "uninstalling"}
-									{#if skillConfirm === s.key}
-										<p class="hint">
-											Remove {s.name}? This uninstalls it from this device.
-											<button class="danger-btn" onclick={() => void skillOp(s.key, "uninstall")}>Remove</button>
-											<button class="subtle-btn" onclick={() => (skillConfirm = "")}>Cancel</button>
-										</p>
-									{:else}
-										<button class="remove-link" onclick={() => (skillConfirm = s.key)}>Remove from this device</button>
-									{/if}
-								{/if}
-							</div>
 						{/if}
 					</div>
+					<p class="hint cred-note">{c.description}</p>
+					{#if badges.error}<p class="hint" role="status">{badges.error}</p>{/if}
+					{#if credSetupFor === c.key && c.fields.length > 0}
+						<div class="cred-form">
+							{#each c.fields as f (f.key)}
+								<label class="cred-field">
+									<span>{f.label}</span>
+									<input
+										type={f.secret || f.format === "password" ? "password" : f.format === "email" ? "email" : f.format === "url" ? "url" : "text"}
+										placeholder={f.note ?? ""}
+										autocomplete="off"
+										value={credDraft[`${c.key}:${f.key}`] ?? ""}
+										oninput={(e) => (credDraft = { ...credDraft, [`${c.key}:${f.key}`]: e.currentTarget.value })}
+									/>
+								</label>
+							{/each}
+							<div class="cred-actions">
+								<button class="subtle-btn" disabled={credBusy} onclick={() => void savePasswordCredential(c.key)}>Request save to this machine</button>
+								<button class="subtle-btn" onclick={() => (credSetupFor = "")}>Cancel</button>
+							</div>
+						</div>
+					{/if}
+				</div>
+			{/each}
+			{#if credError}<p class="hint" role="alert">{credError}</p>{/if}
+			<div class="gskills">
+				<p class="hint">
+					Google account selectors for <code>gws-as</code>. Secrets stay in each account's local config directory; agents choose the account explicitly.
+				</p>
+				{#each googleRows as row (row.id)}
+					{@const account = fieldStr(row.fields, "account")}
+					{@const auth = fieldStr(row.fields, "auth")}
+					{@const status = fieldStr(row.fields, "status")}
+					<div class="gskill">
+						<span class="skill-name cred-label">{account}</span>
+						<span class="chip {auth !== "" && auth !== "none" ? "on" : status === "broken" ? "failed" : "needs-auth"}">
+							{auth !== "" && auth !== "none" ? auth.replaceAll("_", " ") : status === "broken" ? "failed" : status === "missing" ? "missing client" : "auth needed"}
+						</span>
+						<button class="subtle-btn" disabled={googleAccountBusy} onclick={() => void requestOperation("google", "auth.login", account)}>Request login</button>
+						<button class="subtle-btn" disabled={googleAccountBusy} onclick={() => void requestOperation("google", "auth.check", account)}>Request check</button>
+						{#if googleRemoveConfirm === account}
+							<button class="subtle-btn reset-right" disabled={googleAccountBusy} onclick={() => void removeGoogleAccount(account)}>Remove?</button>
+							<button class="subtle-btn" onclick={() => (googleRemoveConfirm = "")}>Cancel</button>
+						{:else}
+							<button class="remove-link" onclick={() => (googleRemoveConfirm = account)}>Remove</button>
+						{/if}
+					</div>
+					{#if fieldStr(row.fields, "error")}<p class="hint" role="status">{fieldStr(row.fields, "error")}</p>{/if}
 				{/each}
-			{/if}
+				<form
+					onsubmit={(e) => {
+						e.preventDefault();
+						void addGoogleAccount();
+					}}
+				>
+					<input bind:value={googleAccountDraft} placeholder="support@matcherino.com" autocomplete="off" />
+					<button type="submit" disabled={googleAccountBusy || !googleAccountDraft.trim()}>Request Google login</button>
+				</form>
+			</div>
+			{#each skillCards as s (s.key)}
+				{@const state = skillPhase(s.key)}
+				{@const body = skillBodies[s.key.toLowerCase()]}
+				<div class="skill">
+					<div class="skill-row">
+						<button
+							class="skill-name"
+							onclick={() => {
+								skillOpen = skillOpen === s.key ? "" : s.key;
+								skillConfirm = "";
+							}}>{s.name}</button
+						>
+						<span class="chip {state.phase}">
+							{state.phase === "on"
+								? "on"
+								: state.phase === "installing"
+									? "installing…"
+									: state.phase === "uninstalling"
+										? "removing…"
+										: state.phase === "needs-auth"
+											? "auth needed"
+											: state.phase === "failed"
+												? "failed"
+												: "off"}
+						</span>
+						{#if state.phase === "needs-auth" || state.phase === "failed"}
+							<button class="subtle-btn" onclick={() => void skillOp(s.key, "recheck")}>Re-check</button>
+						{/if}
+						<label class="switch">
+							<input
+								type="checkbox"
+								checked={state.phase === "on" || state.phase === "installing"}
+								disabled={state.phase === "installing" || state.phase === "uninstalling"}
+								onchange={(e) =>
+									void skillOp(s.key, (e.currentTarget as HTMLInputElement).checked ? "enable" : "disable")}
+							/>
+							<span class="slider"></span>
+						</label>
+					</div>
+					{#if skillOpen === s.key}
+						<div class="skill-detail">
+							<p class="hint">{s.description}</p>
+							<p class="skill-install">Installation: {state.installed ? "done ✓" : state.phase === "installing" ? "running…" : "not installed"}</p>
+							{#if state.error}
+								<p class="hint auth-hint">{state.error}</p>
+							{/if}
+							<div class="skill-prompt">
+								<div class="pname">
+									Prompt <span class="hint-inline">what the agent reads via skill_read</span>
+								</div>
+								<textarea
+									rows="6"
+									value={skillPromptDraft[s.key] ?? body?.text ?? ""}
+									oninput={(e) => (skillPromptDraft[s.key] = (e.currentTarget as HTMLTextAreaElement).value)}
+								></textarea>
+								<div class="skill-prompt-actions">
+									<button
+										class="subtle-btn"
+										disabled={(skillPromptDraft[s.key] ?? body?.text ?? "") === (body?.text ?? "")}
+										onclick={() => void saveSkillPrompt(s.key)}
+									>{skillPromptSaved === s.key ? "Saved" : "Save prompt"}</button>
+									{#if (skillPromptDraft[s.key] ?? body?.text ?? "") !== (body?.text ?? "")}
+										<button class="subtle-btn" onclick={() => { delete skillPromptDraft[s.key]; }}>Revert</button>
+									{/if}
+									{#if body}
+										{#if skillResetConfirm === s.key}
+											<span class="hint-inline">Replace with the stock prompt?</span>
+											<button class="danger-btn" onclick={() => void resetSkillPrompt(s.key)}>Reset</button>
+											<button class="subtle-btn" onclick={() => (skillResetConfirm = "")}>Cancel</button>
+										{:else}
+											<button class="subtle-btn reset-right" onclick={() => (skillResetConfirm = s.key)}>Reset to default</button>
+										{/if}
+									{/if}
+								</div>
+							</div>
+							{#if jobLogs[s.key]}
+								<pre class="skill-log">{jobLogs[s.key].slice(-2000)}</pre>
+							{/if}
+							{#if state.installed && state.phase !== "installing" && state.phase !== "uninstalling"}
+								{#if skillConfirm === s.key}
+									<p class="hint">
+										Remove {s.name}? This uninstalls it from this device.
+										<button class="danger-btn" onclick={() => void skillOp(s.key, "uninstall")}>Remove</button>
+										<button class="subtle-btn" onclick={() => (skillConfirm = "")}>Cancel</button>
+									</p>
+								{:else}
+									<button class="remove-link" onclick={() => (skillConfirm = s.key)}>Remove from this device</button>
+								{/if}
+							{/if}
+						</div>
+					{/if}
+				</div>
+			{/each}
 			<div class="gskills">
 				<p class="hint">
 					The integrations above are the global set — every agent lists them. Any other skill belongs
