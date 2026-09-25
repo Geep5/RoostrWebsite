@@ -5,7 +5,8 @@
  */
 
 import { goto } from "$app/navigation";
-import { fetchObject, note } from "$lib/api";
+import { fetchAllQuery, fetchObject, note } from "$lib/api";
+import { thisMachineId } from "$lib/capability-actions";
 import type { ValueJSON } from "$lib/types";
 import { TYPE_GLYPHS } from "$lib/icons";
 import { store } from "$lib/data.svelte";
@@ -60,8 +61,29 @@ export async function applyTemplate(objectId: string, templateId: string): Promi
 	}
 }
 
+
+/**
+ * A computer object is a machine's self-publication: it exists because a
+ * running harness announced itself (stable machine id, live capabilities).
+ * Hand-crafting one would mint an inert twin nothing serves, so New →
+ * Computer adopts this device's row when its harness already published it,
+ * and otherwise goes to setup - the machine creates its own object.
+ */
+async function createMachine(): Promise<string> {
+	const id = await thisMachineId();
+	if (id) {
+		const mine = (await fetchAllQuery({ type: "machine" })).find((r) => r.fields["machine_id"]?.stringValue === id);
+		if (mine) {
+			await goto(`/app/object/${mine.id}`);
+			return mine.id;
+		}
+	}
+	await goto("/setup");
+	return "";
+}
 export async function createTyped(typeKey: string, channelId: string, name = ""): Promise<string> {
 	const key = typeKey.trim().toLowerCase();
+	if (key === "machine") return createMachine();
 	const { id } = await note.create(name, key, channelField(channelId));
 	const tplId = store.types.find((t) => t.key === key)?.defaultTemplateId;
 	if (tplId) await applyTemplate(id, tplId).catch(() => {}); // a deleted default template is a no-op
