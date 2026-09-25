@@ -12,6 +12,7 @@
 	import FeaturedProps from "$lib/components/FeaturedProps.svelte";
 	import Repeat from "$lib/components/Repeat.svelte";
 	import Discussion from "$lib/components/Discussion.svelte";
+	import Installation from "$lib/components/Installation.svelte";
 	import ConversationDrawer from "$lib/components/ConversationDrawer.svelte";
 	import { objectThreads } from "$lib/conversations";
 	import SetTable from "$lib/components/SetTable.svelte";
@@ -151,6 +152,7 @@
 	const isChat = $derived(object?.typeKey === "chat");
 	const isAgent = $derived(object?.typeKey === "agent");
 	const isCapability = $derived(object?.typeKey === "capability");
+	const isInstall = $derived(object?.typeKey === "install");
 	const isType = $derived(object?.typeKey === "type");
 	const isTemplate = $derived(object?.typeKey === "template");
 	const isRelation = $derived(object?.typeKey === "relation");
@@ -549,6 +551,8 @@
 			<AgentSetup {object} onchanged={refresh} />
 		{:else if isCapability}
 			<CapabilitySetup {object} onchanged={refresh} />
+		{:else if isInstall}
+			<Installation {object} />
 		{:else if isType}
 			<TypePanel {object} onchanged={refresh} />
 			<div class="dataview">
