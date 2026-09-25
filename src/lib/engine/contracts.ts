@@ -137,6 +137,8 @@ export interface CheckpointRow {
 
 /** One object's raw history for a corpus load. */
 export interface ObjectHistory {
+	/** Set by the store; ad-hoc callers (tests) may omit it. */
+	objectId?: string;
 	checkpoint?: Uint8Array;
 	changes: Uint8Array[];
 }

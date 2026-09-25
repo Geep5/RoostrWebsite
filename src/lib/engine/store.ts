@@ -246,7 +246,7 @@ export class ChangeStore implements ChangeStoreApi {
 		const histories = new Map<string, ObjectHistory>();
 		const historyOf = (objectId: string): ObjectHistory => {
 			let history = histories.get(objectId);
-			if (!history) histories.set(objectId, (history = { changes: [] }));
+			if (!history) histories.set(objectId, (history = { objectId, changes: [] }));
 			return history;
 		};
 		for (const cp of checkpoints) historyOf(cp.objectId).checkpoint = cp.bytes;

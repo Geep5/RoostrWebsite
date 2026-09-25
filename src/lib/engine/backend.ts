@@ -53,6 +53,8 @@ class WebBackend {
 	private queryUpserted = new Set<string>();
 	private queryRemoved = new Set<string>();
 	private allDirty = true;
+	/** In-flight cold corpus load, shared by concurrent fetchQuery callers. */
+	private coldLoad: Promise<void> | null = null;
 	private commitListeners = new Set<(ids: string[]) => void>();
 	status: SyncStatus = { phase: "idle", imported: 0, bootstrapped: false };
 	private statusListeners = new Set<(s: SyncStatus) => void>();
@@ -451,22 +453,38 @@ class WebBackend {
 	async fetchQuery(body: QueryBody): Promise<{ total: number; records: never[] }> {
 		await this.ensure();
 		if (needsColdLoad()) {
-			// Cold start: hand the core the protobuf this replica already
-			// stores instead of serialising every object to JSON for it.
-			// Measured on this machine: 3x faster at 10k objects, and the
-			// payload is 1.4 MB where the JSON was 2.1 MB.
-			try {
-				loadCorpus(await this.store.allChangeHistories());
-				// Raw history includes relay copies the vanish ledger excludes.
-				// Reapply the whole ledger, including after a core-only reset.
-				for (const id of this.vanished) this.queryRemoved.add(id);
-				// Keep pending deltas: another query or mutation may have
-				// replayed newer state while the IndexedDB read was pending.
-			} catch (error) {
-				// A refused corpus must not wedge querying: fall through to
-				// the JSON snapshot path, which is slower but independent.
-				console.warn("[replica] corpus load fell back to JSON:", error);
-			}
+			// Boot fires five queries at once (refreshAll's Promise.all):
+			// without this share, each ran its own full corpus reset+push and
+			// the peak was N x the vault - the "query cache memory limit
+			// exceeded" at vault open. One load, every caller awaits it.
+			this.coldLoad ??= (async () => {
+				// Cold start: hand the core the protobuf this replica already
+				// stores instead of serialising every object to JSON for it.
+				// Measured on this machine: 3x faster at 10k objects, and the
+				// payload is 1.4 MB where the JSON was 2.1 MB.
+				// Vanished histories stay on disk (relays may redeliver them)
+				// but never enter the cache: their peak cost is real.
+				try {
+					const histories = (await this.store.allChangeHistories()).filter((h) => !h.objectId || !this.vanished.has(h.objectId));
+					// Every pending upsert is a replay of the bytes the corpus
+					// just loaded; re-pushing them as JSON doubles the peak
+					// (corpus regions and upsert regions coexist until commit).
+					// Single-threaded: nothing replays between the read and here.
+					const covered = new Set(this.queryUpserted);
+					loadCorpus(histories);
+					for (const id of covered) this.queryUpserted.delete(id);
+					// Raw history includes relay copies the vanish ledger
+					// excludes. Reapply it, including after a core-only reset.
+					for (const id of this.vanished) this.queryRemoved.add(id);
+				} catch (error) {
+					// A refused corpus must not wedge querying: fall through to
+					// the JSON snapshot path, which is slower but independent.
+					console.warn("[replica] corpus load fell back to JSON:", error);
+				}
+			})().finally(() => {
+				this.coldLoad = null;
+			});
+			await this.coldLoad;
 		}
 		const delta = { upserted: [...this.queryUpserted], removed: [...this.queryRemoved] };
 		const result = runQuery(this.states.values(), body, delta) as { total: number; records: never[] };
