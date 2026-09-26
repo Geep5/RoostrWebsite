@@ -260,20 +260,31 @@
 					{/each}
 				{:else if rel.format === "status" && !empty}
 					{@const opt = rel.options.find((o) => o.text === display(rel))}
-					<button class="badge" style={badgeStyle(opt?.color ?? "")} title={rel.name || rel.key} onclick={() => (editing = editing === rel.key ? null : rel.key)}>
-						<PropIcon icon={statusIcon(display(rel))} />{display(rel)}
-					</button>
+					<span class="cell-wrap">
+						<button class="badge" style={badgeStyle(opt?.color ?? "")} title={rel.name || rel.key} onclick={() => (editing = editing === rel.key ? null : rel.key)}>
+							<PropIcon icon={statusIcon(display(rel))} />{display(rel)}
+						</button>
+						<button class="rm" aria-label={`Remove ${rel.name || rel.key}`} title="Remove property" onclick={() => void removeProp(rel.key)}>×</button>
+					</span>
 				{:else if rel.format === "checkbox"}
 					{@const on = plain(v, "checkbox") === true}
-					<button class="badge" style={badgeStyle(on ? "lime" : "")} title={rel.name || rel.key} onclick={() => void saveValue(rel.key, { boolValue: !on })}>
-						<PropIcon icon={on ? "check" : "dashed"} />{rel.name || rel.key}
-					</button>
+					<span class="cell-wrap">
+						<button class="badge" style={badgeStyle(on ? "lime" : "")} title={rel.name || rel.key} onclick={() => void saveValue(rel.key, { boolValue: !on })}>
+							<PropIcon icon={on ? "check" : "dashed"} />{rel.name || rel.key}
+						</button>
+						<button class="rm" aria-label={`Remove ${rel.name || rel.key}`} title="Remove property" onclick={() => void removeProp(rel.key)}>×</button>
+					</span>
 				{:else if rel.key === "served_by"}
 					{@const pinnedId = (plain(v, "object") as string[])[0] ?? ""}
 					{@const warn = serve?.warning}
-					<button class="badge" class:empty={!serve} class:plain={!pinnedId} style={warn ? badgeStyle("red") : badgeStyle("")} title={serve ? `Served by · ${serve.text}${warn ? " (cannot be honoured)" : ""}` : "Which machine serves this object"} onclick={() => (editing = editing === rel.key ? null : rel.key)}>
-						<span class="emoji">🖥️</span>{serve ? serve.text.replace(/^served by /, "") : "No machine yet"}
-					</button>
+					<span class="cell-wrap">
+						<button class="badge" class:empty={!serve} class:plain={!pinnedId} style={warn ? badgeStyle("red") : badgeStyle("")} title={serve ? `Served by · ${serve.text}${warn ? " (cannot be honoured)" : ""}` : "Which machine serves this object"} onclick={() => (editing = editing === rel.key ? null : rel.key)}>
+							<span class="emoji">🖥️</span>{serve ? serve.text.replace(/^served by /, "") : "No machine yet"}
+						</button>
+						{#if pinnedId}
+							<button class="rm" aria-label="Remove computer" title="Remove property" onclick={() => void removeProp(rel.key)}>×</button>
+						{/if}
+					</span>
 				{:else if rel.key === "install"}
 					{#if (plain(v, "object") as string[]).length > 0}
 						{#each plain(v, "object") as string[] as id (id)}
