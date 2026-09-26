@@ -1580,6 +1580,7 @@
 		   width - so an open discussion takes its own column instead of
 		   floating over the page it belongs to. */
 		grid-template-columns: 56px 220px 1fr var(--disc-w, 0px);
+		column-gap: 0;
 		flex: 1;
 		min-height: 0;
 		transition: grid-template-columns 0.16s ease;
@@ -1776,7 +1777,7 @@
 		display: flex;
 		flex-direction: column;
 		gap: 8px;
-		margin: 6px 0;
+		margin: 6px 0 6px 6px;
 		background: var(--panel);
 		border-radius: 16px;
 	}
@@ -2052,6 +2053,9 @@
 	.main-col {
 		overflow-y: auto;
 		padding: 0 32px;
+		margin: 6px 0;
+		background: var(--bg);
+		border-radius: 16px;
 	}
 .desk {
 		display: flex;
