@@ -10,7 +10,6 @@
 	import { discussionUI, store, refreshAll, onObjectEvent, layoutOf } from "$lib/data.svelte";
 	import { activeSpace } from "$lib/space.svelte";
 	import Editor from "$lib/components/Editor.svelte";
-	import FeaturedProps from "$lib/components/FeaturedProps.svelte";
 	import Repeat from "$lib/components/Repeat.svelte";
 	import Discussion from "$lib/components/Discussion.svelte";
 	import Installation from "$lib/components/Installation.svelte";
@@ -537,9 +536,6 @@
 		{#if isTemplate}
 			<p class="tpl-note">Template{templateTargetName ? ` of ${templateTargetName}` : ""} — new objects copy these blocks.</p>
 		{/if}
-		{#if !isChannel && !isChat && !isType && !isRelation}
-			<FeaturedProps {object} relations={scopedRelations} onchanged={refresh} />
-		{/if}
 		{#if !isChannel && !isChat && !isType && !isRelation && !isTemplate && !isQuery && !isCollection && !isAgent}
 			<Repeat {object} onchanged={refresh} />
 		{/if}
@@ -665,6 +661,7 @@
 			{#key object.id}
 			<ConversationDrawer
 				{object}
+				relations={scopedRelations}
 				onchanged={refresh}
 				floating={floatingNow}
 				onpopout={drawerPopOut}

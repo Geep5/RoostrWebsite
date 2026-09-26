@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { onMount } from "svelte";
-	import type { AgentMessage, ObjectJSON } from "$lib/types";
+	import type { AgentMessage, ObjectJSON, RelationDefJSON } from "$lib/types";
 	import { fieldStr } from "$lib/types";
 	import { mailbox } from "$lib/api";
 	import { discussionUI } from "$lib/data.svelte";
@@ -8,15 +8,18 @@
 	import type { ObjectAgentOption } from "$lib/threads";
 	import { objectIcon } from "$lib/icons";
 	import Discussion from "./Discussion.svelte";
+	import PropertiesPane from "./PropertiesPane.svelte";
 
 	let {
 		object,
+		relations,
 		onchanged,
 		floating = false,
 		onpopout,
 		ondock,
 	}: {
 		object: ObjectJSON;
+		relations: RelationDefJSON[];
 		onchanged: () => Promise<void>;
 		/** True once the human has popped the pane out into a card. */
 		floating?: boolean;
@@ -162,6 +165,11 @@
 {#if refreshError}
 	<p class="dd-error" role="status">{refreshError} <button onclick={() => void refreshActive()}>Refresh</button></p>
 {/if}
+<!-- The object's properties sit on top of the pane; the conversation is
+     below, separated by the same inset divider as the other panes. -->
+<div class="dd-props">
+	<PropertiesPane {object} {relations} {onchanged} />
+</div>
 {#if view === "list"}
 	<div class="dd-list">
 		<button class="conv" onclick={() => void openThread("__discussion__")}>
@@ -440,8 +448,14 @@
 	.dd-error,
 	.conv-problem { color: var(--orange, #ff9f0a); font-size: 12px; }
 	.dd-error { padding: 0 14px; overflow-wrap: anywhere; }
-	/* The full-variant Discussion fills the drawer: messages scroll,
-	   composer pinned at the bottom. */
+	.dd-props {
+		flex: none;
+		padding: 4px 0 8px;
+		border-bottom: 1px solid var(--border);
+		margin: 0 14px;
+		max-height: 40%;
+		overflow-y: auto;
+	}
 	.dd-body :global(.discussion.full) {
 		flex: 1;
 		min-height: 0;
