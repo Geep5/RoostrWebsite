@@ -15,6 +15,7 @@
 	import { AGENTLESS_TYPES } from "$lib/agent-field";
 	import { resolveServing, servingCopy, type MachineRow, type Serving } from "$lib/serving";
 	import PropertyValue from "./PropertyValue.svelte";
+	import PropertySuggest from "./PropertySuggest.svelte";
 	import CheckboxIcon from "./CheckboxIcon.svelte";
 	import { objectIcon } from "$lib/icons";
 	import { badgeStyle, statusIcon, tagStyle, type BadgeIcon } from "$lib/options";
@@ -221,6 +222,33 @@
 		if (rel.format === "date") return "Select a date";
 		return "Empty";
 	}
+
+	/** ＋ Add property: pick an existing property to put on this object, or
+	    create a new one - same surface as the object's right-click add. */
+	let addPos = $state<{ x: number; y: number } | null>(null);
+
+	/** The empty value for a format, so a new property appears as an empty row. */
+	function emptyValue(format: string): ValueJSON {
+		switch (format) {
+			case "checkbox": return { boolValue: false };
+			case "number": return { floatValue: 0 };
+			case "date": return { intValue: 0 };
+			case "tag":
+			case "object":
+			case "agent":
+			case "install":
+			case "requires": return { valuesValue: { items: [] } };
+			default: return { stringValue: "" };
+		}
+	}
+
+	async function addProperty(rel: RelationDefJSON) {
+		addPos = null;
+		await note.setField(object.id, rel.key, emptyValue(rel.format));
+		await onchanged();
+		// Open the new row's editor so the value can be set straight away.
+		editing = rel.key;
+	}
 </script>
 
 {#if shown.length > 0}
@@ -368,6 +396,22 @@
 		<button class="backdrop" aria-label="Close" onclick={() => (editing = null)}></button>
 	{/if}
 {/if}
+<button
+	class="add-prop"
+	onclick={(e) => {
+		const r = e.currentTarget.getBoundingClientRect();
+		addPos = { x: r.left, y: r.bottom + 4 };
+	}}
+>＋ Add property</button>
+{#if addPos}
+	<PropertySuggest
+		x={addPos.x}
+		y={addPos.y}
+		exclude={shown.map((r) => r.key)}
+		onpick={(rel) => void addProperty(rel)}
+		onclose={() => (addPos = null)}
+	/>
+{/if}
 
 <style>
 	.props {
@@ -375,6 +419,22 @@
 		flex-direction: column;
 		font-size: 13px;
 		padding: 4px 0;
+	}
+	.add-prop {
+		display: block;
+		width: 100%;
+		background: none;
+		border: none;
+		border-radius: 6px;
+		padding: 6px 4px;
+		font-size: 12.5px;
+		color: var(--muted);
+		text-align: left;
+		cursor: pointer;
+	}
+	.add-prop:hover {
+		background: var(--hover);
+		color: var(--fg);
 	}
 	.row-wrap {
 		position: relative;
