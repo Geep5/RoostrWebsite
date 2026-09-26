@@ -1,7 +1,6 @@
 <script lang="ts">
 	import { onMount } from "svelte";
 	import type { ObjectJSON, RelationDefJSON } from "$lib/types";
-	import { fieldStr } from "$lib/types";
 	import { discussionUI } from "$lib/data.svelte";
 	import { objectIcon } from "$lib/icons";
 	import Discussion from "./Discussion.svelte";
@@ -11,17 +10,10 @@
 		object,
 		relations,
 		onchanged,
-		floating = false,
-		onpopout,
-		ondock,
 	}: {
 		object: ObjectJSON;
 		relations: RelationDefJSON[];
 		onchanged: () => Promise<void>;
-		/** True once the human has popped the pane out into a card. */
-		floating?: boolean;
-		onpopout?: () => void;
-		ondock?: () => void;
 	} = $props();
 
 	let tab = $state<"chat" | "props">("chat");
@@ -64,15 +56,6 @@
 			<span class="dd-tab-icon">🧩</span>Properties
 		</button>
 	</div>
-	<span class="dd-sub">{fieldStr(object.fields, "name") || "Untitled"}</span>
-	<!-- Affixed is the default; popping out hands the pane to the pointer as
-	     a card that can be dragged anywhere. Subtle on purpose: it sits with
-	     the close control, not as a call to action. -->
-	{#if floating}
-		<button class="dd-affix" data-tip="Affix to the side" onclick={() => ondock?.()}>⇥</button>
-	{:else}
-		<button class="dd-affix" data-tip="Pop out" onclick={() => onpopout?.()}>⇱</button>
-	{/if}
 	<button class="dd-close" data-tip="Close" onclick={() => (discussionUI.open = false)}>»</button>
 </header>
 
@@ -138,18 +121,7 @@
 		color: var(--fg);
 	}
 	.dd-tab-icon { font-size: 13px; }
-	.dd-sub {
-		flex: 1;
-		min-width: 0;
-		font-size: 11.5px;
-		color: var(--muted);
-		overflow: hidden;
-		white-space: nowrap;
-		text-overflow: ellipsis;
-		text-align: right;
-	}
-	.dd-close,
-	.dd-affix {
+	.dd-close {
 		background: none;
 		border: 1px solid var(--border);
 		border-radius: 7px;
@@ -159,14 +131,9 @@
 		height: 26px;
 		cursor: pointer;
 		flex: none;
+		margin-left: auto;
 	}
-	/* Subtle until wanted: no border at rest, so the pane header stays quiet. */
-	.dd-affix {
-		border-color: transparent;
-		opacity: 0.6;
-	}
-	.dd-close:hover,
-	.dd-affix:hover {
+	.dd-close:hover {
 		color: var(--fg);
 		border-color: var(--muted);
 		opacity: 1;

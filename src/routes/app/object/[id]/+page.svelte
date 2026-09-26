@@ -311,144 +311,34 @@
 		drawerTop = h ? Math.max(0, Math.round(h.getBoundingClientRect().bottom)) : 0;
 	});
 	let drawerW = $state(typeof localStorage === "undefined" ? 380 : parseInt(localStorage.getItem("disc-drawer-w") ?? "380") || 380);
-
-	// ── Dragging the card ────────────────────────────────────────────
-	//
-	// Docked, the card derives its geometry from the viewport: right/bottom
-	// pinned, top under the header. Once dragged it becomes a free window, so
-	// position AND height turn explicit - height is captured at grab time so
-	// the card does not resize under the cursor. `null` means still docked,
-	// which is also what a double-click on the header returns it to.
-	interface DrawerPos {
-		x: number;
-		y: number;
-		h: number;
-	}
-	function readPos(): DrawerPos | null {
-		if (typeof localStorage === "undefined") return null;
-		try {
-			const p = JSON.parse(localStorage.getItem("disc-drawer-pos") ?? "null");
-			if (typeof p?.x === "number" && typeof p?.y === "number" && typeof p?.h === "number") return p;
-		} catch {
-			/* corrupt → docked */
-		}
-		return null;
-	}
-	let drawerPos = $state<DrawerPos | null>(readPos());
-	/** Mobile is a full sheet, so a position saved on a wide window must not
-	 *  leak into it as inline left/height and fight the media query. */
-	const floatingNow = $derived(drawerPos !== null && !isMobileVp);
 	/**
 	 * Affixed discussion = a real pane. The shell keeps a fourth grid track
 	 * sized by --disc-w, so an open discussion pushes the page over instead
-	 * of covering it. Floating (popped out) and mobile (full sheet) give the
-	 * column back.
+	 * of covering it. Mobile is a full sheet and gives the column back.
 	 */
 	$effect(() => {
-		const affixed = discussionUI.open && hasDiscussion && !floatingNow && !isMobileVp;
+		const affixed = discussionUI.open && hasDiscussion && !isMobileVp;
 		document.documentElement.style.setProperty("--disc-w", affixed ? `${drawerW}px` : "0px");
 		return () => document.documentElement.style.setProperty("--disc-w", "0px");
 	});
-	/** Keep the card reachable: a saved spot must survive a smaller window,
-	 *  and the header must never leave the screen or it cannot be grabbed. */
-	function clampPos(p: DrawerPos, w = drawerW): DrawerPos {
-		const h = Math.max(160, Math.min(p.h, window.innerHeight - 16));
-		return {
-			x: Math.min(Math.max(8, p.x), Math.max(8, window.innerWidth - w - 8)),
-			y: Math.min(Math.max(0, p.y), Math.max(0, window.innerHeight - 56)),
-			h,
-		};
-	}
-	function savePos() {
-		if (drawerPos) localStorage.setItem("disc-drawer-pos", JSON.stringify(drawerPos));
-		else localStorage.removeItem("disc-drawer-pos");
-	}
-	/**
-	 * Hold off text selection for the length of a drag.
-	 *
-	 * The handle itself is user-select: none, but that only stops the header's
-	 * own text going blue - Chrome still extends a selection into whatever the
-	 * pointer travels over, so moving the card smeared a highlight across the
-	 * document underneath. The clean fix is a flag on <html> for the duration,
-	 * since the alternative - cancelling pointerdown - takes the dblclick that
-	 * docks the card with it. Any selection already on the page is dropped, or
-	 * it would sit there looking like the drag made it.
-	 */
+	/** Hold off text selection while the resize edge is dragged. */
 	function suppressSelection(on: boolean) {
 		document.documentElement.classList.toggle("dragging-ui", on);
 		if (on) window.getSelection()?.removeAllRanges();
 	}
-	function drawerDragStart(e: PointerEvent) {
-		if (isMobileVp) return; // mobile is a full sheet, nothing to move
-		const t = e.target as HTMLElement | null;
-		if (!t?.closest(".dd-head")) return; // the header is the handle
-		if (t.closest("button, a, input, textarea")) return; // its controls still work
-		const card = e.currentTarget as HTMLElement;
-		const r = card.getBoundingClientRect();
-		const grabX = e.clientX - r.left;
-		const grabY = e.clientY - r.top;
-		// Pin the geometry it already had, so the first move does not jump.
-		drawerPos = clampPos({ x: r.left, y: r.top, h: r.height });
-		suppressSelection(true);
-		const move = (ev: PointerEvent) => {
-			drawerPos = clampPos({ x: ev.clientX - grabX, y: ev.clientY - grabY, h: drawerPos?.h ?? r.height });
-		};
-		const up = () => {
-			window.removeEventListener("pointermove", move);
-			window.removeEventListener("pointerup", up);
-			suppressSelection(false);
-			savePos();
-		};
-		window.addEventListener("pointermove", move);
-		window.addEventListener("pointerup", up);
-	}
-	function drawerDock() {
-		drawerPos = null;
-		savePos();
-	}
-	$effect(() => {
-		if (!discussionUI.open) return;
-		const onResize = () => {
-			if (drawerPos) drawerPos = clampPos(drawerPos);
-		};
-		window.addEventListener("resize", onResize);
-		return () => window.removeEventListener("resize", onResize);
-	});
-	/** Hand the pane to the pointer: same geometry, now a draggable card. */
-	function drawerPopOut() {
-		const card = document.querySelector(".disc-drawer");
-		const r = card?.getBoundingClientRect();
-		drawerPos = clampPos({
-			x: r ? Math.max(8, r.left - 24) : window.innerWidth - drawerW - 40,
-			y: r ? r.top : drawerTop + 24,
-			h: r?.height ?? Math.max(320, window.innerHeight - drawerTop - 80),
-		});
-		savePos();
-	}
-
 	function drawerResizeStart(e: PointerEvent) {
-		// Cancelling pointerdown is safe here - the resize edge has no
-		// dblclick to lose - but the flag still goes on: preventDefault stops
-		// a selection starting on the edge, not one already in progress
-		// elsewhere, and the pointer leaves the edge as soon as it moves.
 		e.preventDefault();
 		suppressSelection(true);
 		const startX = e.clientX;
 		const startW = drawerW;
-		const startLeft = drawerPos?.x ?? 0;
 		const move = (ev: PointerEvent) => {
-			const w = Math.min(640, Math.max(300, startW + (startX - ev.clientX)));
-			// Floating, the left edge is the one under the cursor: move it and
-			// leave the right edge where it is, as the docked card does.
-			if (drawerPos) drawerPos = clampPos({ ...drawerPos, x: startLeft + (startW - w) }, w);
-			drawerW = w;
+			drawerW = Math.min(640, Math.max(300, startW + (startX - ev.clientX)));
 		};
 		const up = () => {
 			window.removeEventListener("pointermove", move);
 			window.removeEventListener("pointerup", up);
 			suppressSelection(false);
 			localStorage.setItem("disc-drawer-w", String(drawerW));
-			savePos();
 		};
 		window.addEventListener("pointermove", move);
 		window.addEventListener("pointerup", up);
@@ -648,14 +538,7 @@
 		<!-- svelte-ignore a11y_no_static_element_interactions -->
 		<aside
 			class="disc-drawer"
-			class:floating={floatingNow}
-			style={floatingNow
-				? `width: ${drawerW}px; left: ${drawerPos?.x}px; top: ${drawerPos?.y}px; height: ${drawerPos?.h}px`
-				: `width: ${drawerW}px; top: 0px`}
-			onpointerdown={drawerDragStart}
-			ondblclick={(e) => {
-				if ((e.target as HTMLElement)?.closest(".dd-head")) drawerDock();
-			}}
+			style={`width: ${drawerW}px; top: 0px`}
 		>
 			<div class="dd-resize" role="separator" aria-orientation="vertical" onpointerdown={drawerResizeStart}></div>
 			{#key object.id}
@@ -663,9 +546,6 @@
 				{object}
 				relations={scopedRelations}
 				onchanged={refresh}
-				floating={floatingNow}
-				onpopout={drawerPopOut}
-				ondock={drawerDock}
 			/>
 			{/key}
 		</aside>
@@ -880,34 +760,16 @@
 		border-radius: 16px 0 0 0;
 		overflow: hidden;
 	}
-	/* Popped out: a card again, floating wherever it was dragged. */
-	.disc-drawer.floating {
-		right: auto;
-		bottom: auto;
-		border: 1px solid var(--border);
-		border-radius: 14px;
-		box-shadow: 0 18px 60px rgb(0 0 0 / 0.5);
-	}
-	/* The handle reads as one. Scoped styles cannot see the child's header,
-	   hence :global - the selector stays anchored to this card. */
-	/* While a card drag or resize is in flight, nothing anywhere is
-	   selectable: the pointer travels over the document and would otherwise
-	   paint a highlight behind the card it is carrying. Set on <html>, so it
-	   has to be :global. */
+	/* While a resize drag is in flight, nothing anywhere is selectable: the
+	   pointer travels over the document and would otherwise paint a
+	   highlight. Set on <html>, so it has to be :global. */
 	:global(html.dragging-ui),
 	:global(html.dragging-ui *) {
 		user-select: none !important;
 		-webkit-user-select: none !important;
 	}
 	.disc-drawer :global(.dd-head) {
-		cursor: grab;
-		touch-action: none;
-		/* Drag without smearing a text selection across the title. Replaces
-		   preventDefault on pointerdown, which would eat the dblclick. */
 		user-select: none;
-	}
-	.disc-drawer :global(.dd-head:active) {
-		cursor: grabbing;
 	}
 	.disc-drawer :global(.dd-head button),
 	.disc-drawer :global(.dd-head a) {
