@@ -1,60 +1,129 @@
 /**
- * Agent kinds - the shared half of putting an agent on a computer.
+ * Agent prompts - the shared half of putting an agent on a computer.
  *
- * `/setup` (the stepper) and the agent object's setup panel read the same
- * DAG (descriptor cards, the paired harness) and write the same field
- * contract, so the contract lives once, here: an `agent` object carries
- * `kind`, `served_by`, `requires`, `responsible_types` and, when the card
- * names one, `model`. Secret values never touch the agent.
+ * `/setup` (the stepper) and the agent-creation paths read the same DAG
+ * (system_prompt objects, descriptor cards, the paired harness) and write
+ * the same field contract, so the contract lives once, here: an `agent`
+ * object carries a `prompt` link to a system_prompt object in its space
+ * plus `served_by`. The prompt's own configuration (system, model,
+ * requires, skills) stays on the prompt object - editing it edits every
+ * agent linked to it - and per-agent fields (`system`, `model`,
+ * `responsible_types`, non-secret setup values) override the prompt,
+ * never the other way round. Secret values never touch the agent.
  */
 
-import { fetchAllQuery, fetchObject } from "$lib/api";
+import { fetchAllQuery, fetchChannels, fetchObject, note, type QueryResultRow } from "$lib/api";
 import { isLocalBackend } from "$lib/client-backend";
 import { harnessFetch, pairedSession } from "$lib/local-transport";
-import { cardOf, type Card, type DescribedObject } from "$lib/card-shape";
+import { cardOf, type Card, type CardField, type DescribedObject } from "$lib/card-shape";
 import type { ValueJSON } from "$lib/types";
 
-/** Contract 1: the decoded card's `agent` block, present only on kind === "agent" cards. */
-export interface AgentSpec {
-	system: string;
+/** A system_prompt object as the setup flows need it. */
+export interface PromptView {
+	/** Object id - the target of an agent's `prompt` link. */
+	id: string;
+	name: string;
+	description: string;
 	model: string;
+	/** Capability object ids the prompt's `requires` links point at (a legacy string item reads as a capability key). */
 	requires: string[];
+	/** Skill object ids the prompt's `skills` links point at (a legacy string item reads as a skill name). */
 	skills: string[];
-	responsibleTypes: string[];
+	/** Setup FieldSpec, matched from the descriptor card of the same name; empty for ad-hoc prompts. */
+	fields: CardField[];
+	/** Space (channel id) the prompt belongs to; "" when unstamped. */
+	channel: string;
 }
 
-export interface KindCard {
-	card: Card;
-	agent: AgentSpec;
+/**
+ * The assistant seed, mirrored from glonOdin/harness/src/prompts.ts
+ * (DEFAULT_PROMPT: DEFAULT_SYSTEM/DEFAULT_MODEL). The website only ever
+ * CREATES the assistant prompt - every other prompt object is the
+ * harness's to seed - and only when the space has none to reuse.
+ */
+export const ASSISTANT_PROMPT = {
+	name: "Assistant",
+	description: "A general Roostr agent: answers its chat and object discussions, reads and organizes the space.",
+	system: `You are a helpful agent living inside Roostr, a local-first notes app where
+everything is an object in a content-addressed DAG. You converse with your
+principal through your chat and through any object's discussion — messages
+from other objects arrive framed with their origin and the object's contents.
+ALWAYS answer in plain text: your final reply is posted to the surface the
+question came from automatically (never use chat_reply_on for that; it is
+only for unprompted messages on OTHER objects). Use tools to read, search,
+create, and organize objects; use memory_* tools to pin durable facts and
+milestones. Be concise and concrete. When a listed skill matches the task,
+read it with skill_read before starting.`,
+	model: "claude-sonnet-4-5",
+};
+
+/** Link targets of a field, in shape order; a legacy string item passes through. */
+function linkTokens(v: ValueJSON | undefined): string[] {
+	const items = v?.valuesValue?.items ?? (v?.linkValue || v?.stringValue ? [v] : []);
+	return items.map((i) => i.linkValue?.targetId ?? i.stringValue ?? "").filter(Boolean);
 }
 
-/** A card older than Contract 1 has no `agent`; it is still a kind, with empty defaults. */
-export function agentSpecOf(object: DescribedObject): AgentSpec {
-	const raw = object.descriptor?.agent;
+const promptNameOf = (row: QueryResultRow): string => row.fields["name"]?.stringValue || row.name || "";
+
+function promptViewOf(row: QueryResultRow, cards: Card[]): PromptView {
+	const name = promptNameOf(row);
+	// The FieldSpec is not on the prompt object (it is harness-side seed
+	// data); the descriptor card of the same name carries a copy the setup
+	// form renders from.
+	const card = cards.find((c) => c.kind === "agent" && (c.key.toLowerCase() === name.toLowerCase() || c.name === name));
 	return {
-		system: raw?.system ?? "",
-		model: raw?.model ?? "",
-		requires: raw?.requires ?? [],
-		skills: raw?.skills ?? [],
-		responsibleTypes: raw?.responsibleTypes ?? [],
+		id: row.id,
+		name,
+		description: row.fields["description"]?.stringValue ?? "",
+		model: row.fields["model"]?.stringValue ?? "",
+		requires: linkTokens(row.fields["requires"]),
+		skills: linkTokens(row.fields["skills"]),
+		fields: card?.fields ?? [],
+		channel: row.fields["channel"]?.stringValue ?? "",
 	};
 }
 
-/** Every published card (for capability labels) and the agent kinds among them, both by name. */
-export async function loadKinds(): Promise<{ cards: Card[]; kinds: KindCard[] }> {
-	const descriptors = await fetchAllQuery({ type: "descriptor" });
+/** Every published card (for capability labels and FieldSpec) and every system_prompt object, both by name. */
+export async function loadPrompts(): Promise<{ cards: Card[]; prompts: PromptView[] }> {
+	const [descriptors, rows] = await Promise.all([fetchAllQuery({ type: "descriptor" }), fetchAllQuery({ type: "system_prompt" })]);
 	const objects = await Promise.all(descriptors.map((r) => fetchObject(r.id) as Promise<DescribedObject>));
 	const cards: Card[] = [];
-	const kinds: KindCard[] = [];
 	for (const o of objects) {
 		const card = cardOf(o);
-		if (!card) continue;
-		cards.push(card);
-		if (card.kind === "agent") kinds.push({ card, agent: agentSpecOf(o) });
+		if (card) cards.push(card);
 	}
 	cards.sort((a, b) => a.name.localeCompare(b.name));
-	kinds.sort((a, b) => a.card.name.localeCompare(b.card.name));
-	return { cards, kinds };
+	const prompts = rows.map((r) => promptViewOf(r, cards)).sort((a, b) => a.name.localeCompare(b.name));
+	return { cards, prompts };
+}
+
+/**
+ * The system_prompt object named `promptName` in `channelId`, created from
+ * the assistant seed when absent - the website half of the harness's
+ * ensureSystemPrompt (identity: prompt name × space; a channel-less caller
+ * seeds into the vault's oldest channel, the engine's own creation
+ * fallback, resolved here so reuse matches). Only the assistant seed
+ * travels with the website, so a miss on any other name returns "".
+ */
+export async function ensurePrompt(promptName: string, channelId: string): Promise<string> {
+	let channel = channelId;
+	if (!channel) {
+		const channels = await fetchChannels();
+		channel = channels.sort((a, b) => a.createdAt - b.createdAt)[0]?.id ?? "";
+	}
+	const existing = (await fetchAllQuery({ type: "system_prompt" })).find(
+		(r) => promptNameOf(r) === promptName && (r.fields["channel"]?.stringValue ?? "") === channel,
+	);
+	if (existing) return existing.id;
+	if (promptName !== ASSISTANT_PROMPT.name) return "";
+	const fields: Record<string, ValueJSON> = {
+		system: sv(ASSISTANT_PROMPT.system),
+		model: sv(ASSISTANT_PROMPT.model),
+		description: sv(ASSISTANT_PROMPT.description),
+	};
+	if (channel) fields.channel = sv(channel);
+	const { id } = await note.create(promptName, "system_prompt", fields);
+	return id;
 }
 
 /** machine_id of the harness this tab is paired with; "" when hosted, unpaired, or unreachable. */
@@ -83,17 +152,17 @@ export async function adoptLocally(id: string): Promise<boolean> {
 }
 
 export const sv = (s: string): ValueJSON => ({ stringValue: s });
-export const lv = (items: string[]): ValueJSON => ({ valuesValue: { items: items.map((s) => ({ stringValue: s })) } });
 
-/** Contract 2: the fields that make an `agent` object one of `kind`, on `machineId`. */
-export function agentCreateFields(kindKey: string, machineId: string, kind: KindCard): Record<string, ValueJSON> {
-	const fields: Record<string, ValueJSON> = {
-		kind: sv(kindKey),
+/**
+ * The fields that make an `agent` object run `prompt` on `machineId`: the
+ * `prompt` link and the server pin. The prompt's own configuration stays
+ * on the prompt object - never `kind`, never a copy of the prompt's fields
+ * - and non-secret FieldSpec values for this agent are the caller's to
+ * write on top.
+ */
+export function agentCreateFields(promptName: string, machineId: string, prompt: Pick<PromptView, "id">): Record<string, ValueJSON> {
+	return {
+		prompt: { linkValue: { targetId: prompt.id, relationKey: "prompt" } },
 		served_by: sv(machineId),
-		requires: lv(kind.agent.requires),
-		responsible_types: lv(kind.agent.responsibleTypes),
 	};
-	// A card without a model (older codec) leaves the harness default in force.
-	if (kind.agent.model) fields.model = sv(kind.agent.model);
-	return fields;
 }

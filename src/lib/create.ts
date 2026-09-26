@@ -7,7 +7,7 @@
 import { goto } from "$app/navigation";
 import { fetchAllQuery, fetchObject, note } from "$lib/api";
 import { thisMachineId } from "$lib/capability-actions";
-import { adoptLocally, agentCreateFields, loadKinds, localMachineId, sv } from "$lib/agent-kinds";
+import { ASSISTANT_PROMPT, adoptLocally, agentCreateFields, ensurePrompt, localMachineId } from "$lib/agent-kinds";
 import { guestAgents, type ValueJSON } from "$lib/types";
 import { agentLinksValue } from "$lib/agent-field";
 import { TYPE_GLYPHS } from "$lib/icons";
@@ -88,7 +88,8 @@ async function createMachine(): Promise<string> {
 	return "";
 }
 /**
- * A new agent that WORKS: kind, the kind card's defaults, this machine
+ * A new agent that WORKS: a `prompt` link to the space's assistant
+ * system_prompt object (created from the seed when absent), this machine
  * pinned as its server, and roster adoption - the same contract /setup and
  * `harness setup` write ($lib/agent-kinds), so the agent answers the moment
  * it is addressed. Unpaired goes to setup: a serverless agent is the
@@ -100,11 +101,10 @@ async function createAgent(channelId: string): Promise<string> {
 		await goto("/setup");
 		return "";
 	}
-	const { kinds } = await loadKinds();
-	const assistant = kinds.find((k) => k.card.key === "assistant");
+	const promptId = await ensurePrompt(ASSISTANT_PROMPT.name, channelId);
 	const fields: Record<string, ValueJSON> = {
 		...channelField(channelId),
-		...(assistant ? agentCreateFields("assistant", id, assistant) : { kind: sv("assistant"), served_by: sv(id) }),
+		...agentCreateFields(ASSISTANT_PROMPT.name, id, { id: promptId }),
 	};
 	const { id: agentId } = await note.create("New agent", "agent", fields);
 	await adoptLocally(agentId);

@@ -2,30 +2,32 @@
 	/**
 	 * /setup - put an agent on a computer, in order.
 	 *
-	 * Pair → choose the computer → choose the kind → satisfy what the kind
-	 * requires on that computer → fill the kind's fields → create. Every step
-	 * reads the DAG the way the app does (machine objects, descriptor cards,
-	 * install rows) and writes through the same calls, so the result is one
-	 * ordinary `agent` object the chosen machine's harness adopts by `served_by`.
-	 * Secret values never touch the agent: they go to the machine's credential
-	 * store through the requirements step.
+	 * Pair → choose the computer → choose the prompt → satisfy what the
+	 * prompt requires on that computer → fill the prompt's fields → create.
+	 * Every step reads the DAG the way the app does (machine objects,
+	 * system_prompt objects, descriptor cards, install rows) and writes
+	 * through the same calls, so the result is one ordinary `agent` object
+	 * linking its space's system_prompt object, adopted by the chosen
+	 * machine's harness via `served_by`. Secret values never touch the
+	 * agent: they go to the machine's credential store through the
+	 * requirements step.
 	 */
 	import { onMount } from "svelte";
-	import { fetchChannels, note } from "$lib/api";
+	import { fetchAllQuery, fetchChannels, note } from "$lib/api";
 	import { backend, isLocalBackend } from "$lib/client-backend";
 	import { pairedSession, onPairingChange } from "$lib/local-transport";
 	import { loadKey } from "$lib/engine/keys";
 	import { fetchMachines, type MachineRow } from "$lib/serving";
 	import type { Card } from "$lib/card-shape";
-	import { adoptLocally, agentCreateFields, loadKinds, localMachineId as fetchLocalMachineId, sv, type KindCard } from "$lib/agent-kinds";
+	import { ASSISTANT_PROMPT, adoptLocally, agentCreateFields, ensurePrompt, loadPrompts, localMachineId as fetchLocalMachineId, sv, type PromptView } from "$lib/agent-kinds";
 	import type { SpaceJSON, ValueJSON } from "$lib/types";
 	import PairGate from "$lib/components/PairGate.svelte";
 	import KeyGate from "$lib/components/KeyGate.svelte";
 	import SetupRequirements from "$lib/components/SetupRequirements.svelte";
 
-	const STEPS = ["pair", "computer", "kind", "requirements", "fields", "done"] as const;
+	const STEPS = ["pair", "computer", "prompt", "requirements", "fields", "done"] as const;
 	type Step = (typeof STEPS)[number];
-	const TITLES: Record<Step, string> = { pair: "Pair", computer: "Computer", kind: "Kind", requirements: "Requirements", fields: "Details", done: "Done" };
+	const TITLES: Record<Step, string> = { pair: "Pair", computer: "Computer", prompt: "Prompt", requirements: "Requirements", fields: "Details", done: "Done" };
 
 	let step = $state<Step>("pair");
 	let ready = $state(false);
@@ -35,13 +37,15 @@
 
 	let machines = $state<MachineRow[]>([]);
 	let cards = $state<Card[]>([]);
-	let kinds = $state<KindCard[]>([]);
+	let prompts = $state<PromptView[]>([]);
+	/** Capability key by capability object id - resolves a prompt's `requires` links to keys. */
+	let capKeyById = $state(new Map<string, string>());
 	let spaces = $state<SpaceJSON[]>([]);
 	/** machine_id of the harness this tab is paired with; "" when unpaired or unreachable. */
 	let localMachineId = $state("");
 
 	let machineId = $state("");
-	let kindKey = $state("");
+	let promptId = $state("");
 	let satisfied = $state(false);
 	let draft = $state<Record<string, string>>({});
 	let name = $state("");
@@ -52,19 +56,45 @@
 	let runsHere = $state(false);
 
 	const machine = $derived(machines.find((m) => m.machineId === machineId));
-	const kind = $derived(kinds.find((k) => k.card.key === kindKey));
+	/** Choice value: the prompt object id, or the seed name for the not-yet-created assistant. */
+	const keyOf = (p: PromptView) => p.id || p.name;
 	const stepIndex = $derived(STEPS.indexOf(step));
+
+	/** The selected space's prompts. A space with none still offers the
+	 *  assistant: its object is created from the seed at Create (ensurePrompt),
+	 *  so a fresh vault is never a dead end. */
+	const spacePrompts = $derived.by(() => {
+		const inSpace = prompts.filter((p) => !spaceId || !p.channel || p.channel === spaceId);
+		if (inSpace.some((p) => p.name.toLowerCase() === ASSISTANT_PROMPT.name.toLowerCase())) return inSpace;
+		const seedCard = cards.find((c) => c.kind === "agent" && c.key.toLowerCase() === ASSISTANT_PROMPT.name.toLowerCase());
+		const seed: PromptView = { id: "", name: ASSISTANT_PROMPT.name, description: ASSISTANT_PROMPT.description, model: ASSISTANT_PROMPT.model, requires: [], skills: [], fields: seedCard?.fields ?? [], channel: spaceId };
+		return [seed, ...inSpace];
+	});
+
+	const prompt = $derived(spacePrompts.find((p) => keyOf(p) === promptId));
+
+	/** A prompt's `requires` as capability keys: link ids resolve through their capability object, legacy strings pass through. */
+	const requireKeysOf = (p: PromptView) => [...new Set(p.requires.map((t) => capKeyById.get(t) ?? t).filter(Boolean))];
+	const requireKeys = $derived(prompt ? requireKeysOf(prompt) : []);
 
 	async function load() {
 		try {
-			const [{ machines: roster }, { cards: next, kinds: nextKinds }, channels] = await Promise.all([fetchMachines(), loadKinds(), fetchChannels()]);
+			const [{ machines: roster }, { cards: next, prompts: nextPrompts }, channels, caps] = await Promise.all([
+				fetchMachines(),
+				loadPrompts(),
+				fetchChannels(),
+				fetchAllQuery({ type: "capability" }),
+			]);
 			machines = roster;
 			cards = next;
-			kinds = nextKinds;
+			prompts = nextPrompts;
+			capKeyById = new Map(caps.map((r) => [r.id, r.fields["key"]?.stringValue ?? ""]));
 			// Oldest first: the first channel is the default space owning unstamped objects.
 			spaces = channels.slice().sort((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id));
 			if (!spaceId && spaces[0]) spaceId = spaces[0].id;
-			if (!kindKey && kinds.length) kindKey = (kinds.find((k) => k.card.key === "assistant") ?? kinds[0]).card.key;
+			if (spacePrompts.length && !spacePrompts.some((p) => keyOf(p) === promptId)) {
+				promptId = keyOf(spacePrompts.find((p) => p.name.toLowerCase() === ASSISTANT_PROMPT.name.toLowerCase()) ?? spacePrompts[0]);
+			}
 			loadError = "";
 		} catch (e) {
 			loadError = e instanceof Error ? e.message : String(e);
@@ -91,8 +121,9 @@
 
 	onMount(() => {
 		if (isLocalBackend ? pairedSession() : loadKey()) void boot();
-		// A harness registers itself and publishes its cards seconds after it
-		// starts; the picker has to notice without a reload.
+		// A harness registers itself and publishes its cards and prompt
+		// objects seconds after it starts; the picker has to notice without
+		// a reload.
 		const timer = setInterval(() => { if (ready && step !== "done") void load(); }, 5_000);
 		const offPairing = onPairingChange(() => {
 			if (!isLocalBackend || pairedSession()) return;
@@ -108,8 +139,8 @@
 		};
 	});
 
-	function chooseKind(key: string) {
-		kindKey = key;
+	function choosePrompt(key: string) {
+		promptId = key;
 		draft = {};
 	}
 
@@ -124,25 +155,29 @@
 
 	const canAdvance = $derived.by(() => {
 		if (step === "computer") return !!machine;
-		if (step === "kind") return !!kind;
-		if (step === "requirements") return satisfied || !kind?.agent.requires.length;
+		if (step === "prompt") return !!prompt;
+		if (step === "requirements") return satisfied || requireKeys.length === 0;
 		return false;
 	});
 
-	/** Contract 2: one `agent` object; secret FieldSpec values are never written here. */
+	/** One `agent` object linking the chosen prompt; secret FieldSpec values are never written here. */
 	async function create() {
-		if (!machine || !kind || creating) return;
+		if (!machine || !prompt || creating) return;
 		creating = true;
 		createError = "";
 		try {
-			const fields: Record<string, ValueJSON> = agentCreateFields(kind.card.key, machine.machineId, kind);
+			// The assistant seed choice has no object yet: create-or-reuse the
+			// space's prompt object now (identity: prompt name × space).
+			const targetId = prompt.id || (await ensurePrompt(prompt.name, spaceId));
+			if (!targetId) throw new Error(`No system prompt "${prompt.name}" exists in this space yet.`);
+			const fields: Record<string, ValueJSON> = agentCreateFields(prompt.name, machine.machineId, { id: targetId });
 			if (spaceId) fields.channel = sv(spaceId);
-			for (const f of kind.card.fields) {
+			for (const f of prompt.fields) {
 				if (f.secret) continue;
 				const value = (draft[f.key] ?? "").trim();
 				if (value) fields[f.key] = sv(value);
 			}
-			const { id } = await note.create(name.trim() || kind.card.name, "agent", fields);
+			const { id } = await note.create(name.trim() || prompt.name, "agent", fields);
 			createdId = id;
 			// The harness adopts by served_by; when that harness is the one this
 			// tab is paired with, claim it on the local roster now as well.
@@ -200,34 +235,33 @@
 						</button>
 					{/each}
 				</div>
-			{:else if step === "kind"}
-				<h1>What kind of agent?</h1>
-				{#if kinds.length === 0}
-					<p class="muted">No machine has published an agent kind yet. A harness newer than this catalog will.</p>
-				{/if}
+			{:else if step === "prompt"}
+				<h1>What should it be?</h1>
+				<p class="muted">A system prompt is what an agent IS before its object says otherwise - edit the object later and every agent linked to it changes.</p>
 				<div class="choices">
-					{#each kinds as k (k.card.key)}
-						<button class="choice" class:picked={k.card.key === kindKey} data-testid={`setup-kind-${k.card.key}`} onclick={() => chooseKind(k.card.key)}>
-							<span class="choice-name">{k.card.name}</span>
-							<span class="choice-sub">{k.card.description || "no description"}</span>
-							{#if k.agent.requires.length || k.agent.model}
-								<span class="choice-meta">{k.agent.model ? `model ${k.agent.model}` : ""}{k.agent.model && k.agent.requires.length ? " · " : ""}{k.agent.requires.length ? `needs ${k.agent.requires.map((r) => cards.find((c) => c.key === r)?.name ?? r).join(", ")}` : ""}</span>
+					{#each spacePrompts as p (keyOf(p))}
+						{@const needs = requireKeysOf(p)}
+						<button class="choice" class:picked={keyOf(p) === promptId} data-testid={`setup-prompt-${p.name.toLowerCase()}`} onclick={() => choosePrompt(keyOf(p))}>
+							<span class="choice-name">{p.name}</span>
+							<span class="choice-sub">{p.description || "no description"}</span>
+							{#if needs.length || p.model}
+								<span class="choice-meta">{p.model ? `model ${p.model}` : ""}{p.model && needs.length ? " · " : ""}{needs.length ? `needs ${needs.map((r) => cards.find((c) => c.key === r)?.name ?? r).join(", ")}` : ""}</span>
 							{/if}
 						</button>
 					{/each}
 				</div>
-			{:else if step === "requirements" && machine && kind}
-				<h1>What {kind.card.name} needs on {machine.name || "that computer"}</h1>
+			{:else if step === "requirements" && machine && prompt}
+				<h1>What {prompt.name} needs on {machine.name || "that computer"}</h1>
 				<p class="muted">Each item must be ready on that computer before the agent can do its work.</p>
-				{#key `${machine.machineId}:${kind.card.key}`}
-					<SetupRequirements {machine} requires={kind.agent.requires} {cards} {localMachineId} bind:satisfied />
+				{#key `${machine.machineId}:${keyOf(prompt)}`}
+					<SetupRequirements {machine} requires={requireKeys} {cards} {localMachineId} bind:satisfied />
 				{/key}
-			{:else if step === "fields" && machine && kind}
+			{:else if step === "fields" && machine && prompt}
 				<h1>Details</h1>
 				<form class="fields" onsubmit={(e) => { e.preventDefault(); void create(); }}>
 					<label class="field">
 						<span>Name</span>
-						<input type="text" data-testid="setup-name" placeholder={kind.card.name} bind:value={name} />
+						<input type="text" data-testid="setup-name" placeholder={prompt.name} bind:value={name} />
 					</label>
 					{#if spaces.length > 0}
 						<label class="field">
@@ -237,7 +271,7 @@
 							</select>
 						</label>
 					{/if}
-					{#each kind.card.fields as f (f.key)}
+					{#each prompt.fields as f (f.key)}
 						<label class="field">
 							<span>{f.label}</span>
 							{#if f.secret}
@@ -249,12 +283,12 @@
 							{/if}
 						</label>
 					{/each}
-					<p class="muted small">Runs on {machine.name || machine.machineId}{kind.agent.model ? ` · model ${kind.agent.model}` : ""}{kind.agent.requires.length ? ` · needs ${kind.agent.requires.join(", ")}` : ""}</p>
+					<p class="muted small">Runs on {machine.name || machine.machineId}{prompt.model ? ` · model ${prompt.model}` : ""}{requireKeys.length ? ` · needs ${requireKeys.join(", ")}` : ""}</p>
 					{#if createError}<p class="error" role="alert" data-testid="setup-error">{createError}</p>{/if}
 					<button class="btn primary" type="submit" disabled={creating} data-testid="setup-create">{creating ? "Creating…" : "Create agent"}</button>
 				</form>
 			{:else if step === "done"}
-				<h1>{name.trim() || kind?.card.name || "Agent"} is set up</h1>
+				<h1>{name.trim() || prompt?.name || "Agent"} is set up</h1>
 				<p class="muted">
 					It runs on {machine?.name || "the chosen computer"}{runsHere ? " and is on this machine's roster now" : ""}. The harness there adopts it on its next pass.
 				</p>
