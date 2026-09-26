@@ -22,7 +22,6 @@
 	import CalendarView from "$lib/components/CalendarView.svelte";
 	import GalleryView from "$lib/components/GalleryView.svelte";
 	import SpaceManage from "$lib/components/SpaceManage.svelte";
-	import AgentSetup from "$lib/components/AgentSetup.svelte";
 	import CapabilitySetup from "$lib/components/CapabilitySetup.svelte";
 	import TypePanel from "$lib/components/TypePanel.svelte";
 	import PropertyPanel from "$lib/components/PropertyPanel.svelte";
@@ -550,7 +549,6 @@
 		{:else if isChat}
 			<Discussion {object} full onchanged={refresh} />
 		{:else if isAgent}
-			<AgentSetup {object} onchanged={refresh} />
 		{:else if isCapability}
 			<CapabilitySetup {object} onchanged={refresh} />
 		{:else if isInstall}

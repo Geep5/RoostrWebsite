@@ -41,10 +41,16 @@
 		// that are tied to a machine (agent, capability, install). agent /
 		// requires / install stay always-on for objects that can take a guest.
 		const MACHINE_BOUND = ["agent", "capability", "install"].includes(object.typeKey);
+		// An agent is configured by editing its properties like any object:
+		// every config slot shows even blank, so a blank agent presents its
+		// full shape for you to fill in.
+		const AGENT_CONFIG = object.typeKey === "agent" ? ["prompt", "model", "responsible_types", "requires", "install", "served_by"] : [];
 		const present = relations.filter((r) => {
 			if (RESERVED_KEYS[r.key]) return false;
+			if (AGENT_CONFIG.includes(r.key)) return true;
 			if (r.key === "served_by") return MACHINE_BOUND || r.key in object.fields;
 			if (["agent", "requires", "install"].includes(r.key)) return !AGENTLESS_TYPES[object.typeKey] || r.key in object.fields;
+			if (["model", "responsible_types"].includes(r.key)) return object.typeKey === "agent" || r.key in object.fields;
 			return !r.hidden && r.key in object.fields;
 		});
 		const rank = new Map(featuredKeys.map((k, i) => [k, i]));

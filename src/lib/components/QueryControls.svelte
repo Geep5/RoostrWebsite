@@ -7,7 +7,7 @@
 	import { fetchQuery, note } from "$lib/api";
 	import { applyTemplate, createTyped } from "$lib/create";
 	import { store } from "$lib/data.svelte";
-	import { ASSISTANT_PROMPT, adoptLocally, agentCreateFields, ensurePrompt, localMachineId } from "$lib/agent-kinds";
+	import { adoptLocally, localMachineId } from "$lib/agent-kinds";
 
 	/**
 	 * View configuration for a query object — source types, filter rules,
@@ -336,14 +336,9 @@
 			if (viewType === "calendar" && dateKey) {
 				fields[dateKey] = { intValue: Date.now() };
 			}
-			// A new agent on a paired tab starts on this computer with the
-			// space's assistant prompt linked, the way /setup would; a hosted
-			// or unpaired tab creates a bare agent the object page finishes.
+			// A new agent is blank: its properties are set on its page like any
+			// object. It is adopted locally so it answers once it has a computer.
 			const me = typeKey === "agent" ? await localMachineId() : "";
-			if (me) {
-				const promptId = await ensurePrompt(ASSISTANT_PROMPT.name, channelId);
-				Object.assign(fields, agentCreateFields(ASSISTANT_PROMPT.name, me, { id: promptId }));
-			}
 			const { id } = await note.create(name, typeKey, fields);
 			if (me) await adoptLocally(id);
 			// Templates: an explicit pick wins (null = Blank, skip); else the

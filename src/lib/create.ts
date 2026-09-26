@@ -7,7 +7,7 @@
 import { goto } from "$app/navigation";
 import { fetchAllQuery, fetchObject, note } from "$lib/api";
 import { thisMachineId } from "$lib/capability-actions";
-import { ASSISTANT_PROMPT, adoptLocally, agentCreateFields, ensurePrompt, localMachineId } from "$lib/agent-kinds";
+import { adoptLocally } from "$lib/agent-kinds";
 import { guestAgents, type ValueJSON } from "$lib/types";
 import { agentLinksValue } from "$lib/agent-field";
 import { TYPE_GLYPHS } from "$lib/icons";
@@ -84,29 +84,18 @@ async function createMachine(): Promise<string> {
 			return mine.id;
 		}
 	}
-	await goto("/setup");
+	// No machine registered here yet: there is nothing to link or open.
 	return "";
 }
 /**
- * A new agent that WORKS: a `prompt` link to the space's assistant
- * system_prompt object (created from the seed when absent), this machine
- * pinned as its server, and roster adoption - the same contract /setup and
- * `harness setup` write ($lib/agent-kinds), so the agent answers the moment
- * it is addressed. Unpaired goes to setup: a serverless agent is the
- * silent dead end this replaces.
+ * A new agent is a blank object, configured the same way as any other:
+ * you set its Computer, System prompt, Model, Requires and Credentials in
+ * the property row. Nothing is stamped at creation - it is adopted locally
+ * so it answers as soon as it has a computer, but a computer-less agent is
+ * an honest dead end, not a silent one.
  */
 async function createAgent(channelId: string): Promise<string> {
-	const id = await localMachineId();
-	if (!id) {
-		await goto("/setup");
-		return "";
-	}
-	const promptId = await ensurePrompt(ASSISTANT_PROMPT.name, channelId);
-	const fields: Record<string, ValueJSON> = {
-		...channelField(channelId),
-		...agentCreateFields(ASSISTANT_PROMPT.name, id, { id: promptId }),
-	};
-	const { id: agentId } = await note.create("New agent", "agent", fields);
+	const { id: agentId } = await note.create("New agent", "agent", channelField(channelId));
 	await adoptLocally(agentId);
 	await goto(`/app/object/${agentId}`);
 	return agentId;
