@@ -254,7 +254,7 @@
 								role="checkbox"
 								title={rel.name || rel.key}
 								onclick={(e) => { e.stopPropagation(); void saveValue(rel.key, { boolValue: !on }); }}
-							><CheckboxIcon checked={on} size={16} /></button>
+							>{on ? "✓" : ""}</button>
 						{:else if rel.format === "tag"}
 							{#each plain(v, "tag") as string[] as t (t)}
 								{@const opt = rel.options.find((o) => o.text === t)}
@@ -493,14 +493,26 @@
 	}
 	.chk {
 		display: inline-flex;
-		border: none;
-		background: none;
+		align-items: center;
+		justify-content: center;
+		width: 18px;
+		height: 18px;
+		border: 1px solid var(--border);
+		border-radius: 4px;
+		background: var(--panel);
+		color: #fff;
+		font-size: 11px;
+		line-height: 1;
 		padding: 0;
 		cursor: pointer;
-		color: var(--muted);
+		flex: none;
+	}
+	.chk:hover {
+		border-color: var(--accent);
 	}
 	.chk.on {
-		color: var(--green);
+		background: var(--accent);
+		border-color: var(--accent);
 	}
 	/* Hover ×: per value on multi rows, one on the row for single values. */
 	.rm {
