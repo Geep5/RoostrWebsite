@@ -361,30 +361,13 @@
 				if (sent.threadId !== threadId) onexchange?.(sent.threadId);
 				return;
 			}
-			if (mentions.length) {
-				// A tagged agent is an addressee: only an addressed envelope
-				// wakes it (a plain discussion post wakes nobody by name), so
-				// the message goes out as an exchange to the tagged endpoints.
-				const sent = await mailbox.send({
-					id: crypto.randomUUID(), exchangeId: crypto.randomUUID(),
-					sender: { objectId: object.id, agentId: "" },
-					recipients: uniqueEndpoints(mentions.map((option) => option.endpoint)),
-					text, title: exchangeTitle || "Object exchange", replyTo: "", sentAt: Date.now(),
-					requestReply: true, historical: false, operation: "", author: "",
-				});
-				draft = "";
-				replyTo = "";
-				tagged = [];
-				await onchanged();
-				onexchange?.(sent.threadId);
-				return;
-			}
 			await chat.post(object.id, text, reply, threadId === "__discussion__" ? "" : threadId);
 			// Cleared only once the change is committed: a failed write used
 			// to swallow the message - empty composer, nothing posted, no
 			// reason given.
 			draft = "";
 			replyTo = "";
+			tagged = [];
 			await onchanged();
 		} catch (err) {
 			sendError = err instanceof Error ? err.message : String(err);
