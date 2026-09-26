@@ -169,6 +169,22 @@
 		await onchanged();
 	}
 
+	/** Remove one value from a list-valued property (multi), or the whole
+	 *  property when that was its only value or the property is single-valued. */
+	async function removeValue(key: string, value: string) {
+		editing = null;
+		const items = (object.fields[key]?.valuesValue?.items ?? []).map((i) => i.stringValue ?? "");
+		const next = items.filter((s) => s !== value);
+		if (next.length > 0 && items.length > 1) await note.setField(object.id, key, { valuesValue: { items: next.map((s) => ({ stringValue: s })) } });
+		else await note.deleteField(object.id, key);
+		await onchanged();
+	}
+
+	/** Whether the × removes one value from a list (multi) or the whole property. */
+	function isMulti(format: string): boolean {
+		return format === "tag" || format === "object";
+	}
+
 	/** Initialize a property so it appears (empty per-format default). */
 	// ── New property (Anytype "create from scratch") ──────────────
 
@@ -235,9 +251,12 @@
 				{#if rel.format === "tag" && (plain(v, "tag") as string[]).length > 0}
 					{#each plain(v, "tag") as string[] as t (t)}
 						{@const opt = rel.options.find((o) => o.text === t)}
-						<button class="badge" style={badgeStyle(opt?.color ?? "")} title={rel.name || rel.key} onclick={() => (editing = editing === rel.key ? null : rel.key)}>
-							<PropIcon icon="dot" />{t}
-						</button>
+						<span class="cell-wrap">
+							<button class="badge" style={badgeStyle(opt?.color ?? "")} title={rel.name || rel.key} onclick={() => (editing = editing === rel.key ? null : rel.key)}>
+								<PropIcon icon="dot" />{t}
+							</button>
+							<button class="rm" aria-label={`Remove ${t}`} title={`Remove ${t}`} onclick={() => void removeValue(rel.key, t)}>×</button>
+						</span>
 					{/each}
 				{:else if rel.format === "status" && !empty}
 					{@const opt = rel.options.find((o) => o.text === display(rel))}
@@ -262,9 +281,12 @@
 							{@const live = row ? (servingState?.serving.machineId && row.machine && row.machine !== servingState.serving.machineId ? { ...row, status: "other machine" } : row) : null}
 							{@const ok = live?.status === "active"}
 							{@const warn = live && !ok}
-							<button class="badge" style={badgeStyle(ok ? "lime" : warn ? "red" : "")} title={live ? `Credentials · ${live.key}${live.account ? ` (${live.account})` : ""} · ${live.status}${live.auth ? ` · ${live.auth}` : ""}` : "Credentials"} onclick={() => (editing = editing === rel.key ? null : rel.key)}>
-								<span class="emoji">🔌</span>{live ? `${live.key}${live.account ? ` · ${live.account}` : ""}${ok ? "" : ` (${live.status.replaceAll("_", " ")})`}` : id.slice(0, 8)}
-							</button>
+							<span class="cell-wrap">
+								<button class="badge" style={badgeStyle(ok ? "lime" : warn ? "red" : "")} title={live ? `Credentials · ${live.key}${live.account ? ` (${live.account})` : ""} · ${live.status}${live.auth ? ` · ${live.auth}` : ""}` : "Credentials"} onclick={() => (editing = editing === rel.key ? null : rel.key)}>
+									<span class="emoji">🔌</span>{live ? `${live.key}${live.account ? ` · ${live.account}` : ""}${ok ? "" : ` (${live.status.replaceAll("_", " ")})`}` : id.slice(0, 8)}
+								</button>
+								<button class="rm" aria-label={`Remove ${live?.key ?? "credential"}`} title="Remove" onclick={() => void removeValue(rel.key, id)}>×</button>
+							</span>
 						{/each}
 					{:else}
 						<button class="badge empty plain" style={badgeStyle("")} title="Logins and accounts this object's work uses" onclick={() => (editing = editing === rel.key ? null : rel.key)}>
@@ -275,9 +297,12 @@
 					{#if (plain(v, "object") as string[]).length > 0}
 						{#each plain(v, "object") as string[] as id (id)}
 							{@const a = store.agents.find((x) => x.id === id)}
-							<button class="badge" style={badgeStyle(a ? "blue" : "red")} title={a ? `${a.name} · agent` : `Agent ${id.slice(0, 8)}… (no longer exists — remove)`} onclick={() => (editing = editing === rel.key ? null : rel.key)}>
-								<span class="emoji">{a ? (a.icon || "🤖") : "⚠️"}</span>{a?.name || `${id.slice(0, 8)}…`}
-							</button>
+							<span class="cell-wrap">
+								<button class="badge" style={badgeStyle(a ? "blue" : "red")} title={a ? `${a.name} · agent` : `Agent ${id.slice(0, 8)}… (no longer exists — remove)`} onclick={() => (editing = editing === rel.key ? null : rel.key)}>
+									<span class="emoji">{a ? (a.icon || "🤖") : "⚠️"}</span>{a?.name || `${id.slice(0, 8)}…`}
+								</button>
+								<button class="rm" aria-label={`Remove ${a?.name ?? "agent"}`} title="Remove" onclick={() => void removeValue(rel.key, id)}>×</button>
+							</span>
 						{/each}
 					{:else}
 						<button class="badge empty plain" style={badgeStyle("")} title="Agents you can @-mention here" onclick={() => (editing = editing === rel.key ? null : rel.key)}>
@@ -289,9 +314,12 @@
 						{#each plain(v, "object") as string[] as id (id)}
 							{@const cap = capabilitiesById.get(id)}
 							{@const ok = cap?.status === "active" && !!cap?.machine}
-							<button class="badge" style={badgeStyle(ok ? "lime" : cap ? "red" : "")} title={cap ? `Needs · ${cap.key} · ${cap.machine ? `${cap.machineName} · ` : ""}${cap.status ?? "missing install"}` : "Needs"} onclick={() => (editing = editing === rel.key ? null : rel.key)}>
-								<span class="emoji">🧩</span>{cap ? `${cap.key}${cap.machine ? ` · ${cap.machineName}` : ""}${ok ? "" : ` (${(cap.status ?? "not set up").replaceAll("_", " ")})`}` : id.slice(0, 8)}
-							</button>
+							<span class="cell-wrap">
+								<button class="badge" style={badgeStyle(ok ? "lime" : cap ? "red" : "")} title={cap ? `Needs · ${cap.key} · ${cap.machine ? `${cap.machineName} · ` : ""}${cap.status ?? "missing install"}` : "Needs"} onclick={() => (editing = editing === rel.key ? null : rel.key)}>
+									<span class="emoji">🧩</span>{cap ? `${cap.key}${cap.machine ? ` · ${cap.machineName}` : ""}${ok ? "" : ` (${(cap.status ?? "not set up").replaceAll("_", " ")})`}` : id.slice(0, 8)}
+								</button>
+								<button class="rm" aria-label={`Remove ${cap?.key ?? "capability"}`} title="Remove" onclick={() => void removeValue(rel.key, id)}>×</button>
+							</span>
 						{/each}
 					{:else}
 						<button class="badge empty plain" style={badgeStyle("")} title="Capabilities this object needs" onclick={() => (editing = editing === rel.key ? null : rel.key)}>
@@ -302,15 +330,23 @@
 					{#each plain(v, "object") as string[] as id (id)}
 						{@const o = store.summaries.find((x) => x.id === id)}
 						{@const a = o ? undefined : store.agents.find((x) => x.id === id)}
-						<button class="badge" style={badgeStyle(a ? "blue" : "")} title={rel.name || rel.key} onclick={() => (editing = editing === rel.key ? null : rel.key)}>
-							{#if o && layoutOf(o.typeKey) === "task"}<span class="li-check" class:on={o.done === true}><CheckboxIcon checked={o.done === true} size={14} /></span>{:else}<span class="emoji">{a ? (a.icon || "🤖") : objectIcon(o?.icon, o?.typeKey ?? "")}</span>{/if}{o?.name || a?.name || "Untitled"}
-						</button>
+						<span class="cell-wrap">
+							<button class="badge" style={badgeStyle(a ? "blue" : "")} title={rel.name || rel.key} onclick={() => (editing = editing === rel.key ? null : rel.key)}>
+								{#if o && layoutOf(o.typeKey) === "task"}<span class="li-check" class:on={o.done === true}><CheckboxIcon checked={o.done === true} size={14} /></span>{:else}<span class="emoji">{a ? (a.icon || "🤖") : objectIcon(o?.icon, o?.typeKey ?? "")}</span>{/if}{o?.name || a?.name || "Untitled"}
+							</button>
+							<button class="rm" aria-label={`Remove ${o?.name || a?.name || "link"}`} title="Remove" onclick={() => void removeValue(rel.key, id)}>×</button>
+						</span>
 					{/each}
 				{:else}
 					{@const b = badgeFor(rel)}
-					<button class="badge" class:empty class:plain={!b.icon} style={badgeStyle(b.color)} title={rel.name || rel.key} onclick={() => (editing = editing === rel.key ? null : rel.key)}>
-						{#if b.icon}<PropIcon icon={b.icon} />{/if}{display(rel) || rel.name || rel.key}
-					</button>
+					<span class="cell-wrap">
+						<button class="badge" class:empty class:plain={!b.icon} style={badgeStyle(b.color)} title={rel.name || rel.key} onclick={() => (editing = editing === rel.key ? null : rel.key)}>
+							{#if b.icon}<PropIcon icon={b.icon} />{/if}{display(rel) || rel.name || rel.key}
+						</button>
+						{#if !empty}
+							<button class="rm" aria-label={`Remove ${rel.name || rel.key}`} title="Remove property" onclick={() => void removeProp(rel.key)}>×</button>
+						{/if}
+					</span>
 				{/if}
 				{#if editing === rel.key}
 					<div class="pop">
@@ -356,6 +392,38 @@
 	.badge.empty {
 		opacity: 0.6;
 		font-weight: 400;
+	}
+	/* Hover × on every badge: remove that value (multi) or the property
+	 * (single). Revealed on the wrap's hover so it never crowds the row. */
+	.cell-wrap {
+		position: relative;
+		display: inline-flex;
+		align-items: center;
+		gap: 2px;
+	}
+	.rm {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		width: 18px;
+		height: 18px;
+		border: none;
+		border-radius: 50%;
+		background: none;
+		color: var(--muted);
+		font-size: 13px;
+		line-height: 1;
+		cursor: pointer;
+		opacity: 0;
+		transition: opacity 100ms;
+		flex: none;
+	}
+	.cell-wrap:hover .rm {
+		opacity: 1;
+	}
+	.rm:hover {
+		color: var(--red);
+		background: var(--hover);
 	}
 	.badge.plain {
 		padding-left: 10px;
