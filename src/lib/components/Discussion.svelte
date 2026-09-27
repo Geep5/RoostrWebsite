@@ -328,23 +328,27 @@
 		if (names.length === 0) return null;
 		return new RegExp(`@(${names.map((n) => n.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|")})(?![\\w])`, "g");
 	});
+	/** The agent's icon as pill HTML: its image, its emoji, or the 🤖 default. */
+	function mentionGlyph(name: string): string {
+		const icon = mentionIcons.get(name) || objectIcon("", "agent");
+		return /^https?:\/\//.test(icon) ? `<img class="mention-ico" src="${escapeHtml(icon).replace(/"/g, "&quot;")}" alt="">` : `<span class="mention-ico">${escapeHtml(icon)}</span>`;
+	}
 	/** Sent messages: the pill leads with the agent's icon, like Discord's avatar-less role chip. */
 	function mentionPills(html: string): string {
-		if (!mentionPattern) return html;
-		return html.replace(mentionPattern, (_, name: string) => {
-			const icon = mentionIcons.get(name) || objectIcon("", "agent");
-			const glyph = /^https?:\/\//.test(icon) ? `<img class="mention-ico" src="${escapeHtml(icon).replace(/"/g, "&quot;")}" alt="">` : `<span class="mention-ico">${escapeHtml(icon)}</span>`;
-			return `<span class="mention">${glyph}@${name}</span>`;
-		});
+		return mentionPattern ? html.replace(mentionPattern, (_, name: string) => `<span class="mention">${mentionGlyph(name)}@${name}</span>`) : html;
 	}
 
 	let mirrorEl = $state<HTMLDivElement>();
 	/** The draft as HTML for the composer mirror: escaped, mentions pilled.
-	 *  No icon here - anything extra would shift the text away from the
-	 *  textarea's caret. A trailing space keeps a final newline's line height in step. */
+	 *  The icon is painted over the pill's `@` (which keeps its width but not
+	 *  its ink), so the mirror's text never drifts from the textarea's caret.
+	 *  A trailing space keeps a final newline's line height in step. */
 	function composerMirror(text: string): string {
 		const escaped = escapeHtml(text);
-		return `${mentionPattern ? escaped.replace(mentionPattern, '<span class="mention">@$1</span>') : escaped} `;
+		const pilled = mentionPattern
+			? escaped.replace(mentionPattern, (_, name: string) => `<span class="mention"><span class="mention-at">@${mentionGlyph(name)}</span>${name}</span>`)
+			: escaped;
+		return `${pilled} `;
 	}
 
 	function startReply(messageId: string, privately = false) {
@@ -1225,6 +1229,25 @@
 		box-shadow: 0 0 0 2px rgba(88, 101, 242, 0.3);
 		color: #c9cdfb;
 		border-radius: 3px;
+	}
+	/* The `@` holds its width for the caret; the agent's icon covers it. */
+	.mirror :global(.mention-at) {
+		position: relative;
+		color: transparent;
+	}
+	.mirror :global(.mention-at .mention-ico) {
+		position: absolute;
+		left: 50%;
+		top: 50%;
+		transform: translate(-50%, -50%);
+		width: 1em;
+		height: 1em;
+		font-size: 0.9em;
+		line-height: 1em;
+		text-align: center;
+		color: var(--fg);
+		border-radius: 3px;
+		object-fit: cover;
 	}
 	.form-toolbar {
 		display: flex;
