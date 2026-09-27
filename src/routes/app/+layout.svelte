@@ -1457,10 +1457,19 @@
 		height: 0;
 	}
 
+	/* Pinned to the top of the nav while it scrolls: the space name, search
+	   and create stay reachable. It spans the pane's padding (negative
+	   margins) so the list slides under a solid strip, not past its edges. */
 	.space-head-row {
 		display: flex;
 		align-items: center;
 		gap: 2px;
+		position: sticky;
+		top: -10px;
+		z-index: 20;
+		margin: -10px -8px 0;
+		padding: 10px 8px 6px;
+		background: var(--bg);
 	}
 	.head-search {
 		display: flex;
