@@ -301,7 +301,7 @@
 	{#if rule}
 		{#if agentOwned}
 			<p class="meta">
-				<span>{#if assigneeName}runs as {assigneeName} on {servingName || "its machine"}{:else}runs on {servingName || "the machine serving this space"}{/if}{isIOSBackend ? " · not on this device" : ""}{#if servingWarning}<span class="overdue"> · {servingWarning}</span>{/if}</span>
+				<span>{#if assigneeName}runs as {assigneeName} on {servingName || "its machine"}{:else}runs on {servingName || "its agent's machine"}{/if}{isIOSBackend ? " · not on this device" : ""}{#if servingWarning}<span class="overdue"> · {servingWarning}</span>{/if}</span>
 			</p>
 		{/if}
 		{#if rule.fired_at !== undefined || rule.last_run}

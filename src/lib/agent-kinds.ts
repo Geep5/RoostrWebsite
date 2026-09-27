@@ -21,8 +21,8 @@ export async function localMachineId(): Promise<string> {
 }
 
 /**
- * Claim an agent on the paired harness's roster now, the way SpaceAgents
- * does, so it answers before the next converge. A failure here is not an error.
+ * Claim an agent on the paired harness's roster now, so it answers before
+ * the next converge. A failure here is not an error.
  */
 export async function adoptLocally(id: string): Promise<boolean> {
 	try {

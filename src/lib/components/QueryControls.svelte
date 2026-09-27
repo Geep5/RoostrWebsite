@@ -187,7 +187,7 @@
 		{ id: "equal", label: "is", needsValue: true },
 		{ id: "notEqual", label: "is not", needsValue: true },
 	];
-	const SERVING_OPTIONS = ["attention", "ok", "pinned", "space", "capability", "unsatisfied", "pinned-uncapable"];
+	const SERVING_OPTIONS = ["attention", "ok", "pinned", "agent", "capability", "unsatisfied", "pinned-uncapable", "unserved"];
 
 	function formatOf(key: string): string {
 		if (key === "type" || key === "id") return "shorttext";

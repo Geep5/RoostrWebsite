@@ -2,19 +2,18 @@
  * Per-object serving: which machine's harness does the work for an
  * object. The engine owns the rule (`core/serving.odin`, method
  * `serving`); this module gathers its inputs from the DAG the app already
- * holds (machines, the object's space) and turns the answer into copy.
- * Nothing here decides anything.
+ * holds (machines, the agents an object names) and turns the answer into
+ * copy. Nothing here decides anything.
  */
 
-import { fetchAllQuery, fetchObject, type QueryResultRow } from "$lib/api";
+import { fetchAllQuery, type QueryResultRow } from "$lib/api";
 import { coreCall, initCore } from "$lib/engine/core";
-import { objectSpaceId } from "$lib/relations";
-import type { ObjectJSON } from "$lib/types";
+import { guestAgents, type ObjectJSON } from "$lib/types";
 
 export interface Serving {
-	/** "" when no space default exists and nothing qualifies. */
+	/** "" when nothing pins the object and no machine qualifies. */
 	machineId: string;
-	reason: "self" | "pinned" | "pinned-uncapable" | "space" | "space-capable" | "capability" | "unsatisfied";
+	reason: "self" | "pinned" | "pinned-uncapable" | "agent" | "agent-capable" | "capability" | "unsatisfied" | "unserved";
 	requires: string[];
 	/** Machine ids whose capabilities cover `requires`, sorted. */
 	candidates: string[];
@@ -54,25 +53,32 @@ export async function fetchMachines(): Promise<{ rows: QueryResultRow[]; machine
 	return { rows, machines: rows.map(machineRowOf) };
 }
 
-/** Resolve one object against the live machine roster and its space. */
+/**
+ * The agent objects any of `objects` names in its `agent` guest list: the
+ * engine takes the first of them with a `served_by` as the object's pin.
+ */
+async function guestAgentRows(objects: Array<Pick<ObjectJSON, "fields">>): Promise<QueryResultRow[]> {
+	const ids = [...new Set(objects.flatMap((o) => guestAgents(o.fields)))];
+	return ids.length > 0 ? fetchAllQuery({ filters: [{ key: "id", condition: "in", value: ids }] }) : [];
+}
+
+/** Resolve one object against the live machine roster and its agents. */
 export async function resolveServing(object: ObjectJSON): Promise<{ serving: Serving; machines: MachineRow[] }> {
-	const spaceId = objectSpaceId(object);
-	const [{ rows, machines }, space] = await Promise.all([fetchMachines(), spaceId ? fetchObject(spaceId) : Promise.resolve(null), initCore()]);
-	const serving = coreCall<Serving>("serving", { action: "resolve", object, space, machines: rows });
+	const [{ rows, machines }, agents] = await Promise.all([fetchMachines(), guestAgentRows([object]), initCore()]);
+	const serving = coreCall<Serving>("serving", { action: "resolve", object, agents, machines: rows });
 	return { serving, machines };
 }
 
 /**
- * Resolve many objects with one roster fetch. `spaces` are the channel
- * rows (oldest first: the first one is the default space that owns
- * unstamped objects). Returns one entry per input object, in order.
+ * Resolve many objects with one roster fetch and one fetch of the agents
+ * they name. Returns one entry per input object, in order.
  */
-export async function resolveMany(objects: QueryResultRow[], spaces: QueryResultRow[], machineRows: QueryResultRow[]): Promise<Serving[]> {
-	await initCore();
-	const byId = new Map(spaces.map((s) => [s.id, s]));
+export async function resolveMany(objects: QueryResultRow[], machineRows: QueryResultRow[]): Promise<Serving[]> {
+	const [agentRows] = await Promise.all([guestAgentRows(objects), initCore()]);
+	const byId = new Map(agentRows.map((a) => [a.id, a]));
 	return objects.map((object) => {
-		const space = byId.get(object.fields["channel"]?.stringValue || "") ?? spaces[0] ?? null;
-		return coreCall<Serving>("serving", { action: "resolve", object, space, machines: machineRows });
+		const agents = guestAgents(object.fields).flatMap((id) => byId.get(id) ?? []);
+		return coreCall<Serving>("serving", { action: "resolve", object, agents, machines: machineRows });
 	});
 }
 
@@ -91,6 +97,7 @@ export function servingCopy(serving: Serving, machines: MachineRow[]): { text: s
 			return { text: `served by ${name} (pinned)`, warning: false };
 		case "pinned-uncapable":
 			return { text: `pinned to ${name}, which lacks ${keys(serving)}`, warning: true };
+		case "agent-capable":
 		case "capability":
 			return { text: `served by ${name} for ${keys(serving)}`, warning: false };
 		case "unsatisfied":

@@ -5,16 +5,13 @@
 	import { joinUrl } from "$lib/invite";
 	import { objectIcon } from "$lib/icons";
 	import { onMount } from "svelte";
-	import { goto } from "$app/navigation";
+	import { goto, invalidateAll } from "$app/navigation";
 	import { layoutOf, store, refreshAll } from "$lib/data.svelte";
 	import { activeSpace } from "$lib/space.svelte";
 	import { myNpub, listJoinRequests, clearJoinRequest, type JoinRequest } from "$lib/client-identity";
 	import { backend } from "$lib/client-backend";
-	import { harnessFetch, pairedSession, onPairingChange } from "$lib/local-transport";
+	import { onPairingChange } from "$lib/local-transport";
 
-	let paired = $state(pairedSession() !== null);
-	let harnessError = $state("");
-	let machineDataError = $state("");
 	let identityError = $state("");
 
 	let confirmDelete = $state(false);
@@ -80,8 +77,10 @@
 
 	onMount(() => {
 		void loadBin();
-		refreshPairing();
-		return onPairingChange(refreshPairing);
+		void loadIdentity();
+		// A local daemon's identity (and so its join requests) is reachable
+		// only while paired.
+		return onPairingChange(() => void loadIdentity());
 	});
 
 	async function restoreObject(id: string) {
@@ -113,9 +112,6 @@
 		await loadBin();
 		binBusy = "";
 	}
-	import { invalidateAll } from "$app/navigation";
-	import SpaceAgents from "./SpaceAgents.svelte";
-	import Machines from "./Machines.svelte";
 
 	let {
 		object,
@@ -144,143 +140,6 @@
 	let ownerNpub = $state("");
 	let copiedJoin = $state(false);
 	let joinRequests = $state<JoinRequest[]>([]);
-
-	// ── Serving: one machine per space (served_by on the channel). ──
-	interface MachineRow {
-		id: string;
-		machine_id: string;
-		name: string;
-		/** spaceId -> local checkout path on that machine (its own JSON field). */
-		paths: Record<string, string>;
-		/** spaceId -> binding status, written by that machine's harness. */
-		pathsStatus: Record<string, string>;
-	}
-	let machines = $state<MachineRow[]>([]);
-	let thisMachine = $state<{ id: string; host: string } | null>(null);
-	const servedBy = $derived(object.fields["served_by"]?.stringValue ?? "");
-	const servedByName = $derived(machines.find((m) => m.machine_id === servedBy)?.name || (servedBy ? servedBy.slice(0, 8) + "…" : "nobody yet"));
-	const servedHere = $derived(!!thisMachine && servedBy === thisMachine.id);
-
-	async function loadServing() {
-		try {
-			const res = await fetchAllQuery({ type: "machine" });
-			const parseMap = (v?: string): Record<string, string> => {
-				try {
-					return v ? (JSON.parse(v) as Record<string, string>) : {};
-				} catch {
-					return {};
-				}
-			};
-			machines = res.map((r) => ({
-				id: r.id,
-				machine_id: r.fields["machine_id"]?.stringValue ?? "",
-				name: r.fields["name"]?.stringValue ?? "",
-				paths: parseMap(r.fields["paths"]?.stringValue),
-				pathsStatus: parseMap(r.fields["paths_status"]?.stringValue),
-			}));
-			machineDataError = "";
-		} catch (error) {
-			machineDataError = error instanceof Error ? error.message : "Saved machine information is unavailable.";
-		}
-		if (!pairedSession()) {
-			thisMachine = null;
-			return;
-		}
-		try {
-			const res = await harnessFetch("/machine");
-			if (!res.ok) throw new Error(`Cannot identify this machine (HTTP ${res.status}).`);
-			const machine = (await res.json()) as { id: string; host: string };
-			if (!pairedSession()) return;
-			thisMachine = machine;
-			harnessError = "";
-		} catch (error) {
-			thisMachine = null;
-			harnessError = error instanceof Error ? error.message : "The paired harness is unreachable.";
-		}
-	}
-
-	function refreshPairing() {
-		paired = !!pairedSession();
-		thisMachine = null;
-		bindSeeded = false;
-		bindPath = "";
-		bindResult = "";
-		bindError = "";
-		harnessError = "";
-		void loadServing();
-		void loadIdentity();
-	}
-
-	// ── Project: repo identity is synced truth; the checkout path is a
-	// per-machine fact that ONLY the serving machine sets, through its own
-	// harness (which validates and writes the status). ──
-	let repoUrl = $state("");
-	let bindPath = $state("");
-	let bindBusy = $state(false);
-	let bindResult = $state("");
-	let bindError = $state("");
-	let bindSeeded = false;
-	let repoSeeded = false;
-	const myRow = $derived(machines.find((m) => m.machine_id === thisMachine?.id));
-	const checkoutRows = $derived(machines.filter((m) => m.paths[object.id] || m.machine_id === servedBy));
-	$effect(() => {
-		if (!repoSeeded) {
-			repoSeeded = true;
-			repoUrl = object.fields["repo_url"]?.stringValue ?? "";
-		}
-		if (bindSeeded || !myRow) return;
-		bindSeeded = true;
-		bindPath = myRow.paths[object.id] ?? "";
-	});
-
-	async function saveRepoUrl() {
-		const v = repoUrl.trim();
-		if (v === (object.fields["repo_url"]?.stringValue ?? "")) return;
-		await note.setField(object.id, "repo_url", { stringValue: v });
-		await onchanged();
-	}
-
-	async function bindWorkspace(path: string) {
-		if (!pairedSession() || !servedHere) {
-			bindError = "Pair with the machine serving this space before changing its checkout.";
-			return;
-		}
-		bindBusy = true;
-		bindResult = "";
-		bindError = "";
-		try {
-			const res = await harnessFetch("/workspace", {
-				method: "POST",
-				headers: { "Content-Type": "application/json" },
-				body: JSON.stringify({ space: object.id, path }),
-			});
-			const out = (await res.json()) as { status?: string; error?: string };
-			if (!res.ok || out.error) throw new Error(out.error || `Workspace binding failed (HTTP ${res.status}).`);
-			if (!out.status) throw new Error("The harness did not return a workspace binding status.");
-			bindResult = out.status;
-			if (!path) bindPath = "";
-			// The harness wrote the machine object; re-read once it lands.
-			setTimeout(() => void loadServing(), 900);
-		} catch (error) {
-			bindError = error instanceof Error ? error.message : "The paired harness is unreachable.";
-		} finally {
-			bindBusy = false;
-		}
-	}
-
-	async function takeOverServing() {
-		if (!pairedSession() || !thisMachine) {
-			harnessError = "Pair with the native app before serving this space from this machine.";
-			return;
-		}
-		const noCheckout =
-			repoUrl.trim() && !machines.find((m) => m.machine_id === thisMachine?.id)?.paths[object.id]
-				? " This machine has no checkout of the project yet - bind a path after taking over."
-				: "";
-		if (servedBy && !confirm(`Serve this space from ${thisMachine.host}? ${servedByName} will stand down once it syncs.${noCheckout}`)) return;
-		await note.setField(object.id, "served_by", { stringValue: thisMachine.id });
-		await onchanged();
-	}
 
 	async function loadIdentity() {
 		ownerNpub = myNpub() ?? "";
@@ -362,79 +221,6 @@
 <svelte:window onkeydown={(e) => { if (e.key !== "Escape") return; if (confirmEmpty) confirmEmpty = false; else if (confirmDelete && !deleting) confirmDelete = false; }} />
 
 <section class="manage">
-	<SpaceAgents channelId={object.id} />
-
-	<h3>Serving</h3>
-	<p class="hint">
-		One machine serves a space: it minds the agents, mints new ones, and answers. The claim is synced
-		data — if this machine breaks, take over from any other; it stands down when it syncs.
-	</p>
-	{#if !paired}
-		<p class="hint">Pair under This machine to identify this machine, take over serving, or bind a local checkout. Browser space controls remain available.</p>
-	{/if}
-	{#if harnessError || machineDataError}
-		<p class="hint" role="alert">{harnessError || machineDataError}</p>
-		<button onclick={() => void loadServing()}>Retry machine status</button>
-	{/if}
-	<div class="serving-row">
-		<span class="serving-name">🖥️ {servedByName}{servedHere ? " (this machine)" : ""}</span>
-		{#if thisMachine && !servedHere}
-			<button onclick={() => void takeOverServing()}>Serve from this machine</button>
-		{:else if !thisMachine}
-			<span class="hint-inline">— manage from a machine running the harness</span>
-		{/if}
-	</div>
-
-	<Machines />
-
-	<h3>Project</h3>
-	<p class="hint">
-		A space can manage a local repo. The remote URL is synced everywhere; the checkout path is a
-		machine fact — only the machine serving this space sets where its working copy lives, and its
-		harness verifies the path. Agents here get the workspace in their prompt and run shell commands
-		inside it.
-	</p>
-	<input
-		class="repo-url"
-		placeholder="git remote URL (optional, e.g. git@github.com:you/repo.git)"
-		bind:value={repoUrl}
-		onblur={() => void saveRepoUrl()}
-		onkeydown={(e) => { if (e.key === "Enter") (e.currentTarget as HTMLInputElement).blur(); }}
-	/>
-	{#each checkoutRows as m (m.id)}
-		<div class="checkout">
-			<span class="checkout-host">🖥️ {m.name || m.machine_id.slice(0, 8)}</span>
-			{#if servedHere && m.machine_id === thisMachine?.id}
-				<input
-					class="checkout-path"
-					placeholder="/absolute/path/to/checkout"
-					bind:value={bindPath}
-					onkeydown={(e) => { if (e.key === "Enter") void bindWorkspace(bindPath.trim()); }}
-				/>
-				<button disabled={bindBusy || !bindPath.trim()} onclick={() => void bindWorkspace(bindPath.trim())}>Bind</button>
-				{#if m.paths[object.id]}
-					<button class="danger" disabled={bindBusy} onclick={() => void bindWorkspace("")}>Unbind</button>
-				{/if}
-			{:else}
-				<span class="checkout-ro">{m.paths[object.id] || "no checkout"}</span>
-			{/if}
-			{#if m.paths[object.id] && m.pathsStatus[object.id]}
-				<span
-					class="ws-status"
-					class:ok={m.pathsStatus[object.id] === "ok"}
-					title={m.pathsStatus[object.id]}>{m.pathsStatus[object.id] === "ok" ? "✓" : "✗"}</span
-				>
-			{/if}
-		</div>
-	{/each}
-	{#if bindResult}
-		<p class="hint">{bindResult === "ok" ? "Bound and verified." : bindResult === "unbound" ? "Unbound." : `Bound with warning: ${bindResult}`}</p>
-	{/if}
-	{#if bindError}<p class="hint" role="alert">{bindError}</p>{/if}
-	{#if !servedHere}
-		<p class="hint">The checkout path is set from the machine serving this space.</p>
-	{/if}
-
 	<h3>Members</h3>
 	<p class="hint">
 		Everyone holding this space's key can read and write every object in it. Adding an npub gift-wraps
@@ -797,70 +583,5 @@
 	}
 	.bin-check.on {
 		color: var(--accent);
-	}
-	.serving-row {
-		display: flex;
-		align-items: center;
-		gap: 12px;
-		margin-bottom: 6px;
-	}
-	.repo-url {
-		width: 100%;
-		box-sizing: border-box;
-		background: var(--hl-light);
-		border: 1px solid var(--border);
-		border-radius: 8px;
-		color: var(--fg);
-		font: inherit;
-		font-size: 13px;
-		padding: 7px 10px;
-		margin-bottom: 8px;
-	}
-	.checkout {
-		display: flex;
-		align-items: center;
-		gap: 8px;
-		padding: 4px 0;
-		font-size: 13px;
-	}
-	.checkout-host {
-		flex: none;
-		color: var(--muted);
-	}
-	.checkout-path {
-		flex: 1;
-		min-width: 0;
-		background: var(--hl-light);
-		border: 1px solid var(--border);
-		border-radius: 8px;
-		color: var(--fg);
-		font: inherit;
-		font-size: 13px;
-		padding: 5px 10px;
-	}
-	.checkout-ro {
-		flex: 1;
-		min-width: 0;
-		overflow: hidden;
-		text-overflow: ellipsis;
-		white-space: nowrap;
-		color: var(--muted);
-		font-family: ui-monospace, monospace;
-		font-size: 12px;
-	}
-	.ws-status {
-		flex: none;
-		color: #e05555;
-		font-weight: 600;
-	}
-	.ws-status.ok {
-		color: #4caf7d;
-	}
-	.serving-name {
-		font-size: 13.5px;
-	}
-	.hint-inline {
-		color: var(--muted);
-		font-size: 12px;
 	}
 </style>

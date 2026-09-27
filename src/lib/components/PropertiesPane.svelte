@@ -34,15 +34,16 @@
 	});
 
 	/** Agent-related properties group first (after any featured order): the
-	    machine, the agent, its config, then its credentials and what it
-	    needs - the "how this object runs" block ahead of ordinary fields. */
-	const AGENT_PRIORITY = ["served_by", "agent", "model", "prompt", "responsible_types", "requires", "install", "capability"];
+	    machine and the project folder on it, the agent, its config, then its
+	    credentials and what it needs - the "how this object runs" block ahead
+	    of ordinary fields. */
+	const AGENT_PRIORITY = ["served_by", "repo_path", "agent", "model", "prompt", "responsible_types", "requires", "install", "capability"];
 	const agentRank = new Map(AGENT_PRIORITY.map((k, i) => [k, i]));
 
 	/** Featured order first, then the rest. */
 	const shown = $derived.by(() => {
 		const MACHINE_BOUND = ["agent", "capability", "install"].includes(object.typeKey);
-		const AGENT_CONFIG = object.typeKey === "agent" ? ["prompt", "model", "responsible_types", "requires", "install", "served_by"] : [];
+		const AGENT_CONFIG = object.typeKey === "agent" ? ["prompt", "model", "responsible_types", "requires", "install", "served_by", "repo_path"] : [];
 		const present = relations.filter((r) => {
 			if (RESERVED_KEYS[r.key]) return false;
 			if (AGENT_CONFIG.includes(r.key)) return true;
@@ -210,6 +211,7 @@
 	function leftIcon(rel: RelationDefJSON): { emoji: string } | { icon: BadgeIcon; color: string } {
 		switch (rel.key) {
 			case "served_by": return { emoji: "🖥️" };
+			case "repo_path": return { emoji: "📁" };
 			case "install": return { emoji: "🔌" };
 			case "agent": return { emoji: "🤖" };
 			case "requires": return { emoji: "🧩" };
@@ -236,6 +238,7 @@
 	function placeholderFor(rel: RelationDefJSON): string {
 		switch (rel.key) {
 			case "served_by": return "No machine yet";
+			case "repo_path": return "No project folder";
 			case "install": return "No credentials";
 			case "agent": return "Add agent";
 			case "requires": return "Nothing needed";
@@ -278,7 +281,7 @@
 	const canRepeat = $derived(!["channel", "chat", "type", "relation", "template", "query", "set", "collection", "agent"].includes(object.typeKey));
 
 	// ── Grouped display: System / Agent / Custom, each a labeled section ──
-	const AGENT_KEYS = new Set(["served_by", "agent", "model", "prompt", "responsible_types", "requires", "install", "capability"]);
+	const AGENT_KEYS = new Set(["served_by", "repo_path", "agent", "model", "prompt", "responsible_types", "requires", "install", "capability"]);
 	const SYSTEM_KEYS = new Set(["done", "due_date", "status", "tag", "description", "url", "email", "phone", "error", "created_date", "modified_date", "createdDate", "modifiedDate"]);
 	type Group = "system" | "agent" | "custom";
 	const groupOf = (key: string): Group => (AGENT_KEYS.has(key) ? "agent" : SYSTEM_KEYS.has(key) ? "system" : "custom");

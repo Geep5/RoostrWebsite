@@ -12,7 +12,7 @@
 	import PropertyValue from "./PropertyValue.svelte";
 	import { tagStyle } from "$lib/options";
 	import CheckboxIcon from "./CheckboxIcon.svelte";
-	import { fetchAllQuery, fetchQuery, note, type QueryResultRow } from "$lib/api";
+	import { fetchQuery, note, type QueryResultRow } from "$lib/api";
 	import { fetchMachines, resolveMany, servingCopy } from "$lib/serving";
 	import { store, layoutOf } from "$lib/data.svelte";
 	import type { ObjectJSON, RelationDefJSON, ValueJSON } from "$lib/types";
@@ -362,12 +362,17 @@
 	}
 	let servingById = $state<Map<string, ServingInfo>>(new Map());
 
+	/** Needs a person: the resolution cannot be honoured, or nothing serves the object at all. */
+	function servingAttention(info: ServingInfo | undefined): boolean {
+		return !!info && (info.warning || info.reason === "unserved");
+	}
+
 	function servingMatch(rule: { condition: string; value: string }, info: ServingInfo | undefined): boolean {
-		const hit = rule.value === "attention" ? (info?.warning ?? false) : rule.value === "ok" ? !(info?.warning ?? true) : info?.reason === rule.value;
+		const hit = rule.value === "attention" ? servingAttention(info) : rule.value === "ok" ? !!info && !servingAttention(info) : info?.reason === rule.value;
 		return rule.condition === "notEqual" ? !hit : hit;
 	}
 
-	/** Attention (unsatisfied / pinned-uncapable) first, then unresolved, then fine. */
+	/** Cannot be honoured (unsatisfied / pinned-uncapable) first, then unserved, then fine. */
 	function servingRank(info: ServingInfo | undefined): number {
 		if (!info) return 1;
 		return info.warning ? 0 : info.machineId ? 2 : 1;
@@ -388,9 +393,8 @@
 		const res = await fetchQuery({ ...engineBody, sorts });
 		rows = res.records;
 		if (columns.includes("serving") || rules.length > 0 || servingSort) {
-			const [{ rows: machineRows, machines }, spaceRows] = await Promise.all([fetchMachines(), fetchAllQuery({ type: "channel" })]);
-			const spaces = [...spaceRows].sort((a, b) => a.createdAt - b.createdAt);
-			const resolved = await resolveMany(rows, spaces, machineRows);
+			const { rows: machineRows, machines } = await fetchMachines();
+			const resolved = await resolveMany(rows, machineRows);
 			const map = new Map<string, ServingInfo>();
 			rows.forEach((r, i) => {
 				const s = resolved[i];
