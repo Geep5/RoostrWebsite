@@ -1362,6 +1362,9 @@
 						{/if}
 					</div>
 				{/if}
+				{#if discussionUI.available && !discussionUI.open}
+					<button class="hbtn" data-tip="Open pane" onclick={() => (discussionUI.open = true)}>«</button>
+				{/if}
 			</div>
 		</header>
 
