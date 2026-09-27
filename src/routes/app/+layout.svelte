@@ -1138,6 +1138,7 @@
 		{#if current}
 			<div class="space-head-row">
 				<a class="space-head" href="/app/object/{current.id}" title="Space settings">
+					<span class="space-head-ico">{#if current.icon?.startsWith("http")}<img class="rail-img" src={current.icon} alt="" />{:else}{current.icon || "◍"}{/if}</span>
 					<span class="space-name">{current.name}</span>
 				</a>
 				<button class="head-search" data-tip="Search (⌘K)" aria-label="Search" onclick={() => (showSearch = true)}>
@@ -1791,6 +1792,18 @@
 	}
 	.space-head:hover {
 		background: var(--hl-med);
+	}
+	.space-head-ico {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		flex: none;
+		width: 22px;
+		height: 22px;
+		margin-right: 6px;
+		border-radius: 6px;
+		overflow: hidden;
+		font-size: 17px;
 	}
 	.space-name {
 		overflow: hidden;
