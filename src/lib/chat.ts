@@ -237,17 +237,30 @@ export function objectChatMessages(object: ObjectJSON): ChatMessage[] {
 	for (const c of object.conversations ?? []) {
 		if (c.kind === "agent_private") sources.push({ root: c.id, authors: new Set(c.participants) });
 	}
+	// An agent answering in the discussion also writes the same line to its
+	// private transcript; show that copy only when the discussion lacks it
+	// (older answers lived only in the transcript).
+	const inDiscussion = new Set<string>();
+	const echoKey = (author: string, text: string, ts: number) => `${author}\u0000${text}\u0000${Math.round(ts / 10_000)}`;
 	for (const { root, authors } of sources) {
 		for (const { id, block } of chatBlocks(object, root)) {
 			if (out.has(id)) continue;
 			const meta = block.content.custom?.meta ?? {};
 			const author = meta["author"] ?? "";
 			if (authors && !authors.has(author)) continue;
+			const ts = Number(meta["ts"] ?? 0);
+			const text = meta["text"] ?? "";
+			if (authors) {
+				// Same author + text within the same ~10s window, or the adjacent one.
+				if (inDiscussion.has(echoKey(author, text, ts)) || inDiscussion.has(echoKey(author, text, ts - 10_000)) || inDiscussion.has(echoKey(author, text, ts + 10_000))) continue;
+			} else {
+				inDiscussion.add(echoKey(author, text, ts));
+			}
 			out.set(id, {
 				id,
 				author,
-				ts: Number(meta["ts"] ?? 0),
-				text: meta["text"] ?? "",
+				ts,
+				text,
 				replyTo: meta["replyTo"] ?? "",
 				origin: (meta["origin"] === "schedule" ? meta["origin_object"] : meta["origin"]) ?? "",
 				reactions: parseReactions(meta["reactions"] ?? ""),
