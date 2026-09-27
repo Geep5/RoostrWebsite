@@ -1771,8 +1771,9 @@
 		flex-direction: column;
 		gap: 8px;
 		margin: 6px 0 6px 6px;
-		background: var(--panel);
-		border-radius: 16px;
+		/* Same dark as the phone's space screen: the outlined cards below
+		   are what mark the column, not a lighter pane. */
+		background: var(--bg);
 	}
 	/* Invisible grab strip on the pane's right edge - only the cursor
 	   betrays it. Absolute top+bottom spans the full scroll content, so
@@ -1809,11 +1810,11 @@
 		text-overflow: ellipsis;
 		white-space: nowrap;
 	}
-	/* Anytype widget: each pinned object is its own card; the header is
-	   the 600-weight clickable row with hover highlight. */
+	/* Phone-style card: grey with a thin outline on the dark nav. */
 	.widget {
-		background: var(--hl-light);
-		border-radius: 12px;
+		background: var(--panel);
+		border: 1px solid var(--border);
+		border-radius: 10px;
 		padding: 8px;
 		position: relative;
 	}
@@ -1928,9 +1929,14 @@
 		min-width: 0;
 	}
 	.section-body {
-		background: var(--hl-light);
-		border-radius: 12px;
-		padding: 8px;
+		background: var(--panel);
+		border: 1px solid var(--border);
+		border-radius: 10px;
+		padding: 4px 8px;
+	}
+	/* Thin line between rows inside the card, as on the phone. */
+	.section-body > * + * {
+		border-top: 1px solid var(--border);
 	}
 	.section-head {
 		display: flex;
@@ -1973,6 +1979,8 @@
 		border: none;
 		font-size: 11px;
 		font-weight: 600;
+		text-transform: uppercase;
+		letter-spacing: 0.05em;
 		line-height: 18px;
 		font-family: inherit;
 		color: var(--muted);
