@@ -15,6 +15,7 @@
 	import KeyGate from "$lib/components/KeyGate.svelte";
 	import { myNpub } from "$lib/client-identity";
 	import GraphIcon from "$lib/components/GraphIcon.svelte";
+	import PaneIcon from "$lib/components/PaneIcon.svelte";
 	import PinnedWidget from "$lib/components/PinnedWidget.svelte";
 	import { creatableTypes, typeGlyph, createTyped, createCollection, createQuery, seedSpaceDefaults } from "$lib/create";
 	import { CREATABLE_FORMATS, RESERVED_KEYS, createRelation, formatGlyph, spaceRelations } from "$lib/relations";
@@ -826,7 +827,7 @@
 					{/if}
 				</div>
 				{#if discussionUI.available}
-					<button class="m-btn" data-tip={discussionUI.convCount ? "Chat" : "Properties"} aria-label={discussionUI.convCount ? "Open chat" : "Open properties"} onclick={() => (discussionUI.open = true)}>{discussionUI.convCount ? "💬" : "🧩"}</button>
+					<button class="m-btn pane-btn" data-tip="Chat & properties" aria-label="Open chat and properties" onclick={() => (discussionUI.open = true)}><PaneIcon />{#if discussionUI.count}<span class="pane-badge">{discussionUI.count > 99 ? "99+" : discussionUI.count}</span>{/if}</button>
 				{/if}
 				</div>
 			{/if}
@@ -1357,7 +1358,7 @@
 					</div>
 				{/if}
 				{#if discussionUI.available && !discussionUI.open}
-					<button class="hbtn pane-open" data-tip="Open pane" onclick={() => (discussionUI.open = true)}>«</button>
+					<button class="hbtn pane-open pane-btn" data-tip="Chat & properties" aria-label="Open chat and properties" onclick={() => (discussionUI.open = true)}><PaneIcon size={16} />{#if discussionUI.count}<span class="pane-badge">{discussionUI.count > 99 ? "99+" : discussionUI.count}</span>{/if}</button>
 				{/if}
 			</div>
 		</header>
@@ -2208,6 +2209,30 @@
 	.pane-open:hover {
 		border-color: var(--muted);
 		color: var(--fg);
+	}
+	/* Pane toggle: the right-panel icon, with the chat's message count. */
+	.pane-btn {
+		position: relative;
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+	}
+	.pane-badge {
+		position: absolute;
+		top: -4px;
+		right: -4px;
+		min-width: 16px;
+		height: 16px;
+		padding: 0 4px;
+		box-sizing: border-box;
+		border-radius: 8px;
+		background: var(--accent);
+		color: #fff;
+		font-size: 10px;
+		font-weight: 600;
+		line-height: 16px;
+		text-align: center;
+		pointer-events: none;
 	}
 	/* Anytype-style tooltip: delayed dark pill below the control. */
 	[data-tip] {
