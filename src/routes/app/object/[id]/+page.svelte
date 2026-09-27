@@ -286,12 +286,12 @@
 		return () => mq.removeEventListener("change", fn);
 	});
 	const hasDiscussion = $derived(
-		!!object && (!!object.mailbox?.length || (!isChannel && !isChat && !isAgent && !isType && !isTemplate && !isRelation && !isQuery && !isCollection)),
+		!!object && (!!object.mailbox?.length || (!isChat && !isAgent && !isType && !isTemplate && !isRelation && !isQuery && !isCollection)),
 	);
 	/** The right pane holds properties and (when the object has one) the
 	 *  chat - so it exists wherever the property row used to. */
-	// A space's page is its settings: its conversation is Space chat (/app/chat), and it has no properties to edit.
-	const hasPane = $derived(!isChannel && (hasDiscussion || (!!object && !isChat && !isType && !isRelation)));
+	// A space's page is its settings in the middle; its chat and its guest list (Properties) live in this pane.
+	const hasPane = $derived(hasDiscussion || (!!object && !isChat && !isType && !isRelation));
 	$effect(() => {
 		discussionUI.available = hasPane;
 		if (!object) {

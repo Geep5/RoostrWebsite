@@ -58,6 +58,8 @@
 			// The error badge is how the harness surfaces a problem on a
 			// machine-bound object (no server, a holdup, a failed run); show it
 			// there even before one is written, so its absence reads as "ok".
+			// A space's one editable property is its guest list: who answers its chat.
+			if (typeKey === "channel") return r.key === "agent";
 			if (r.key === "error") return (MACHINE_BOUND && object.typeKey !== "template") || r.key in object.fields;
 			if (r.key === "served_by") return MACHINE_BOUND || r.key in object.fields;
 			if (["agent", "requires", "install"].includes(r.key)) return !AGENTLESS_TYPES[typeKey] || r.key in object.fields;
