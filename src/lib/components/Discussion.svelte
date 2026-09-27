@@ -329,6 +329,14 @@
 		return mentionPattern ? html.replace(mentionPattern, '<span class="mention">@$1</span>') : html;
 	}
 
+	let mirrorEl = $state<HTMLDivElement>();
+	/** The draft as HTML for the composer mirror: escaped, mentions pilled.
+	 *  A trailing space keeps a final newline's line height in step. */
+	function composerMirror(text: string): string {
+		const escaped = text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+		return `${mentionPills(escaped)} `;
+	}
+
 	function startReply(messageId: string, privately = false) {
 		replyTo = messageId;
 		const target = messageById.get(messageId)?.mailbox?.message;
@@ -658,12 +666,18 @@
 			{:else if mention && tagOptions && !mentionMatches.length}
 				<div class="mention-menu empty">No agent matches “{mention.query}”.</div>
 			{/if}
+			<!-- A textarea cannot style part of its text, so a mirror behind it
+			     draws the draft with mention pills; the textarea's own glyphs
+			     are transparent and only its caret and selection show. -->
+			<div class="input-wrap">
+			<div class="mirror" aria-hidden="true" bind:this={mirrorEl}>{@html composerMirror(draft)}</div>
 			<textarea
 				bind:this={composerEl}
 				placeholder={isExchange ? "Write a message… (@ to tag an agent)" : "Write a comment… (@ to tag an agent)"}
 				bind:value={draft}
 				rows={1}
 				disabled={sending}
+				onscroll={(e) => { if (mirrorEl) mirrorEl.scrollTop = e.currentTarget.scrollTop; }}
 				oninput={(e) => {
 					const el = e.currentTarget as HTMLTextAreaElement;
 					el.style.height = "auto";
@@ -687,6 +701,7 @@
 					if (e.key === "Escape") { e.preventDefault(); replyTo = ""; privateRecipient = ""; }
 				}}
 			></textarea>
+			</div>
 			<div class="form-toolbar">
 				<span class="toolbar-side"></span>
 				<button class="send" disabled={sending || !draft.trim() || (isExchange && !audience.length)} aria-label="Send" onclick={() => void send()}>
@@ -1138,17 +1153,58 @@
 	.mention-menu .m-dot { color: #fff; font-size: 9px; text-transform: uppercase; }
 	.mention-menu .m-name { font-weight: 500; }
 	.mention-menu .m-where { color: var(--muted); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+	.input-wrap {
+		position: relative;
+		display: flex;
+		flex-direction: column;
+	}
+	/* Mirror and textarea share every metric that affects wrapping, so the
+	   pills sit exactly under the (invisible) glyphs the caret moves through. */
+	.composer textarea,
+	.mirror {
+		font: inherit;
+		font-size: 14px;
+		line-height: 1.45;
+		letter-spacing: normal;
+		padding: 12px 12px 4px;
+		white-space: pre-wrap;
+		overflow-wrap: break-word;
+		word-break: normal;
+		scrollbar-gutter: stable;
+		box-sizing: border-box;
+	}
+	.mirror {
+		position: absolute;
+		inset: 0;
+		color: var(--fg);
+		overflow: hidden;
+		pointer-events: none;
+	}
 	.composer textarea {
+		position: relative;
 		background: none;
 		border: none;
 		outline: none;
 		resize: none;
-		color: var(--fg);
-		font: inherit;
-		font-size: 14px;
-		line-height: 1.45;
-		padding: 12px 12px 4px;
+		color: transparent;
+		caret-color: var(--fg);
 		max-height: 40vh;
+		overflow-y: auto;
+	}
+	.composer textarea::placeholder {
+		color: var(--muted);
+	}
+	.composer textarea::selection {
+		background: rgb(10 132 255 / 0.35);
+		color: transparent;
+	}
+	/* The composer pill cannot take padding or weight (either would widen the
+	   text under the caret); the shadow paints the breathing room instead. */
+	.mirror :global(.mention) {
+		background: rgba(88, 101, 242, 0.3);
+		box-shadow: 0 0 0 2px rgba(88, 101, 242, 0.3);
+		color: #c9cdfb;
+		border-radius: 3px;
 	}
 	.form-toolbar {
 		display: flex;
