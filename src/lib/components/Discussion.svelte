@@ -1342,10 +1342,12 @@
 		padding: 0 2px;
 		font-weight: 500;
 	}
-	/* On the solid accent bubble the blurple tint vanishes: a white wash instead. */
+	/* On the solid accent bubble the pale blurple tint vanishes, so the pill
+	   goes deep blurple with Discord's lavender text - still a clear chip. */
 	.msg.own .text :global(.mention) {
-		background: rgba(255, 255, 255, 0.22);
-		color: #fff;
+		background: rgba(35, 39, 125, 0.55);
+		color: #e0e3ff;
+		font-weight: 600;
 	}
 	.audience { margin-top: 10px; display: flex; flex-direction: column; gap: 5px; }
 	.audience label { display: flex; align-items: center; gap: 7px; }
