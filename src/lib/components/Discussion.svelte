@@ -32,7 +32,10 @@
 	const messages = $derived(threadId === "__discussion__" ? objectChatMessages(object) : chatMessages(object, threadId));
 	const conversation = $derived(object.conversations?.find((c) => c.id === threadId));
 	const legacy = $derived(isLegacyExchange(object, threadId));
-	const isExchange = $derived(legacy || conversation?.kind === "a2a" || messages.some((m) => m.mailbox));
+	// The object's one chat (__discussion__) is a discussion even though it
+	// shows envelopes: tagging sends one, an untagged line stays a chat line.
+	// Only an opened exchange thread is reply-to-all.
+	const isExchange = $derived(threadId !== "__discussion__" && (legacy || conversation?.kind === "a2a" || messages.some((m) => m.mailbox)));
 	const readOnly = $derived(legacy || (isExchange && !!conversation?.closed)
 		|| (threadId !== "__discussion__" && !conversation && !messages.length));
 	const members = $derived(uniqueEndpoints(messages.flatMap((m) => m.mailbox ? [m.mailbox.message.sender, ...m.mailbox.message.recipients] : [])));
@@ -210,7 +213,7 @@
 	function liveTags(text: string): ObjectAgentOption[] {
 		return tagged.filter((option) => text.includes(`@${option.agentName}`));
 	}
-	const replyMessage = $derived((replyTo ? messageById.get(replyTo) : messages[messages.length - 1])?.mailbox?.message);
+	const replyMessage = $derived((replyTo ? messageById.get(replyTo) : messages.findLast((m) => m.mailbox))?.mailbox?.message);
 	const replyAll = $derived(replyMessage ? replyRecipients(replyMessage, { objectId: object.id, agentId: "" }) : []);
 	const audience = $derived(privateRecipient ? replyAll.filter((endpoint) => endpoint.objectId === privateRecipient) : replyAll);
 
@@ -364,13 +367,15 @@
 			if (isExchange || mentions.length > 0) {
 				if (isExchange && !replyMessage) throw new Error("Reload this exchange before replying.");
 				const title = privateRecipient ? `Private: ${exchangeTitle}` : exchangeTitle;
-				const parentId = reply || replyMessage?.id || "";
-				const recipients = uniqueEndpoints([...audience, ...mentions.map((option) => option.endpoint)]);
+				// In the one chat, a tagged line goes to exactly the tagged agents
+				// and replies only when the human picked a message to reply to.
+				const parentId = isExchange ? reply || replyMessage?.id || "" : reply;
+				const recipients = uniqueEndpoints(isExchange ? [...audience, ...mentions.map((option) => option.endpoint)] : mentions.map((option) => option.endpoint));
 				// One chat per object: reuse the exchange already going with the
 				// tagged agent(s) on this object; only mint one when there is none.
 				// A fresh UUID per send splintered every message into its own thread.
 				const agentIds = new Set(mentions.map((option) => option.endpoint.agentId));
-				const existing = replyMessage?.exchangeId
+				const existing = (isExchange ? replyMessage?.exchangeId : undefined)
 					|| (object.conversations ?? []).find((c) => c.kind === "a2a" && mentions.length > 0 && [...agentIds].every((id) => c.participants.includes(id)))?.id;
 				const exchangeId = privateRecipient || !existing ? crypto.randomUUID() : existing.replace(/^__thread__/, "");
 				if (!pendingSend || pendingSend.text !== text || pendingSend.replyTo !== parentId || pendingSend.title !== title
