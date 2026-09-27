@@ -185,6 +185,24 @@
 		});
 	}
 
+	/** An object with an agent opens its composer already addressed: `@Name `
+	 *  per guest agent, tagged, caret after - you just type. Only ever fills
+	 *  an empty draft, so a message in progress is never touched. */
+	async function seedMentions(): Promise<void> {
+		if (draft !== "" || readOnly) return;
+		await ensureTagOptions();
+		if (draft !== "" || !tagOptions?.length) return;
+		tagged = tagOptions;
+		draft = tagOptions.map((option) => `@${option.agentName} `).join("");
+		requestAnimationFrame(() => {
+			const el = composerEl;
+			if (!el) return;
+			el.setSelectionRange(draft.length, draft.length);
+			el.style.height = "auto";
+			el.style.height = `${el.scrollHeight}px`;
+		});
+	}
+
 	/** Tags whose @Name survived editing and are present in this text. */
 	function liveTags(text: string): ObjectAgentOption[] {
 		return tagged.filter((option) => text.includes(`@${option.agentName}`));
@@ -220,6 +238,7 @@
 	}
 	onMount(() => {
 		refreshPairing();
+		void seedMentions();
 		return onPairingChange(refreshPairing);
 	});
 	interface AgentPresence {
@@ -358,6 +377,7 @@
 				privateRecipient = "";
 				tagged = [];
 				await onchanged();
+				void seedMentions();
 				if (sent.threadId !== threadId) onexchange?.(sent.threadId);
 				return;
 			}
@@ -369,6 +389,7 @@
 			replyTo = "";
 			tagged = [];
 			await onchanged();
+			void seedMentions();
 		} catch (err) {
 			sendError = err instanceof Error ? err.message : String(err);
 		} finally {
