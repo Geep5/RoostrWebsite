@@ -279,7 +279,7 @@
 
 	// ── Grouped display: System / Agent / Custom, each a labeled section ──
 	const AGENT_KEYS = new Set(["served_by", "agent", "model", "prompt", "responsible_types", "requires", "install", "capability"]);
-	const SYSTEM_KEYS = new Set(["done", "due_date", "status", "tag", "description", "url", "email", "phone", "created_date", "modified_date", "createdDate", "modifiedDate"]);
+	const SYSTEM_KEYS = new Set(["done", "due_date", "status", "tag", "description", "url", "email", "phone", "error", "created_date", "modified_date", "createdDate", "modifiedDate"]);
 	type Group = "system" | "agent" | "custom";
 	const groupOf = (key: string): Group => (AGENT_KEYS.has(key) ? "agent" : SYSTEM_KEYS.has(key) ? "system" : "custom");
 	const groups = $derived.by(() => {
