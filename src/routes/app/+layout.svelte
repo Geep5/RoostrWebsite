@@ -1363,7 +1363,7 @@
 					</div>
 				{/if}
 				{#if discussionUI.available && !discussionUI.open}
-					<button class="hbtn" data-tip="Open pane" onclick={() => (discussionUI.open = true)}>«</button>
+					<button class="hbtn pane-open" data-tip="Open pane" onclick={() => (discussionUI.open = true)}>«</button>
 				{/if}
 			</div>
 		</header>
@@ -2200,6 +2200,15 @@
 		font-size: 16px;
 		border-radius: 7px;
 		cursor: pointer;
+	}
+	/* The pane's uncollapse matches the bordered collapse it pairs with. */
+	.pane-open {
+		border: 1px solid var(--border);
+		font-size: 14px;
+	}
+	.pane-open:hover {
+		border-color: var(--muted);
+		color: var(--fg);
 	}
 	/* Anytype-style tooltip: delayed dark pill below the control. */
 	[data-tip] {
