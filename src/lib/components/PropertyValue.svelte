@@ -179,9 +179,11 @@
 	<div class="objects">
 		{#each objectIds as id (id)}
 			{@const s = store.summaries.find((x) => x.id === id)}
-			{@const agent = s ? undefined : store.agents.find((a) => a.id === id)}
+			<!-- Agents first, whichever list holds them: the chip shows the same
+			     avatar as the property row (icon, else 🤖), never the ◈ type glyph. -->
+			{@const agent = store.agents.find((a) => a.id === id)}
 			<span class="obj-chip">
-				<a href="/app/object/{id}">{#if s && layoutOf(s.typeKey) === "task"}<span class="li-check" class:on={s.done === true}><CheckboxIcon checked={s.done === true} size={14} /></span>{:else if agent}{agent.icon || "🤖"}{:else}{objectIcon(s?.icon, s?.typeKey ?? "note")}{/if} {nameOf(id)}</a>
+				<a href="/app/object/{id}">{#if agent || s?.typeKey === "agent"}{agent?.icon || s?.icon || "🤖"}{:else if s && layoutOf(s.typeKey) === "task"}<span class="li-check" class:on={s.done === true}><CheckboxIcon checked={s.done === true} size={14} /></span>{:else}{objectIcon(s?.icon, s?.typeKey ?? "note")}{/if} {nameOf(id)}</a>
 				<button title="Remove" onclick={() => void toggleObject(id)}>×</button>
 			</span>
 		{/each}
@@ -196,7 +198,7 @@
 							onclick={() => {
 								objectOpen = false;
 								void toggleObject(c.id);
-							}}><span class="obj-name">{#if layoutOf(c.typeKey) === "task"}<span class="li-check" class:on={c.done === true}><CheckboxIcon checked={c.done === true} size={15} /></span>{:else}{objectIcon(c.icon, c.typeKey)}{/if} {c.name || "Untitled"}</span> <span class="tk">{c.typeKey}</span></button
+							}}><span class="obj-name">{#if c.typeKey === "agent"}{c.icon || store.agents.find((a) => a.id === c.id)?.icon || "🤖"}{:else if layoutOf(c.typeKey) === "task"}<span class="li-check" class:on={c.done === true}><CheckboxIcon checked={c.done === true} size={15} /></span>{:else}{objectIcon(c.icon, c.typeKey)}{/if} {c.name || "Untitled"}</span> <span class="tk">{c.typeKey}</span></button
 						>
 					{/each}
 					{#if candidates.length === 0}<span class="tk pad">No matches</span>{/if}
