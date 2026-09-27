@@ -32,6 +32,12 @@
 		return items.map((i) => i.stringValue).filter((s): s is string => typeof s === "string");
 	});
 
+	/** Agent-related properties group first (after any featured order): the
+	    machine, the agent, its config, then its credentials and what it
+	    needs - the "how this object runs" block ahead of ordinary fields. */
+	const AGENT_PRIORITY = ["served_by", "agent", "model", "prompt", "responsible_types", "requires", "install", "capability"];
+	const agentRank = new Map(AGENT_PRIORITY.map((k, i) => [k, i]));
+
 	/** Same filter as FeaturedProps: featured order first, then the rest. */
 	const shown = $derived.by(() => {
 		const MACHINE_BOUND = ["agent", "capability", "install"].includes(object.typeKey);
@@ -45,7 +51,9 @@
 			return !r.hidden && r.key in object.fields;
 		});
 		const rank = new Map(featuredKeys.map((k, i) => [k, i]));
-		return present.toSorted((a, b) => (rank.get(a.key) ?? 999) - (rank.get(b.key) ?? 999));
+		return present.toSorted((a, b) =>
+			(rank.get(a.key) ?? 999) - (rank.get(b.key) ?? 999)
+			|| (agentRank.get(a.key) ?? 999) - (agentRank.get(b.key) ?? 999));
 	});
 
 	// ── Serving: served_by names the machine and carries the warning ──

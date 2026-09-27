@@ -9,14 +9,22 @@
 	let {
 		object,
 		relations,
+		chat,
 		onchanged,
 	}: {
 		object: ObjectJSON;
 		relations: RelationDefJSON[];
+		/** False for objects without a discussion (agents, types, sets): properties only. */
+		chat: boolean;
 		onchanged: () => Promise<void>;
 	} = $props();
 
-	let tab = $state<"chat" | "props">("chat");
+	let picked = $state<"chat" | "props" | null>(null);
+	/** Chat when the object has one and nothing else was picked; never a Chat tab without a chat. */
+	const tab = $derived(picked ?? (chat ? "chat" : "props"));
+	$effect(() => {
+		if (!chat && picked === "chat") picked = null;
+	});
 	let refreshError = $state("");
 
 	let refreshing = false;
@@ -35,7 +43,7 @@
 
 	function onKey(e: KeyboardEvent) {
 		if (e.key !== "Escape" || e.defaultPrevented) return;
-		if (tab === "props") tab = "chat";
+		if (chat && tab === "props") picked = "chat";
 		else discussionUI.open = false;
 	}
 
@@ -49,10 +57,12 @@
 
 <header class="dd-head">
 	<div class="dd-tabs" role="tablist" aria-label="Pane">
-		<button class="dd-tab" class:active={tab === "chat"} role="tab" aria-selected={tab === "chat"} onclick={() => (tab = "chat")}>
-			<span class="dd-tab-icon">{objectIcon("", "chat")}</span>Chat
-		</button>
-		<button class="dd-tab" class:active={tab === "props"} role="tab" aria-selected={tab === "props"} onclick={() => (tab = "props")}>
+		{#if chat}
+			<button class="dd-tab" class:active={tab === "chat"} role="tab" aria-selected={tab === "chat"} onclick={() => (picked = "chat")}>
+				<span class="dd-tab-icon">{objectIcon("", "chat")}</span>Chat
+			</button>
+		{/if}
+		<button class="dd-tab" class:active={tab === "props"} role="tab" aria-selected={tab === "props"} onclick={() => (picked = "props")}>
 			<span class="dd-tab-icon">🧩</span>Properties
 		</button>
 	</div>

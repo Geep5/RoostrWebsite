@@ -288,8 +288,11 @@
 	const hasDiscussion = $derived(
 		!!object && (!!object.mailbox?.length || (!isChannel && !isChat && !isAgent && !isType && !isTemplate && !isRelation && !isQuery && !isCollection)),
 	);
+	/** The right pane holds properties and (when the object has one) the
+	 *  chat - so it exists wherever the property row used to. */
+	const hasPane = $derived(hasDiscussion || (!!object && !isChannel && !isChat && !isType && !isRelation));
 	$effect(() => {
-		discussionUI.available = hasDiscussion;
+		discussionUI.available = hasPane;
 		if (!object) {
 			discussionUI.count = 0;
 			return;
@@ -317,7 +320,7 @@
 	 * of covering it. Mobile is a full sheet and gives the column back.
 	 */
 	$effect(() => {
-		const affixed = discussionUI.open && hasDiscussion && !isMobileVp;
+		const affixed = discussionUI.open && hasPane && !isMobileVp;
 		document.documentElement.style.setProperty("--disc-w", affixed ? `${drawerW}px` : "0px");
 		return () => document.documentElement.style.setProperty("--disc-w", "0px");
 	});
@@ -531,7 +534,7 @@
 
 	</article>
 
-	{#if hasDiscussion && discussionUI.open}
+	{#if hasPane && discussionUI.open}
 		<!-- Delegated on the card: the header is the handle, so the child
 		     component needs no knowledge of where it sits. Double-click the
 		     header to dock it back. -->
@@ -545,6 +548,7 @@
 			<ConversationDrawer
 				{object}
 				relations={scopedRelations}
+				chat={hasDiscussion}
 				onchanged={refresh}
 			/>
 			{/key}
