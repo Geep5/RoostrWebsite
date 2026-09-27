@@ -495,7 +495,7 @@
 		font-size: 12.5px;
 	}
 
-	/* Popover - same shell as FeaturedProps' .pop */
+	/* Popover - same shell as PropertiesPane's .pop */
 	.pop {
 		position: absolute;
 		top: calc(100% + 6px);

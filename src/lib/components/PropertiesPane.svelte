@@ -1,7 +1,7 @@
 <script lang="ts">
 	/**
-	 * The right pane's properties section: the same properties FeaturedProps
-	 * shows as badges under the title, laid out as vertical rows - a small
+	 * The right pane's properties section: the object's properties
+	 * laid out as vertical rows - a small
 	 * icon + the property name on the left (muted), the value on the right.
 	 * Clicking a row opens the property's PropertyValue editor in a popover
 	 * anchored to the row; checkboxes toggle in place. Multi-value rows
@@ -39,7 +39,7 @@
 	const AGENT_PRIORITY = ["served_by", "agent", "model", "prompt", "responsible_types", "requires", "install", "capability"];
 	const agentRank = new Map(AGENT_PRIORITY.map((k, i) => [k, i]));
 
-	/** Same filter as FeaturedProps: featured order first, then the rest. */
+	/** Featured order first, then the rest. */
 	const shown = $derived.by(() => {
 		const MACHINE_BOUND = ["agent", "capability", "install"].includes(object.typeKey);
 		const AGENT_CONFIG = object.typeKey === "agent" ? ["prompt", "model", "responsible_types", "requires", "install", "served_by"] : [];
@@ -129,7 +129,7 @@
 		return "";
 	}
 
-	/** Compact display string, same as FeaturedProps' cells. */
+	/** Compact display string for a row. */
 	function display(rel: RelationDefJSON): string {
 		const v = object.fields[rel.key];
 		const p = plain(v, rel.format);
@@ -189,7 +189,7 @@
 		}
 	}
 
-	/** Glyph + palette for a non-option property, as FeaturedProps. */
+	/** Glyph + palette for a non-option property\. */
 	function badgeFor(rel: RelationDefJSON): { icon: BadgeIcon | null; color: string } {
 		const v = object.fields[rel.key];
 		switch (rel.format) {
@@ -232,7 +232,7 @@
 		return display(rel) !== "";
 	}
 
-	/** Empty-state copy per row, matching FeaturedProps' empty badges. */
+	/** Empty-state copy per row\. */
 	function placeholderFor(rel: RelationDefJSON): string {
 		switch (rel.key) {
 			case "served_by": return "No machine yet";
@@ -666,7 +666,7 @@
 		top: 50%;
 		transform: translateY(-50%);
 	}
-	/* Editor popover, same pattern as FeaturedProps. */
+	/* Editor popover, anchored under its row. */
 	.pop {
 		position: absolute;
 		top: calc(100% + 4px);

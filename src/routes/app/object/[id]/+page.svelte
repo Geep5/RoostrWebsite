@@ -20,6 +20,7 @@
 	import CalendarView from "$lib/components/CalendarView.svelte";
 	import GalleryView from "$lib/components/GalleryView.svelte";
 	import SpaceManage from "$lib/components/SpaceManage.svelte";
+	import ObjectMeta from "$lib/components/ObjectMeta.svelte";
 	import CapabilitySetup from "$lib/components/CapabilitySetup.svelte";
 	import TypePanel from "$lib/components/TypePanel.svelte";
 	import PropertyPanel from "$lib/components/PropertyPanel.svelte";
@@ -425,6 +426,7 @@
 				}}
 			></textarea>
 		</div>
+		<ObjectMeta {object} />
 		{#if isTemplate}
 			<p class="tpl-note">Template{templateTargetName ? ` of ${templateTargetName}` : ""} — new objects copy these blocks.</p>
 		{/if}
