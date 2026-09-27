@@ -787,11 +787,6 @@
 								? sync.detail ?? "Syncing…"
 								: "Not syncing"}
 				><span class="m-sync-dot"></span></span>
-				{#if discussionUI.available}
-					<button class="m-btn disc-chip" class:active={discussionUI.open} data-tip="Conversations" onclick={() => (discussionUI.open = !discussionUI.open)}>
-						💬{#if discussionUI.convCount > 1}<span class="disc-n">{discussionUI.convCount}</span>{:else if discussionUI.count > 0}<span class="disc-n">{discussionUI.count}</span>{/if}
-					</button>
-				{/if}
 				<div class="more-wrap">
 					<button class="m-btn" data-tip="More" onclick={() => { showMore = !showMore; showCollections = false; }}>⋯</button>
 					{#if showMore}
@@ -1321,11 +1316,6 @@
 			</button>
 			<div class="header-side right">
 				<a class="hbtn" data-tip="Graph" href={objectId ? `/app/graph?focus=${objectId}` : "/app/graph"}><GraphIcon size={16} /></a>
-				{#if discussionUI.available}
-					<button class="hbtn disc-chip" class:active={discussionUI.open} data-tip="Discussion" onclick={() => (discussionUI.open = !discussionUI.open)}>
-						💬{#if discussionUI.convCount > 1}<span class="disc-n">{discussionUI.convCount}</span>{:else if discussionUI.count > 0}<span class="disc-n">{discussionUI.count}</span>{/if}
-					</button>
-				{/if}
 				{#if objectRelation}
 					<div class="more-wrap">
 						<button class="hbtn" data-tip="More" onclick={() => { showMore = !showMore; showCollections = false; }}>⋯</button>
@@ -2992,20 +2982,5 @@
 		object-fit: cover;
 		border-radius: 50%;
 		display: block;
-	}
-	.disc-chip {
-		display: inline-flex;
-		align-items: center;
-		gap: 4px;
-	}
-	.disc-chip.active {
-		color: var(--accent);
-	}
-	.disc-n {
-		font-size: 11px;
-		color: var(--muted);
-	}
-	.disc-chip.active .disc-n {
-		color: var(--accent);
 	}
 </style>

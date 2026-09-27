@@ -66,7 +66,7 @@
 			<span class="dd-tab-icon">🧩</span>Properties
 		</button>
 	</div>
-	<button class="dd-close" data-tip="Close" onclick={() => (discussionUI.open = false)}>»</button>
+	<button class="dd-close" data-tip="Collapse" onclick={() => (discussionUI.open = false)}>»</button>
 </header>
 
 {#if refreshError}
@@ -141,7 +141,6 @@
 		height: 26px;
 		cursor: pointer;
 		flex: none;
-		margin-left: auto;
 	}
 	.dd-close:hover {
 		color: var(--fg);

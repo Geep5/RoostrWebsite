@@ -553,6 +553,9 @@
 			/>
 			{/key}
 		</aside>
+	{:else if hasPane}
+		<!-- Collapsed: a slim edge rail reopens the pane. -->
+		<button class="disc-rail" data-tip="Open pane" onclick={() => (discussionUI.open = true)}>«</button>
 	{/if}
 {:else if loadError}
 	<p class="muted">Cannot open this object: {loadError}</p>
@@ -763,6 +766,26 @@
 		border: none;
 		border-radius: 16px 0 0 0;
 		overflow: hidden;
+	}
+	/* Collapsed: a slim handle on the right edge reopens the pane. */
+	.disc-rail {
+		position: fixed;
+		right: 0;
+		top: 40%;
+		z-index: 150;
+		width: 22px;
+		height: 64px;
+		background: var(--bg);
+		border: 1px solid var(--border);
+		border-right: none;
+		border-radius: 8px 0 0 8px;
+		color: var(--muted);
+		font-size: 13px;
+		cursor: pointer;
+	}
+	.disc-rail:hover {
+		color: var(--fg);
+		border-color: var(--muted);
 	}
 	/* While a resize drag is in flight, nothing anywhere is selectable: the
 	   pointer travels over the document and would otherwise paint a
