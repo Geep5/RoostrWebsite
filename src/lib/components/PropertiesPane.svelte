@@ -16,6 +16,7 @@
 	import { resolveServing, servingCopy, type MachineRow, type Serving } from "$lib/serving";
 	import PropertyValue from "./PropertyValue.svelte";
 	import PropertySuggest from "./PropertySuggest.svelte";
+	import Repeat from "./Repeat.svelte";
 	import CheckboxIcon from "./CheckboxIcon.svelte";
 	import { objectIcon } from "$lib/icons";
 	import { badgeStyle, statusIcon, tagStyle, type BadgeIcon } from "$lib/options";
@@ -257,8 +258,17 @@
 		// Open the new row's editor so the value can be set straight away.
 		editing = rel.key;
 	}
+
+	/** Repeat is a property of the object too: it rows first, only for the
+	    plain objects that can recur. */
+	const canRepeat = $derived(!["channel", "chat", "type", "relation", "template", "query", "set", "collection", "agent"].includes(object.typeKey));
 </script>
 
+{#if canRepeat}
+	<div class="repeat-row">
+		<Repeat {object} {onchanged} />
+	</div>
+{/if}
 {#if shown.length > 0}
 	<div class="props">
 		{#each shown as rel (rel.key)}
