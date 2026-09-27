@@ -1578,8 +1578,8 @@
 		min-height: 0;
 		transition: grid-template-columns 0.16s ease;
 	}
-	/* Anytype pageVault: a rounded solid card, no border — panes separate
-	   by background, not lines. */
+	/* Dark like the nav and the phone's spaces list: the outlined space
+	   tiles mark the column, not a lighter pane. */
 	.vault {
 		position: relative;
 		display: flex;
@@ -1588,8 +1588,7 @@
 		gap: 8px;
 		padding: 12px 0;
 		margin: 6px 0 6px 6px;
-		background: var(--panel);
-		border-radius: 16px;
+		background: var(--bg);
 	}
 	.vault.wide {
 		align-items: stretch;
@@ -1684,24 +1683,36 @@
 		font-weight: 500;
 		text-align: left;
 	}
+	/* Widened rail: each space is an outlined grey card, like the phone's
+	   spaces list. */
 	.vault.wide .space {
 		width: 100%;
 		height: 42px;
 		padding: 3px 5px;
-		border-radius: 12px;
+		border-radius: 10px;
+		background: var(--panel);
+		border: 1px solid var(--border);
 	}
 	.vault.wide .space:hover,
 	.vault.wide .space.active {
 		background: var(--hover);
 	}
+	.vault.wide .space.add,
+	.vault.wide .space.settings {
+		background: none;
+		border-color: transparent;
+	}
 	.vault.wide .space.active {
 		box-shadow: none;
+		border-color: var(--accent);
 	}
 	.vault.wide .space-ico {
 		width: 32px;
 		height: 32px;
-		border-radius: 9px;
+		border-radius: 8px;
 		font-size: 14px;
+		border: none;
+		background: var(--hover);
 	}
 	.vault.wide .space-ico.round {
 		border-radius: 50%;
