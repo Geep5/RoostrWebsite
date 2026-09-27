@@ -7,6 +7,7 @@
 	import { goto } from "$app/navigation";
 	import { chat, mailbox, settings } from "$lib/api";
 	import { store } from "$lib/data.svelte";
+	import { objectIcon } from "$lib/icons";
 	import EmojiPicker from "./EmojiPicker.svelte";
 	import { renderMarkdown } from "$lib/markdown";
 	import { onMount } from "svelte";
@@ -331,8 +332,8 @@
 	function mentionPills(html: string): string {
 		if (!mentionPattern) return html;
 		return html.replace(mentionPattern, (_, name: string) => {
-			const icon = mentionIcons.get(name) ?? "";
-			const glyph = !icon ? "" : /^https?:\/\//.test(icon) ? `<img class="mention-ico" src="${escapeHtml(icon).replace(/"/g, "&quot;")}" alt="">` : `<span class="mention-ico">${escapeHtml(icon)}</span>`;
+			const icon = mentionIcons.get(name) || objectIcon("", "agent");
+			const glyph = /^https?:\/\//.test(icon) ? `<img class="mention-ico" src="${escapeHtml(icon).replace(/"/g, "&quot;")}" alt="">` : `<span class="mention-ico">${escapeHtml(icon)}</span>`;
 			return `<span class="mention">${glyph}@${name}</span>`;
 		});
 	}

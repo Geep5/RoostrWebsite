@@ -12,7 +12,8 @@ export const TYPE_GLYPHS: Record<string, string> = {
 	set: "🔍",
 	collection: "🗂️",
 	peer: "◉",
-	agent: "◈",
+	// An agent with no emoji of its own shows the robot, like the Agent type.
+	agent: "🤖",
 	channel: "◍",
 	chat: "💬",
 };

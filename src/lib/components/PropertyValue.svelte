@@ -187,7 +187,7 @@
 		{#each objectIds as id (id)}
 			{@const s = store.summaries.find((x) => x.id === id)}
 			<!-- Agents first, whichever list holds them: the chip shows the same
-			     avatar as the property row (icon, else 🤖), never the ◈ type glyph. -->
+			     avatar as the property row (icon, else the 🤖 default). -->
 			{@const agent = store.agents.find((a) => a.id === id)}
 			<span class="obj-chip">
 				<a href="/app/object/{id}">{#if agent || s?.typeKey === "agent"}{agent?.icon || s?.icon || "🤖"}{:else if s && layoutOf(s.typeKey) === "task"}<span class="li-check" class:on={s.done === true}><CheckboxIcon checked={s.done === true} size={14} /></span>{:else}{objectIcon(s?.icon, s?.typeKey ?? "note")}{/if} {nameOf(id)}</a>
