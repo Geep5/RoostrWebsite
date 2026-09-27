@@ -358,16 +358,19 @@
 		sending = true;
 		sendError = "";
 		try {
-			if (isExchange) {
-				if (!replyMessage) throw new Error("Reload this exchange before replying.");
+			// A message addressing an agent is an envelope, never a bare chat
+			// line: the agent answers only what is addressed to it. On a plain
+			// discussion this starts the exchange; inside one it replies.
+			if (isExchange || mentions.length > 0) {
+				if (isExchange && !replyMessage) throw new Error("Reload this exchange before replying.");
 				const title = privateRecipient ? `Private: ${exchangeTitle}` : exchangeTitle;
-				const parentId = reply || replyMessage.id;
+				const parentId = reply || replyMessage?.id || "";
 				const recipients = uniqueEndpoints([...audience, ...mentions.map((option) => option.endpoint)]);
 				if (!pendingSend || pendingSend.text !== text || pendingSend.replyTo !== parentId || pendingSend.title !== title
 					|| pendingSend.requestReply !== requestReply || JSON.stringify(pendingSend.recipients) !== JSON.stringify(recipients)) {
 					pendingSend = {
 						id: crypto.randomUUID(),
-						exchangeId: privateRecipient ? crypto.randomUUID() : replyMessage.exchangeId,
+						exchangeId: privateRecipient || !replyMessage ? crypto.randomUUID() : replyMessage.exchangeId,
 						sender: { objectId: object.id, agentId: "" }, recipients,
 						text, replyTo: parentId, sentAt: Date.now(), title,
 						requestReply, historical: false, operation: "", author: "",
