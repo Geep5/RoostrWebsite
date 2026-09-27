@@ -382,23 +382,16 @@
 		sending = true;
 		sendError = "";
 		try {
-			// A message addressing an agent is an envelope, never a bare chat
-			// line: the agent answers only what is addressed to it. On a plain
-			// discussion this starts the exchange; inside one it replies.
-			if (isExchange || mentions.length > 0) {
-				if (isExchange && !replyMessage) throw new Error("Reload this exchange before replying.");
+			// The object's one chat is __discussion__: a line that @-mentions a
+			// guest agent is the harness's wake signal, and the agent replies in
+			// the same thread - no envelope. Envelopes are for an opened exchange
+			// thread (reply-to-all), where they carry the audience.
+			if (isExchange) {
+				if (!replyMessage) throw new Error("Reload this exchange before replying.");
 				const title = privateRecipient ? `Private: ${exchangeTitle}` : exchangeTitle;
-				// In the one chat, a tagged line goes to exactly the tagged agents
-				// and replies only when the human picked a message to reply to.
-				const parentId = isExchange ? reply || replyMessage?.id || "" : reply;
-				const recipients = uniqueEndpoints(isExchange ? [...audience, ...mentions.map((option) => option.endpoint)] : mentions.map((option) => option.endpoint));
-				// One chat per object: reuse the exchange already going with the
-				// tagged agent(s) on this object; only mint one when there is none.
-				// A fresh UUID per send splintered every message into its own thread.
-				const agentIds = new Set(mentions.map((option) => option.endpoint.agentId));
-				const existing = (isExchange ? replyMessage?.exchangeId : undefined)
-					|| (object.conversations ?? []).find((c) => c.kind === "a2a" && mentions.length > 0 && [...agentIds].every((id) => c.participants.includes(id)))?.id;
-				const exchangeId = privateRecipient || !existing ? crypto.randomUUID() : existing.replace(/^__thread__/, "");
+				const parentId = reply || replyMessage.id;
+				const recipients = uniqueEndpoints([...audience, ...mentions.map((option) => option.endpoint)]);
+				const exchangeId = privateRecipient ? crypto.randomUUID() : replyMessage.exchangeId;
 				if (!pendingSend || pendingSend.text !== text || pendingSend.replyTo !== parentId || pendingSend.title !== title
 					|| pendingSend.requestReply !== requestReply || JSON.stringify(pendingSend.recipients) !== JSON.stringify(recipients)) {
 					pendingSend = {
@@ -506,10 +499,11 @@
 			{#each messages as m (m.id)}
 				<div class="msg" class:own={m.author === me} id="msg-{m.id}">
 					{#if m.author !== me}
+						{@const agentHref = store.agents.some((a) => a.id === m.author) ? `/app/object/${m.author}` : undefined}
 						{#if avatarEmoji(m.author)}
-							<span class="avatar emoji">{avatarEmoji(m.author)}</span>
+							<svelte:element this={agentHref ? "a" : "span"} class="avatar emoji" href={agentHref} title={agentHref ? `Open ${who(m.author)}` : undefined}>{avatarEmoji(m.author)}</svelte:element>
 						{:else}
-							<span class="avatar" style="background: hsl({hue(m.author)}, 45%, 35%)">{m.author.slice(0, 2)}</span>
+							<svelte:element this={agentHref ? "a" : "span"} class="avatar" href={agentHref} title={agentHref ? `Open ${who(m.author)}` : undefined} style="background: hsl({hue(m.author)}, 45%, 35%)">{m.author.slice(0, 2)}</svelte:element>
 						{/if}
 					{/if}
 					<div class="body">
@@ -522,7 +516,11 @@
 						{/if}
 						<div class="meta-row">
 							{#if m.author !== me}
-								<span class="author">{who(m.author)}</span>
+								{#if store.agents.some((a) => a.id === m.author)}
+									<a class="author agent-link" href="/app/object/{m.author}">{who(m.author)}</a>
+								{:else}
+									<span class="author">{who(m.author)}</span>
+								{/if}
 							{/if}
 							{#if m.origin}
 								<a class="origin" href="/app/object/{m.origin}" title="Asked from this object">↳ {originName(m.origin)}</a>
@@ -875,6 +873,13 @@
 		font-family: ui-monospace, monospace;
 		color: #fff;
 	}
+	a.avatar {
+		text-decoration: none;
+		cursor: pointer;
+	}
+	a.avatar:hover {
+		box-shadow: 0 0 0 2px var(--accent);
+	}
 	.body {
 		min-width: 0;
 		max-width: 78%;
@@ -893,6 +898,13 @@
 	.author {
 		font-size: 12px;
 		font-weight: 600;
+	}
+	.author.agent-link {
+		color: var(--fg);
+		text-decoration: none;
+	}
+	.author.agent-link:hover {
+		text-decoration: underline;
 	}
 	.time {
 		font-size: 11px;
