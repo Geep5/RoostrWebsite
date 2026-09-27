@@ -36,7 +36,11 @@
 	const checked = $derived(value?.boolValue === true);
 	const items = $derived((value?.valuesValue?.items ?? []).map((i) => i.stringValue ?? "").filter(Boolean));
 	/** Object-format values are link lists (relation-stamped); legacy rows may be plain strings. */
-	const objectIds = $derived((value?.valuesValue?.items ?? []).map((i) => i.linkValue?.targetId ?? i.stringValue ?? "").filter(Boolean));
+	const objectIds = $derived(
+		value?.linkValue?.targetId
+			? [value.linkValue.targetId]
+			: (value?.valuesValue?.items ?? []).map((i) => i.linkValue?.targetId ?? i.stringValue ?? "").filter(Boolean),
+	);
 
 	const sv = (s: string): ValueJSON => ({ stringValue: s });
 	const list = (xs: string[]): ValueJSON => ({ valuesValue: { items: xs.map(sv) } });
@@ -114,6 +118,8 @@
 			: store.summaries.filter((s) => !objectIds.includes(s.id) && !HIDDEN_TYPES[s.typeKey]);
 		if (rel.objectSource) pool = sourceIds ? pool.filter((s) => sourceIds!.has(s.id)) : [];
 		else if (!wantsAgents && allowedTypeKeys.size > 0) pool = pool.filter((s) => allowedTypeKeys.has(s.typeKey));
+		// A system prompt belongs to one space; an agent picks from its own.
+		if (spaceId && allowedTypeKeys.has("system_prompt")) pool = pool.filter((s) => "channelId" in s && s.channelId === spaceId);
 		return pool
 			.filter((s) => !q || (s.name ?? "").toLowerCase().includes(q))
 			.slice(0, 8);
@@ -122,7 +128,8 @@
 		return store.summaries.find((s) => s.id === id)?.name || store.agents.find((a) => a.id === id)?.name || id.slice(0, 8);
 	}
 	async function toggleObject(id: string) {
-		const next = objectIds.includes(id) ? objectIds.filter((x) => x !== id) : [...objectIds, id];
+		// A single-value relation (System prompt, Served by) swaps its link; a list adds.
+		const next = objectIds.includes(id) ? objectIds.filter((x) => x !== id) : rel.maxCount === 1 ? [id] : [...objectIds, id];
 		objectQuery = "";
 		await onsave({ valuesValue: { items: next.map((target) => ({ linkValue: { targetId: target, relationKey: rel.key } })) } });
 	}

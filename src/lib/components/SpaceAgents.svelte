@@ -101,7 +101,8 @@
 				id: r.id,
 				name: r.fields["name"]?.stringValue || "Agent",
 				icon: r.fields["iconEmoji"]?.stringValue ?? "",
-				model: r.fields["model"]?.stringValue ?? "",
+				// A select stores a one-item list; older rows hold plain text.
+				model: r.fields["model"]?.stringValue ?? r.fields["model"]?.valuesValue?.items?.[0]?.stringValue ?? "",
 				types: (r.fields["responsible_types"]?.valuesValue?.items ?? []).map((i) => i.stringValue ?? "").filter(Boolean),
 				system: r.fields["system"]?.stringValue ?? "",
 				role: r.fields["role"]?.stringValue ?? "",
@@ -253,7 +254,7 @@
 			const framed = [
 				`Target agent: ${a.name} (id ${a.id})`,
 				`Model: ${a.model || "(default)"}`,
-				`Current prompt:\n${a.system || "(empty — using the harness default)"}`,
+				`Current prompt override:\n${a.system || "(empty — using the agent's linked System prompt object)"}`,
 				`Instruction: ${instruction}`,
 			].join("\n\n");
 			await chat.post(chatId, framed);
@@ -629,7 +630,7 @@
 				</label>
 				<textarea
 					rows="8"
-					placeholder="Empty — the agent uses the built-in default prompt."
+					placeholder="Empty — the agent uses its linked System prompt object (open it from the agent's properties). Text here overrides it for this agent only."
 					value={draft}
 					oninput={(e) => (promptDraft[a.id] = (e.currentTarget as HTMLTextAreaElement).value)}
 				></textarea>
