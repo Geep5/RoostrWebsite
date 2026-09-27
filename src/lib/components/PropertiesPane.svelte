@@ -225,6 +225,8 @@
 			case "install": return { emoji: "🔌" };
 			case "agent": return { emoji: "🤖" };
 			case "requires": return { emoji: "🧩" };
+			case "prompt": return { emoji: "📜" };
+			case "model": return { emoji: "🧬" };
 		}
 		if (rel.format === "status") {
 			const d = display(rel);

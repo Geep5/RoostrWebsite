@@ -295,7 +295,8 @@
 		discussionUI.open = false;
 	});
 	const hasDiscussion = $derived(
-		!!object && (!!object.mailbox?.length || (!isChat && !isAgent && !isType && !isTemplate && !isRelation && !isQuery && !isCollection)),
+		// An agent's page is its own transcript: the harness serving it answers here.
+		!!object && (!!object.mailbox?.length || (!isChat && !isType && !isTemplate && !isRelation && !isQuery && !isCollection)),
 	);
 	/** The right pane holds properties and (when the object has one) the
 	 *  chat - so it exists wherever the property row used to. */
