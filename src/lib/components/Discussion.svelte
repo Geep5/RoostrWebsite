@@ -146,6 +146,9 @@
 	function updateMention() {
 		const el = composerEl;
 		if (!el) return;
+		// A tag deleted from the text untags immediately, so the menu offers
+		// that agent again (the seeded @Name must not pin it out of the list).
+		tagged = tagged.filter((option) => draft.includes(`@${option.agentName}`));
 		const caret = el.selectionStart ?? 0;
 		const hit = /(?:^|\s)@([^@\n]*)$/.exec(draft.slice(0, caret));
 		if (!hit) {
