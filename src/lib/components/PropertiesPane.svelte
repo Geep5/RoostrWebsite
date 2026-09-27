@@ -40,20 +40,28 @@
 	const AGENT_PRIORITY = ["served_by", "repo_path", "agent", "model", "prompt", "responsible_types", "requires", "install", "capability"];
 	const agentRank = new Map(AGENT_PRIORITY.map((k, i) => [k, i]));
 
+	/** A template edits the properties of the type it stamps out, so an
+	    Agent template offers Served by, System prompt, Model… as defaults. */
+	const typeKey = $derived.by(() => {
+		if (object.typeKey !== "template") return object.typeKey;
+		const target = object.fields["target_type"]?.stringValue ?? "";
+		return store.types.find((t) => t.id === target)?.key ?? object.typeKey;
+	});
+
 	/** Featured order first, then the rest. */
 	const shown = $derived.by(() => {
-		const MACHINE_BOUND = ["agent", "capability", "install"].includes(object.typeKey);
-		const AGENT_CONFIG = object.typeKey === "agent" ? ["prompt", "model", "responsible_types", "requires", "install", "served_by", "repo_path"] : [];
+		const MACHINE_BOUND = ["agent", "capability", "install"].includes(typeKey);
+		const AGENT_CONFIG = typeKey === "agent" ? ["prompt", "model", "responsible_types", "requires", "install", "served_by", "repo_path"] : [];
 		const present = relations.filter((r) => {
 			if (RESERVED_KEYS[r.key]) return false;
 			if (AGENT_CONFIG.includes(r.key)) return true;
 			// The error badge is how the harness surfaces a problem on a
 			// machine-bound object (no server, a holdup, a failed run); show it
 			// there even before one is written, so its absence reads as "ok".
-			if (r.key === "error") return MACHINE_BOUND || r.key in object.fields;
+			if (r.key === "error") return (MACHINE_BOUND && object.typeKey !== "template") || r.key in object.fields;
 			if (r.key === "served_by") return MACHINE_BOUND || r.key in object.fields;
-			if (["agent", "requires", "install"].includes(r.key)) return !AGENTLESS_TYPES[object.typeKey] || r.key in object.fields;
-			if (["model", "responsible_types"].includes(r.key)) return object.typeKey === "agent" || r.key in object.fields;
+			if (["agent", "requires", "install"].includes(r.key)) return !AGENTLESS_TYPES[typeKey] || r.key in object.fields;
+			if (["model", "responsible_types"].includes(r.key)) return typeKey === "agent" || r.key in object.fields;
 			return !r.hidden && r.key in object.fields;
 		});
 		const rank = new Map(featuredKeys.map((k, i) => [k, i]));

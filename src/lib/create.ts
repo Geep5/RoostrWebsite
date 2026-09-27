@@ -34,11 +34,12 @@ export function typeGlyph(typeKey: string): string {
 }
 
 /**
- * Copy a template's content blocks into a fresh object (Anytype: ObjectCreate
- * with type.defaultTemplateId). Ids are remapped; the discussion subtree and
- * template-identity fields stay behind. The one property that DOES cross is
- * `agent`: a template declares who answers what it spawns, normalized to the
- * link-list shape regardless of how the template stored it.
+ * Copy a template into a fresh object (Anytype: ObjectCreate with
+ * type.defaultTemplateId): its content blocks with ids remapped, and its
+ * properties as the new object's defaults - an Agent template's Served by,
+ * System prompt, Model, Requires… The discussion subtree and the fields that
+ * describe the template itself (TEMPLATE_OWN) stay behind; the guest list
+ * is normalized to the link-list shape however the template stored it.
  */
 export async function applyTemplate(objectId: string, templateId: string): Promise<void> {
 	const tpl = await fetchObject(templateId);
@@ -62,10 +63,14 @@ export async function applyTemplate(objectId: string, templateId: string): Promi
 			content: b.content,
 		});
 	}
-	const agents = guestAgents(tpl.fields);
-	if (agents.length > 0) await note.setField(objectId, "agent", agentLinksValue(agents));
+	for (const [key, value] of Object.entries(tpl.fields)) {
+		if (TEMPLATE_OWN.has(key)) continue;
+		await note.setField(objectId, key, key === "agent" ? agentLinksValue(guestAgents(tpl.fields)) : value);
+	}
 }
 
+/** A template's own identity and bookkeeping, never a default for what it creates. */
+const TEMPLATE_OWN = new Set(["name", "target_type", "channel", "error", "createdDate", "modifiedDate", "type_key", "repeat"]);
 
 /**
  * A computer object is a machine's self-publication: it exists because a
@@ -87,30 +92,41 @@ async function createMachine(): Promise<string> {
 	return "";
 }
 /**
- * A new agent is a blank object, configured the same way as any other:
- * you set its Computer, System prompt, Model, Requires and Credentials in
- * the property row. It starts linked to its space's "Assistant" system
- * prompt when one exists, so the prompt it runs on is always visible (the
- * harness links it on first serve otherwise, creating that object if the
- * space has none). It runs nowhere until its Served by names a computer;
- * until then the engine shows that on its Error property.
+ * A new agent is an object configured the same way as any other: its
+ * Computer, System prompt, Model, Requires and Credentials are properties.
+ * The Agent type's default template supplies them as defaults (a template
+ * with a Served by gives every agent it creates that computer). Without a
+ * template prompt it links its space's "Assistant" system prompt when one
+ * exists, so the prompt it runs on is always visible. It runs nowhere until
+ * its Served by names a computer; until then the engine shows that on its
+ * Error property.
  */
 async function createAgent(channelId: string): Promise<string> {
-	const assistant = (await fetchAllQuery({ type: "system_prompt", filters: [{ key: "channel", condition: "equal", value: channelId }] }))
-		.find((r) => r.fields["name"]?.stringValue === "Assistant");
+	const tplId = defaultTemplateOf("agent", channelId);
+	const tpl = tplId ? await fetchObject(tplId).catch(() => null) : null;
+	const assistant = tpl?.fields["prompt"]
+		? undefined
+		: (await fetchAllQuery({ type: "system_prompt", filters: [{ key: "channel", condition: "equal", value: channelId }] }))
+			.find((r) => r.fields["name"]?.stringValue === "Assistant");
 	const { id: agentId } = await note.create("New agent", "agent", {
 		...channelField(channelId),
 		...(assistant ? { prompt: { linkValue: { targetId: assistant.id, relationKey: "prompt" } } } : {}),
 	});
+	if (tpl) await applyTemplate(agentId, tpl.id);
 	await goto(`/app/object/${agentId}`);
 	return agentId;
+}
+/** The type's default template in this space: every space carries its own copy of a bundled type. */
+function defaultTemplateOf(key: string, channelId: string): string {
+	const types = store.types.filter((t) => t.key === key);
+	return (types.find((t) => t.space === channelId) ?? types[0])?.defaultTemplateId ?? "";
 }
 export async function createTyped(typeKey: string, channelId: string, name = ""): Promise<string> {
 	const key = typeKey.trim().toLowerCase();
 	if (key === "agent") return createAgent(channelId);
 	if (key === "machine") return createMachine();
 	const { id } = await note.create(name, key, channelField(channelId));
-	const tplId = store.types.find((t) => t.key === key)?.defaultTemplateId;
+	const tplId = defaultTemplateOf(key, channelId);
 	if (tplId) await applyTemplate(id, tplId).catch(() => {}); // a deleted default template is a no-op
 	await goto(`/app/object/${id}`);
 	return id;
