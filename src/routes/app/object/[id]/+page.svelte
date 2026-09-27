@@ -290,7 +290,8 @@
 	);
 	/** The right pane holds properties and (when the object has one) the
 	 *  chat - so it exists wherever the property row used to. */
-	const hasPane = $derived(hasDiscussion || (!!object && !isChannel && !isChat && !isType && !isRelation));
+	// A space's page is its settings: its conversation is Space chat (/app/chat), and it has no properties to edit.
+	const hasPane = $derived(!isChannel && (hasDiscussion || (!!object && !isChat && !isType && !isRelation)));
 	$effect(() => {
 		discussionUI.available = hasPane;
 		if (!object) {
