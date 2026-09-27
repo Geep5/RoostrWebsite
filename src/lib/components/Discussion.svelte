@@ -316,6 +316,19 @@
 		return endpointName(endpoint);
 	}
 
+	/** Discord-style mention pills: `@Agent Name` for any known agent becomes a
+	 *  tinted chip. Longest names first so "@Bed Test" wins over a "@Bed" agent.
+	 *  Runs on rendered HTML; agent names never appear inside our tags. */
+	const mentionPattern = $derived.by(() => {
+		const names = [...new Set(store.agents.map((a) => a.name).filter(Boolean))].sort((a, b) => b.length - a.length);
+		if (names.length === 0) return null;
+		const escaped = names.map((n) => n.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"));
+		return new RegExp(`@(${escaped.join("|")})(?![\\w])`, "g");
+	});
+	function mentionPills(html: string): string {
+		return mentionPattern ? html.replace(mentionPattern, '<span class="mention">@$1</span>') : html;
+	}
+
 	function startReply(messageId: string, privately = false) {
 		replyTo = messageId;
 		const target = messageById.get(messageId)?.mailbox?.message;
@@ -510,34 +523,34 @@
 							{/if}
 							<span class="time">{when(m.ts)}</span>
 						</div>
-						<div class="text md">{@html renderMarkdown(m.text)}</div>
+						<div class="text md">{@html mentionPills(renderMarkdown(m.text))}</div>
 						{#if m.mailbox}
 							{@const entry = m.mailbox}
-							<div class="receipts">
-								<span>To {entry.message.recipients.map(memberName).join(", ")}</span>
-								{#if entry.outgoing}
-									{#each entry.deliveries as delivery (delivery.recipient.objectId)}
-										<div class="receipt" class:failed={delivery.status === "failed"}>
-											<span>{memberName(delivery.recipient)} · {delivery.status}{delivery.status === "delivered" ? " to inbox" : ""}</span>
-											{#if delivery.error}<span>{delivery.error}</span>{/if}
-											{#if delivery.status === "failed"}
-												<button disabled={retrying.includes(`${m.id}:delivery:${delivery.recipient.objectId}`)} onclick={() => void retry(m.id, "delivery", delivery.recipient.objectId)}>Retry delivery</button>
-											{/if}
-										</div>
-									{/each}
-								{/if}
-								{#if entry.incoming && (entry.message.operation || entry.message.recipients.some((recipient) => recipient.objectId === object.id && recipient.agentId))}
-									<div class="receipt" class:failed={entry.processing.status === "failed"}>
-										<span>Local processing · {entry.processing.status.replaceAll("_", " ")}</span>
-										{#if entry.processing.error}<span>{entry.processing.error}</span>{/if}
-										{#if entry.processing.status === "failed"}
-											<button disabled={retrying.includes(`${m.id}:processing:`)} onclick={() => void retry(m.id, "processing")}>Retry processing</button>
-										{:else if entry.processing.status === "awaiting_approval"}
-											<span>Approve on the installation's owning machine.</span>
-										{/if}
-									</div>
-								{/if}
-							</div>
+							{@const failedDelivery = entry.outgoing ? entry.deliveries.find((d) => d.status === "failed") : undefined}
+							{@const pendingDelivery = entry.outgoing && entry.deliveries.some((d) => d.status === "pending")}
+							{@const localWork = entry.incoming && (!!entry.message.operation || entry.message.recipients.some((r) => r.objectId === object.id && r.agentId))}
+							{@const waitingFor = entry.message.recipients.filter((r) => r.agentId).map((r) => store.agents.find((a) => a.id === r.agentId)?.name || "the agent").join(", ")}
+							<!-- Quiet when all is well (delivered + processed); one line only
+							     while in flight or when something needs a hand. -->
+							{#if failedDelivery}
+								<div class="status failed">
+									<span>Not delivered to {memberName(failedDelivery.recipient)}{failedDelivery.error ? ` · ${failedDelivery.error}` : ""}</span>
+									<button disabled={retrying.includes(`${m.id}:delivery:${failedDelivery.recipient.objectId}`)} onclick={() => void retry(m.id, "delivery", failedDelivery.recipient.objectId)}>Retry</button>
+								</div>
+							{:else if localWork && entry.processing.status === "failed"}
+								<div class="status failed">
+									<span>Failed{entry.processing.error ? ` · ${entry.processing.error}` : ""}</span>
+									<button disabled={retrying.includes(`${m.id}:processing:`)} onclick={() => void retry(m.id, "processing")}>Retry</button>
+								</div>
+							{:else if localWork && entry.processing.status === "held"}
+								<div class="status failed"><span>On hold{entry.processing.error ? ` · ${entry.processing.error}` : ""}</span></div>
+							{:else if localWork && entry.processing.status === "awaiting_approval"}
+								<div class="status"><span>Waiting for approval on the installation's machine</span></div>
+							{:else if pendingDelivery}
+								<div class="status"><span>Sending…</span></div>
+							{:else if localWork && (entry.processing.status === "pending" || entry.processing.status === "processing")}
+								<div class="status"><span>Waiting for {waitingFor}…</span></div>
+							{/if}
 						{/if}
 						{#if m.reactions.length > 0 || pickerFor === m.id}
 							<div class="reactions">
@@ -1235,7 +1248,7 @@
 	.pagemode .composer {
 		flex: none;
 	}
-	.members, .audience, .receipts {
+	.members, .audience, .status {
 		font-size: 11px;
 		color: var(--muted);
 		line-height: 1.5;
@@ -1243,10 +1256,9 @@
 	}
 	.members { display: flex; flex-wrap: wrap; gap: 5px 8px; padding: 8px 0; }
 	.members a { color: var(--fg); text-decoration: none; }
-	.receipts { display: flex; flex-direction: column; gap: 3px; padding: 3px 2px; }
-	.receipt { display: flex; flex-wrap: wrap; align-items: baseline; gap: 3px 6px; }
-	.receipt.failed { color: var(--orange, #ff9f0a); }
-	.receipt button {
+	.status { display: flex; flex-wrap: wrap; align-items: baseline; gap: 3px 6px; padding: 2px 2px 0; }
+	.status.failed { color: var(--orange, #ff9f0a); }
+	.status button {
 		background: none;
 		border: 1px solid var(--border);
 		border-radius: 5px;
@@ -1255,7 +1267,20 @@
 		font: inherit;
 		padding: 1px 5px;
 	}
-	.receipt button:disabled { opacity: 0.5; }
+	.status button:disabled { opacity: 0.5; }
+	/* Discord-style mention: tinted pill, lighter text, slight weight. */
+	.text :global(.mention) {
+		background: rgba(88, 101, 242, 0.3);
+		color: #c9cdfb;
+		border-radius: 3px;
+		padding: 0 2px;
+		font-weight: 500;
+	}
+	/* On the solid accent bubble the blurple tint vanishes: a white wash instead. */
+	.msg.own .text :global(.mention) {
+		background: rgba(255, 255, 255, 0.22);
+		color: #fff;
+	}
 	.audience { margin-top: 10px; display: flex; flex-direction: column; gap: 5px; }
 	.audience label { display: flex; align-items: center; gap: 7px; }
 	.audience select {
