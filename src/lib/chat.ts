@@ -205,3 +205,43 @@ export function lastChatMessage(
 		last: newest?.ts ?? 0,
 	};
 }
+
+/**
+ * The object's ONE chat: the human discussion plus every agent exchange,
+ * merged into a single time-ordered timeline. Who a message involved rides
+ * on the envelope (recipients), so a reply is "from" the agent and a tag is
+ * visible on the message that carried it - the thread it sits in is an
+ * implementation detail, not a separate view.
+ */
+export function objectChatMessages(object: ObjectJSON): ChatMessage[] {
+	const byId = new Map(object.blocks.map((block) => [block.id, block]));
+	const out = new Map<string, ChatMessage>();
+	// Envelopes (human asks, agent replies) from every thread on the object.
+	for (const entry of mailboxEntries(object)) {
+		out.set(entry.message.id, {
+			id: entry.message.id,
+			author: entry.message.author || entry.message.sender.agentId,
+			ts: entry.message.sentAt,
+			text: entry.message.text,
+			replyTo: entry.message.replyTo,
+			origin: entry.message.sender.objectId === object.id ? "" : entry.message.sender.objectId,
+			reactions: parseReactions(byId.get(entry.message.id)?.content.custom?.meta?.["reactions"] ?? ""),
+			mailbox: entry,
+		});
+	}
+	// Plain discussion chat lines (no envelope), only if not already covered.
+	for (const { id, block } of chatBlocks(object, "__discussion__")) {
+		if (out.has(id)) continue;
+		const meta = block.content.custom?.meta ?? {};
+		out.set(id, {
+			id,
+			author: meta["author"] ?? "",
+			ts: Number(meta["ts"] ?? 0),
+			text: meta["text"] ?? "",
+			replyTo: meta["replyTo"] ?? "",
+			origin: (meta["origin"] === "schedule" ? meta["origin_object"] : meta["origin"]) ?? "",
+			reactions: parseReactions(meta["reactions"] ?? ""),
+		});
+	}
+	return [...out.values()].sort((a, b) => a.ts - b.ts || (a.id < b.id ? -1 : 1));
+}

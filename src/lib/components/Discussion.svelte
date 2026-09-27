@@ -1,7 +1,7 @@
 <script lang="ts">
 	/** Human/private chat stays local; exchanges send immutable mailbox envelopes. */
 	import { guestAgents, type AgentEndpoint, type AgentMessage, type ObjectJSON } from "$lib/types";
-	import { chatMessages, isLegacyExchange, replyRecipients, uniqueEndpoints } from "$lib/chat";
+	import { chatMessages, isLegacyExchange, objectChatMessages, replyRecipients, uniqueEndpoints } from "$lib/chat";
 	import { endpointName, loadObjectAgents } from "$lib/conversations";
 	import type { ObjectAgentOption } from "$lib/threads";
 	import { goto } from "$app/navigation";
@@ -29,7 +29,7 @@
 		onexchange?: (threadId: string) => void;
 	} = $props();
 
-	const messages = $derived(chatMessages(object, threadId));
+	const messages = $derived(threadId === "__discussion__" ? objectChatMessages(object) : chatMessages(object, threadId));
 	const conversation = $derived(object.conversations?.find((c) => c.id === threadId));
 	const legacy = $derived(isLegacyExchange(object, threadId));
 	const isExchange = $derived(legacy || conversation?.kind === "a2a" || messages.some((m) => m.mailbox));
