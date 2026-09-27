@@ -21,7 +21,7 @@ type Descriptor = {
 	fields: Array<{ key: string; label: string; secret: boolean; format: string; note: string }>;
 	auths: string[];
 	check?: { command: string; expectContains: string; timeoutMs: number };
-	agent?: { system: string; model: string; requires: string[]; skills: string[]; responsibleTypes: string[] };
+	agent?: { system: string; model: string; requires: string[]; skills: string[] };
 	unknown?: string;
 };
 
@@ -77,7 +77,7 @@ test("a descriptor from a newer writer survives this host", () => {
 test("an agent card says what the kind is", () => {
 	// A kind picker copies `requires` onto the agent it mints; every list has
 	// to come back intact, or the agent lands on a machine that cannot run it.
-	const agent = { system: "You are Marco.", model: "kimi-k2-0905-preview", requires: ["matcherino-dev", "discord-bot"], skills: [], responsibleTypes: ["task"] };
+	const agent = { system: "You are Marco.", model: "kimi-k2-0905-preview", requires: ["matcherino-dev", "discord-bot"], skills: [] };
 	const wire = coreCall<string>("descriptor", {
 		action: "encode",
 		type: "descriptor",

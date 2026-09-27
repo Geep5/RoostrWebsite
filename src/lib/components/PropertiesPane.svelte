@@ -37,7 +37,7 @@
 	    machine and the project folder on it, the agent, its config, then its
 	    credentials and what it needs - the "how this object runs" block ahead
 	    of ordinary fields. */
-	const AGENT_PRIORITY = ["served_by", "repo_path", "agent", "model", "prompt", "responsible_types", "requires", "install", "capability"];
+	const AGENT_PRIORITY = ["served_by", "repo_path", "agent", "model", "prompt", "requires", "install", "capability"];
 	const agentRank = new Map(AGENT_PRIORITY.map((k, i) => [k, i]));
 
 	/** A template edits the properties of the type it stamps out, so an
@@ -51,7 +51,7 @@
 	/** Featured order first, then the rest. */
 	const shown = $derived.by(() => {
 		const MACHINE_BOUND = ["agent", "capability", "install"].includes(typeKey);
-		const AGENT_CONFIG = typeKey === "agent" ? ["prompt", "model", "responsible_types", "requires", "install", "served_by", "repo_path"] : [];
+		const AGENT_CONFIG = typeKey === "agent" ? ["prompt", "model", "requires", "install", "served_by", "repo_path"] : [];
 		const present = relations.filter((r) => {
 			if (RESERVED_KEYS[r.key]) return false;
 			if (AGENT_CONFIG.includes(r.key)) return true;
@@ -63,7 +63,7 @@
 			if (r.key === "error") return (MACHINE_BOUND && object.typeKey !== "template") || r.key in object.fields;
 			if (r.key === "served_by") return MACHINE_BOUND || r.key in object.fields;
 			if (["agent", "requires", "install"].includes(r.key)) return !AGENTLESS_TYPES[typeKey] || r.key in object.fields;
-			if (["model", "responsible_types"].includes(r.key)) return typeKey === "agent" || r.key in object.fields;
+			if (r.key === "model") return typeKey === "agent" || r.key in object.fields;
 			return !r.hidden && r.key in object.fields;
 		});
 		const rank = new Map(featuredKeys.map((k, i) => [k, i]));
@@ -293,7 +293,7 @@
 	const canRepeat = $derived(!["channel", "chat", "type", "relation", "template", "query", "set", "collection", "agent"].includes(object.typeKey));
 
 	// ── Grouped display: System / Agent / Custom, each a labeled section ──
-	const AGENT_KEYS = new Set(["served_by", "repo_path", "agent", "model", "prompt", "responsible_types", "requires", "install", "capability"]);
+	const AGENT_KEYS = new Set(["served_by", "repo_path", "agent", "model", "prompt", "requires", "install", "capability"]);
 	const SYSTEM_KEYS = new Set(["done", "due_date", "status", "tag", "description", "url", "email", "phone", "error", "created_date", "modified_date", "createdDate", "modifiedDate"]);
 	type Group = "system" | "agent" | "custom";
 	const groupOf = (key: string): Group => (AGENT_KEYS.has(key) ? "agent" : SYSTEM_KEYS.has(key) ? "system" : "custom");

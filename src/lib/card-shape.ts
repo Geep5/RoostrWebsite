@@ -30,7 +30,7 @@ export interface Card {
 	check?: { command: string; expectContains: string; timeoutMs: number };
 	install?: { prompt: string; uninstallPrompt: string; docsUrl: string };
 	/** Present only on `kind === "agent"` cards: what an agent of this kind is. */
-	agent?: { system: string; model: string; requires: string[]; skills: string[]; responsibleTypes: string[] };
+	agent?: { system: string; model: string; requires: string[]; skills: string[] };
 	version: string;
 	author: string;
 }
