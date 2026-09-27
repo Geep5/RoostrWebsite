@@ -366,11 +366,18 @@
 				const title = privateRecipient ? `Private: ${exchangeTitle}` : exchangeTitle;
 				const parentId = reply || replyMessage?.id || "";
 				const recipients = uniqueEndpoints([...audience, ...mentions.map((option) => option.endpoint)]);
+				// One chat per object: reuse the exchange already going with the
+				// tagged agent(s) on this object; only mint one when there is none.
+				// A fresh UUID per send splintered every message into its own thread.
+				const agentIds = new Set(mentions.map((option) => option.endpoint.agentId));
+				const existing = replyMessage?.exchangeId
+					|| (object.conversations ?? []).find((c) => c.kind === "a2a" && mentions.length > 0 && [...agentIds].every((id) => c.participants.includes(id)))?.id;
+				const exchangeId = privateRecipient || !existing ? crypto.randomUUID() : existing.replace(/^__thread__/, "");
 				if (!pendingSend || pendingSend.text !== text || pendingSend.replyTo !== parentId || pendingSend.title !== title
 					|| pendingSend.requestReply !== requestReply || JSON.stringify(pendingSend.recipients) !== JSON.stringify(recipients)) {
 					pendingSend = {
 						id: crypto.randomUUID(),
-						exchangeId: privateRecipient || !replyMessage ? crypto.randomUUID() : replyMessage.exchangeId,
+						exchangeId,
 						sender: { objectId: object.id, agentId: "" }, recipients,
 						text, replyTo: parentId, sentAt: Date.now(), title,
 						requestReply, historical: false, operation: "", author: "",
