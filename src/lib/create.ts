@@ -90,12 +90,19 @@ async function createMachine(): Promise<string> {
 /**
  * A new agent is a blank object, configured the same way as any other:
  * you set its Computer, System prompt, Model, Requires and Credentials in
- * the property row. Nothing is stamped at creation - it is adopted locally
- * so it answers as soon as it has a computer, but a computer-less agent is
- * an honest dead end, not a silent one.
+ * the property row. It starts linked to its space's "Assistant" system
+ * prompt when one exists, so the prompt it runs on is always visible (the
+ * harness links it on first serve otherwise, creating that object if the
+ * space has none). It is adopted locally so it answers as soon as it has a
+ * computer; a computer-less agent is an honest dead end, not a silent one.
  */
 async function createAgent(channelId: string): Promise<string> {
-	const { id: agentId } = await note.create("New agent", "agent", channelField(channelId));
+	const assistant = (await fetchAllQuery({ type: "system_prompt", filters: [{ key: "channel", condition: "equal", value: channelId }] }))
+		.find((r) => r.fields["name"]?.stringValue === "Assistant");
+	const { id: agentId } = await note.create("New agent", "agent", {
+		...channelField(channelId),
+		...(assistant ? { prompt: { linkValue: { targetId: assistant.id, relationKey: "prompt" } } } : {}),
+	});
 	await adoptLocally(agentId);
 	await goto(`/app/object/${agentId}`);
 	return agentId;
