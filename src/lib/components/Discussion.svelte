@@ -486,9 +486,7 @@
 			<p class="presence error" role="status">Cannot load your discussion identity: {identityError}</p>
 			<button onclick={() => void loadIdentity()}>Retry discussion identity</button>
 		{/if}
-		{#if !isExchange && !paired}
-			<p class="presence">Pair under This machine to see live agent status. Discussion history and comments remain available.</p>
-		{:else if !isExchange && presenceError}
+		{#if !isExchange && paired && presenceError}
 			<p class="presence error" role="status">{presenceError} Check that the paired native app and harness are running. Discussion remains available.</p>
 		{/if}
 		{#if members.length}
