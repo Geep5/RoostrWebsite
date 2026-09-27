@@ -229,19 +229,30 @@ export function objectChatMessages(object: ObjectJSON): ChatMessage[] {
 			mailbox: entry,
 		});
 	}
-	// Plain discussion chat lines (no envelope), only if not already covered.
-	for (const { id, block } of chatBlocks(object, "__discussion__")) {
-		if (out.has(id)) continue;
-		const meta = block.content.custom?.meta ?? {};
-		out.set(id, {
-			id,
-			author: meta["author"] ?? "",
-			ts: Number(meta["ts"] ?? 0),
-			text: meta["text"] ?? "",
-			replyTo: meta["replyTo"] ?? "",
-			origin: (meta["origin"] === "schedule" ? meta["origin_object"] : meta["origin"]) ?? "",
-			reactions: parseReactions(meta["reactions"] ?? ""),
-		});
+	// Plain chat lines: the human discussion (all of it) and each agent's
+	// private transcript (only what that agent wrote - its answers; the
+	// harness's framed copies of the question are authored by the asker
+	// and already shown as the envelope).
+	const sources: Array<{ root: string; authors: Set<string> | null }> = [{ root: "__discussion__", authors: null }];
+	for (const c of object.conversations ?? []) {
+		if (c.kind === "agent_private") sources.push({ root: c.id, authors: new Set(c.participants) });
+	}
+	for (const { root, authors } of sources) {
+		for (const { id, block } of chatBlocks(object, root)) {
+			if (out.has(id)) continue;
+			const meta = block.content.custom?.meta ?? {};
+			const author = meta["author"] ?? "";
+			if (authors && !authors.has(author)) continue;
+			out.set(id, {
+				id,
+				author,
+				ts: Number(meta["ts"] ?? 0),
+				text: meta["text"] ?? "",
+				replyTo: meta["replyTo"] ?? "",
+				origin: (meta["origin"] === "schedule" ? meta["origin_object"] : meta["origin"]) ?? "",
+				reactions: parseReactions(meta["reactions"] ?? ""),
+			});
+		}
 	}
 	return [...out.values()].sort((a, b) => a.ts - b.ts || (a.id < b.id ? -1 : 1));
 }
