@@ -13,7 +13,8 @@
 	let { object }: { object: ObjectJSON } = $props();
 
 	const typeDef = $derived(store.types.find((t) => t.key === object.typeKey));
-	const typeName = $derived(typeDef?.name || object.typeKey);
+	// A space's type (`channel`) is engine infrastructure with no type page; people call it a Space.
+	const typeName = $derived(typeDef?.name || (object.typeKey === "channel" ? "Space" : object.typeKey));
 
 	let backlinks = $state<Backlink[]>([]);
 	let open = $state(false);
