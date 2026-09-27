@@ -285,6 +285,15 @@
 		mq.addEventListener("change", fn);
 		return () => mq.removeEventListener("change", fn);
 	});
+	// On a phone the pane is a full-screen sheet over the object, so each
+	// object opens on its own page; the header's 💬 opens the sheet.
+	let sheetFor = "";
+	$effect(() => {
+		const id = object?.id ?? "";
+		if (!id || !isMobileVp || id === sheetFor) return;
+		sheetFor = id;
+		discussionUI.open = false;
+	});
 	const hasDiscussion = $derived(
 		!!object && (!!object.mailbox?.length || (!isChat && !isAgent && !isType && !isTemplate && !isRelation && !isQuery && !isCollection)),
 	);

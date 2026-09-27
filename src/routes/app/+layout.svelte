@@ -825,6 +825,9 @@
 						</div>
 					{/if}
 				</div>
+				{#if discussionUI.available}
+					<button class="m-btn" data-tip={discussionUI.convCount ? "Chat" : "Properties"} aria-label={discussionUI.convCount ? "Open chat" : "Open properties"} onclick={() => (discussionUI.open = true)}>{discussionUI.convCount ? "💬" : "🧩"}</button>
+				{/if}
 				</div>
 			{/if}
 		</header>
