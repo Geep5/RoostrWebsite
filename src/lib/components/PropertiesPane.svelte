@@ -144,6 +144,16 @@
 	}
 
 	async function saveValue(key: string, value: ValueJSON) {
+		// served_by is a pin to a machine_id string, not a link to the machine
+		// object: the engine resolves the id against the roster, and a link to
+		// the object never matches, so the harness would refuse to serve.
+		if (key === "served_by") {
+			const target = value.linkValue?.targetId ?? value.valuesValue?.items?.[0]?.linkValue?.targetId ?? "";
+			if (target) {
+				const machine = servingState?.machines.find((m) => m.id === target);
+				value = machine ? { stringValue: machine.machineId } : value;
+			}
+		}
 		await note.setField(object.id, key, value);
 		await onchanged();
 	}
