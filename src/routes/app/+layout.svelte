@@ -892,7 +892,7 @@
 			<p class="m-build">Build {__BUILD_STAMP__}</p>
 		</div>
 	{:else}
-		<div class="m-screen nav">
+		<div class="m-screen">
 			<div class="m-top">
 				<button class="m-btn" data-tip="Spaces" aria-label="Spaces" onclick={() => (mobileSpaceOpen = false)}><svg style="width:20px;height:20px" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M14.5 6L9 12l5.5 6" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
 				<span class="m-top-spacer"></span>
@@ -2401,28 +2401,6 @@
 		flex: 1;
 		min-height: 0;
 		padding: calc(env(safe-area-inset-top, 0px) + 12px) 14px 0;
-	}
-	/* The space screen is the phone's nav pane: the desktop nav card's grey,
-	   widgets and lists as its faint borderless tint, and the round buttons
-	   and search one shade up so they stay visible on the grey. */
-	.m-screen.nav,
-	.m-screen.nav .m-top {
-		background: var(--panel);
-	}
-	.m-screen.nav .m-wcard,
-	.m-screen.nav .m-section-body {
-		background: var(--hl-light);
-		border-color: transparent;
-		border-radius: 12px;
-	}
-	.m-screen.nav .m-section-body .m-row + .m-row {
-		border-top-color: var(--hl-med);
-	}
-	.m-screen.nav .m-btn,
-	.m-screen.nav .m-search,
-	.m-screen.nav .m-compose {
-		background: var(--hover);
-		border-color: transparent;
 	}
 	.m-head {
 		display: flex;
