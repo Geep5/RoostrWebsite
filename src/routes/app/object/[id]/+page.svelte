@@ -308,11 +308,12 @@
 	$effect(() => {
 		discussionUI.convCount = object && hasDiscussion ? objectThreads(object).length + 1 : 0;
 	});
-	let drawerTop = $state(0);
+	/** The shell's top edge (below the tab strip) + the 6px gutter: the pane lines up with the page card. */
+	let drawerTop = $state(6);
 	$effect(() => {
 		if (!discussionUI.open) return;
-		const h = document.querySelector(".main-col > header");
-		drawerTop = h ? Math.max(0, Math.round(h.getBoundingClientRect().bottom)) : 0;
+		const shell = document.querySelector(".shell");
+		drawerTop = (shell ? Math.round(shell.getBoundingClientRect().top) : 0) + 6;
 	});
 	let drawerW = $state(typeof localStorage === "undefined" ? 380 : parseInt(localStorage.getItem("disc-drawer-w") ?? "380") || 380);
 	/**
@@ -539,7 +540,7 @@
 		<!-- svelte-ignore a11y_no_static_element_interactions -->
 		<aside
 			class="disc-drawer"
-			style={`width: ${drawerW}px; top: 0px`}
+			style={`width: ${drawerW - 6}px; top: ${drawerTop}px`}
 		>
 			<div class="dd-resize" role="separator" aria-orientation="vertical" onpointerdown={drawerResizeStart}></div>
 			{#key object.id}
@@ -746,20 +747,20 @@
 			height: 72px;
 		}
 	}
-	/* Affixed: the pane fills the shell's fourth column - flush to the right
-	   edge, full height under the header, square inner corner so it reads as
-	   a pane rather than a card parked on top of the page. */
+	/* Affixed: the pane fills the shell's fourth column as its own card on
+	   the gutter - 6px from the page, the top, the bottom and the window
+	   edge, like every other pane. */
 	.disc-drawer {
 		position: fixed;
-		right: 0;
-		bottom: 0;
+		right: 6px;
+		bottom: 6px;
 		z-index: 150;
 		box-sizing: border-box;
 		display: flex;
 		flex-direction: column;
 		background: var(--bg);
 		border: none;
-		border-radius: 16px 0 0 0;
+		border-radius: 16px;
 		overflow: hidden;
 	}
 	/* While a resize drag is in flight, nothing anywhere is selectable: the

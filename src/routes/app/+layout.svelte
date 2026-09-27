@@ -2018,7 +2018,9 @@
 	.main-col {
 		overflow-y: auto;
 		padding: 0 32px;
-		margin: 6px 0;
+		/* A card on the gutter like every pane: 6px from the nav, the window
+		   edge, and the affixed chat/properties pane. */
+		margin: 6px;
 		background: var(--bg);
 		border-radius: 16px;
 	}
