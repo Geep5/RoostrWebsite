@@ -489,7 +489,7 @@
 		{#if !isExchange && paired && presenceError}
 			<p class="presence error" role="status">{presenceError} Check that the paired native app and harness are running. Discussion remains available.</p>
 		{/if}
-		{#if members.length}
+		{#if isExchange && members.length}
 			<div class="members" aria-label="Exchange participants">
 				<span>Participants</span>
 				{#each members as member (member.objectId)}
