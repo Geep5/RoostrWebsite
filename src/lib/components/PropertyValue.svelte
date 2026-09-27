@@ -22,10 +22,13 @@
 		rel,
 		value,
 		onsave,
+		spaceId = "",
 	}: {
 		rel: RelationDefJSON;
 		value: ValueJSON | undefined;
 		onsave: (v: ValueJSON) => void | Promise<void>;
+		/** Owning space of the object being edited; agent pickers offer only its agents. */
+		spaceId?: string;
 	} = $props();
 
 	const text = $derived(value?.stringValue ?? "");
@@ -107,7 +110,7 @@
 	const candidates = $derived.by(() => {
 		const q = objectQuery.trim().toLowerCase();
 		let pool: Array<{ id: string; name: string; typeKey: string; icon?: string; done?: boolean }> = wantsAgents
-			? store.agents.filter((a) => !objectIds.includes(a.id)).map((a) => ({ id: a.id, name: a.name, typeKey: "agent", icon: a.icon }))
+			? store.agents.filter((a) => !objectIds.includes(a.id) && (!spaceId || !a.channel || a.channel === spaceId)).map((a) => ({ id: a.id, name: a.name, typeKey: "agent", icon: a.icon }))
 			: store.summaries.filter((s) => !objectIds.includes(s.id) && !HIDDEN_TYPES[s.typeKey]);
 		if (rel.objectSource) pool = sourceIds ? pool.filter((s) => sourceIds!.has(s.id)) : [];
 		else if (!wantsAgents && allowedTypeKeys.size > 0) pool = pool.filter((s) => allowedTypeKeys.has(s.typeKey));

@@ -367,7 +367,7 @@
 								<button class="pop-rm" title="Remove property" onclick={() => void removeProp(rel.key)}>Remove</button>
 							{/if}
 						</div>
-						<PropertyValue {rel} value={v} onsave={(nv) => void saveValue(rel.key, nv)} />
+						<PropertyValue {rel} value={v} spaceId={object.fields["channel"]?.stringValue ?? ""} onsave={(nv) => void saveValue(rel.key, nv)} />
 					</div>
 				{/if}
 			</span>

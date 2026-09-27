@@ -18,6 +18,8 @@ export interface AgentRef {
 	id: string;
 	name: string;
 	icon: string;
+	/** Owning space: an agent lives in exactly one. Empty = unassigned. */
+	channel: string;
 }
 
 export interface TypeDef {
@@ -63,6 +65,7 @@ async function fetchAgents(): Promise<AgentRef[]> {
 		id: r.id,
 		name: r.fields["name"]?.stringValue ?? "",
 		icon: r.fields["iconEmoji"]?.stringValue ?? "",
+		channel: r.fields["channel"]?.stringValue ?? "",
 	}));
 }
 
