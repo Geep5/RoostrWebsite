@@ -48,6 +48,7 @@
 		const present = relations.filter((r) => {
 			if (RESERVED_KEYS[r.key]) return false;
 			if (AGENT_CONFIG.includes(r.key)) return true;
+			if (r.key === "error") return MACHINE_BOUND || r.key in object.fields;
 			if (r.key === "served_by") return MACHINE_BOUND || r.key in object.fields;
 			if (["agent", "requires", "install"].includes(r.key)) return !AGENTLESS_TYPES[object.typeKey] || r.key in object.fields;
 			if (["model", "responsible_types"].includes(r.key)) return object.typeKey === "agent" || r.key in object.fields;
