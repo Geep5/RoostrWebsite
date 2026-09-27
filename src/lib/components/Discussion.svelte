@@ -319,22 +319,31 @@
 	/** Discord-style mention pills: `@Agent Name` for any known agent becomes a
 	 *  tinted chip. Longest names first so "@Bed Test" wins over a "@Bed" agent.
 	 *  Runs on rendered HTML; agent names never appear inside our tags. */
+	const escapeHtml = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+	/** Escaped agent name → its icon (emoji, image URL, or "" for none). */
+	const mentionIcons = $derived(new Map(store.agents.filter((a) => a.name).map((a) => [escapeHtml(a.name), a.icon])));
 	const mentionPattern = $derived.by(() => {
-		const names = [...new Set(store.agents.map((a) => a.name).filter(Boolean))].sort((a, b) => b.length - a.length);
+		const names = [...mentionIcons.keys()].sort((a, b) => b.length - a.length);
 		if (names.length === 0) return null;
-		const escaped = names.map((n) => n.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"));
-		return new RegExp(`@(${escaped.join("|")})(?![\\w])`, "g");
+		return new RegExp(`@(${names.map((n) => n.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|")})(?![\\w])`, "g");
 	});
+	/** Sent messages: the pill leads with the agent's icon, like Discord's avatar-less role chip. */
 	function mentionPills(html: string): string {
-		return mentionPattern ? html.replace(mentionPattern, '<span class="mention">@$1</span>') : html;
+		if (!mentionPattern) return html;
+		return html.replace(mentionPattern, (_, name: string) => {
+			const icon = mentionIcons.get(name) ?? "";
+			const glyph = !icon ? "" : /^https?:\/\//.test(icon) ? `<img class="mention-ico" src="${escapeHtml(icon).replace(/"/g, "&quot;")}" alt="">` : `<span class="mention-ico">${escapeHtml(icon)}</span>`;
+			return `<span class="mention">${glyph}@${name}</span>`;
+		});
 	}
 
 	let mirrorEl = $state<HTMLDivElement>();
 	/** The draft as HTML for the composer mirror: escaped, mentions pilled.
-	 *  A trailing space keeps a final newline's line height in step. */
+	 *  No icon here - anything extra would shift the text away from the
+	 *  textarea's caret. A trailing space keeps a final newline's line height in step. */
 	function composerMirror(text: string): string {
-		const escaped = text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-		return `${mentionPills(escaped)} `;
+		const escaped = escapeHtml(text);
+		return `${mentionPattern ? escaped.replace(mentionPattern, '<span class="mention">@$1</span>') : escaped} `;
 	}
 
 	function startReply(messageId: string, privately = false) {
@@ -1342,12 +1351,24 @@
 		padding: 0 2px;
 		font-weight: 500;
 	}
-	/* On the solid accent bubble the pale blurple tint vanishes, so the pill
-	   goes deep blurple with Discord's lavender text - still a clear chip. */
+	/* On the solid accent bubble: the same light touch - a faint blurple
+	   wash and lavender-white text, no heavier weight. */
 	.msg.own .text :global(.mention) {
-		background: rgba(35, 39, 125, 0.55);
-		color: #e0e3ff;
-		font-weight: 600;
+		background: rgba(88, 101, 242, 0.45);
+		color: #eef0ff;
+	}
+	.text :global(.mention-ico) {
+		display: inline-block;
+		margin-right: 3px;
+		font-size: 0.9em;
+		line-height: 1;
+	}
+	.text :global(img.mention-ico) {
+		width: 1em;
+		height: 1em;
+		border-radius: 3px;
+		vertical-align: -0.12em;
+		object-fit: cover;
 	}
 	.audience { margin-top: 10px; display: flex; flex-direction: column; gap: 5px; }
 	.audience label { display: flex; align-items: center; gap: 7px; }
