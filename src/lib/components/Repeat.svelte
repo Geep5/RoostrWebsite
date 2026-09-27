@@ -280,16 +280,21 @@
 </script>
 
 <div class="repeat" class:active={!!rule}>
-	<div class="row">
-		<button class="cell" class:empty={!rule} onclick={openEditor} title="Repeat">
-			<span class="glyph">↻</span>
-			{#if rule && view}
-				{describe(view)}
-				<span class="sep">·</span>
-				<span class:overdue>{overdue ? "overdue since" : "next"} {fmtLong(rule.next)}</span>
-			{:else}
-				Does not repeat
-			{/if}
+	<div class="row-wrap">
+		<button class="row" class:empty={!rule} onclick={openEditor} title="Repeat">
+			<span class="row-label">
+				<span class="glyph">↻</span>
+				<span class="row-name">Repeat</span>
+			</span>
+			<span class="row-value">
+				{#if rule && view}
+					{describe(view)}
+					<span class="sep">·</span>
+					<span class:overdue>{overdue ? "overdue since" : "next"} {fmtLong(rule.next)}</span>
+				{:else}
+					<span class="placeholder">Off</span>
+				{/if}
+			</span>
 		</button>
 	</div>
 
@@ -395,41 +400,59 @@
 <style>
 	.repeat {
 		position: relative;
-		margin: -8px 0 14px 48px;
 		font-size: 13px;
 		display: flex;
 		flex-direction: column;
-		gap: 6px;
+		gap: 2px;
 	}
 	.row {
 		display: flex;
 		align-items: center;
-		gap: 8px;
-	}
-	.cell {
+		gap: 10px;
+		width: 100%;
+		min-height: 28px;
+		padding: 3px 22px 3px 4px;
 		border: none;
 		background: none;
-		color: var(--fg);
-		padding: 2px 4px;
 		border-radius: 6px;
-		cursor: pointer;
-		display: inline-flex;
-		align-items: center;
-		gap: 6px;
+		color: var(--fg);
 		font-size: 13px;
+		text-align: left;
+		cursor: pointer;
 	}
-	.cell:hover {
+	.row:hover {
 		background: var(--hover);
 	}
-	.cell.empty {
+	.row-label {
+		display: flex;
+		align-items: center;
+		gap: 7px;
+		flex: none;
+		min-width: 0;
 		color: var(--muted);
-		opacity: 0.7;
+	}
+	.row-name {
+		font-size: 13px;
+		white-space: nowrap;
+	}
+	.row-value {
+		margin-left: auto;
+		display: flex;
+		align-items: center;
+		justify-content: flex-end;
+		gap: 4px;
+		min-width: 0;
+		text-align: right;
+	}
+	.placeholder {
+		color: var(--muted);
+		opacity: 0.65;
 	}
 	.glyph {
 		font-size: 14px;
 		color: var(--accent);
 	}
-	.cell.empty .glyph {
+	.row.empty .glyph {
 		color: inherit;
 	}
 	.sep {
@@ -440,7 +463,7 @@
 	}
 	.meta {
 		margin: 0;
-		padding-left: 4px;
+		padding-left: 25px;
 		display: flex;
 		flex-wrap: wrap;
 		gap: 2px 12px;

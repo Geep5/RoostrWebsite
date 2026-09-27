@@ -262,157 +262,178 @@
 	/** Repeat is a property of the object too: it rows first, only for the
 	    plain objects that can recur. */
 	const canRepeat = $derived(!["channel", "chat", "type", "relation", "template", "query", "set", "collection", "agent"].includes(object.typeKey));
+
+	// ── Grouped display: System / Agent / Custom, each a labeled section ──
+	const AGENT_KEYS = new Set(["served_by", "agent", "model", "prompt", "responsible_types", "requires", "install", "capability"]);
+	const SYSTEM_KEYS = new Set(["done", "due_date", "status", "tag", "description", "url", "email", "phone", "created_date", "modified_date", "createdDate", "modifiedDate"]);
+	type Group = "system" | "agent" | "custom";
+	const groupOf = (key: string): Group => (AGENT_KEYS.has(key) ? "agent" : SYSTEM_KEYS.has(key) ? "system" : "custom");
+	const groups = $derived.by(() => {
+		const out: Array<{ id: Group; label: string; rows: typeof shown }> = [];
+		for (const [id, label] of [["system", "System"], ["agent", "Agent"], ["custom", "Custom"]] as Array<[Group, string]>) {
+			const rows = shown.filter((r) => groupOf(r.key) === id);
+			if (id === "system" && canRepeat) rows.unshift({ key: "__repeat__", name: "Repeat" } as unknown as (typeof shown)[number]);
+			if (rows.length) out.push({ id, label, rows });
+		}
+		return out;
+	});
 </script>
 
-{#if canRepeat}
-	<div class="repeat-row">
-		<Repeat {object} {onchanged} />
-	</div>
-{/if}
-{#if shown.length > 0}
-	<div class="props">
-		{#each shown as rel (rel.key)}
-			{@const v = object.fields[rel.key]}
-			{@const li = leftIcon(rel)}
-			<div class="row-wrap">
-				<div
-					class="row"
-					role="button"
-					tabindex="0"
-					onclick={() => toggleEdit(rel.key)}
-					onkeydown={(e) => onRowKey(e, rel.key)}
-				>
-					<span class="row-label">
-						{#if "emoji" in li}
-							<span class="emoji">{li.emoji}</span>
-						{:else}
-							<span class="row-icon" style={badgeStyle(li.color)}><PropIcon icon={li.icon} size={14} /></span>
-						{/if}
-						<span class="row-name">{rel.name || rel.key}</span>
-					</span>
-					<span class="row-value">
-						{#if rel.format === "checkbox"}
-							{@const on = plain(v, "checkbox") === true}
-							<button
-								class="chk"
-								class:on
-								aria-checked={on}
-								role="checkbox"
-								title={rel.name || rel.key}
-								onclick={(e) => { e.stopPropagation(); void saveValue(rel.key, { boolValue: !on }); }}
-							>{on ? "✓" : ""}</button>
-						{:else if rel.format === "tag"}
-							{#each plain(v, "tag") as string[] as t (t)}
-								{@const opt = rel.options.find((o) => o.text === t)}
-								<span class="chip-wrap">
-									<span class="pill" style={tagStyle(opt?.color ?? "")}>{t}</span>
-									<button class="rm" aria-label={`Remove ${t}`} title={`Remove ${t}`} onclick={(e) => { e.stopPropagation(); void removeValue(rel.key, t); }}>×</button>
-								</span>
-							{:else}
-								<span class="placeholder">{placeholderFor(rel)}</span>
-							{/each}
-						{:else if rel.format === "status"}
-							{@const d = display(rel)}
-							{#if d}
-								{@const opt = rel.options.find((o) => o.text === d)}
-								<span class="status-val" style={badgeStyle(opt?.color ?? "")}>
-									<PropIcon icon={statusIcon(d)} size={14} />{d}
-								</span>
-							{:else}
-								<span class="placeholder">{placeholderFor(rel)}</span>
-							{/if}
-						{:else if rel.key === "served_by"}
-							{#if serve}
-								<span class="val-text" class:warn={serve.warning} title={serve.warning ? "Cannot be honoured" : ""}>{serve.text.replace(/^served by /, "")}</span>
-							{:else}
-								<span class="placeholder">{placeholderFor(rel)}</span>
-							{/if}
-						{:else if rel.key === "install"}
-							{#each plain(v, "object") as string[] as id (id)}
-								{@const row = installsById.get(id)}
-								{@const live = row ? (servingState?.serving.machineId && row.machine && row.machine !== servingState.serving.machineId ? { ...row, status: "other machine" } : row) : null}
-								{@const ok = live?.status === "active"}
-								<span class="chip-wrap">
-									<span class="chip" class:ok class:warn={!!live && !ok} title={live ? `${live.key}${live.account ? ` (${live.account})` : ""} · ${live.status}${live.auth ? ` · ${live.auth}` : ""}` : "Credentials"}>
-										<span class="emoji">🔌</span>{live ? `${live.key}${live.account ? ` · ${live.account}` : ""}${ok ? "" : ` (${live.status.replaceAll("_", " ")})`}` : id.slice(0, 8)}
-									</span>
-									<button class="rm" aria-label={`Remove ${live?.key ?? "credential"}`} title="Remove" onclick={(e) => { e.stopPropagation(); void removeValue(rel.key, id); }}>×</button>
-								</span>
-							{:else}
-								<span class="placeholder">{placeholderFor(rel)}</span>
-							{/each}
-						{:else if rel.key === "agent"}
-							{#each plain(v, "object") as string[] as id (id)}
-								{@const a = store.agents.find((x) => x.id === id)}
-								<span class="chip-wrap">
-									<span class="chip" class:warn={!a} title={a ? `${a.name} · agent` : `Agent ${id.slice(0, 8)}… (no longer exists — remove)`}>
-										<span class="emoji">{a ? (a.icon || "🤖") : "⚠️"}</span>{a?.name || `${id.slice(0, 8)}…`}
-									</span>
-									<button class="rm" aria-label={`Remove ${a?.name ?? "agent"}`} title="Remove" onclick={(e) => { e.stopPropagation(); void removeValue(rel.key, id); }}>×</button>
-								</span>
-							{:else}
-								<span class="placeholder">{placeholderFor(rel)}</span>
-							{/each}
-						{:else if rel.key === "requires"}
-							{#each plain(v, "object") as string[] as id (id)}
-								{@const cap = capabilitiesById.get(id)}
-								{@const ok = cap?.status === "active" && !!cap?.machine}
-								<span class="chip-wrap">
-									<span class="chip" class:ok class:warn={!!cap && !ok} title={cap ? `${cap.key} · ${cap.machine ? `${cap.machineName} · ` : ""}${cap.status ?? "missing install"}` : "Needs"}>
-										<span class="emoji">🧩</span>{cap ? `${cap.key}${cap.machine ? ` · ${cap.machineName}` : ""}${ok ? "" : ` (${(cap.status ?? "not set up").replaceAll("_", " ")})`}` : id.slice(0, 8)}
-									</span>
-									<button class="rm" aria-label={`Remove ${cap?.key ?? "capability"}`} title="Remove" onclick={(e) => { e.stopPropagation(); void removeValue(rel.key, id); }}>×</button>
-								</span>
-							{:else}
-								<span class="placeholder">{placeholderFor(rel)}</span>
-							{/each}
-						{:else if rel.format === "object"}
-							{#each plain(v, "object") as string[] as id (id)}
-								{@const o = store.summaries.find((x) => x.id === id)}
-								{@const a = o ? undefined : store.agents.find((x) => x.id === id)}
-								<span class="chip-wrap">
-									<span class="chip">
-										{#if o && layoutOf(o.typeKey) === "task"}
-											<span class="li-check" class:on={o.done === true}><CheckboxIcon checked={o.done === true} size={13} /></span>
-										{:else}
-											<span class="emoji">{a ? (a.icon || "🤖") : objectIcon(o?.icon, o?.typeKey ?? "")}</span>
-										{/if}{o?.name || a?.name || "Untitled"}
-									</span>
-									<button class="rm" aria-label={`Remove ${o?.name || a?.name || "link"}`} title="Remove" onclick={(e) => { e.stopPropagation(); void removeValue(rel.key, id); }}>×</button>
-								</span>
-							{:else}
-								<span class="placeholder">{placeholderFor(rel)}</span>
-							{/each}
-						{:else}
-							{@const d = display(rel)}
-							{#if d}
-								<span class="val-text">{d}</span>
-							{:else}
-								<span class="placeholder">{placeholderFor(rel)}</span>
-							{/if}
-						{/if}
-					</span>
+{#snippet propRow(rel: (typeof shown)[number])}
+	{#if rel.key === "__repeat__"}
+		<div class="repeat-row">
+			<Repeat {object} {onchanged} />
+		</div>
+	{:else}
+	{@const v = object.fields[rel.key]}
+	{@const li = leftIcon(rel)}
+	<div class="row-wrap">
+		<div
+			class="row"
+			role="button"
+			tabindex="0"
+			onclick={() => toggleEdit(rel.key)}
+			onkeydown={(e) => onRowKey(e, rel.key)}
+		>
+			<span class="row-label">
+				{#if "emoji" in li}
+					<span class="emoji">{li.emoji}</span>
+				{:else}
+					<span class="row-icon" style={badgeStyle(li.color)}><PropIcon icon={li.icon} size={14} /></span>
+				{/if}
+				<span class="row-name">{rel.name || rel.key}</span>
+			</span>
+			<span class="row-value">
+				{#if rel.format === "checkbox"}
+					{@const on = plain(v, "checkbox") === true}
+					<button
+						class="chk"
+						class:on
+						aria-checked={on}
+						role="checkbox"
+						title={rel.name || rel.key}
+						onclick={(e) => { e.stopPropagation(); void saveValue(rel.key, { boolValue: !on }); }}
+					>{on ? "✓" : ""}</button>
+				{:else if rel.format === "tag"}
+					{#each plain(v, "tag") as string[] as t (t)}
+						{@const opt = rel.options.find((o) => o.text === t)}
+						<span class="chip-wrap">
+							<span class="pill" style={tagStyle(opt?.color ?? "")}>{t}</span>
+							<button class="rm" aria-label={`Remove ${t}`} title={`Remove ${t}`} onclick={(e) => { e.stopPropagation(); void removeValue(rel.key, t); }}>×</button>
+						</span>
+					{:else}
+						<span class="placeholder">{placeholderFor(rel)}</span>
+					{/each}
+				{:else if rel.format === "status"}
+					{@const d = display(rel)}
+					{#if d}
+						{@const opt = rel.options.find((o) => o.text === d)}
+						<span class="status-val" style={badgeStyle(opt?.color ?? "")}>
+							<PropIcon icon={statusIcon(d)} size={14} />{d}
+						</span>
+					{:else}
+						<span class="placeholder">{placeholderFor(rel)}</span>
+					{/if}
+				{:else if rel.key === "served_by"}
+					{#if serve}
+						<span class="val-text" class:warn={serve.warning} title={serve.warning ? "Cannot be honoured" : ""}>{serve.text.replace(/^served by /, "")}</span>
+					{:else}
+						<span class="placeholder">{placeholderFor(rel)}</span>
+					{/if}
+				{:else if rel.key === "install"}
+					{#each plain(v, "object") as string[] as id (id)}
+						{@const row = installsById.get(id)}
+						{@const live = row ? (servingState?.serving.machineId && row.machine && row.machine !== servingState.serving.machineId ? { ...row, status: "other machine" } : row) : null}
+						{@const ok = live?.status === "active"}
+						<span class="chip-wrap">
+							<span class="chip" class:ok class:warn={!!live && !ok} title={live ? `${live.key}${live.account ? ` (${live.account})` : ""} · ${live.status}${live.auth ? ` · ${live.auth}` : ""}` : "Credentials"}>
+								<span class="emoji">🔌</span>{live ? `${live.key}${live.account ? ` · ${live.account}` : ""}${ok ? "" : ` (${live.status.replaceAll("_", " ")})`}` : id.slice(0, 8)}
+							</span>
+							<button class="rm" aria-label={`Remove ${live?.key ?? "credential"}`} title="Remove" onclick={(e) => { e.stopPropagation(); void removeValue(rel.key, id); }}>×</button>
+						</span>
+					{:else}
+						<span class="placeholder">{placeholderFor(rel)}</span>
+					{/each}
+				{:else if rel.key === "agent"}
+					{#each plain(v, "object") as string[] as id (id)}
+						{@const a = store.agents.find((x) => x.id === id)}
+						<span class="chip-wrap">
+							<span class="chip" class:warn={!a} title={a ? `${a.name} · agent` : `Agent ${id.slice(0, 8)}… (no longer exists — remove)`}>
+								<span class="emoji">{a ? (a.icon || "🤖") : "⚠️"}</span>{a?.name || `${id.slice(0, 8)}…`}
+							</span>
+							<button class="rm" aria-label={`Remove ${a?.name ?? "agent"}`} title="Remove" onclick={(e) => { e.stopPropagation(); void removeValue(rel.key, id); }}>×</button>
+						</span>
+					{:else}
+						<span class="placeholder">{placeholderFor(rel)}</span>
+					{/each}
+				{:else if rel.key === "requires"}
+					{#each plain(v, "object") as string[] as id (id)}
+						{@const cap = capabilitiesById.get(id)}
+						{@const ok = cap?.status === "active" && !!cap?.machine}
+						<span class="chip-wrap">
+							<span class="chip" class:ok class:warn={!!cap && !ok} title={cap ? `${cap.key} · ${cap.machine ? `${cap.machineName} · ` : ""}${cap.status ?? "missing install"}` : "Needs"}>
+								<span class="emoji">🧩</span>{cap ? `${cap.key}${cap.machine ? ` · ${cap.machineName}` : ""}${ok ? "" : ` (${(cap.status ?? "not set up").replaceAll("_", " ")})`}` : id.slice(0, 8)}
+							</span>
+							<button class="rm" aria-label={`Remove ${cap?.key ?? "capability"}`} title="Remove" onclick={(e) => { e.stopPropagation(); void removeValue(rel.key, id); }}>×</button>
+						</span>
+					{:else}
+						<span class="placeholder">{placeholderFor(rel)}</span>
+					{/each}
+				{:else if rel.format === "object"}
+					{#each plain(v, "object") as string[] as id (id)}
+						{@const o = store.summaries.find((x) => x.id === id)}
+						{@const a = o ? undefined : store.agents.find((x) => x.id === id)}
+						<span class="chip-wrap">
+							<span class="chip">
+								{#if o && layoutOf(o.typeKey) === "task"}
+									<span class="li-check" class:on={o.done === true}><CheckboxIcon checked={o.done === true} size={13} /></span>
+								{:else}
+									<span class="emoji">{a ? (a.icon || "🤖") : objectIcon(o?.icon, o?.typeKey ?? "")}</span>
+								{/if}{o?.name || a?.name || "Untitled"}
+							</span>
+							<button class="rm" aria-label={`Remove ${o?.name || a?.name || "link"}`} title="Remove" onclick={(e) => { e.stopPropagation(); void removeValue(rel.key, id); }}>×</button>
+						</span>
+					{:else}
+						<span class="placeholder">{placeholderFor(rel)}</span>
+					{/each}
+				{:else}
+					{@const d = display(rel)}
+					{#if d}
+						<span class="val-text">{d}</span>
+					{:else}
+						<span class="placeholder">{placeholderFor(rel)}</span>
+					{/if}
+				{/if}
+			</span>
+		</div>
+		{#if rowRemovable(rel)}
+			<button class="rm row-rm" aria-label={`Remove ${rel.name || rel.key}`} title="Remove property" onclick={(e) => { e.stopPropagation(); void removeProp(rel.key); }}>×</button>
+		{/if}
+		{#if editing === rel.key}
+			<div class="pop">
+				<div class="pop-head">
+					<span class="pop-name">{rel.name || rel.key}</span>
+					{#if rel.key !== "done"}
+						<button class="pop-rm" title="Remove property" onclick={() => void removeProp(rel.key)}>Remove</button>
+					{/if}
 				</div>
-				{#if rowRemovable(rel)}
-					<button class="rm row-rm" aria-label={`Remove ${rel.name || rel.key}`} title="Remove property" onclick={(e) => { e.stopPropagation(); void removeProp(rel.key); }}>×</button>
-				{/if}
-				{#if editing === rel.key}
-					<div class="pop">
-						<div class="pop-head">
-							<span class="pop-name">{rel.name || rel.key}</span>
-							{#if rel.key !== "done"}
-								<button class="pop-rm" title="Remove property" onclick={() => void removeProp(rel.key)}>Remove</button>
-							{/if}
-						</div>
-						<PropertyValue {rel} value={v} onsave={(nv) => void saveValue(rel.key, nv)} />
-					</div>
-				{/if}
+				<PropertyValue {rel} value={v} onsave={(nv) => void saveValue(rel.key, nv)} />
 			</div>
+		{/if}
+	</div>
+	{/if}
+{/snippet}
+
+{#each groups as g (g.id)}
+	<div class="prop-group">
+		<span class="group-label">{g.label} Properties</span>
+		{#each g.rows as rel (rel.key)}
+			{@render propRow(rel)}
 		{/each}
 	</div>
-	{#if editing}
-		<button class="backdrop" aria-label="Close" onclick={() => (editing = null)}></button>
-	{/if}
+{/each}
+{#if editing}
+	<button class="backdrop" aria-label="Close" onclick={() => (editing = null)}></button>
 {/if}
 <button
 	class="add-prop"
@@ -432,11 +453,18 @@
 {/if}
 
 <style>
-	.props {
+	.prop-group {
 		display: flex;
 		flex-direction: column;
-		font-size: 13px;
-		padding: 4px 0;
+		padding: 4px 0 6px;
+	}
+	.group-label {
+		font-size: 11px;
+		font-weight: 600;
+		text-transform: uppercase;
+		letter-spacing: 0.06em;
+		color: var(--muted);
+		padding: 4px 4px 2px;
 	}
 	.add-prop {
 		display: block;
