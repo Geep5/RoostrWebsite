@@ -1412,6 +1412,7 @@
 <style>
 	:global(:root) {
 		--bg: #1e1e20;
+		--gutter: #141416;
 		--panel: #2b2b2e;
 		--hover: #3a3a3e;
 		--border: #45454a;
@@ -1577,17 +1578,20 @@
 		flex: 1;
 		min-height: 0;
 		transition: grid-template-columns 0.16s ease;
+		/* The gutter: darker than the panes, so the 6px gaps between them
+		   read as separators (Anytype's sidebar). */
+		background: var(--gutter);
 	}
-	/* Dark like the nav and the phone's spaces list: the outlined space
-	   tiles mark the column, not a lighter pane. */
+	/* The space rail is a lighter rounded card on the dark gutter. */
 	.vault {
 		position: relative;
 		display: flex;
 		flex-direction: column;
 		align-items: center;
-		gap: 8px;
-		padding: 12px 0;
+		gap: 4px;
+		padding: 10px 0;
 		margin: 6px 0 6px 6px;
+		border-radius: 12px;
 		background: var(--bg);
 	}
 	.vault.wide {
@@ -1642,16 +1646,20 @@
 	.rail-handle:active::after {
 		background: #47474d;
 	}
+	/* Anytype's vault: flat rows, a large rounded icon, a muted name. The
+	   active space (and hover) is a lighter rounded row with a bright name;
+	   no outlines, no rings. */
 	.space {
 		display: flex;
 		align-items: center;
-		gap: 10px;
-		width: 36px;
-		height: 36px;
+		justify-content: center;
+		gap: 12px;
+		width: 44px;
+		height: 44px;
 		padding: 0;
 		border: none;
 		background: none;
-		color: var(--fg);
+		color: var(--muted);
 		font-size: 15px;
 		cursor: pointer;
 		border-radius: 10px;
@@ -1664,14 +1672,13 @@
 		width: 36px;
 		height: 36px;
 		flex: none;
-		border-radius: 10px;
-		border: 1px solid var(--border);
+		border-radius: 9px;
 		background: var(--panel);
+		color: var(--fg);
 		overflow: hidden;
 	}
 	.space-ico.round {
 		border-radius: 50%;
-		border: none;
 		background: none;
 	}
 	.space-label {
@@ -1679,49 +1686,27 @@
 		overflow: hidden;
 		white-space: nowrap;
 		text-overflow: ellipsis;
-		font-size: 14.5px;
+		font-size: 15px;
 		font-weight: 500;
 		text-align: left;
 	}
-	/* Widened rail: each space is an outlined grey card, like the phone's
-	   spaces list. */
 	.vault.wide .space {
+		justify-content: flex-start;
 		width: 100%;
-		height: 42px;
-		padding: 3px 5px;
-		border-radius: 10px;
-		background: var(--panel);
-		border: 1px solid var(--border);
-	}
-	.vault.wide .space:hover,
-	.vault.wide .space.active {
-		background: var(--hover);
-	}
-	.vault.wide .space.add,
-	.vault.wide .space.settings {
-		background: none;
-		border-color: transparent;
-	}
-	.vault.wide .space.active {
-		box-shadow: none;
-		border-color: var(--accent);
+		height: 52px;
+		padding: 0 8px;
 	}
 	.vault.wide .space-ico {
-		width: 32px;
-		height: 32px;
-		border-radius: 8px;
-		font-size: 14px;
-		border: none;
-		background: var(--hover);
+		width: 38px;
+		height: 38px;
+		font-size: 16px;
 	}
-	.vault.wide .space-ico.round {
-		border-radius: 50%;
-	}
-	.space:hover {
-		background: var(--hover);
+	.space:hover,
+	.space.active {
+		background: var(--panel);
 	}
 	.space.active {
-		box-shadow: 0 0 0 2px var(--accent);
+		color: var(--fg);
 	}
 	/* Reorder affordances. The rail is vertical, so the drop line is
 	   horizontal; the dragged tile fades so the line reads as its
@@ -1782,6 +1767,7 @@
 		flex-direction: column;
 		gap: 8px;
 		margin: 6px 0 6px 6px;
+		border-radius: 12px;
 		/* Same dark as the phone's space screen: the outlined cards below
 		   are what mark the column, not a lighter pane. */
 		background: var(--bg);
