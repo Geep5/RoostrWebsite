@@ -7,7 +7,6 @@
 import { goto } from "$app/navigation";
 import { fetchAllQuery, fetchObject, note } from "$lib/api";
 import { thisMachineId } from "$lib/capability-actions";
-import { adoptLocally } from "$lib/agent-kinds";
 import { guestAgents, type ValueJSON } from "$lib/types";
 import { agentLinksValue } from "$lib/agent-field";
 import { TYPE_GLYPHS } from "$lib/icons";
@@ -93,8 +92,8 @@ async function createMachine(): Promise<string> {
  * the property row. It starts linked to its space's "Assistant" system
  * prompt when one exists, so the prompt it runs on is always visible (the
  * harness links it on first serve otherwise, creating that object if the
- * space has none). It is adopted locally so it answers as soon as it has a
- * computer; a computer-less agent is an honest dead end, not a silent one.
+ * space has none). It runs nowhere until its Served by names a computer;
+ * until then the engine shows that on its Error property.
  */
 async function createAgent(channelId: string): Promise<string> {
 	const assistant = (await fetchAllQuery({ type: "system_prompt", filters: [{ key: "channel", condition: "equal", value: channelId }] }))
@@ -103,7 +102,6 @@ async function createAgent(channelId: string): Promise<string> {
 		...channelField(channelId),
 		...(assistant ? { prompt: { linkValue: { targetId: assistant.id, relationKey: "prompt" } } } : {}),
 	});
-	await adoptLocally(agentId);
 	await goto(`/app/object/${agentId}`);
 	return agentId;
 }

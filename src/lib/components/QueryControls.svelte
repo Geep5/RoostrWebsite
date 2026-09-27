@@ -7,7 +7,6 @@
 	import { fetchQuery, note } from "$lib/api";
 	import { applyTemplate, createTyped } from "$lib/create";
 	import { store } from "$lib/data.svelte";
-	import { adoptLocally, localMachineId } from "$lib/agent-kinds";
 
 	/**
 	 * View configuration for a query object — source types, filter rules,
@@ -337,10 +336,8 @@
 				fields[dateKey] = { intValue: Date.now() };
 			}
 			// A new agent is blank: its properties are set on its page like any
-			// object. It is adopted locally so it answers once it has a computer.
-			const me = typeKey === "agent" ? await localMachineId() : "";
+			// object, Served by included - until then it runs nowhere.
 			const { id } = await note.create(name, typeKey, fields);
-			if (me) await adoptLocally(id);
 			// Templates: an explicit pick wins (null = Blank, skip); else the
 			// type's default pre-fills - type pages read their own field,
 			// queries resolve the source type's default from the store.
