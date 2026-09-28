@@ -13,6 +13,7 @@
 	import { typeGlyph } from "$lib/create";
 	import PropIcon from "./PropIcon.svelte";
 	import { fetchBacklinks, type Backlink } from "$lib/backlinks";
+	import TypeSuggest from "./TypeSuggest.svelte";
 
 	let { object }: { object: ObjectJSON } = $props();
 
@@ -35,17 +36,18 @@
 			return { key, id: t?.id ?? "", name: t?.name || key, icon: t?.icon || typeGlyph(key) };
 		});
 	});
-	async function removeSource(key: string) {
-		const next = sourceKeys.filter((k) => k !== key);
-		if (next.length === 0) open = "";
-		await note.setField(object.id, "setOf", { valuesValue: { items: next.map((k) => ({ stringValue: k })) } });
+	const isQuery = $derived(object.typeKey === "query");
+	function saveSources(next: string[]) {
+		return note.setField(object.id, "setOf", { valuesValue: { items: next.map((k) => ({ stringValue: k })) } });
 	}
 
 	let backlinks = $state<Backlink[]>([]);
 	let open = $state<"" | "sources" | "backlinks">("");
 	$effect(() => {
 		const id = object.id;
-		open = "";
+		// A query with no type yet shows nothing: open its type card so the
+		// first thing asked is what to query.
+		open = object.typeKey === "query" && sourceKeys.length === 0 ? "sources" : "";
 		backlinks = [];
 		void fetchBacklinks(id).then((b) => {
 			if (object.id === id) backlinks = b;
@@ -62,10 +64,14 @@
 	{:else}
 		<span class="badge" style={badgeStyle("")} title="Type"><PropIcon icon="dot" />{typeName}</span>
 	{/if}
-	{#if sources.length > 0}
+	{#if isQuery}
 		<span class="wrap">
 			<button class="badge" style={badgeStyle("")} title="What this query shows" onclick={() => toggle("sources")}>
-				<span class="emoji">{sources[0].icon}</span>Object {sources.length === 1 ? "Type" : "Types"}: {sources.map((s) => s.name).join(", ")}
+				{#if sources.length}
+					<span class="emoji">{sources[0].icon}</span>Object {sources.length === 1 ? "Type" : "Types"}: {sources.map((s) => s.name).join(", ")}
+				{:else}
+					<PropIcon icon="dot" />Choose an object type
+				{/if}
 			</button>
 			{#if open === "sources"}
 				<div class="pop">
@@ -82,9 +88,15 @@
 									<span class="source-text"><span class="source-label">Object Type</span><span class="source-name">{s.name}</span></span>
 								</span>
 							{/if}
-							<button class="source-rm" aria-label={`Stop querying ${s.name}`} title="Remove" onclick={() => void removeSource(s.key)}>×</button>
+							<button class="source-rm" aria-label={`Stop querying ${s.name}`} title="Remove" onclick={() => void saveSources(sourceKeys.filter((k) => k !== s.key))}>×</button>
 						</div>
 					{/each}
+					<TypeSuggest
+						exclude={sourceKeys}
+						placeholder={sources.length ? "Add another type…" : "Search types… (e.g. p → Person, Project)"}
+						onpick={(key) => void saveSources([...sourceKeys, key])}
+						onclose={() => (open = "")}
+					/>
 				</div>
 			{/if}
 		</span>

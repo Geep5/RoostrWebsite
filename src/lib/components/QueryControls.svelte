@@ -1,6 +1,5 @@
 <script lang="ts">
 	import { goto } from "$app/navigation";
-	import TypeSuggest from "./TypeSuggest.svelte";
 	import LayoutIcon from "./LayoutIcon.svelte";
 	import { createRelation } from "$lib/relations";
 	import type { ObjectJSON, RelationDefJSON, ValueJSON } from "$lib/types";
@@ -105,11 +104,7 @@
 	const filters = $derived(parseFilters(object.fields));
 	const sorts = $derived(parseSorts(object.fields));
 
-	// ── Persist ───────────────────────────────────────────────────
-	async function saveSources(next: string[]) {
-		await note.setField(object.id, "setOf", { valuesValue: { items: next.map((s) => ({ stringValue: s })) } });
-		await onchanged();
-	}
+	// Sources (`setOf`) are edited from the Object Type chip under the title (ObjectMeta).
 
 	async function saveFilters(next: FilterRule[]) {
 		await note.setField(object.id, "viewFilters", {
@@ -395,7 +390,7 @@
 	}
 
 	// ── UI state ──────────────────────────────────────────────────
-	let open = $state<"" | "source" | "filter" | "sort">("");
+	let open = $state<"" | "filter" | "sort">("");
 	/** Index of the sort row whose "Show empty" menu is open. */
 	let sortMore = $state(-1);
 	/** Drag-reorder state for sort rules (Anytype useSortable rows). */
@@ -413,12 +408,6 @@
 		sortDragIdx = sortOverIdx = -1;
 		await saveSorts(next);
 	}
-	$effect(() => {
-		// A sourceless QUERY needs a source before it can show anything -
-		// open the picker. Collections have no source concept: their
-		// membership IS the source, so nothing auto-opens.
-		if (mode === "query" && sources.length === 0) open = "source";
-	});
 
 	function updateFilter(idx: number, patch: Partial<FilterRule>) {
 		const next = filters.map((f, i) => (i === idx ? { ...f, ...patch } : f));
@@ -438,11 +427,6 @@
 <svelte:window onmousedown={(e) => { if (settingsOpen && !(e.target as HTMLElement).closest(".settings-anchor")) settingsOpen = false; }} onkeydown={(e) => { if (e.key === "Escape") settingsOpen = false; }} />
 
 <div class="controls">
-	{#if mode === "query"}
-		<button class="pill" class:active={open === "source"} onclick={() => (open = open === "source" ? "" : "source")}>
-			Source{sources.length ? `: ${sources.join(", ")}` : ""}
-		</button>
-	{/if}
 	<span class="spacer"></span>
 	<span class="view-chip"><LayoutIcon kind={viewType} size={16} /> {viewType[0].toUpperCase() + viewType.slice(1)}</span>
 	<!-- Anytype dataviewControlsSideRight: search, then the collapsible
@@ -560,23 +544,6 @@
 		{/if}
 	</span>
 </div>
-
-{#if open === "source" && mode === "query"}
-	<div class="panel">
-		{#each sources as s, i (s + i)}
-			<div class="rule">
-				<span class="chip">{s}</span>
-				<button class="x" onclick={() => void saveSources(sources.filter((_, j) => j !== i))}>×</button>
-			</div>
-		{/each}
-		<TypeSuggest
-			exclude={sources}
-			placeholder="Search types… (e.g. p → Person, Project)"
-			onpick={(key) => void saveSources([...sources, key])}
-			onclose={() => (open = "")}
-		/>
-	</div>
-{/if}
 
 {#if open === "filter"}
 	<div class="panel">
@@ -712,20 +679,6 @@
 		display: flex;
 		gap: 8px;
 		margin-bottom: 10px;
-	}
-	.pill {
-		background: none;
-		border: 1px solid var(--border);
-		color: var(--muted);
-		border-radius: 999px;
-		padding: 4px 12px;
-		font-size: 12px;
-		cursor: pointer;
-	}
-	.pill:hover,
-	.pill.active {
-		color: var(--fg);
-		border-color: var(--accent);
 	}
 	.panel {
 		border: 1px solid var(--border);
