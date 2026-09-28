@@ -1140,7 +1140,7 @@
 
 	<aside class="widgets">
 		{#if current}
-			<div class="space-head-row">
+			<div class="space-head-row" class:menu-open={showCreate}>
 				<a class="space-head" href="/app/object/{current.id}" title="Space settings">
 					<span class="space-head-ico">{#if current.icon?.startsWith("http")}<img class="rail-img" src={current.icon} alt="" />{:else}{current.icon || "◍"}{/if}</span>
 					<span class="space-name">{current.name}</span>
@@ -1474,6 +1474,13 @@
 		margin: -10px -8px 0;
 		padding: 10px 8px 6px;
 		background: var(--bg);
+	}
+	/* Sticky + z-index makes the row a stacking context, so its create menu
+	   can only sit as high as the row: lift the row over the click-away
+	   backdrop (z 80) while the menu is open, or the backdrop eats its
+	   wheel and clicks. */
+	.space-head-row.menu-open {
+		z-index: 85;
 	}
 	.head-search {
 		display: flex;
