@@ -13,7 +13,7 @@
 	import { tagStyle } from "$lib/options";
 	import CheckboxIcon from "./CheckboxIcon.svelte";
 	import { fetchQuery, note, type QueryResultRow } from "$lib/api";
-	import { fetchMachines, resolveMany, servingCopy } from "$lib/serving";
+	import { fetchMachines, machineName, resolveMany, servingCopy, type MachineRow } from "$lib/serving";
 	import { store, layoutOf } from "$lib/data.svelte";
 	import type { ObjectJSON, RelationDefJSON, ValueJSON } from "$lib/types";
 	import { fieldStr } from "$lib/types";
@@ -361,6 +361,7 @@
 		machineId: string;
 	}
 	let servingById = $state<Map<string, ServingInfo>>(new Map());
+	let machineList = $state<MachineRow[]>([]);
 
 	/** Needs a person: the resolution cannot be honoured, or nothing serves the object at all. */
 	function servingAttention(info: ServingInfo | undefined): boolean {
@@ -392,6 +393,8 @@
 		}));
 		const res = await fetchQuery({ ...engineBody, sorts });
 		rows = res.records;
+		// A Served by column holds machine ids: name them from the roster.
+		if (columns.includes("served_by")) machineList = (await fetchMachines()).machines;
 		if (columns.includes("serving") || rules.length > 0 || servingSort) {
 			const { rows: machineRows, machines } = await fetchMachines();
 			const resolved = await resolveMany(rows, machineRows);
@@ -484,6 +487,12 @@
 		const v: ValueJSON | undefined = r.fields[key];
 		const format = formatOf(key);
 		if (!v) return "";
+		// served_by pins a machine_id (a string, or the link the picker wrote): show the computer's name.
+		if (key === "served_by") {
+			const id = v.stringValue ?? v.linkValue?.targetId ?? v.valuesValue?.items?.[0]?.stringValue ?? v.valuesValue?.items?.[0]?.linkValue?.targetId ?? "";
+			const byObject = machineList.find((m) => m.id === id);
+			return byObject ? byObject.name : id ? machineName(machineList, id) : "";
+		}
 		if (format === "object" && v.valuesValue) {
 			return v.valuesValue.items
 				.map((i) => store.summaries.find((s) => s.id === i.stringValue)?.name || (i.stringValue ?? "").slice(0, 6))
