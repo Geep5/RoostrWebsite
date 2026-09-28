@@ -102,10 +102,13 @@
 	}
 
 	const pos = $derived.by(() => {
-		const w = 300;
+		const w = 320; // the rendered menu: 300px + padding and border
 		const h = 400;
+		// Stay inside the page card: the affixed chat/properties pane sits to
+		// its right and would cover anything that spills past the card.
+		const right = document.querySelector(".main-col")?.getBoundingClientRect().right ?? window.innerWidth;
 		return {
-			left: Math.min(x, window.innerWidth - w - 12),
+			left: Math.max(12, Math.min(x, right - w - 12)),
 			top: y + h > window.innerHeight - 12 ? Math.max(12, window.innerHeight - h - 12) : y,
 		};
 	});

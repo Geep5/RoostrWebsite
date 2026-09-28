@@ -656,7 +656,7 @@
 		{@const rel = relations.find((x) => x.key === cellEdit!.key)}
 		{@const row = rows.find((x) => x.id === cellEdit!.recordId)}
 		{#if rel && row}
-			<div class="cell-pop" style="left:{Math.min(cellEdit.x, window.innerWidth - 320)}px; top:{cellEdit.y}px" role="dialog">
+			<div class="cell-pop" style="left:{Math.min(cellEdit.x, (document.querySelector('.main-col')?.getBoundingClientRect().right ?? window.innerWidth) - 320)}px; top:{cellEdit.y}px" role="dialog">
 				<PropertyValue {rel} value={row.fields[rel.key]} onsave={(v) => void cellSave(v)} />
 			</div>
 		{/if}
