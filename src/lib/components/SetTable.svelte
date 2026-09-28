@@ -13,7 +13,7 @@
 	import { tagStyle } from "$lib/options";
 	import CheckboxIcon from "./CheckboxIcon.svelte";
 	import { fetchQuery, note, type QueryResultRow } from "$lib/api";
-	import { fetchMachines, machineName, resolveMany, servingCopy, type MachineRow } from "$lib/serving";
+	import { fetchMachines, machineName, resolveMany, servingCopy } from "$lib/serving";
 	import { store, layoutOf } from "$lib/data.svelte";
 	import type { ObjectJSON, RelationDefJSON, ValueJSON } from "$lib/types";
 	import { fieldStr } from "$lib/types";
@@ -225,7 +225,8 @@
 		{ key: "type", name: "Type" },
 		{ key: "createdAt", name: "Created" },
 		{ key: "updatedAt", name: "Updated" },
-		{ key: "serving", name: "Serving" },
+		// The object's resolved computer (its own pin, else its agent's), warning when it can't be honoured.
+		{ key: "serving", name: "Served by" },
 	];
 
 	/** Anytype default grid columns for a fresh view. */
@@ -349,19 +350,20 @@
 		void saveColumns(next);
 	}
 
-	// ── Virtual "Serving" property ──────────────────────────────────
+	// ── Virtual "Served by" column (resolved serving) ───────────────
 	// The value is resolved per row by the engine's serving resolver
 	// ($lib/serving), never stored: a serving column shows it, serving
 	// filter rules (peeled from the body, which never sends them to the
 	// engine) and a serving sort are applied here after the query.
 	interface ServingInfo {
 		text: string;
+		/** What the cell shows: the computer's name, or "No machine". */
+		label: string;
 		warning: boolean;
 		reason: string;
 		machineId: string;
 	}
 	let servingById = $state<Map<string, ServingInfo>>(new Map());
-	let machineList = $state<MachineRow[]>([]);
 
 	/** Needs a person: the resolution cannot be honoured, or nothing serves the object at all. */
 	function servingAttention(info: ServingInfo | undefined): boolean {
@@ -393,15 +395,14 @@
 		}));
 		const res = await fetchQuery({ ...engineBody, sorts });
 		rows = res.records;
-		// A Served by column holds machine ids: name them from the roster.
-		if (columns.includes("served_by")) machineList = (await fetchMachines()).machines;
 		if (columns.includes("serving") || rules.length > 0 || servingSort) {
 			const { rows: machineRows, machines } = await fetchMachines();
 			const resolved = await resolveMany(rows, machineRows);
 			const map = new Map<string, ServingInfo>();
 			rows.forEach((r, i) => {
 				const s = resolved[i];
-				map.set(r.id, { ...servingCopy(s, machines), reason: s.reason, machineId: s.machineId });
+				const label = s.machineId ? machineName(machines, s.machineId) : "No machine";
+				map.set(r.id, { ...servingCopy(s, machines), label, reason: s.reason, machineId: s.machineId });
 			});
 			servingById = map;
 			if (rules.length > 0) rows = rows.filter((r) => rules.every((rule) => servingMatch(rule, servingById.get(r.id))));
@@ -475,7 +476,7 @@
 	}
 
 	function cell(r: QueryResultRow, key: string): string {
-		if (key === "serving") return servingById.get(r.id)?.text ?? "";
+		if (key === "serving") return servingById.get(r.id)?.label ?? "";
 		if (key === "type") {
 			// Display name, never the raw key: "finance_task" reads as its
 			// type's name (or at worst the key with spaces).
@@ -487,12 +488,6 @@
 		const v: ValueJSON | undefined = r.fields[key];
 		const format = formatOf(key);
 		if (!v) return "";
-		// served_by pins a machine_id (a string, or the link the picker wrote): show the computer's name.
-		if (key === "served_by") {
-			const id = v.stringValue ?? v.linkValue?.targetId ?? v.valuesValue?.items?.[0]?.stringValue ?? v.valuesValue?.items?.[0]?.linkValue?.targetId ?? "";
-			const byObject = machineList.find((m) => m.id === id);
-			return byObject ? byObject.name : id ? machineName(machineList, id) : "";
-		}
 		if (format === "object" && v.valuesValue) {
 			return v.valuesValue.items
 				.map((i) => store.summaries.find((s) => s.id === i.stringValue)?.name || (i.stringValue ?? "").slice(0, 6))
@@ -618,7 +613,7 @@
 								{/if}
 							</td>
 						{:else}
-							<td class:muted={c === "type" || c === "createdAt" || c === "updatedAt"} class:cell-warn={c === "serving" && (servingById.get(r.id)?.warning ?? false)}>{cell(r, c)}</td>
+							<td class:muted={c === "type" || c === "createdAt" || c === "updatedAt"} class:cell-warn={c === "serving" && (servingById.get(r.id)?.warning ?? false)} title={c === "serving" ? servingById.get(r.id)?.text : undefined}>{cell(r, c)}</td>
 						{/if}
 					{/each}
 					<td></td>
@@ -686,6 +681,7 @@
 	     create new -> name + type. Fixed-position, viewport-clamped. -->
 	<PropertyFlow
 		x={adding.x}
+		exclude={["served_by"]}
 		y={adding.y}
 		items={[
 			...cols.map((c) => {

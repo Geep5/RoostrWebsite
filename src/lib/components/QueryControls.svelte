@@ -211,12 +211,13 @@
 	 * timestamps are virtual, so a space owning a property of the same key
 	 * would collide here even with one def per key upstream. */
 	const filterKeys = $derived.by(() => {
-		const keys = relations.filter((r) => !r.hidden && r.key !== "setOf").map((r) => r.key);
+		// `served_by` is covered by the resolved "serving" (Served by) key, which also knows agent pins.
+		const keys = relations.filter((r) => !r.hidden && r.key !== "setOf" && r.key !== "served_by").map((r) => r.key);
 		return [...new Set(["type", ...keys, "createdAt", "updatedAt", "serving"])];
 	});
 
 	function labelOf(key: string): string {
-		if (key === "serving") return "Serving";
+		if (key === "serving") return "Served by";
 		if (key === "type") return "Type";
 		if (key === "createdAt") return "Created";
 		if (key === "updatedAt") return "Updated";

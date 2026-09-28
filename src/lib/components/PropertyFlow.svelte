@@ -27,6 +27,7 @@
 		x,
 		y,
 		items,
+		exclude = [],
 		ontoggle,
 		onadd,
 		onclose,
@@ -35,6 +36,8 @@
 		y: number;
 		/** Stage-1 rows: current/available properties with their toggle state. */
 		items: FlowItem[];
+		/** Properties this surface covers another way (a table's resolved Served by column covers `served_by`). */
+		exclude?: string[];
 		ontoggle: (key: string, on: boolean) => void;
 		/** A property picked or created in stages 2-3. */
 		onadd: (rel: RelationDefJSON) => void;
@@ -76,7 +79,7 @@
 	// ── Stage 2 data (Anytype relationSuggest getSections) ─────────
 	const SYSTEM_KEYS = ["createdDate", "modifiedDate", "dueDate", "done", "tag", "status", "url", "email", "phone", "description"];
 	const present = $derived(new Set(items.map((i) => i.key)));
-	const allRels = $derived(spaceRelations(store.relations, currentSpaceId()).filter((r) => !r.hidden && !RESERVED_KEYS[r.key] && !present.has(r.key)));
+	const allRels = $derived(spaceRelations(store.relations, currentSpaceId()).filter((r) => !r.hidden && !RESERVED_KEYS[r.key] && !present.has(r.key) && !exclude.includes(r.key)));
 	const q = $derived(query.trim().toLowerCase());
 	const matching = $derived(q ? allRels.filter((r) => (r.name || r.key).toLowerCase().includes(q)) : allRels);
 	const library = $derived(matching.filter((r) => !SYSTEM_KEYS.includes(r.key)));
