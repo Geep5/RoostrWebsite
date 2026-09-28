@@ -62,10 +62,21 @@ async function guestAgentRows(objects: Array<Pick<ObjectJSON, "fields">>): Promi
 	return ids.length > 0 ? fetchAllQuery({ filters: [{ key: "id", condition: "in", value: ids }] }) : [];
 }
 
+/**
+ * Capability objects ride with their installs: the resolver honours a
+ * requirement only when the capability's install is active, and it finds
+ * both in the same state map. Without these every object with `requires`
+ * resolves pinned-uncapable - the red "cannot be honoured" row.
+ */
+async function capabilityRows(): Promise<QueryResultRow[]> {
+	const [caps, installs] = await Promise.all([fetchAllQuery({ type: "capability" }), fetchAllQuery({ type: "install" })]);
+	return [...caps, ...installs];
+}
+
 /** Resolve one object against the live machine roster and its agents. */
 export async function resolveServing(object: ObjectJSON): Promise<{ serving: Serving; machines: MachineRow[] }> {
-	const [{ rows, machines }, agents] = await Promise.all([fetchMachines(), guestAgentRows([object]), initCore()]);
-	const serving = coreCall<Serving>("serving", { action: "resolve", object, agents, machines: rows });
+	const [{ rows, machines }, agents, capabilities] = await Promise.all([fetchMachines(), guestAgentRows([object]), capabilityRows(), initCore()]);
+	const serving = coreCall<Serving>("serving", { action: "resolve", object, agents, machines: rows, capabilities });
 	return { serving, machines };
 }
 
@@ -74,11 +85,11 @@ export async function resolveServing(object: ObjectJSON): Promise<{ serving: Ser
  * they name. Returns one entry per input object, in order.
  */
 export async function resolveMany(objects: QueryResultRow[], machineRows: QueryResultRow[]): Promise<Serving[]> {
-	const [agentRows] = await Promise.all([guestAgentRows(objects), initCore()]);
+	const [agentRows, capabilities] = await Promise.all([guestAgentRows(objects), capabilityRows(), initCore()]);
 	const byId = new Map(agentRows.map((a) => [a.id, a]));
 	return objects.map((object) => {
 		const agents = guestAgents(object.fields).flatMap((id) => byId.get(id) ?? []);
-		return coreCall<Serving>("serving", { action: "resolve", object, agents, machines: machineRows });
+		return coreCall<Serving>("serving", { action: "resolve", object, agents, machines: machineRows, capabilities });
 	});
 }
 
