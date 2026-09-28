@@ -3,10 +3,14 @@
 	 * The line under an object's title: what type it is (opens the type) and
 	 * how many objects link here (opens the list). Properties live in the
 	 * right pane; these two are facts about the object, not settings on it.
+	 * A query also names what it queries (Anytype's "Object Type: X" chip):
+	 * its source types, each removable from the chip's card.
 	 */
 	import type { ObjectJSON } from "$lib/types";
 	import { store } from "$lib/data.svelte";
+	import { note } from "$lib/api";
 	import { badgeStyle } from "$lib/options";
+	import { typeGlyph } from "$lib/create";
 	import PropIcon from "./PropIcon.svelte";
 	import { fetchBacklinks, type Backlink } from "$lib/backlinks";
 
@@ -14,18 +18,40 @@
 
 	const typeDef = $derived(store.types.find((t) => t.key === object.typeKey));
 	// A space's type (`channel`) is engine infrastructure with no type page; people call it a Space.
-	const typeName = $derived(typeDef?.name || (object.typeKey === "channel" ? "Space" : object.typeKey));
+	// Built-in kinds with no type object read as words, like the table's type column: `query` → "Query".
+	const typeName = $derived(
+		typeDef?.name || (object.typeKey === "channel" ? "Space" : (object.typeKey.charAt(0).toUpperCase() + object.typeKey.slice(1)).replaceAll("_", " ")),
+	);
+
+	/** A query's source types (`setOf` keys), resolved to this space's copy of each type. */
+	const sourceKeys = $derived(
+		object.typeKey === "query" ? (object.fields["setOf"]?.valuesValue?.items ?? []).map((i) => i.stringValue ?? "").filter(Boolean) : [],
+	);
+	const sources = $derived.by(() => {
+		const space = object.fields["channel"]?.stringValue ?? "";
+		return sourceKeys.map((key) => {
+			const matches = store.types.filter((t) => t.key === key);
+			const t = matches.find((x) => x.space === space) ?? matches[0];
+			return { key, id: t?.id ?? "", name: t?.name || key, icon: t?.icon || typeGlyph(key) };
+		});
+	});
+	async function removeSource(key: string) {
+		const next = sourceKeys.filter((k) => k !== key);
+		if (next.length === 0) open = "";
+		await note.setField(object.id, "setOf", { valuesValue: { items: next.map((k) => ({ stringValue: k })) } });
+	}
 
 	let backlinks = $state<Backlink[]>([]);
-	let open = $state(false);
+	let open = $state<"" | "sources" | "backlinks">("");
 	$effect(() => {
 		const id = object.id;
-		open = false;
+		open = "";
 		backlinks = [];
 		void fetchBacklinks(id).then((b) => {
 			if (object.id === id) backlinks = b;
 		});
 	});
+	const toggle = (which: "sources" | "backlinks") => (open = open === which ? "" : which);
 </script>
 
 <div class="meta">
@@ -36,16 +62,43 @@
 	{:else}
 		<span class="badge" style={badgeStyle("")} title="Type"><PropIcon icon="dot" />{typeName}</span>
 	{/if}
+	{#if sources.length > 0}
+		<span class="wrap">
+			<button class="badge" style={badgeStyle("")} title="What this query shows" onclick={() => toggle("sources")}>
+				<span class="emoji">{sources[0].icon}</span>Object {sources.length === 1 ? "Type" : "Types"}: {sources.map((s) => s.name).join(", ")}
+			</button>
+			{#if open === "sources"}
+				<div class="pop">
+					{#each sources as s (s.key)}
+						<div class="source">
+							{#if s.id}
+								<a class="source-main" href="/app/object/{s.id}" onclick={() => (open = "")}>
+									<span class="source-ico">{s.icon}</span>
+									<span class="source-text"><span class="source-label">Object Type</span><span class="source-name">{s.name}</span></span>
+								</a>
+							{:else}
+								<span class="source-main">
+									<span class="source-ico">{s.icon}</span>
+									<span class="source-text"><span class="source-label">Object Type</span><span class="source-name">{s.name}</span></span>
+								</span>
+							{/if}
+							<button class="source-rm" aria-label={`Stop querying ${s.name}`} title="Remove" onclick={() => void removeSource(s.key)}>×</button>
+						</div>
+					{/each}
+				</div>
+			{/if}
+		</span>
+	{/if}
 	{#if backlinks.length > 0}
 		<span class="wrap">
-			<button class="badge" style={badgeStyle("")} title="Backlinks" onclick={() => (open = !open)}>
+			<button class="badge" style={badgeStyle("")} title="Backlinks" onclick={() => toggle("backlinks")}>
 				<PropIcon icon="link" />{backlinks.length} backlink{backlinks.length === 1 ? "" : "s"}
 			</button>
-			{#if open}
+			{#if open === "backlinks"}
 				<div class="pop">
 					<div class="pop-name">Linked from</div>
 					{#each backlinks as b (b.id)}
-						<a class="backlink" href="/app/object/{b.id}" onclick={() => (open = false)}>
+						<a class="backlink" href="/app/object/{b.id}" onclick={() => (open = "")}>
 							<span class="bl-icon">{b.icon || "▨"}</span>{b.name}
 							<span class="bl-kind">{b.typeKey}</span>
 						</a>
@@ -56,7 +109,7 @@
 	{/if}
 </div>
 {#if open}
-	<button class="backdrop" aria-label="Close" onclick={() => (open = false)}></button>
+	<button class="backdrop" aria-label="Close" onclick={() => (open = "")}></button>
 {/if}
 
 <style>
@@ -150,6 +203,67 @@
 		margin-left: auto;
 		color: var(--muted);
 		font-size: 11px;
+	}
+	/* Anytype's source card: a large icon tile, "Object Type" over the name, × on the right. */
+	.source {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		padding: 8px;
+		border-radius: 8px;
+		background: var(--hl-med);
+	}
+	.source-main {
+		display: flex;
+		align-items: center;
+		gap: 12px;
+		flex: 1;
+		min-width: 0;
+		color: var(--fg);
+		text-decoration: none;
+	}
+	.source-ico {
+		flex: none;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		width: 40px;
+		height: 40px;
+		border-radius: 8px;
+		background: var(--hover);
+		font-size: 20px;
+	}
+	.source-text {
+		display: flex;
+		flex-direction: column;
+		gap: 2px;
+		min-width: 0;
+	}
+	.source-label {
+		font-size: 14px;
+		color: var(--fg);
+	}
+	.source-name {
+		font-size: 13px;
+		color: var(--muted);
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+	.source-rm {
+		flex: none;
+		width: 28px;
+		height: 28px;
+		border: none;
+		border-radius: 6px;
+		background: none;
+		color: var(--muted);
+		font-size: 18px;
+		cursor: pointer;
+	}
+	.source-rm:hover {
+		background: var(--hover);
+		color: var(--fg);
 	}
 	.backdrop {
 		position: fixed;
