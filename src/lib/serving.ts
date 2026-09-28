@@ -8,7 +8,7 @@
 
 import { fetchAllQuery, type QueryResultRow } from "$lib/api";
 import { coreCall, initCore } from "$lib/engine/core";
-import { guestAgents, type ObjectJSON } from "$lib/types";
+import { guestAgents, type ObjectJSON, type ValueJSON } from "$lib/types";
 
 export interface Serving {
 	/** "" when nothing pins the object and no machine qualifies. */
@@ -69,8 +69,9 @@ async function guestAgentRows(objects: Array<Pick<ObjectJSON, "fields">>): Promi
  * resolves pinned-uncapable - the red "cannot be honoured" row.
  */
 async function capabilityRows(): Promise<QueryResultRow[]> {
-	const [caps, installs] = await Promise.all([fetchAllQuery({ type: "capability" }), fetchAllQuery({ type: "install" })]);
-	return [...caps, ...installs];
+	// A login's capability is gated by its Credential's status, a skill's by its install.
+	const [caps, installs, credentials] = await Promise.all([fetchAllQuery({ type: "capability" }), fetchAllQuery({ type: "install" }), fetchAllQuery({ type: "credential" })]);
+	return [...caps, ...installs, ...credentials];
 }
 
 /** Resolve one object against the live machine roster and its agents. */
@@ -97,6 +98,18 @@ export async function resolveMany(objects: QueryResultRow[], machineRows: QueryR
 export function machineName(machines: MachineRow[], machineId: string): string {
 	if (!machineId) return "no machine";
 	return machines.find((m) => m.machineId === machineId)?.name || `${machineId.slice(0, 8)}…`;
+}
+
+/**
+ * The machine id a `served_by` field names, however it was written: the
+ * machine_id string pins use, or a link / one-item list pointing at the
+ * machine's object (resolved to its machine_id through `machines`).
+ */
+export function servedByMachineId(fields: Record<string, ValueJSON>, machines: MachineRow[]): string {
+	const v = fields["served_by"];
+	const first = v?.valuesValue?.items?.[0];
+	const raw = v?.stringValue || v?.linkValue?.targetId || first?.stringValue || first?.linkValue?.targetId || "";
+	return machines.find((m) => m.id === raw)?.machineId ?? raw;
 }
 
 /** The sentence a chip or cell shows; `warning` when the resolution cannot be honoured. */

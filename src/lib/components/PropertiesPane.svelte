@@ -5,15 +5,15 @@
 	 * icon + the property name on the left (muted), the value on the right.
 	 * Clicking a row opens the property's PropertyValue editor in a popover
 	 * anchored to the row; checkboxes toggle in place. Multi-value rows
-	 * (tag/object/agent/install/requires) carry a hover × per value,
+	 * (tag/object/agent/credentials/requires) carry a hover × per value,
 	 * single-value rows a hover × that removes the property.
 	 */
-	import type { ObjectJSON, RelationDefJSON, ValueJSON } from "$lib/types";
-	import { note, fetchAllQuery } from "$lib/api";
+	import { fieldStr, type ObjectJSON, type RelationDefJSON, type ValueJSON } from "$lib/types";
+	import { note, fetchAllQuery, type QueryResultRow } from "$lib/api";
 	import { layoutOf, store } from "$lib/data.svelte";
 	import { RESERVED_KEYS } from "$lib/relations";
 	import { AGENTLESS_TYPES } from "$lib/agent-field";
-	import { resolveServing, servingCopy, type MachineRow, type Serving } from "$lib/serving";
+	import { machineName, resolveServing, servingCopy, type MachineRow, type Serving } from "$lib/serving";
 	import PropertyValue from "./PropertyValue.svelte";
 	import PropertySuggest from "./PropertySuggest.svelte";
 	import Repeat from "./Repeat.svelte";
@@ -37,7 +37,7 @@
 	    machine and the project folder on it, the agent, its config, then its
 	    credentials and what it needs - the "how this object runs" block ahead
 	    of ordinary fields. */
-	const AGENT_PRIORITY = ["served_by", "repo_path", "agent", "model", "prompt", "requires", "install", "capability"];
+	const AGENT_PRIORITY = ["served_by", "repo_path", "agent", "model", "prompt", "requires", "credentials", "capability"];
 	const agentRank = new Map(AGENT_PRIORITY.map((k, i) => [k, i]));
 
 	/** A template edits the properties of the type it stamps out, so an
@@ -50,8 +50,8 @@
 
 	/** Featured order first, then the rest. */
 	const shown = $derived.by(() => {
-		const MACHINE_BOUND = ["agent", "capability", "install"].includes(typeKey);
-		const AGENT_CONFIG = typeKey === "agent" ? ["prompt", "model", "requires", "install", "served_by", "repo_path"] : [];
+		const MACHINE_BOUND = ["agent", "capability", "install", "credential"].includes(typeKey);
+		const AGENT_CONFIG = typeKey === "agent" ? ["prompt", "model", "requires", "credentials", "served_by", "repo_path"] : [];
 		const present = relations.filter((r) => {
 			if (RESERVED_KEYS[r.key]) return false;
 			if (AGENT_CONFIG.includes(r.key)) return true;
@@ -62,7 +62,7 @@
 			if (typeKey === "channel") return r.key === "agent";
 			if (r.key === "error") return (MACHINE_BOUND && object.typeKey !== "template") || r.key in object.fields;
 			if (r.key === "served_by") return MACHINE_BOUND || r.key in object.fields;
-			if (["agent", "requires", "install"].includes(r.key)) return !AGENTLESS_TYPES[typeKey] || r.key in object.fields;
+			if (["agent", "requires", "credentials"].includes(r.key)) return !AGENTLESS_TYPES[typeKey] || r.key in object.fields;
 			if (r.key === "model") return typeKey === "agent" || r.key in object.fields;
 			return !r.hidden && r.key in object.fields;
 		});
@@ -90,41 +90,52 @@
 		return { text: copy.text, warning: copy.warning };
 	});
 
-	// ── Install + capability lookups so install/requires rows show live status ──
-	let installsById = $state<Map<string, { key: string; account: string; status: string; auth: string; machine: string }>>(new Map());
+	// ── Capability lookups so requires rows show live status (from the install each points at) ──
 	let capabilitiesById = $state<Map<string, { key: string; machine: string; machineName: string; status: string }>>(new Map());
 	$effect(() => {
 		void (async () => {
 			try {
 				const [rows, caps] = await Promise.all([fetchAllQuery({ type: "install" }), fetchAllQuery({ type: "capability" })]);
-				const byId = new Map<string, { key: string; account: string; status: string; auth: string; machine: string }>();
-				for (const r of rows) {
-					const m = r.fields["machine_id"]?.stringValue ?? "";
-					byId.set(r.id, {
-						key: r.fields["key"]?.stringValue ?? "",
-						account: r.fields["account"]?.stringValue ?? "",
-						status: r.fields["status"]?.stringValue ?? "",
-						auth: r.fields["auth"]?.stringValue ?? "",
-						machine: m,
-					});
-				}
-				installsById = byId;
+				const installStatus = new Map(rows.map((r) => [r.id, r.fields["status"]?.stringValue ?? ""]));
 				const byCapId = new Map<string, { key: string; machine: string; machineName: string; status: string }>();
 				for (const c of caps) {
 					const m = c.fields["served_by"]?.linkValue?.targetId ?? c.fields["served_by"]?.stringValue ?? "";
 					const instId = c.fields["install"]?.linkValue?.targetId ?? c.fields["install"]?.stringValue ?? "";
-					const inst = byId.get(instId);
 					byCapId.set(c.id, {
 						key: c.fields["key"]?.stringValue ?? "",
 						machine: m,
 						machineName: m ? (servingState?.machines.find((x) => x.machineId === m)?.name ?? `${m.slice(0, 8)}…`) : "",
-						status: inst?.status ?? "missing",
+						status: installStatus.get(instId) ?? "missing",
 					});
 				}
 				capabilitiesById = byCapId;
-			} catch { /* credentials are optional context */ }
+			} catch { /* capability status is optional context */ }
 		})();
 	});
+
+	// ── The credential objects the credentials row links, for their status and keeping computer ──
+	const credentialIdsKey = $derived((plain(object.fields["credentials"], "object") as string[]).join(","));
+	let credentialsById = $state<Map<string, QueryResultRow>>(new Map());
+	$effect(() => {
+		const ids = credentialIdsKey ? credentialIdsKey.split(",") : [];
+		void (async () => {
+			try {
+				const rows = ids.length > 0 ? await fetchAllQuery({ filters: [{ key: "id", condition: "in", value: ids }] }) : [];
+				credentialsById = new Map(rows.map((r) => [r.id, r]));
+			} catch { /* credential status is optional context */ }
+		})();
+	});
+	/** A linked credential's chip: its label and status colour. It carries its secret, so it works wherever this object's work runs. */
+	function credentialChip(id: string): { label: string; tone: "ok" | "pending" | "warn" | ""; title: string } {
+		const row = credentialsById.get(id);
+		if (!row) return { label: store.summaries.find((s) => s.id === id)?.name || `${id.slice(0, 8)}…`, tone: "", title: "Credential" };
+		const status = fieldStr(row.fields, "status") || "missing";
+		return {
+			label: fieldStr(row.fields, "name") || fieldStr(row.fields, "service") || "Credential",
+			tone: status === "active" ? "ok" : status === "broken" ? "warn" : "pending",
+			title: `${fieldStr(row.fields, "account") || fieldStr(row.fields, "service")} · ${status.replaceAll("_", " ")}`,
+		};
+	}
 
 	let editing = $state<string | null>(null);
 
@@ -173,12 +184,12 @@
 		await onchanged();
 	}
 
-	/** Remove one value from a list-valued property, or the property when that was its last value. */
+	/** Remove one value from a list-valued property, or the property when that was its last value. Items keep their shape (string or link). */
 	async function removeValue(key: string, value: string) {
 		editing = null;
-		const items = (object.fields[key]?.valuesValue?.items ?? []).map((i) => i.stringValue ?? "");
-		const next = items.filter((s) => s !== value);
-		if (next.length > 0 && items.length > 1) await note.setField(object.id, key, { valuesValue: { items: next.map((s) => ({ stringValue: s })) } });
+		const items = object.fields[key]?.valuesValue?.items ?? [];
+		const next = items.filter((i) => (i.stringValue ?? i.linkValue?.targetId ?? "") !== value);
+		if (next.length > 0 && items.length > 1) await note.setField(object.id, key, { valuesValue: { items: $state.snapshot(next) } });
 		else await note.deleteField(object.id, key);
 		await onchanged();
 	}
@@ -222,7 +233,7 @@
 		switch (rel.key) {
 			case "served_by": return { emoji: "🖥️" };
 			case "repo_path": return { emoji: "📁" };
-			case "install": return { emoji: "🔌" };
+			case "credentials": return { emoji: "🔑" };
 			case "agent": return { emoji: "🤖" };
 			case "requires": return { emoji: "🧩" };
 			case "prompt": return { emoji: "📜" };
@@ -251,7 +262,7 @@
 		switch (rel.key) {
 			case "served_by": return "No machine yet";
 			case "repo_path": return "No project folder";
-			case "install": return "No credentials";
+			case "credentials": return "No credentials";
 			case "agent": return "Add agent";
 			case "requires": return "Nothing needed";
 		}
@@ -274,7 +285,7 @@
 			case "tag":
 			case "object":
 			case "agent":
-			case "install":
+			case "credentials":
 			case "requires": return { valuesValue: { items: [] } };
 			default: return { stringValue: "" };
 		}
@@ -293,7 +304,7 @@
 	const canRepeat = $derived(!["channel", "chat", "type", "relation", "template", "query", "set", "collection", "agent"].includes(object.typeKey));
 
 	// ── Grouped display: System / Agent / Custom, each a labeled section ──
-	const AGENT_KEYS = new Set(["served_by", "repo_path", "agent", "model", "prompt", "requires", "install", "capability"]);
+	const AGENT_KEYS = new Set(["served_by", "repo_path", "agent", "model", "prompt", "requires", "credentials", "capability"]);
 	const SYSTEM_KEYS = new Set(["done", "due_date", "status", "tag", "description", "url", "email", "phone", "error", "created_date", "modified_date", "createdDate", "modifiedDate"]);
 	type Group = "system" | "agent" | "custom";
 	const groupOf = (key: string): Group => (AGENT_KEYS.has(key) ? "agent" : SYSTEM_KEYS.has(key) ? "system" : "custom");
@@ -369,16 +380,14 @@
 					{:else}
 						<span class="placeholder">{placeholderFor(rel)}</span>
 					{/if}
-				{:else if rel.key === "install"}
+				{:else if rel.key === "credentials"}
 					{#each plain(v, "object") as string[] as id (id)}
-						{@const row = installsById.get(id)}
-						{@const live = row ? (servingState?.serving.machineId && row.machine && row.machine !== servingState.serving.machineId ? { ...row, status: "other machine" } : row) : null}
-						{@const ok = live?.status === "active"}
+						{@const cred = credentialChip(id)}
 						<span class="chip-wrap">
-							<span class="chip" class:ok class:warn={!!live && !ok} title={live ? `${live.key}${live.account ? ` (${live.account})` : ""} · ${live.status}${live.auth ? ` · ${live.auth}` : ""}` : "Credentials"}>
-								<span class="emoji">🔌</span>{live ? `${live.key}${live.account ? ` · ${live.account}` : ""}${ok ? "" : ` (${live.status.replaceAll("_", " ")})`}` : id.slice(0, 8)}
-							</span>
-							<button class="rm" aria-label={`Remove ${live?.key ?? "credential"}`} title="Remove" onclick={(e) => { e.stopPropagation(); void removeValue(rel.key, id); }}>×</button>
+							<a class="chip" class:ok={cred.tone === "ok"} class:pending={cred.tone === "pending"} class:warn={cred.tone === "warn"} href="/app/object/{id}" title={cred.title} onclick={(e) => e.stopPropagation()}>
+								<span class="emoji">🔑</span>{cred.label}
+							</a>
+							<button class="rm" aria-label={`Remove ${cred.label}`} title="Remove" onclick={(e) => { e.stopPropagation(); void removeValue(rel.key, id); }}>×</button>
 						</span>
 					{:else}
 						<span class="placeholder">{placeholderFor(rel)}</span>
@@ -618,6 +627,16 @@
 	}
 	.chip.warn {
 		color: var(--red);
+	}
+	a.chip {
+		color: inherit;
+		text-decoration: none;
+	}
+	a.chip:hover {
+		text-decoration: underline;
+	}
+	.chip.pending {
+		color: var(--orange);
 	}
 	.li-check {
 		display: inline-flex;

@@ -29,7 +29,6 @@
 	let busy = $state("");
 	let actionError = $state("");
 	let actionNotice = $state("");
-	let draft = $state<Record<string, string>>({});
 	let requestPoll: ReturnType<typeof setInterval> | undefined;
 
 	const key = $derived(fieldStr(object.fields, "key"));
@@ -106,10 +105,8 @@
 		busy = request.messageId;
 		actionError = "";
 		try {
-			const fields = Object.fromEntries((request.fields ?? []).map((f) => [f.key, draft[`${request.messageId}:${f.key}`] ?? ""]));
-			const result = await resolveCapabilityRequest(request, action, fields);
+			const result = await resolveCapabilityRequest(request, action);
 			if (action === "finish-login" && !result.active) actionNotice = "Authentication is not confirmed yet. Finish signing in on that machine, then check again.";
-			for (const f of request.fields ?? []) delete draft[`${request.messageId}:${f.key}`];
 			await loadRequests();
 		} catch (e) {
 			actionError = e instanceof Error ? e.message : String(e);
@@ -187,7 +184,6 @@
 				{/if}
 			{:else}
 				{#if card?.install?.docsUrl}<button class="subtle-btn" disabled={!!busy} onclick={() => void stage("auth.login")}>Request login</button>{/if}
-				{#if (card?.fields.length ?? 0) > 0}<button class="subtle-btn" disabled={!!busy} onclick={() => void stage("auth.save")}>Request key save</button>{/if}
 				<button class="subtle-btn" disabled={!!busy} onclick={() => void stage("auth.check")}>Request check</button>
 				{#if installed}<button class="subtle-btn" disabled={!!busy} onclick={() => void stage("auth.revoke")}>Request removal</button>{/if}
 			{/if}
@@ -204,7 +200,7 @@
 						<span class="chip">{request.operation} · {request.status === "processing" && request.operation === "auth.login" ? "waiting for login" : request.status.replaceAll("_", " ")}</span>
 						{#if request.status === "pending" || request.status === "awaiting_approval"}
 							{#if request.canApprove}
-								<button class="subtle-btn" disabled={!!busy} onclick={() => void resolve(request, "approve")}>{request.operation === "auth.save" ? "Approve & save locally" : "Approve on this computer"}</button>
+								<button class="subtle-btn" disabled={!!busy} onclick={() => void resolve(request, "approve")}>Approve on this computer</button>
 								<button class="subtle-btn" disabled={!!busy} onclick={() => void resolve(request, "reject")}>Reject</button>
 							{:else}
 								<span class="muted">approve on {machine?.name || "the owning computer"}</span>
@@ -220,15 +216,6 @@
 						{/if}
 					</div>
 					{#if request.error}<p class="muted" role="status">{request.error}</p>{/if}
-					{#if (request.status === "pending" || request.status === "awaiting_approval") && request.operation === "auth.save" && request.canApprove}
-						<p class="muted">These values go only to that machine's local store, never into the request or object history.</p>
-						{#each request.fields ?? [] as field (field.key)}
-							<label class="cred-field">
-								<span>{field.label}</span>
-								<input type="password" autocomplete="off" value={draft[`${request.messageId}:${field.key}`] ?? ""} oninput={(e) => (draft[`${request.messageId}:${field.key}`] = e.currentTarget.value)} />
-							</label>
-						{/each}
-					{/if}
 				</div>
 			{/each}
 			{#if !paired}
@@ -268,6 +255,4 @@
 	.request { border-top: 1px solid var(--border); padding: 8px 0 6px; display: flex; flex-direction: column; gap: 6px; }
 	.request:first-of-type { border-top: none; }
 	.request-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-	.cred-field { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); }
-	.cred-field input { background: var(--bg); border: 1px solid var(--border); border-radius: 7px; padding: 6px 10px; color: var(--fg); font: inherit; }
 </style>

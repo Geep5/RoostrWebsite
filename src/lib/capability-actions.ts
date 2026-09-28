@@ -22,7 +22,6 @@ export interface CapabilityRequest {
 	status: string;
 	error: string;
 	canApprove: boolean;
-	fields?: Array<{ key: string; label: string; secret: boolean }>;
 }
 
 /** Requests waiting on a human or in flight, harness-side view. */
@@ -77,9 +76,8 @@ export async function sendCapabilityRequest(senderObjectId: string, installation
 }
 
 /** Approve, reject, or confirm a login. Approval executes on this machine's harness. */
-export async function resolveCapabilityRequest(request: CapabilityRequest, action: "approve" | "reject" | "finish-login", fields?: Record<string, string>): Promise<{ active?: boolean }> {
-	const body: { objectId: string; messageId: string; fields?: Record<string, string> } = { objectId: request.objectId, messageId: request.messageId };
-	if (action === "approve" && request.operation === "auth.save") body.fields = fields ?? {};
+export async function resolveCapabilityRequest(request: CapabilityRequest, action: "approve" | "reject" | "finish-login"): Promise<{ active?: boolean }> {
+	const body = { objectId: request.objectId, messageId: request.messageId };
 	const res = await harnessFetch(`/capability-requests/${action}`, { method: "POST", body: JSON.stringify(body) });
 	const result = (await res.json().catch(() => ({}))) as { error?: string; active?: boolean };
 	if (!res.ok || result.error) throw new Error(result.error ?? `HTTP ${res.status}`);

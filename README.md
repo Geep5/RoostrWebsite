@@ -72,10 +72,14 @@ audience; **Private** starts a separate exchange. Delivery and local processing
 status are displayed separately. The shared exchange ID is a UI grouping key,
 not a shared conversation object.
 
-Machine capability and authentication requests also use object mailboxes.
-**This machine → Capability requests** shows requests waiting for local
-approval and failed operations. Credentials are entered only into the paired
-machine's local approval form, never into a message or synced object property.
+Skill and Google-account requests also use object mailboxes; an Installation
+page shows requests waiting for local approval and failed operations.
+
+A Credential page (New → Credential) is one login for one service. Keys typed
+there are saved on the credential itself (readable by everyone in its space);
+Connect / Check / Disconnect run on the computer in its Served by, which opens
+the Chrome sign-in window and keeps the status current. Agents list the
+credentials they may use in their Credentials property.
 
 ## Verification
 

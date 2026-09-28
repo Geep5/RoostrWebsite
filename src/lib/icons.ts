@@ -16,6 +16,7 @@ export const TYPE_GLYPHS: Record<string, string> = {
 	agent: "🤖",
 	channel: "◍",
 	chat: "💬",
+	credential: "🔑",
 };
 
 export function objectIcon(emoji: string | undefined, typeKey: string): string {

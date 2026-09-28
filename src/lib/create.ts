@@ -121,10 +121,27 @@ function defaultTemplateOf(key: string, channelId: string): string {
 	const types = store.types.filter((t) => t.key === key);
 	return (types.find((t) => t.space === channelId) ?? types[0])?.defaultTemplateId ?? "";
 }
+/**
+ * A credential lives on one computer - its Chrome profile or keys never
+ * leave it - so a new one starts pinned to the computer this tab is paired
+ * with, when there is one. The type's default template still applies.
+ */
+async function createCredential(channelId: string, name: string): Promise<string> {
+	const machineId = await thisMachineId();
+	const { id } = await note.create(name || "New credential", "credential", {
+		...channelField(channelId),
+		...(machineId ? { served_by: { stringValue: machineId } } : {}),
+	});
+	const tplId = defaultTemplateOf("credential", channelId);
+	if (tplId) await applyTemplate(id, tplId).catch(() => {}); // a deleted default template is a no-op
+	await goto(`/app/object/${id}`);
+	return id;
+}
 export async function createTyped(typeKey: string, channelId: string, name = ""): Promise<string> {
 	const key = typeKey.trim().toLowerCase();
 	if (key === "agent") return createAgent(channelId);
 	if (key === "machine") return createMachine();
+	if (key === "credential") return createCredential(channelId, name);
 	const { id } = await note.create(name, key, channelField(channelId));
 	const tplId = defaultTemplateOf(key, channelId);
 	if (tplId) await applyTemplate(id, tplId).catch(() => {}); // a deleted default template is a no-op

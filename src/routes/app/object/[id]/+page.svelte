@@ -12,6 +12,7 @@
 	import Editor from "$lib/components/Editor.svelte";
 	import Discussion from "$lib/components/Discussion.svelte";
 	import Installation from "$lib/components/Installation.svelte";
+	import Credential from "$lib/components/Credential.svelte";
 	import ConversationDrawer from "$lib/components/ConversationDrawer.svelte";
 	import { objectThreads } from "$lib/conversations";
 	import SetTable from "$lib/components/SetTable.svelte";
@@ -152,6 +153,7 @@
 	const isAgent = $derived(object?.typeKey === "agent");
 	const isCapability = $derived(object?.typeKey === "capability");
 	const isInstall = $derived(object?.typeKey === "install");
+	const isCredential = $derived(object?.typeKey === "credential");
 	const isType = $derived(object?.typeKey === "type");
 	const isTemplate = $derived(object?.typeKey === "template");
 	const isRelation = $derived(object?.typeKey === "relation");
@@ -451,6 +453,8 @@
 			<CapabilitySetup {object} onchanged={refresh} />
 		{:else if isInstall}
 			<Installation {object} />
+		{:else if isCredential}
+			<Credential {object} onchanged={refresh} />
 		{:else if isType}
 			<TypePanel {object} onchanged={refresh} />
 			<div class="dataview">
