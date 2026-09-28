@@ -1538,6 +1538,11 @@
 		display: flex;
 		flex-direction: column;
 		box-shadow: 0 16px 48px rgb(0 0 0 / 0.5);
+		/* A vault with many types outgrows the window: the menu scrolls
+		   inside the viewport instead of running off the bottom. */
+		max-height: calc(100vh - 110px);
+		overflow-y: auto;
+		overscroll-behavior: contain;
 	}
 	.create-menu > button {
 		display: flex;
