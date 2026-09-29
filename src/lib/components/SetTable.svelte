@@ -17,7 +17,7 @@
 	import { store, layoutOf } from "$lib/data.svelte";
 	import type { ObjectJSON, RelationDefJSON, ValueJSON } from "$lib/types";
 	import { fieldStr } from "$lib/types";
-	import { objectIcon } from "$lib/icons";
+	import { objectIcon, typeIcon } from "$lib/icons";
 
 	let {
 		body,
@@ -613,7 +613,7 @@
 								{/if}
 							</td>
 						{:else}
-							<td class:muted={c === "type" || c === "createdAt" || c === "updatedAt"} class:cell-warn={c === "serving" && (servingById.get(r.id)?.warning ?? false)} title={c === "serving" ? servingById.get(r.id)?.text : undefined}>{cell(r, c)}</td>
+							<td class:muted={c === "type" || c === "createdAt" || c === "updatedAt"} class:cell-warn={c === "serving" && (servingById.get(r.id)?.warning ?? false)} title={c === "serving" ? servingById.get(r.id)?.text : undefined}>{#if c === "type" && typeIcon(r.typeKey)}<span class="type-icon">{typeIcon(r.typeKey)}</span>{/if}{cell(r, c)}</td>
 						{/if}
 					{/each}
 					<td></td>
@@ -715,6 +715,9 @@
 	/>
 {/if}
 <style>
+	.type-icon {
+		margin-right: 6px;
+	}
 	.set-table {
 		overflow-x: auto;
 	}
