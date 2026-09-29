@@ -5,6 +5,7 @@
 	import BlockNode from "./BlockNode.svelte";
 	import TableBlock from "./TableBlock.svelte";
 	import RelationBlock from "./RelationBlock.svelte";
+	import FileBlock from "./FileBlock.svelte";
 	import { isToggleOpen, setToggleOpen } from "$lib/toggles";
 	import { store } from "$lib/data.svelte";
 	import { objectIcon } from "$lib/icons";
@@ -326,7 +327,7 @@
 			</div>
 			<RelationBlock {block} {object} {onrefresh} />
 		</div>
-	{:else if block.content.custom?.contentType === "embed" || block.content.custom?.contentType === "bookmark"}
+	{:else if block.content.custom?.contentType === "embed" || block.content.custom?.contentType === "bookmark" || block.content.custom?.contentType === "file"}
 		{@const meta = block.content.custom.meta ?? {}}
 		<div
 			class="block zone-{zone} {draggingId === block.id ? 'dragging' : ''}" class:selected={selectedIds.has(block.id)}
@@ -355,7 +356,9 @@
 					<svg viewBox="0 0 2 12" fill="none" xmlns="http://www.w3.org/2000/svg"><path fill-rule="evenodd" clip-rule="evenodd" d="M0 1C0 0.447716 0.447715 0 1 0C1.55228 0 2 0.447716 2 1C2 1.55228 1.55228 2 1 2C0.447715 2 0 1.55228 0 1ZM0 6C0 5.44772 0.447715 5 1 5C1.55228 5 2 5.44772 2 6C2 6.55228 1.55228 7 1 7C0.447715 7 0 6.55228 0 6ZM1 10C0.447715 10 0 10.4477 0 11C0 11.5523 0.447715 12 1 12C1.55228 12 2 11.5523 2 11C2 10.4477 1.55228 10 1 10Z" fill="currentColor" /></svg>
 				</button>
 			</div>
-			{#if block.content.custom.contentType === "embed"}
+			{#if block.content.custom.contentType === "file"}
+				<FileBlock {meta} />
+			{:else if block.content.custom.contentType === "embed"}
 				<iframe
 					class="embed"
 					class:audio={meta["processor"] === "spotify"}

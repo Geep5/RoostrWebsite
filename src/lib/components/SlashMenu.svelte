@@ -14,7 +14,8 @@
 		| { kind: "divider"; style: "line" | "dots" }
 		| { kind: "relation"; key: string }
 		| { kind: "property_add" }
-		| { kind: "link_object" };
+		| { kind: "link_object" }
+		| { kind: "file" };
 	let {
 		filter,
 		x,
@@ -60,6 +61,7 @@
 		{ section: "Other", label: "Dots divider", desc: "Three dots separator", preview: "···", cls: "pv-div", aliases: ["dots", "dot divider", "***"], pick: { kind: "divider", style: "dots" } },
 		// Anytype menuBlockAdd getBlockLink: "Link to existing page" (alias "link").
 		{ section: "Other", label: "Link to object", desc: "Embed a link to an existing object", preview: "🔗", cls: "pv-link", aliases: ["link", "object", "existing", "page"], pick: { kind: "link_object" } },
+		{ section: "Other", label: "Image or file", desc: "Upload an image, PDF or any file", preview: "📎", cls: "pv-link", aliases: ["image", "img", "picture", "photo", "pdf", "file", "upload", "attach"], pick: { kind: "file" } },
 	];
 
 	/** Anytype's slash "Relations" section (menu/block/add.tsx:111-131):

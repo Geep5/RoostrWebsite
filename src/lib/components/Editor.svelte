@@ -17,6 +17,8 @@
 	import LinkPicker from "./LinkPicker.svelte";
 	import { store, refreshAll } from "$lib/data.svelte";
 	import { RESERVED_KEYS, emptyValueFor, objectSpaceId, spaceRelations } from "$lib/relations";
+	import { FILES_NEED_LOCAL, pickFile, uploadFile } from "$lib/files";
+	import { isLocalBackend } from "$lib/client-backend";
 	import type { RelationDefJSON } from "$lib/types";
 	import { getProcessorByUrl, getEmbedUrl, isSingleUrl, type EmbedProcessor } from "$lib/embed";
 
@@ -1178,6 +1180,34 @@
 				await writes.blockUpdate(object.id, id, contentFor(id, clean, marks));
 				await writes.blockAdd(object.id, { id: crypto.randomUUID(), childrenIds: [], content: divider }, id, Pos.BOTTOM);
 				focusRequest = { blockId: id, offset: start };
+			}
+		} else if (pick.kind === "file") {
+			// Bytes become a File object (held by this computer, fetched
+			// peer-to-peer elsewhere); the block only points at it.
+			if (!isLocalBackend) {
+				alert(FILES_NEED_LOCAL);
+				return;
+			}
+			const file = await pickFile();
+			if (!file) return;
+			let uploaded: { id: string; hash: string };
+			try {
+				uploaded = await uploadFile(file, objectSpaceId(object));
+			} catch (err) {
+				alert(`Could not add ${file.name}: ${err instanceof Error ? err.message : String(err)}`);
+				return;
+			}
+			const block = { custom: { contentType: "file", meta: { fileId: uploaded.id, hash: uploaded.hash, mime: file.type, name: file.name } } };
+			if (clean === "") {
+				// Like a divider: the empty block becomes the file, and a fresh
+				// paragraph below keeps somewhere to type.
+				const paraId = crypto.randomUUID();
+				await writes.blockUpdate(object.id, id, block);
+				await writes.blockAdd(object.id, { id: paraId, childrenIds: [], content: { text: { text: "", style: Style.PARAGRAPH } } }, id, Pos.BOTTOM);
+				focusRequest = { blockId: paraId, offset: 0 };
+			} else {
+				await writes.blockUpdate(object.id, id, contentFor(id, clean, marks));
+				await writes.blockAdd(object.id, { id: crypto.randomUUID(), childrenIds: [], content: block }, id, Pos.BOTTOM);
 			}
 		} else if (pick.kind === "relation") {
 			await insertRelationBlock(id, clean, marks, pick.key);
