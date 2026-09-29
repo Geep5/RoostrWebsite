@@ -220,6 +220,8 @@
 	}
 
 	let showTypePick = $state(false);
+	/** Queries and collections are views, not records: retyping one would strand its view settings behind a page. */
+	const canRetype = $derived(!!objectSummary && !["query", "collection", "set"].includes(objectSummary.typeKey));
 
 	/** Retype the current object in place (blocks and fields survive). */
 	async function changeType(typeKey: string) {
@@ -810,7 +812,7 @@
 									{/if}
 								</div>
 							{/if}
-							<button onclick={() => (showTypePick = !showTypePick)}><Icon name="arrow-left-right" />Change type<span class="chev"><Icon name="chevron-right" size={14} /></span></button>
+							{#if canRetype}<button onclick={() => (showTypePick = !showTypePick)}><Icon name="arrow-left-right" />Change type<span class="chev"><Icon name="chevron-right" size={14} /></span></button>{/if}
 							{#if showTypePick}
 								<div class="submenu">
 									{#each sidebarTypes.filter((t) => t.key !== objectSummary?.typeKey) as t (t.id)}
@@ -1340,7 +1342,7 @@
 										{/if}
 									</div>
 								{/if}
-								<button onclick={() => (showTypePick = !showTypePick)}><Icon name="arrow-left-right" />Change type<span class="chev"><Icon name="chevron-right" size={14} /></span></button>
+								{#if canRetype}<button onclick={() => (showTypePick = !showTypePick)}><Icon name="arrow-left-right" />Change type<span class="chev"><Icon name="chevron-right" size={14} /></span></button>{/if}
 								{#if showTypePick}
 									<div class="submenu">
 										{#each sidebarTypes.filter((t) => t.key !== objectSummary?.typeKey) as t (t.id)}
