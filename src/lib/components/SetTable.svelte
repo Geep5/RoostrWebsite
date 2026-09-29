@@ -490,9 +490,14 @@
 		const v: ValueJSON | undefined = r.fields[key];
 		const format = formatOf(key);
 		if (!v) return "";
-		if (format === "object" && v.valuesValue) {
-			return v.valuesValue.items
-				.map((i) => store.summaries.find((s) => s.id === i.stringValue)?.name || (i.stringValue ?? "").slice(0, 6))
+		// Object values come as a list, a bare link, or a bare id: all read as names.
+		if (format === "object" || v.linkValue) {
+			const ids = v.valuesValue
+				? v.valuesValue.items.map((i) => i.linkValue?.targetId ?? i.stringValue ?? "")
+				: [v.linkValue?.targetId ?? v.stringValue ?? ""];
+			return ids
+				.filter(Boolean)
+				.map((id) => store.summaries.find((s) => s.id === id)?.name || id.slice(0, 8))
 				.join(", ");
 		}
 		if (v.stringValue !== undefined) return v.stringValue;
@@ -501,7 +506,6 @@
 		if (v.floatValue !== undefined) return String(v.floatValue);
 		if (v.valuesValue) return v.valuesValue.items.map((i) => i.stringValue ?? "").join(", ");
 		if (v.listValue) return v.listValue.values.join(", ");
-		if (v.linkValue) return v.linkValue.targetId.slice(0, 8);
 		return "";
 	}
 
