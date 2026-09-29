@@ -561,7 +561,7 @@
 	 * fills from the bottom meanwhile, and leaving early cancels. One toggle
 	 * per visit: the tab moves away as its pane folds, which ends the hover.
 	 */
-	const DWELL_MS = 1000;
+	const DWELL_MS = 700;
 	let dwelling = $state<"" | "nav" | "pane">("");
 	let dwellTimer: ReturnType<typeof setTimeout> | undefined;
 	function dwellStart(which: "nav" | "pane", toggle: () => void) {
