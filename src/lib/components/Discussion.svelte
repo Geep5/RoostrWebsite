@@ -1226,7 +1226,8 @@
 	   text under the caret); the shadow paints the breathing room instead. */
 	.mirror :global(.mention) {
 		background: rgba(88, 101, 242, 0.3);
-		box-shadow: 0 0 0 2px rgba(88, 101, 242, 0.3);
+		/* Height only: a side ring would cover the ~4px space between adjacent tags. */
+		box-shadow: 0 2px 0 0 rgba(88, 101, 242, 0.3), 0 -2px 0 0 rgba(88, 101, 242, 0.3);
 		color: #c9cdfb;
 		border-radius: 3px;
 	}

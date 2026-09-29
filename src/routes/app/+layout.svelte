@@ -50,6 +50,8 @@
 	const objectId = $derived(page.url.pathname.startsWith("/app/object/") ? page.url.pathname.slice("/app/object/".length) : "");
 	const objectSummary = $derived(store.summaries.find((s) => s.id === objectId));
 	const objectRelation = $derived(objectId ? store.relations.find((r) => r.id === objectId) : undefined);
+	/** The open object is a space: not a summary row, but still an object with an id. */
+	const objectSpace = $derived(objectId && !objectSummary ? channels.find((c) => c.id === objectId) : undefined);
 
 	/** The channel whose pinnedIds owns this object (unassigned → default). */
 	const owningSpaceOf = (channelId: string) => channels.find((c) => c.id === channelId);
@@ -240,8 +242,8 @@
 	/** Copy the object's id - the stable handle for referencing it to an
 	 * agent (object_get, links, queries). Carries no access. */
 	async function copyObjectId() {
-		if (!objectSummary) return;
-		await navigator.clipboard.writeText(objectSummary.id);
+		if (!objectId) return;
+		await navigator.clipboard.writeText(objectId);
 	}
 
 	/** Pinned objects of the current channel, in pinned order. */
@@ -833,6 +835,23 @@
 					<button class="m-btn pane-btn" data-tip="Chat & properties" aria-label="Open chat and properties" onclick={() => (discussionUI.open = true)}><PaneIcon />{#if discussionUI.count}<span class="pane-badge">{discussionUI.count > 99 ? "99+" : discussionUI.count}</span>{/if}</button>
 				{/if}
 				</div>
+			{:else if objectSpace}
+				<div class="m-actions">
+				<div class="more-wrap">
+					<button class="m-btn" data-tip="More" onclick={() => { showMore = !showMore; showCollections = false; }}>⋯</button>
+					{#if showMore}
+						<div class="more-menu">
+							<button onclick={() => { showMore = false; void goto(`/app/graph?focus=${objectId}`); }}>
+								<span class="menu-graph-icon"><GraphIcon size={14} /></span> Graph
+							</button>
+							<button onclick={() => { showMore = false; void copyObjectId(); }}><Icon name="hash" />Copy ID</button>
+						</div>
+					{/if}
+				</div>
+				{#if discussionUI.available}
+					<button class="m-btn pane-btn" data-tip="Chat & properties" aria-label="Open chat and properties" onclick={() => (discussionUI.open = true)}><PaneIcon />{#if discussionUI.count}<span class="pane-badge">{discussionUI.count > 99 ? "99+" : discussionUI.count}</span>{/if}</button>
+				{/if}
+				</div>
 			{/if}
 		</header>
 		<main class="m-main">{@render children()}</main>
@@ -1356,6 +1375,15 @@
 								{/if}
 								<div class="menu-sep"></div>
 								<button class="danger" onclick={() => { showMore = false; void moveToBin(); }}><Icon name="trash" />Move to bin</button>
+							</div>
+						{/if}
+					</div>
+				{:else if objectSpace}
+					<div class="more-wrap">
+						<button class="hbtn" data-tip="More" onclick={() => { showMore = !showMore; showCollections = false; }}>⋯</button>
+						{#if showMore}
+							<div class="more-menu">
+								<button onclick={() => { showMore = false; void copyObjectId(); }}><Icon name="hash" />Copy ID</button>
 							</div>
 						{/if}
 					</div>

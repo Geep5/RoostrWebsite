@@ -119,15 +119,21 @@
 	// ── Profile picture (kind 0, engine-signed) ──────────────────────
 	import { cachedProfile, fetchProfile, saveProfile, imageToAvatar } from "$lib/client-profile";
 	let profilePicture = $state("");
+	let profileName = $state("");
+	/** The name as last saved, so an unchanged field never republishes the profile. */
+	let savedName = "";
 	let avatarBusy = $state(false);
 	let avatarState = $state("");
 	let avatarFileEl = $state<HTMLInputElement>();
 
 	profilePicture = cachedProfile().picture ?? "";
+	profileName = savedName = cachedProfile().name ?? "";
 	async function loadProfile() {
 		avatarState = "";
 		try {
-			profilePicture = (await fetchProfile()).picture ?? "";
+			const p = await fetchProfile();
+			profilePicture = p.picture ?? "";
+			profileName = savedName = p.name ?? "";
 		} catch (err) {
 			avatarState = err instanceof Error ? err.message : String(err);
 		}
@@ -155,6 +161,22 @@
 		try {
 			const p = await saveProfile({ picture: "" });
 			profilePicture = p.picture ?? "";
+			avatarState = "saved";
+		} catch (err) {
+			avatarState = err instanceof Error ? err.message : String(err);
+		} finally {
+			avatarBusy = false;
+		}
+	}
+
+	async function saveName() {
+		const name = profileName.trim();
+		if (name === savedName) return;
+		avatarBusy = true;
+		avatarState = "saving…";
+		try {
+			const p = await saveProfile({ name });
+			profileName = savedName = p.name ?? "";
 			avatarState = "saved";
 		} catch (err) {
 			avatarState = err instanceof Error ? err.message : String(err);
@@ -351,13 +373,22 @@
 
 		<section>
 			<h3>Profile</h3>
-			<p class="hint">Your avatar - shown on the Spaces screen and synced to every device holding this key.</p>
+			<p class="hint">Your name and avatar (your Nostr profile), synced to every device holding this key. The avatar also shows on the Spaces screen.</p>
 			<div class="profile-row">
 				{#if profilePicture}
 					<img class="profile-avatar" src={profilePicture} alt="" />
 				{:else}
 					<span class="profile-avatar placeholder">⚙</span>
 				{/if}
+				<input
+					class="profile-name"
+					placeholder="Your name"
+					aria-label="Profile name"
+					bind:value={profileName}
+					disabled={avatarBusy}
+					onchange={() => void saveName()}
+					onkeydown={(e) => { if (e.key === "Enter") e.currentTarget.blur(); }}
+				/>
 				<input type="file" accept="image/*" bind:this={avatarFileEl} onchange={(e) => void pickAvatar(e)} hidden />
 				<button class="action" disabled={avatarBusy} onclick={() => avatarFileEl?.click()}>{profilePicture ? "Change picture" : "Upload picture"}</button>
 				{#if profilePicture}
@@ -907,6 +938,11 @@
 		display: flex;
 		align-items: center;
 		gap: 12px;
+	}
+	.profile-name {
+		flex: 1;
+		min-width: 0;
+		max-width: 220px;
 	}
 	.profile-avatar {
 		width: 56px;
