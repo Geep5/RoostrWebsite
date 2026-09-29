@@ -370,9 +370,10 @@
 	type Group = "credential" | "system" | "agent" | "custom";
 	const groupOf = (key: string): Group => (AGENT_KEYS.has(key) ? "agent" : SYSTEM_KEYS.has(key) ? "system" : "custom");
 	const groups = $derived.by(() => {
-		const out: Array<{ id: Group; label: string; rows: typeof shown }> = credentialRows.length ? [{ id: "credential", label: "Credential", rows: credentialRows }] : [];
-		for (const [id, label] of [["system", "System"], ["agent", "Agent"], ["custom", "Custom"]] as Array<[Group, string]>) {
-			const rows = shown.filter((r) => groupOf(r.key) === id);
+		const out: Array<{ id: Group; label: string; rows: typeof shown }> = [];
+		// System first, and Repeat first within it: the one row every object shares sits at the very top.
+		for (const [id, label] of [["system", "System"], ["credential", "Credential"], ["agent", "Agent"], ["custom", "Custom"]] as Array<[Group, string]>) {
+			const rows = id === "credential" ? credentialRows : shown.filter((r) => groupOf(r.key) === id);
 			if (id === "system" && canRepeat) rows.unshift({ key: "__repeat__", name: "Repeat" } as unknown as (typeof shown)[number]);
 			if (rows.length) out.push({ id, label, rows });
 		}
