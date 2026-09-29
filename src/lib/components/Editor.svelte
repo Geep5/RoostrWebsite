@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { flushSync } from "svelte";
+	import { createWriteQueue, queued } from "$lib/editor/write-queue";
 	import type { ObjectJSON, BlockJSON, MarkJSON } from "$lib/types";
 	import { Pos, Style, MarkT, Layout } from "$lib/types";
 	import { note, table, fetchObject } from "$lib/api";
@@ -19,6 +20,10 @@
 	import { getProcessorByUrl, getEmbedUrl, isSingleUrl, type EmbedProcessor } from "$lib/embed";
 
 	let { object, onchanged }: { object: ObjectJSON; onchanged: () => Promise<void> } = $props();
+
+	/** Every write this editor makes, in the order it made them (lib/editor/write-queue). */
+	const writeQueue = createWriteQueue();
+	const writes = queued(note, writeQueue);
 
 	const byId = $derived(new Map(object.blocks.map((b) => [b.id, b])));
 	const rootIds = $derived.by(() => {
@@ -406,10 +411,9 @@
 			e.preventDefault();
 			const tops = topmostSelected();
 			selectedIds = [];
-			lastLocalEdit = Date.now();
 			for (const id of tops) {
 				cancelPending(id);
-				await note.blockRemove(object.id, id);
+				await writes.blockRemove(object.id, id);
 			}
 			await refresh();
 		}
@@ -435,10 +439,14 @@
 	/** "Paste as" menu (Anytype editor/page.tsx onPasteUrl). */
 	let pasteMenu = $state<{ blockId: string; url: string; processor: EmbedProcessor | null; x: number; y: number; at: number } | null>(null);
 	const saveTimers = new Map<string, ReturnType<typeof setTimeout>>();
-	let lastLocalEdit = $state(0);
 
-	export function lastEditAt(): number {
-		return lastLocalEdit;
+	/** Resolves once no typing is waiting to save and every write has landed. */
+	export async function settled(): Promise<void> {
+		for (;;) {
+			await writeQueue.idle();
+			if (dirty.size === 0) return;
+			await new Promise((r) => setTimeout(r, 150));
+		}
 	}
 
 	const blockEl = (id: string): HTMLElement | null => document.querySelector(`[data-block="${id}"] .text`);
@@ -448,6 +456,7 @@
 		// otherwise a refresh triggered by one block's mutation clobbers
 		// another block's unflushed typing.
 		for (const id of [...dirty]) await flushSave(id);
+		await writeQueue.idle();
 		await onchanged();
 		void syncLinksField();
 		if (focusRequest) {
@@ -465,9 +474,8 @@
 		linkPicker = null;
 		const cur = byId.get(blockId)?.content.text;
 		const empty = (cur?.text ?? "") === "";
-		lastLocalEdit = Date.now();
 		const block = { id: crypto.randomUUID(), childrenIds: [], content: { custom: { contentType: "link", meta: { target: targetId } } } };
-		await note.blockAdd(object.id, block, blockId, empty ? Pos.REPLACE : Pos.BOTTOM);
+		await writes.blockAdd(object.id, block, blockId, empty ? Pos.REPLACE : Pos.BOTTOM);
 		await refresh();
 	}
 
@@ -481,7 +489,7 @@
 		const targets = [...new Set(object.blocks.filter((b) => b.content.custom?.contentType === "link").map((b) => b.content.custom!.meta?.target ?? "").filter(Boolean))];
 		const current = (object.fields["links"]?.valuesValue?.items ?? []).map((i) => i.linkValue?.targetId ?? "").filter(Boolean);
 		if (targets.length === current.length && targets.every((t, i) => t === current[i])) return;
-		await note.setField(object.id, "links", { valuesValue: { items: targets.map((t) => ({ linkValue: { targetId: t, relationKey: "links" } })) } });
+		await writes.setField(object.id, "links", { valuesValue: { items: targets.map((t) => ({ linkValue: { targetId: t, relationKey: "links" } })) } });
 	}
 
 	function readBlock(id: string): { text: string; marks: ReturnType<typeof fromDom>["marks"] } {
@@ -545,7 +553,6 @@
 		const cur = byId.get(rid);
 		if (!cur) return false;
 		cancelPending(rid);
-		lastLocalEdit = Date.now();
 		flushSync(() => {
 			if (cur.content.text) {
 				cur.content.text.text = liveText;
@@ -562,8 +569,8 @@
 		});
 		focusSync(rid, caretAt);
 		await persist(async () => {
-			await note.blockUpdate(object.id, rid, contentFor(rid, liveText, liveMarks));
-			await note.blockMove(object.id, rid, parentId, Pos.BOTTOM);
+			await writes.blockUpdate(object.id, rid, contentFor(rid, liveText, liveMarks));
+			await writes.blockMove(object.id, rid, parentId, Pos.BOTTOM);
 		});
 		return true;
 	}
@@ -572,14 +579,13 @@
 	async function addSibling(rid: string, pos: number, style: number) {
 		const nid = crypto.randomUUID();
 		cancelPending(rid);
-		lastLocalEdit = Date.now();
 		flushSync(() => {
 			const nb: BlockJSON = { id: nid, childrenIds: [], content: { text: { text: "", style } } };
 			if (pos === Pos.TOP) localInsertBefore(nb, rid);
 			else localInsertAfter(nb, rid);
 		});
 		focusSync(nid, 0, rid);
-		await persist(() => note.blockAdd(object.id, { id: nid, childrenIds: [], content: { text: { text: "", style } } }, rid, pos));
+		await persist(() => writes.blockAdd(object.id, { id: nid, childrenIds: [], content: { text: { text: "", style } } }, rid, pos));
 	}
 
 	/** Synchronous caret move with async rescue. */
@@ -624,7 +630,6 @@
 	}
 
 	function scheduleSave(id: string) {
-		lastLocalEdit = Date.now();
 		dirty.add(id);
 		clearTimeout(saveTimers.get(id));
 		saveTimers.set(
@@ -632,6 +637,15 @@
 			setTimeout(() => void flushSave(id), 600),
 		);
 	}
+
+	/**
+	 * Save every block with unsaved typing now: the tab is hiding or closing,
+	 * or the editor is going away, and a pending debounce would be lost.
+	 */
+	function flushAll() {
+		for (const id of [...dirty]) void flushSave(id);
+	}
+	$effect(() => flushAll);
 
 	async function flushSave(id: string) {
 		if (!dirty.has(id)) return;
@@ -646,8 +660,7 @@
 		const { text, marks } = fromDom(el);
 		const cur = byId.get(id)!.content.text;
 		if (cur && cur.text === text && JSON.stringify(cur.marks ?? []) === JSON.stringify(marks)) return;
-		lastLocalEdit = Date.now();
-		await note.blockUpdate(object.id, id, contentFor(id, text, marks));
+		await writes.blockUpdate(object.id, id, contentFor(id, text, marks));
 	}
 
 	// ── Keyboard ──────────────────────────────────────────────────
@@ -740,7 +753,6 @@
 			const style = text.trim() === "***" ? "dots" : "line";
 			const newId = crypto.randomUUID();
 			cancelPending(id);
-			lastLocalEdit = Date.now();
 			const para: BlockJSON = { id: newId, childrenIds: [], content: { text: { text: "", style: Style.PARAGRAPH } } };
 			flushSync(() => {
 				byId.get(id)!.content = { custom: { contentType: "divider", meta: { style } } };
@@ -748,8 +760,8 @@
 			});
 			focusSync(newId, 0, id);
 			await persist(async () => {
-				await note.blockUpdate(object.id, id, { custom: { contentType: "divider", meta: { style } } });
-				await note.blockAdd(object.id, { id: newId, childrenIds: [], content: { text: { text: "", style: Style.PARAGRAPH } } }, id, Pos.BOTTOM);
+				await writes.blockUpdate(object.id, id, { custom: { contentType: "divider", meta: { style } } });
+				await writes.blockAdd(object.id, { id: newId, childrenIds: [], content: { text: { text: "", style: Style.PARAGRAPH } } }, id, Pos.BOTTOM);
 			});
 			return true;
 		}
@@ -803,7 +815,6 @@
 				if (parentStyle !== undefined && LIST.includes(parentStyle) && (await outdentBlock(id, 0, "", []))) return;
 				const curText = byId.get(id)!.content.text!;
 				cancelPending(id);
-				lastLocalEdit = Date.now();
 				flushSync(() => {
 					curText.text = "";
 					curText.marks = [];
@@ -811,7 +822,7 @@
 					curText.checked = false;
 				});
 				focusSync(id, 0);
-				await persist(() => note.blockUpdate(object.id, id, { text: { text: "", marks: [], style: Style.PARAGRAPH, checked: false, color: curText.color ?? "" } }));
+				await persist(() => writes.blockUpdate(object.id, id, { text: { text: "", marks: [], style: Style.PARAGRAPH, checked: false, color: curText.color ?? "" } }));
 				return;
 			}
 
@@ -862,7 +873,6 @@
 
 			const newId = crypto.randomUUID();
 			cancelPending(id);
-			lastLocalEdit = Date.now();
 			const head = text.slice(0, at);
 			const tail = text.slice(at);
 			const headMarks = marks.filter((m) => m.from < at).map((m) => ({ ...m, to: Math.min(m.to, at) }));
@@ -894,8 +904,8 @@
 				}
 				focusSync(id, 0);
 				await persist(async () => {
-					await note.blockAdd(object.id, above as BlockJSON, id, Pos.TOP);
-					await note.blockUpdate(object.id, id, { text: { text: tail, marks: tailMarks, style: curStyle, checked: !!tail.length && checked, color } });
+					await writes.blockAdd(object.id, above as BlockJSON, id, Pos.TOP);
+					await writes.blockUpdate(object.id, id, { text: { text: tail, marks: tailMarks, style: curStyle, checked: !!tail.length && checked, color } });
 				});
 				return;
 			}
@@ -922,8 +932,8 @@
 				if (el.innerHTML !== headHtml) el.innerHTML = headHtml;
 			}
 			await persist(async () => {
-				await note.blockUpdate(object.id, id, { text: { text: head, marks: headMarks, style: curStyle, checked: !!head.length && checked, color } });
-				await note.blockAdd(object.id, born as BlockJSON, id, mode === Pos.INNER_FIRST ? Pos.INNER_FIRST : Pos.BOTTOM);
+				await writes.blockUpdate(object.id, id, { text: { text: head, marks: headMarks, style: curStyle, checked: !!head.length && checked, color } });
+				await writes.blockAdd(object.id, born as BlockJSON, id, mode === Pos.INNER_FIRST ? Pos.INNER_FIRST : Pos.BOTTOM);
 			});
 			return;
 		}
@@ -938,7 +948,6 @@
 					// First backspace demotes style - local flip, write behind.
 					const { text, marks } = fromDom(el);
 					cancelPending(id);
-					lastLocalEdit = Date.now();
 					flushSync(() => {
 						curText.text = text;
 						curText.marks = marks;
@@ -946,7 +955,7 @@
 						curText.checked = false;
 					});
 					focusSync(id, 0);
-					await persist(() => note.blockUpdate(object.id, id, { text: { text, marks, style: Style.PARAGRAPH, checked: false, color: curText.color ?? "" } }));
+					await persist(() => writes.blockUpdate(object.id, id, { text: { text, marks, style: Style.PARAGRAPH, checked: false, color: curText.color ?? "" } }));
 					return;
 				}
 				const idx = flatText.indexOf(id);
@@ -961,7 +970,6 @@
 				];
 				cancelPending(id);
 				cancelPending(prevId);
-				lastLocalEdit = Date.now();
 				const prevBlock = byId.get(prevId)!;
 				flushSync(() => {
 					if (prevBlock.content.text) {
@@ -974,8 +982,8 @@
 				if (prevEl) prevEl.innerHTML = toHtml(prev.text + cur2.text, mergedMarks);
 				focusSync(prevId, shift);
 				await persist(async () => {
-					await note.blockUpdate(object.id, prevId, contentFor(prevId, prev.text + cur2.text, mergedMarks));
-					await note.blockRemove(object.id, id);
+					await writes.blockUpdate(object.id, prevId, contentFor(prevId, prev.text + cur2.text, mergedMarks));
+					await writes.blockRemove(object.id, id);
 				});
 				return;
 			}
@@ -1005,7 +1013,6 @@
 			if (idx <= 0) return;
 			const prevId = siblings[idx - 1];
 			cancelPending(id);
-			lastLocalEdit = Date.now();
 			flushSync(() => {
 				if (curBlock.content.text) {
 					curBlock.content.text.text = liveText;
@@ -1018,8 +1025,8 @@
 			if (byId.get(prevId)?.content.text?.style === Style.TOGGLE) setToggleOpen(object.id, prevId, true);
 			focusSync(id, at);
 			await persist(async () => {
-				await note.blockUpdate(object.id, id, contentFor(id, liveText, liveMarks));
-				await note.blockMove(object.id, id, prevId, Pos.INNER);
+				await writes.blockUpdate(object.id, id, contentFor(id, liveText, liveMarks));
+				await writes.blockMove(object.id, id, prevId, Pos.INNER);
 			});
 			return;
 		}
@@ -1137,14 +1144,13 @@
 			setCaret(el, start);
 		}
 		cancelPending(id);
-		lastLocalEdit = Date.now();
 		if (pick.kind === "table") {
 			// Anytype default 3x3: replace the block when it's empty,
 			// otherwise keep the text and insert the table below it.
 			if (clean === "") {
 				await table.create(object.id, id, Pos.REPLACE);
 			} else {
-				await note.blockUpdate(object.id, id, contentFor(id, clean, marks));
+				await writes.blockUpdate(object.id, id, contentFor(id, clean, marks));
 				await table.create(object.id, id, Pos.BOTTOM);
 			}
 		} else if (pick.kind === "divider") {
@@ -1154,12 +1160,12 @@
 			const divider = { custom: { contentType: "divider", meta: { style: pick.style } } };
 			if (clean === "") {
 				const paraId = crypto.randomUUID();
-				await note.blockUpdate(object.id, id, divider);
-				await note.blockAdd(object.id, { id: paraId, childrenIds: [], content: { text: { text: "", style: Style.PARAGRAPH } } }, id, Pos.BOTTOM);
+				await writes.blockUpdate(object.id, id, divider);
+				await writes.blockAdd(object.id, { id: paraId, childrenIds: [], content: { text: { text: "", style: Style.PARAGRAPH } } }, id, Pos.BOTTOM);
 				focusRequest = { blockId: paraId, offset: 0 };
 			} else {
-				await note.blockUpdate(object.id, id, contentFor(id, clean, marks));
-				await note.blockAdd(object.id, { id: crypto.randomUUID(), childrenIds: [], content: divider }, id, Pos.BOTTOM);
+				await writes.blockUpdate(object.id, id, contentFor(id, clean, marks));
+				await writes.blockAdd(object.id, { id: crypto.randomUUID(), childrenIds: [], content: divider }, id, Pos.BOTTOM);
 				focusRequest = { blockId: id, offset: start };
 			}
 		} else if (pick.kind === "relation") {
@@ -1171,7 +1177,7 @@
 			// Anytype: "New relation" opens the relationSuggest menu.
 			propertySuggest = { blockId: id, x: slashPos.x, y: slashPos.y };
 		} else {
-			await note.blockUpdate(object.id, id, { text: { text: clean, marks, style: pick.value, checked: cur?.checked ?? false, color: cur?.color ?? "" } });
+			await writes.blockUpdate(object.id, id, { text: { text: clean, marks, style: pick.value, checked: cur?.checked ?? false, color: cur?.color ?? "" } });
 			focusRequest = { blockId: id, offset: start };
 		}
 		await refresh();
@@ -1214,8 +1220,7 @@
 		el.innerHTML = toHtml(text, marks);
 		setCaret(el, to);
 		cancelPending(id);
-		lastLocalEdit = Date.now();
-		await note.blockUpdate(object.id, id, contentFor(id, text, marks));
+		await writes.blockUpdate(object.id, id, contentFor(id, text, marks));
 		await refresh();
 	}
 
@@ -1233,8 +1238,7 @@
 		el.innerHTML = toHtml(value, shifted);
 		setCaret(el, at + url.length + 1);
 		cancelPending(id);
-		lastLocalEdit = Date.now();
-		await note.blockUpdate(object.id, id, contentFor(id, value, shifted));
+		await writes.blockUpdate(object.id, id, contentFor(id, value, shifted));
 		await refresh();
 	}
 
@@ -1251,8 +1255,7 @@
 				? { processor, url, src: getEmbedUrl(processor, url) }
 				: { url };
 		cancelPending(id);
-		lastLocalEdit = Date.now();
-		await note.blockAdd(
+		await writes.blockAdd(
 			object.id,
 			{ id: crypto.randomUUID(), childrenIds: [], content: { custom: { contentType: kind, meta } } },
 			id,
@@ -1267,14 +1270,14 @@
 	async function insertRelationBlock(id: string, clean: string, marks: MarkJSON[], key: string) {
 		const relBlock = { id: crypto.randomUUID(), childrenIds: [], content: { custom: { contentType: "relation", meta: { key } } } };
 		if (clean === "") {
-			await note.blockAdd(object.id, relBlock, id, Pos.REPLACE);
+			await writes.blockAdd(object.id, relBlock, id, Pos.REPLACE);
 		} else {
-			await note.blockUpdate(object.id, id, contentFor(id, clean, marks));
-			await note.blockAdd(object.id, relBlock, id, Pos.BOTTOM);
+			await writes.blockUpdate(object.id, id, contentFor(id, clean, marks));
+			await writes.blockAdd(object.id, relBlock, id, Pos.BOTTOM);
 		}
 		if (!(key in object.fields)) {
 			const rel = spaceRelations(store.relations, objectSpaceId(object)).find((r) => r.key === key);
-			await note.setField(object.id, key, emptyValueFor(rel?.format ?? "shorttext"));
+			await writes.setField(object.id, key, emptyValueFor(rel?.format ?? "shorttext"));
 		}
 	}
 
@@ -1286,7 +1289,6 @@
 		const cur = byId.get(id)?.content.text;
 		const { text, marks } = el ? fromDom(el) : { text: cur?.text ?? "", marks: cur?.marks ?? [] };
 		cancelPending(id);
-		lastLocalEdit = Date.now();
 		await insertRelationBlock(id, text, marks, rel.key);
 		await refresh();
 	}
@@ -1297,8 +1299,7 @@
 		const el = blockEl(id);
 		const { text, marks } = el ? fromDom(el) : { text: cur?.text ?? "", marks: cur?.marks ?? [] };
 		cancelPending(id);
-		lastLocalEdit = Date.now();
-		await note.blockUpdate(object.id, id, { text: { text, marks, style, checked: cur?.checked ?? false, color: cur?.color ?? "" } });
+		await writes.blockUpdate(object.id, id, { text: { text, marks, style, checked: cur?.checked ?? false, color: cur?.color ?? "" } });
 		if (focus) focusRequest = { blockId: id, offset: text.length };
 		await refresh();
 	}
@@ -1328,8 +1329,7 @@
 		const { text, marks } = fromDom(el);
 		const next = toggleMark(marks, range.from, range.to, type, param);
 		cancelPending(id);
-		lastLocalEdit = Date.now();
-		await note.blockUpdate(object.id, id, contentFor(id, text, next));
+		await writes.blockUpdate(object.id, id, contentFor(id, text, next));
 		toolbar = null;
 		focusRequest = { blockId: id, offset: range.to };
 		await refresh();
@@ -1356,12 +1356,11 @@
 			if (group.includes(walk)) return;
 			walk = parentOf.get(walk);
 		}
-		lastLocalEdit = Date.now();
 		// First block takes the drop position; the rest chain below it,
 		// preserving document order.
 		let prev = "";
 		for (const id of group) {
-			await note.blockMove(object.id, id, prev || targetId, prev ? Pos.BOTTOM : position);
+			await writes.blockMove(object.id, id, prev || targetId, prev ? Pos.BOTTOM : position);
 			prev = id;
 		}
 		selectedIds = [];
@@ -1547,8 +1546,7 @@
 	/** Empty-toggle placeholder click: create + focus the first child. */
 	async function onEmptyToggle(id: string) {
 		const innerId = crypto.randomUUID();
-		lastLocalEdit = Date.now();
-		await note.blockAdd(object.id, { id: innerId, childrenIds: [], content: { text: { text: "", style: Style.PARAGRAPH } } }, id, Pos.INNER_FIRST);
+		await writes.blockAdd(object.id, { id: innerId, childrenIds: [], content: { text: { text: "", style: Style.PARAGRAPH } } }, id, Pos.INNER_FIRST);
 		focusRequest = { blockId: innerId, offset: 0 };
 		await refresh();
 	}
@@ -1558,23 +1556,20 @@
 		const el = blockEl(id);
 		const { text, marks } = el ? fromDom(el) : { text: cur.text, marks: cur.marks ?? [] };
 		cancelPending(id);
-		lastLocalEdit = Date.now();
-		await note.blockUpdate(object.id, id, { text: { ...cur, text, marks, checked } });
+		await writes.blockUpdate(object.id, id, { text: { ...cur, text, marks, checked } });
 		await refresh();
 	}
 
 	async function appendBlock() {
 		const newId = crypto.randomUUID();
-		lastLocalEdit = Date.now();
-		await note.blockAdd(object.id, { id: newId, childrenIds: [], content: { text: { text: "", style: Style.PARAGRAPH } } });
+		await writes.blockAdd(object.id, { id: newId, childrenIds: [], content: { text: { text: "", style: Style.PARAGRAPH } } });
 		focusRequest = { blockId: newId, offset: 0 };
 		await refresh();
 	}
 
 	async function removeBlockById(id: string) {
 		cancelPending(id);
-		lastLocalEdit = Date.now();
-		await note.blockRemove(object.id, id);
+		await writes.blockRemove(object.id, id);
 		await refresh();
 	}
 
@@ -1601,8 +1596,7 @@
 		const el = blockEl(id);
 		const { text, marks } = el ? fromDom(el) : { text: cur.text, marks: cur.marks ?? [] };
 		cancelPending(id);
-		lastLocalEdit = Date.now();
-		await note.blockUpdate(object.id, id, { text: { ...cur, text, marks, color } });
+		await writes.blockUpdate(object.id, id, { text: { ...cur, text, marks, color } });
 		await refresh();
 	}
 
@@ -1620,7 +1614,6 @@
 		const src = byId.get(id);
 		if (!src) return;
 		cancelPending(id);
-		lastLocalEdit = Date.now();
 		if (src.content.table) {
 			// Cells are addressed "<rowId>-<colId>", so a generic clone would
 			// break the grid. Create a fresh same-size table, then copy cells.
@@ -1633,7 +1626,7 @@
 				for (let c = 0; c < cols.length; c++) {
 					const cell = byId.get(`${rows[r]}-${cols[c]}`)?.content.text;
 					if (!cell || (!cell.text && !(cell.marks ?? []).length)) continue;
-					await note.blockUpdate(object.id, `${nshape.rows[r]}-${nshape.cols[c]}`, { text: cell });
+					await writes.blockUpdate(object.id, `${nshape.rows[r]}-${nshape.cols[c]}`, { text: cell });
 				}
 			}
 			await refresh();
@@ -1643,7 +1636,7 @@
 			const s = byId.get(srcId);
 			if (!s) return;
 			const newId = crypto.randomUUID();
-			await note.blockAdd(object.id, { ...s, id: newId, childrenIds: [] }, targetId, position);
+			await writes.blockAdd(object.id, { ...s, id: newId, childrenIds: [] }, targetId, position);
 			for (const cid of s.childrenIds) await cloneInto(cid, newId, Pos.INNER);
 		};
 		await cloneInto(id, id, Pos.BOTTOM);
@@ -1656,7 +1649,6 @@
 		// Styling from a multi-selection hits every selected block.
 		const ids = blockMenu?.group ?? [id];
 		const textIds = ids.filter((b) => byId.get(b)?.content.text);
-		lastLocalEdit = Date.now();
 		// Group styling snapshots its reads BEFORE any write and refreshes
 		// ONCE at the end: per-block write+refetch cycles let a mid-loop
 		// re-render (or an SSE echo) clobber later blocks' reads - the
@@ -1670,7 +1662,7 @@
 			});
 			for (const pIt of payloads) {
 				cancelPending(pIt.b);
-				await note.blockUpdate(object.id, pIt.b, pIt.content);
+				await writes.blockUpdate(object.id, pIt.b, pIt.content);
 			}
 		};
 		switch (a.kind) {
@@ -1683,7 +1675,7 @@
 				await refresh();
 				break;
 			case "align":
-				for (const b of ids) await note.blockSetAttrs(object.id, b, { align: a.value as number });
+				for (const b of ids) await writes.blockSetAttrs(object.id, b, { align: a.value as number });
 				await refresh();
 				break;
 			case "color":
@@ -1695,7 +1687,7 @@
 				await refresh();
 				break;
 			case "background":
-				for (const b of ids) await note.blockSetAttrs(object.id, b, { background_color: a.value as string });
+				for (const b of ids) await writes.blockSetAttrs(object.id, b, { background_color: a.value as string });
 				await refresh();
 				break;
 			case "duplicate":
@@ -1705,7 +1697,7 @@
 				// Anytype menuBlockLinkSettings: cardStyle Text | Card.
 				const cur = byId.get(id)?.content.custom;
 				if (cur?.contentType === "link") {
-					await note.blockUpdate(object.id, id, { custom: { contentType: "link", meta: { ...cur.meta, style: a.value as string } } });
+					await writes.blockUpdate(object.id, id, { custom: { contentType: "link", meta: { ...cur.meta, style: a.value as string } } });
 					await refresh();
 				}
 				break;
@@ -1735,11 +1727,11 @@
 					const s = byId.get(srcId);
 					if (!s) return;
 					const nid = crypto.randomUUID();
-					await note.blockAdd(newId, { ...s, id: nid, childrenIds: [] }, targetId, position);
+					await writes.blockAdd(newId, { ...s, id: nid, childrenIds: [] }, targetId, position);
 					for (const cid of s.childrenIds) await moveInto(cid, nid, Pos.INNER);
 				};
 				for (const cid of src.childrenIds) await moveInto(cid, "", 0);
-				await note.blockAdd(object.id, { id: crypto.randomUUID(), childrenIds: [], content: { custom: { contentType: "link", meta: { target: newId } } } }, id, Pos.BOTTOM);
+				await writes.blockAdd(object.id, { id: crypto.randomUUID(), childrenIds: [], content: { custom: { contentType: "link", meta: { target: newId } } } }, id, Pos.BOTTOM);
 				await removeBlockById(id);
 				// The link row resolves its target through store.summaries, so
 				// until those include the object just created it renders as a
@@ -1750,7 +1742,7 @@
 			case "clear_style": {
 				// Anytype's Clear style: back to default color, background, align.
 				await groupText((cur, text, marks) => ({ ...cur, text, marks, color: "" }));
-				for (const b of ids) await note.blockSetAttrs(object.id, b, { background_color: "", align: 0 });
+				for (const b of ids) await writes.blockSetAttrs(object.id, b, { background_color: "", align: 0 });
 				await refresh();
 				break;
 			}
@@ -1760,7 +1752,7 @@
 					selectedIds = [];
 					for (const b of tops) {
 						cancelPending(b);
-						await note.blockRemove(object.id, b);
+						await writes.blockRemove(object.id, b);
 					}
 					await refresh();
 				} else {
@@ -1773,6 +1765,7 @@
 </script>
 
 <svelte:window
+	onpagehide={flushAll}
 	ondragend={endDrag}
 	onkeydown={(e) => void onWindowKeydown(e)}
 	onmousedown={(e) => {
@@ -1780,6 +1773,8 @@
 		marginMouseDown(e);
 	}}
 />
+
+<svelte:document onvisibilitychange={() => { if (document.visibilityState === "hidden") flushAll(); }} />
 
 <div
 	class="editor"

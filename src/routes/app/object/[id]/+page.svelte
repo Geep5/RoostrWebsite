@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { reconcileObject } from "$lib/editor/reconcile";
 	import { onMount } from "svelte";
 	import { page } from "$app/state";
 	import { goto } from "$app/navigation";
@@ -98,7 +99,31 @@
 
 	async function refresh() {
 		if (!object) return;
-		object = await fetchObject(object.id);
+		const fresh = await fetchObject(object.id);
+		// Same object: patch in place so unchanged blocks keep their identity
+		// (and the focused one its caret). A navigation raced it: leave it be.
+		if (object && fresh.id === object.id) reconcileObject(object, fresh);
+	}
+
+	/**
+	 * A sync event for this object. While the editor has unsaved typing or
+	 * writes in flight, an echo of an earlier write would briefly roll the
+	 * page back, so the refresh waits until the editor has settled - it is
+	 * deferred, never dropped, and bursts collapse into one.
+	 */
+	let refreshPending = false;
+	function refreshWhenSettled() {
+		if (refreshPending) return;
+		refreshPending = true;
+		void (async () => {
+			try {
+				await editor?.settled();
+				await refresh();
+				void table?.reload();
+			} finally {
+				refreshPending = false;
+			}
+		})();
 	}
 
 	let nameDraft = $state("");
@@ -382,10 +407,7 @@
 				return;
 			}
 			if (objectId !== object.id) return;
-			// Skip refresh while the user is actively typing (own writes echo back).
-			if (editor && Date.now() - editor.lastEditAt() < 1200) return;
-			void refresh();
-			void table?.reload();
+			refreshWhenSettled();
 		}),
 	);
 </script>
