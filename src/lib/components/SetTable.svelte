@@ -816,8 +816,33 @@
 	th .hide:hover {
 		color: var(--red);
 	}
+	/* Pinned to the right edge: reachable however many columns scroll past. */
 	.plus-col {
-		width: 32px;
+		width: 40px;
+		position: sticky;
+		right: 0;
+		z-index: 2;
+		background: var(--bg, #1b1b1b);
+		box-shadow: -8px 0 8px -8px rgba(0, 0, 0, 0.6);
+	}
+	th .head.plus {
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		width: 26px;
+		height: 26px;
+		margin: 4px auto;
+		padding: 0;
+		border: 1px solid var(--border);
+		border-radius: 7px;
+		font-size: 17px;
+		line-height: 1;
+		color: var(--fg);
+	}
+	th .head.plus:hover {
+		border-color: var(--accent);
+		color: var(--accent);
+		background: rgba(55, 122, 255, 0.12);
 	}
 	td {
 		border-bottom: 1px solid var(--border);
