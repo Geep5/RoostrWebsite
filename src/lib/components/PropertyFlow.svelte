@@ -79,13 +79,16 @@
 	});
 
 	// ── Stage 2 data (Anytype relationSuggest getSections) ─────────
-	const SYSTEM_KEYS = ["createdDate", "modifiedDate", "dueDate", "done", "tag", "status", "url", "email", "phone", "description"];
+	const SYSTEM_KEYS = ["createdDate", "modifiedDate", "dueDate", "done", "tag", "status", "url", "email", "phone", "description", "error",
+		// Roostr's own credential properties (seeded by the harness in every space), and every pasted key.
+		"account", "service", "login_url", "session_host", "session_cookie"];
+	const isSystem = (key: string) => SYSTEM_KEYS.includes(key) || (key.startsWith("key_") && key !== "key_fields");
 	const present = $derived(new Set(items.map((i) => i.key)));
 	const allRels = $derived(spaceRelations(store.relations, currentSpaceId()).filter((r) => !r.hidden && !RESERVED_KEYS[r.key] && !present.has(r.key) && !exclude.includes(r.key)));
 	const q = $derived(query.trim().toLowerCase());
 	const matching = $derived(q ? allRels.filter((r) => (r.name || r.key).toLowerCase().includes(q)) : allRels);
-	const library = $derived(matching.filter((r) => !SYSTEM_KEYS.includes(r.key)));
-	const system = $derived(matching.filter((r) => SYSTEM_KEYS.includes(r.key)));
+	const library = $derived(matching.filter((r) => !isSystem(r.key)));
+	const system = $derived(matching.filter((r) => isSystem(r.key)));
 	const matchingFormats = $derived(q ? FORMATS.filter((f) => f.name.toLowerCase().includes(q)) : FORMATS);
 	const exact = $derived(allRels.some((r) => (r.name || r.key).toLowerCase() === q));
 	const canCreate = $derived(q !== "" && !exact);

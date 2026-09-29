@@ -10,7 +10,9 @@
 	import PropertyFlow from "./PropertyFlow.svelte";
 	import RowContextMenu from "./RowContextMenu.svelte";
 	import PropertyValue from "./PropertyValue.svelte";
-	import { tagStyle } from "$lib/options";
+	import { badgeStyle, tagStyle } from "$lib/options";
+	import { credentialStatusBadge, credentialStatusText } from "$lib/credential-actions";
+	import PropIcon from "./PropIcon.svelte";
 	import CheckboxIcon from "./CheckboxIcon.svelte";
 	import { fetchQuery, note, type QueryResultRow } from "$lib/api";
 	import { fetchMachines, machineName, resolveMany, servingCopy } from "$lib/serving";
@@ -630,7 +632,11 @@
 						{/if}
 						{fieldStr(r.fields, "name") || "Untitled"}</td>
 					{#each columns as c (c)}
-						{#if isEditable(c)}
+						{#if r.typeKey === "credential" && c === "status"}
+							<!-- The harness writes a credential's status: shown in words like its Properties row, never hand-edited here. -->
+							{@const st = fieldStr(r.fields, "status")}
+							<td><span class="cred-status" style={badgeStyle(credentialStatusBadge(st).color)}><PropIcon icon={credentialStatusBadge(st).icon} size={14} />{credentialStatusText(st)}</span></td>
+						{:else if isEditable(c)}
 							{@const rel = relations.find((x) => x.key === c)}
 							{@const fmt = formatOf(c)}
 							<td class="editable" onclick={(e) => onCellClick(e, r.id, c)}>
@@ -952,6 +958,13 @@
 	}
 	.cell-check.on {
 		color: var(--fg);
+	}
+	.cred-status {
+		display: inline-flex;
+		align-items: center;
+		gap: 5px;
+		color: var(--badge-fg);
+		white-space: nowrap;
 	}
 	/* Anytype tagItem.isSmall: filled 20px pill, radius 10, pale text. */
 	.cell-tag {
