@@ -448,7 +448,11 @@
 		// Editor-wide undo/redo; the browser's own contenteditable undo would
 		// fight the page state, so it never runs here.
 		const mod = e.metaKey || e.ctrlKey;
-		const inEditor = !!(e.target as HTMLElement | null)?.closest?.(".editor") || selectedIds.length > 0;
+		// This page's undo, unless the person is typing in some other field
+		// (the title, a property, the chat) - those keep their own undo.
+		const target = e.target as HTMLElement | null;
+		const otherField = !!target && !target.closest?.(".editor") && (target.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName));
+		const inEditor = !otherField;
 		if (mod && inEditor && !e.altKey && (e.key.toLowerCase() === "z" || (e.key.toLowerCase() === "y" && e.ctrlKey))) {
 			e.preventDefault();
 			await undoRedo(e.key.toLowerCase() === "y" || e.shiftKey);
