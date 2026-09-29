@@ -556,6 +556,28 @@
 		navHidden = !navHidden;
 		localStorage.setItem("nav-hidden", navHidden ? "1" : "0");
 	}
+	/**
+	 * Resting the pointer on a drawer tab for DWELL_MS toggles it too; the tab
+	 * fills from the bottom meanwhile, and leaving early cancels. One toggle
+	 * per visit: the tab moves away as its pane folds, which ends the hover.
+	 */
+	const DWELL_MS = 1000;
+	let dwelling = $state<"" | "nav" | "pane">("");
+	let dwellTimer: ReturnType<typeof setTimeout> | undefined;
+	function dwellStart(which: "nav" | "pane", toggle: () => void) {
+		dwellCancel();
+		dwelling = which;
+		dwellTimer = setTimeout(() => {
+			dwelling = "";
+			toggle();
+		}, DWELL_MS);
+	}
+	function dwellCancel() {
+		clearTimeout(dwellTimer);
+		dwellTimer = undefined;
+		dwelling = "";
+	}
+	const togglePane = () => (discussionUI.open = !discussionUI.open);
 	/** Anytype vault: the icon rail pulls out continuously - width follows
 	 * the pointer; releasing below the threshold collapses back to icons.
 	 * A plain click on the gutter toggles between icons and the last width. */
@@ -1109,20 +1131,28 @@
 		class="nav-drawer"
 		style="left: {navHidden ? 0 : railWidth + sideWidth + 3}px"
 		class:closed={navHidden}
+		class:dwelling={dwelling === "nav"}
+		style:--dwell="{DWELL_MS}ms"
 		title={navHidden ? "Show sidebar" : "Hide sidebar"}
 		aria-label={navHidden ? "Show sidebar" : "Hide sidebar"}
 		aria-expanded={!navHidden}
-		onclick={toggleNav}
+		onpointerenter={() => dwellStart("nav", toggleNav)}
+		onpointerleave={dwellCancel}
+		onclick={() => { dwellCancel(); toggleNav(); }}
 	>{navHidden ? "›" : "‹"}</button>
 	{#if discussionUI.available}
 		<!-- The same tab on the chat/properties pane's edge: folds it away and back. -->
 		<button
 			class="nav-drawer pane-drawer"
 			class:closed={!discussionUI.open}
+			class:dwelling={dwelling === "pane"}
+			style:--dwell="{DWELL_MS}ms"
 			title={discussionUI.open ? "Hide chat & properties" : "Show chat & properties"}
 			aria-label={discussionUI.open ? "Hide chat and properties" : "Show chat and properties"}
 			aria-expanded={discussionUI.open}
-			onclick={() => (discussionUI.open = !discussionUI.open)}
+			onpointerenter={() => dwellStart("pane", togglePane)}
+			onpointerleave={dwellCancel}
+			onclick={() => { dwellCancel(); togglePane(); }}
 		>{discussionUI.open ? "›" : "‹"}</button>
 	{/if}
 	<nav class="vault" class:wide={railWide} class:nav-hidden={navHidden}>
@@ -1682,6 +1712,25 @@
 		cursor: pointer;
 		opacity: 0.55;
 		transition: left 0.16s ease, opacity 0.12s ease;
+		/* The dwell fill sits inside the tab, behind the arrow. */
+		overflow: hidden;
+		isolation: isolate;
+	}
+	/* Hover countdown: fills bottom-to-top over the dwell, then the tab toggles.
+	   Leaving early drops the class, and the fill snaps back with no transition. */
+	.nav-drawer::before {
+		content: "";
+		position: absolute;
+		inset: 0;
+		z-index: -1;
+		background: var(--accent);
+		opacity: 0.45;
+		transform: scaleY(0);
+		transform-origin: bottom;
+	}
+	.nav-drawer.dwelling::before {
+		transform: scaleY(1);
+		transition: transform var(--dwell, 1s) linear;
 	}
 	.nav-drawer.closed {
 		transform: translate(0, -50%);
