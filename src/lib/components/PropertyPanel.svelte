@@ -52,6 +52,19 @@
 		void load();
 	});
 
+	/** Object ids a link value names (a link, or a list of links). */
+	function linkedIds(v: ValueJSON | undefined): string[] {
+		if (!v) return [];
+		if (v.linkValue?.targetId) return [v.linkValue.targetId];
+		return (v.valuesValue?.items ?? []).map((i) => i.linkValue?.targetId ?? "").filter(Boolean);
+	}
+	function linkedObject(id: string): { name: string; icon?: string; typeKey: string } | undefined {
+		const s = store.summaries.find((x) => x.id === id);
+		if (s) return s;
+		const a = store.agents.find((x) => x.id === id);
+		return a ? { name: a.name, icon: a.icon, typeKey: "agent" } : undefined;
+	}
+
 	function fmt(v: ValueJSON | undefined): string {
 		if (!v || format === "repeat") return "";
 		if (v.boolValue !== undefined) return v.boolValue ? "☑" : "☐";
@@ -80,7 +93,16 @@
 				{#each rows as r (r.id)}
 					<tr>
 						<td><a href="/app/object/{r.id}"><span class="obj-icon">{objectIcon(r.fields["iconEmoji"]?.stringValue, r.typeKey)}</span> {r.name || fieldStr(r.fields, "name") || "Untitled"}</a></td>
-						<td class="val">{fmt(r.fields[key])}</td>
+						<td class="val">
+							{#if linkedIds(r.fields[key]).length > 0}
+								{#each linkedIds(r.fields[key]) as id (id)}
+									{@const o = linkedObject(id)}
+									<a class="linked" href="/app/object/{id}"><span class="obj-icon">{objectIcon(o?.icon, o?.typeKey ?? "")}</span>{o?.name || "Untitled"}</a>
+								{/each}
+							{:else}
+								{fmt(r.fields[key])}
+							{/if}
+						</td>
 						<td class="muted">{r.typeKey}</td>
 					</tr>
 				{/each}
@@ -90,6 +112,17 @@
 </div>
 
 <style>
+	.linked {
+		display: inline-flex;
+		align-items: center;
+		gap: 4px;
+		margin-right: 10px;
+		color: var(--fg);
+		text-decoration: none;
+	}
+	.linked:hover {
+		text-decoration: underline;
+	}
 	.prop-panel {
 		padding: 0 48px;
 	}

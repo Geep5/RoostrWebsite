@@ -81,7 +81,7 @@
 			</div>
 			<div class="feature">
 				<h2><span class="n">03</span>One team</h2>
-				<p>People and agents work on the same objects. @mention an agent anywhere and it answers in place, or gather several into one exchange. Invite people into shared spaces. Agents run on computers you pair and ask before they change anything.</p>
+				<p>People and agents work on the same objects. <span class="mention">@mention</span> an agent anywhere and it answers in place, or gather several into one exchange. Invite people into shared spaces. Agents run on computers you pair and ask before they change anything.</p>
 			</div>
 		</section>
 
@@ -280,6 +280,15 @@
 	.feature p {
 		font-size: 15.5px;
 		opacity: 0.85;
+	}
+	/* The app's Discord-style mention pill (Discussion.svelte), with text
+	   darkened for the cream background. */
+	.mention {
+		background: rgba(88, 101, 242, 0.3);
+		color: #2f389e;
+		border-radius: 3px;
+		padding: 0 2px;
+		font-weight: 500;
 	}
 
 	/* ---------- footer ---------- */
