@@ -1008,18 +1008,18 @@
 
 	{#if showCreate}
 		<div class="m-create-menu" role="menu">
+						<button role="menuitem" onclick={() => void sidebarCreate("query")}>
+				<span class="obj-icon">{typeGlyph("query")}</span>Query
+			</button>
+<button role="menuitem" onclick={() => void sidebarCreate("collection")}>
+				<span class="obj-icon">{typeGlyph("collection")}</span>Collection
+			</button>
+			<div class="create-sep"></div>
 			{#each creatableTypes() as t (t.key)}
 				<button role="menuitem" onclick={() => void sidebarCreate(t.key)}>
 					<span class="obj-icon">{t.icon}</span>{t.name}
 				</button>
 			{/each}
-			<div class="create-sep"></div>
-			<button role="menuitem" onclick={() => void sidebarCreate("collection")}>
-				<span class="obj-icon">{typeGlyph("collection")}</span>Collection
-			</button>
-			<button role="menuitem" onclick={() => void sidebarCreate("query")}>
-				<span class="obj-icon">{typeGlyph("query")}</span>Query
-			</button>
 		</div>
 	{/if}
 </div>
@@ -1155,18 +1155,18 @@
 					</button>
 					{#if showCreate}
 						<div class="create-menu" role="menu">
+														<button role="menuitem" onclick={() => void sidebarCreate("query")}>
+								<span class="obj-icon">{typeGlyph("query")}</span>Query
+							</button>
+<button role="menuitem" onclick={() => void sidebarCreate("collection")}>
+								<span class="obj-icon">{typeGlyph("collection")}</span>Collection
+							</button>
+							<div class="create-sep"></div>
 							{#each creatableTypes() as t (t.key)}
 								<button role="menuitem" onclick={() => void sidebarCreate(t.key)}>
 									<span class="obj-icon">{t.icon}</span>{t.name}
 								</button>
 							{/each}
-							<div class="create-sep"></div>
-							<button role="menuitem" onclick={() => void sidebarCreate("collection")}>
-								<span class="obj-icon">{typeGlyph("collection")}</span>Collection
-							</button>
-							<button role="menuitem" onclick={() => void sidebarCreate("query")}>
-								<span class="obj-icon">{typeGlyph("query")}</span>Query
-							</button>
 						</div>
 					{/if}
 				</div>
