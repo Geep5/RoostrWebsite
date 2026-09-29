@@ -1236,14 +1236,16 @@
 		position: relative;
 		color: transparent;
 	}
+	/* Drawn inside the hidden `@`'s width (the caret depends on it), but
+	   smaller and to the left, so a gap stays between icon and name. */
 	.mirror :global(.mention-at .mention-ico) {
 		position: absolute;
-		left: 50%;
+		left: 1px;
 		top: 50%;
-		transform: translate(-50%, -50%);
+		transform: translateY(-50%);
 		width: 1em;
 		height: 1em;
-		font-size: 0.9em;
+		font-size: 0.68em;
 		line-height: 1em;
 		text-align: center;
 		color: var(--fg);
