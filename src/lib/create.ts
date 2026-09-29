@@ -12,6 +12,8 @@ import { agentLinksValue } from "$lib/agent-field";
 import { typeIcon } from "$lib/icons";
 import { store } from "$lib/data.svelte";
 import { activeSpace } from "$lib/space.svelte";
+import { isLocalBackend } from "$lib/client-backend";
+import { FILES_NEED_LOCAL, pickFile, uploadFile } from "$lib/files";
 
 const channelField = (channelId: string): Record<string, ValueJSON> =>
 	channelId ? { channel: { stringValue: channelId } } : {};
@@ -137,11 +139,33 @@ async function createCredential(channelId: string, name: string): Promise<string
 	await goto(`/app/object/${id}`);
 	return id;
 }
+/**
+ * A file is its bytes: the picker comes first, and the paired harness
+ * stores them and creates the File object. A cancelled pick creates
+ * nothing. Without a local harness there is nowhere to keep the bytes.
+ */
+async function createFile(channelId: string): Promise<string> {
+	if (!isLocalBackend) {
+		alert(FILES_NEED_LOCAL);
+		return "";
+	}
+	const file = await pickFile();
+	if (!file) return "";
+	try {
+		const { id } = await uploadFile(file, channelId);
+		await goto(`/app/object/${id}`);
+		return id;
+	} catch (e) {
+		alert(`Could not add ${file.name}: ${e instanceof Error ? e.message : String(e)}`);
+		return "";
+	}
+}
 export async function createTyped(typeKey: string, channelId: string, name = ""): Promise<string> {
 	const key = typeKey.trim().toLowerCase();
 	if (key === "agent") return createAgent(channelId);
 	if (key === "machine") return createMachine();
 	if (key === "credential") return createCredential(channelId, name);
+	if (key === "file") return createFile(channelId);
 	const { id } = await note.create(name, key, channelField(channelId));
 	const tplId = defaultTemplateOf(key, channelId);
 	if (tplId) await applyTemplate(id, tplId).catch(() => {}); // a deleted default template is a no-op

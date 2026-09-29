@@ -309,8 +309,9 @@
 			// Type pages create their own kind; queries create their source.
 			const typeKey = mode === "type" ? object.fields["key"]?.stringValue || "note" : sources[0] || "note";
 			// Infra types are never bare records: a computer is adopted or set
-			// up, an agent is born with a kind and a server (create.ts).
-			if (typeKey === "machine" || typeKey === "agent") {
+			// up, an agent is born with a kind and a server, a file starts
+			// from its bytes (create.ts).
+			if (typeKey === "machine" || typeKey === "agent" || typeKey === "file") {
 				await createTyped(typeKey, channelId);
 				return;
 			}
