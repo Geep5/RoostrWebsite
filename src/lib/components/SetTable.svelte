@@ -364,6 +364,8 @@
 		warning: boolean;
 		reason: string;
 		machineId: string;
+		/** The computer's own emoji, else the Computer type's; empty when nothing serves it. */
+		icon: string;
 	}
 	let servingById = $state<Map<string, ServingInfo>>(new Map());
 
@@ -404,7 +406,9 @@
 			rows.forEach((r, i) => {
 				const s = resolved[i];
 				const label = s.machineId ? machineName(machines, s.machineId) : "No machine";
-				map.set(r.id, { ...servingCopy(s, machines), label, reason: s.reason, machineId: s.machineId });
+				const machine = s.machineId ? machineRows.find((m) => m.fields["machine_id"]?.stringValue === s.machineId) : undefined;
+				const icon = s.machineId ? objectIcon(machine?.fields["iconEmoji"]?.stringValue, "machine") : "";
+				map.set(r.id, { ...servingCopy(s, machines), label, reason: s.reason, machineId: s.machineId, icon });
 			});
 			servingById = map;
 			if (rules.length > 0) rows = rows.filter((r) => rules.every((rule) => servingMatch(rule, servingById.get(r.id))));
@@ -619,7 +623,7 @@
 								{/if}
 							</td>
 						{:else}
-							<td class:muted={c === "type" || c === "createdAt" || c === "updatedAt"} class:cell-warn={c === "serving" && (servingById.get(r.id)?.warning ?? false)} title={c === "serving" ? servingById.get(r.id)?.text : undefined}>{#if c === "type" && typeIcon(r.typeKey)}<span class="type-icon">{typeIcon(r.typeKey)}</span>{/if}{cell(r, c)}</td>
+							<td class:muted={c === "type" || c === "createdAt" || c === "updatedAt"} class:cell-warn={c === "serving" && (servingById.get(r.id)?.warning ?? false)} title={c === "serving" ? servingById.get(r.id)?.text : undefined}>{#if c === "type" && typeIcon(r.typeKey)}<span class="type-icon">{typeIcon(r.typeKey)}</span>{:else if c === "serving" && servingById.get(r.id)?.icon}<span class="type-icon">{servingById.get(r.id)?.icon}</span>{/if}{cell(r, c)}</td>
 						{/if}
 					{/each}
 					<td></td>
