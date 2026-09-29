@@ -13,7 +13,6 @@
 	import Editor from "$lib/components/Editor.svelte";
 	import Discussion from "$lib/components/Discussion.svelte";
 	import Installation from "$lib/components/Installation.svelte";
-	import Credential from "$lib/components/Credential.svelte";
 	import File from "$lib/components/File.svelte";
 	import ConversationDrawer from "$lib/components/ConversationDrawer.svelte";
 	import { objectThreads } from "$lib/conversations";
@@ -179,7 +178,6 @@
 	const isAgent = $derived(object?.typeKey === "agent");
 	const isCapability = $derived(object?.typeKey === "capability");
 	const isInstall = $derived(object?.typeKey === "install");
-	const isCredential = $derived(object?.typeKey === "credential");
 	const isFile = $derived(object?.typeKey === "file");
 	const isType = $derived(object?.typeKey === "type");
 	const isTemplate = $derived(object?.typeKey === "template");
@@ -494,8 +492,6 @@
 			<CapabilitySetup {object} onchanged={refresh} />
 		{:else if isInstall}
 			<Installation {object} />
-		{:else if isCredential}
-			<Credential {object} onchanged={refresh} />
 		{:else if isFile}
 			<File {object} onchanged={refresh} />
 		{:else if isType}

@@ -14,6 +14,8 @@
 	import { RESERVED_KEYS } from "$lib/relations";
 	import { AGENTLESS_TYPES } from "$lib/agent-field";
 	import { machineName, resolveServing, servingCopy, type MachineRow, type Serving } from "$lib/serving";
+	import { credentialStatusBadge, credentialStatusText, pollWhileConnecting } from "$lib/credential-actions";
+	import CredentialStatus from "./CredentialStatus.svelte";
 	import PropertyValue from "./PropertyValue.svelte";
 	import PropertySuggest from "./PropertySuggest.svelte";
 	import Repeat from "./Repeat.svelte";
@@ -48,11 +50,46 @@
 		return store.types.find((t) => t.id === target)?.key ?? object.typeKey;
 	});
 
+	/** A credential's own properties, always shown in this order, then each
+	    `key_*` field it carries (one pasted key each). The harness seeds their
+	    defs in every space; these names and emoji stand in until it has. */
+	const CREDENTIAL_PROPS: Array<[key: string, name: string, format: string, emoji: string]> = [
+		["status", "Status", "status", ""],
+		["error", "Error", "longtext", ""],
+		["served_by", "Served by", "object", ""],
+		["account", "Account", "shorttext", "🪪"],
+		["service", "Service", "shorttext", "🧩"],
+		["description", "Description", "longtext", ""],
+		["login_url", "Login page", "url", "🔗"],
+		["session_host", "Signed-in host", "shorttext", "🌐"],
+		["session_cookie", "Signed-in cookie", "shorttext", "🍪"],
+	];
+	const KEY_PREFIX = "key_";
+	const isCredential = $derived(typeKey === "credential");
+	const credentialRows = $derived.by((): RelationDefJSON[] => {
+		if (!isCredential) return [];
+		const def = (key: string, name: string, format: string, emoji: string): RelationDefJSON =>
+			relations.find((r) => r.key === key)
+			?? { id: `credential-${key}`, key, format, name, iconEmoji: emoji || undefined, hidden: false, readOnly: false, maxCount: format === "status" ? 1 : 0, options: [] };
+		// `key_fields` is the pre-property recipe list the harness converts, not a pasted key.
+		const keyFields = Object.keys(object.fields).filter((k) => k.startsWith(KEY_PREFIX) && k !== "key_fields");
+		return [
+			...CREDENTIAL_PROPS.map(([key, name, format, emoji]) => def(key, name, format, emoji)),
+			...keyFields.map((key) => {
+				const words = key.slice(KEY_PREFIX.length).replaceAll("_", " ");
+				return def(key, words.charAt(0).toUpperCase() + words.slice(1), "shorttext", "🔑");
+			}),
+		];
+	});
+	const credentialRowKeys = $derived(new Set(credentialRows.map((r) => r.key)));
+
 	/** Featured order first, then the rest. */
 	const shown = $derived.by(() => {
 		const MACHINE_BOUND = ["agent", "capability", "install", "credential"].includes(typeKey);
 		const AGENT_CONFIG = typeKey === "agent" ? ["prompt", "model", "skills", "credentials", "served_by", "repo_path"] : [];
 		const present = relations.filter((r) => {
+			// Legacy credential shapes (`key_fields` list, `secret` JSON) stay for old harnesses; never rows.
+			if (credentialRowKeys.has(r.key) || (isCredential && (r.key === "key_fields" || r.key === "secret"))) return false;
 			if (RESERVED_KEYS[r.key]) return false;
 			if (AGENT_CONFIG.includes(r.key)) return true;
 			// The error badge is how the harness surfaces a problem on a
@@ -142,6 +179,18 @@
 	}
 
 	let editing = $state<string | null>(null);
+
+	// While a credential's sign-in window is open its computer writes the status: follow it.
+	const credentialStatus = $derived(isCredential ? fieldStr(object.fields, "status") : "");
+	const objectId = $derived(object.id);
+	let connectPollError = $state("");
+	$effect(() => {
+		if (credentialStatus !== "connecting") return;
+		connectPollError = "";
+		return pollWhileConnecting(objectId, () => object.fields, onchanged, () => {
+			connectPollError = "Still not signed in after 5 minutes. Connect again when you are ready.";
+		});
+	});
 
 	function plain(v: ValueJSON | undefined, format: string): string | number | boolean | string[] {
 		if (!v) return format === "checkbox" ? false : format === "tag" || format === "object" ? [] : "";
@@ -236,6 +285,10 @@
 
 	/** The row's leading icon: an emoji for the machine-bound keys, a badge glyph otherwise. */
 	function leftIcon(rel: RelationDefJSON): { emoji: string } | { icon: BadgeIcon; color: string } {
+		if (credentialRowKeys.has(rel.key)) {
+			if (rel.key === "status") return credentialStatusBadge(credentialStatus);
+			if (rel.iconEmoji) return { emoji: rel.iconEmoji };
+		}
 		switch (rel.key) {
 			case "served_by": return { emoji: "🖥️" };
 			case "repo_path": return { emoji: "📁" };
@@ -257,6 +310,8 @@
 
 	/** Whether the row itself carries a hover × (single-value rows; multi rows put the × on each value). */
 	function rowRemovable(rel: RelationDefJSON): boolean {
+		// A credential's status is its computer's to write.
+		if (isCredential && rel.key === "status") return false;
 		if (rel.format === "tag" || rel.format === "object") {
 			return rel.key === "served_by" && (plain(object.fields[rel.key], "object") as string[]).length > 0;
 		}
@@ -312,10 +367,10 @@
 	// ── Grouped display: System / Agent / Custom, each a labeled section ──
 	const AGENT_KEYS = new Set(["served_by", "repo_path", "agent", "model", "prompt", "skills", "credentials", "capability"]);
 	const SYSTEM_KEYS = new Set(["done", "due_date", "status", "tag", "description", "url", "email", "phone", "error", "created_date", "modified_date", "createdDate", "modifiedDate"]);
-	type Group = "system" | "agent" | "custom";
+	type Group = "credential" | "system" | "agent" | "custom";
 	const groupOf = (key: string): Group => (AGENT_KEYS.has(key) ? "agent" : SYSTEM_KEYS.has(key) ? "system" : "custom");
 	const groups = $derived.by(() => {
-		const out: Array<{ id: Group; label: string; rows: typeof shown }> = [];
+		const out: Array<{ id: Group; label: string; rows: typeof shown }> = credentialRows.length ? [{ id: "credential", label: "Credential", rows: credentialRows }] : [];
 		for (const [id, label] of [["system", "System"], ["agent", "Agent"], ["custom", "Custom"]] as Array<[Group, string]>) {
 			const rows = shown.filter((r) => groupOf(r.key) === id);
 			if (id === "system" && canRepeat) rows.unshift({ key: "__repeat__", name: "Repeat" } as unknown as (typeof shown)[number]);
@@ -350,7 +405,11 @@
 				<span class="row-name">{rel.name || rel.key}</span>
 			</span>
 			<span class="row-value">
-				{#if rel.format === "checkbox"}
+				{#if isCredential && rel.key === "status"}
+					<span class="status-val" style={badgeStyle(credentialStatusBadge(credentialStatus).color)} data-testid="credential-status-value">
+						<PropIcon icon={credentialStatusBadge(credentialStatus).icon} size={14} />{credentialStatusText(credentialStatus)}
+					</span>
+				{:else if rel.format === "checkbox"}
 					{@const on = plain(v, "checkbox") === true}
 					<button
 						class="chk"
@@ -443,7 +502,8 @@
 				{:else}
 					{@const d = display(rel)}
 					{#if d}
-						<span class="val-text" class:wrap={rel.key === "error"}>{d}</span>
+						<!-- A pasted key is a secret: the row says it is set; its editor shows it. -->
+						<span class="val-text" class:wrap={rel.key === "error"}>{isCredential && rel.key.startsWith(KEY_PREFIX) ? "••••••••" : d}</span>
 					{:else}
 						<span class="placeholder">{placeholderFor(rel)}</span>
 					{/if}
@@ -457,11 +517,15 @@
 			<div class="pop">
 				<div class="pop-head">
 					<span class="pop-name">{rel.name || rel.key}</span>
-					{#if rel.key !== "done"}
+					{#if rel.key !== "done" && !(isCredential && rel.key === "status")}
 						<button class="pop-rm" title="Remove property" onclick={() => void removeProp(rel.key)}>Remove</button>
 					{/if}
 				</div>
-				<PropertyValue {rel} value={v} spaceId={object.fields["channel"]?.stringValue ?? ""} onsave={(nv) => void saveValue(rel.key, nv)} />
+				{#if isCredential && rel.key === "status"}
+					<CredentialStatus {object} {onchanged} pollError={connectPollError} />
+				{:else}
+					<PropertyValue {rel} value={v} spaceId={object.fields["channel"]?.stringValue ?? ""} onsave={(nv) => void saveValue(rel.key, nv)} />
+				{/if}
 			</div>
 		{/if}
 	</div>
