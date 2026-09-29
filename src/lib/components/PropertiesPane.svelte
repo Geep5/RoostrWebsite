@@ -710,10 +710,10 @@
 	.pop {
 		position: absolute;
 		top: calc(100% + 4px);
+		/* Span the row, not a fixed width: a narrow pane would clip it. */
+		left: 0;
 		right: 0;
 		z-index: 90;
-		min-width: 280px;
-		max-width: 380px;
 		background: var(--panel, #1a1d23);
 		border: 1px solid var(--border);
 		border-radius: 10px;
