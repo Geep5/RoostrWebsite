@@ -62,7 +62,9 @@
 			if (typeKey === "channel") return r.key === "agent";
 			if (r.key === "error") return (MACHINE_BOUND && object.typeKey !== "template") || r.key in object.fields;
 			if (r.key === "served_by") return MACHINE_BOUND || r.key in object.fields;
-			if (["agent", "requires", "credentials"].includes(r.key)) return !AGENTLESS_TYPES[typeKey] || r.key in object.fields;
+			// Credentials are an agent's (AGENT_CONFIG); elsewhere only when set.
+			if (r.key === "credentials") return r.key in object.fields;
+			if (["agent", "requires"].includes(r.key)) return !AGENTLESS_TYPES[typeKey] || r.key in object.fields;
 			if (r.key === "model") return typeKey === "agent" || r.key in object.fields;
 			return !r.hidden && r.key in object.fields;
 		});
