@@ -785,14 +785,22 @@
 	th .head:hover {
 		color: inherit;
 	}
+	/* Pinned to the header's right edge, centred on the label - never
+	   wrapped onto a line of its own under a long name. */
 	th .hide {
+		position: absolute;
+		right: 8px;
+		top: 50%;
+		transform: translateY(-50%);
 		border: none;
-		background: none;
+		background: var(--bg);
+		border-radius: 4px;
 		color: var(--muted);
 		cursor: pointer;
-		padding: 0 4px;
+		padding: 2px 5px;
+		line-height: 1;
 		opacity: 0;
-		font-size: 12px;
+		font-size: 13px;
 	}
 	th:hover .hide {
 		opacity: 1;
