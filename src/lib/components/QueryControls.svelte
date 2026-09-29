@@ -6,6 +6,7 @@
 	import { fetchQuery, note } from "$lib/api";
 	import { applyTemplate, createTyped } from "$lib/create";
 	import { store } from "$lib/data.svelte";
+	import { tagStyle } from "$lib/options";
 
 	/**
 	 * View configuration for a query object — source types, filter rules,
@@ -202,6 +203,11 @@
 	function optionsFor(key: string): string[] {
 		if (key === "serving") return SERVING_OPTIONS;
 		return (relations.find((r) => r.key === key)?.options ?? []).map((o) => o.text);
+	}
+
+	/** An option's own tag colour, as the cell and property pill show it. */
+	function optionColor(key: string, text: string): string {
+		return relations.find((r) => r.key === key)?.options?.find((o) => o.text === text)?.color ?? "";
 	}
 
 	/** Filterable keys: virtual keys + every non-hidden relation.
@@ -573,6 +579,7 @@
 								<button
 									class="tag"
 									class:on={f.value.includes(opt)}
+									style={tagStyle(optionColor(f.key, opt))}
 									onclick={() => updateFilter(i, { value: f.value.includes(opt) ? f.value.filter((v) => v !== opt) : [...f.value, opt] })}
 								>{opt}</button>
 							{/each}
@@ -728,18 +735,21 @@
 		flex-wrap: wrap;
 	}
 	.tag {
-		border: 1px solid var(--border);
-		background: none;
+		border: 1px solid transparent;
 		color: var(--fg);
 		border-radius: 999px;
 		padding: 2px 10px;
 		font-size: 12px;
 		cursor: pointer;
+		/* Colour stays the tag's own; selection is brightness plus a ring. */
+		opacity: 0.45;
+	}
+	.tag:hover {
+		opacity: 0.75;
 	}
 	.tag.on {
-		background: var(--accent);
+		opacity: 1;
 		border-color: var(--accent);
-		color: #fff;
 	}
 	.x {
 		border: none;
