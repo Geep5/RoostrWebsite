@@ -12,12 +12,15 @@
 	import { badgeStyle } from "$lib/options";
 	import { typeGlyph } from "$lib/create";
 	import PropIcon from "./PropIcon.svelte";
+	import { TYPE_GLYPHS } from "$lib/icons";
 	import { fetchBacklinks, type Backlink } from "$lib/backlinks";
 	import TypeSuggest from "./TypeSuggest.svelte";
 
 	let { object }: { object: ObjectJSON } = $props();
 
 	const typeDef = $derived(store.types.find((t) => t.key === object.typeKey));
+	/** The chip's icon: the type's own, else the built-in glyph for kinds with no type object (collection, query). */
+	const typeIcon = $derived(typeDef?.icon || TYPE_GLYPHS[object.typeKey] || "");
 	// A space's type (`channel`) is engine infrastructure with no type page; people call it a Space.
 	// Built-in kinds with no type object read as words, like the table's type column: `query` → "Query".
 	const typeName = $derived(
@@ -59,10 +62,10 @@
 <div class="meta">
 	{#if typeDef}
 		<a class="badge" style={badgeStyle("")} title="Type" href="/app/object/{typeDef.id}">
-			{#if typeDef.icon}<span class="emoji">{typeDef.icon}</span>{:else}<PropIcon icon="dot" />{/if}{typeName}
+			{#if typeIcon}<span class="emoji">{typeIcon}</span>{:else}<PropIcon icon="dot" />{/if}{typeName}
 		</a>
 	{:else}
-		<span class="badge" style={badgeStyle("")} title="Type"><PropIcon icon="dot" />{typeName}</span>
+		<span class="badge" style={badgeStyle("")} title="Type">{#if typeIcon}<span class="emoji">{typeIcon}</span>{:else}<PropIcon icon="dot" />{/if}{typeName}</span>
 	{/if}
 	{#if isQuery}
 		<span class="wrap">

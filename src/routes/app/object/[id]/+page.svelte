@@ -244,9 +244,19 @@
 	// Collection membership picker.
 	let picking = $state(false);
 	let candidates = $state<Array<{ id: string; name: string; typeKey: string }>>([]);
+	let pickQuery = $state("");
+	const shownCandidates = $derived.by(() => {
+		const q = pickQuery.trim().toLowerCase();
+		return q ? candidates.filter((c) => c.name.toLowerCase().includes(q)) : candidates;
+	});
 
 	async function openPicker() {
 		if (!object) return;
+		if (picking) {
+			picking = false;
+			return;
+		}
+		pickQuery = "";
 		// Self-contained spaces: only this space's objects are addable.
 		const res = await fetchQuery({ filters: [spaceFilterOf(object, store.channels[0]?.id ?? "")], limit: 200 });
 		const HIDDEN: Record<string, true> = { program: true, typescript: true, json: true, proto: true, relation: true, collection: true, query: true, set: true, type: true, template: true, agent: true, skill: true };
@@ -380,6 +390,9 @@
 	);
 </script>
 
+<!-- Esc closes the collection picker wherever focus is. -->
+<svelte:window onkeydown={(e) => { if (picking && e.key === "Escape") { e.preventDefault(); picking = false; } }} />
+
 <svelte:head><title>{object ? fieldStr(object.fields, "name") || "Untitled" : "Loading…"} — glon</title></svelte:head>
 
 {#if object}
@@ -499,16 +512,23 @@
 					</div>
 					{#if picking}
 						<div class="picker">
-							{#each candidates as c (c.id)}
-								<button
-									onclick={() => {
-										picking = false;
-										void setMembers([...memberIds, c.id]);
-									}}>{c.name} <span class="muted">{c.typeKey}</span></button
-								>
-							{/each}
-							{#if candidates.length === 0}<span class="muted">Nothing to add.</span>{/if}
-							<button class="close" onclick={() => (picking = false)}>Close</button>
+							<!-- Search and Close stay put above the list, however long it gets. -->
+							<div class="picker-head">
+								<!-- svelte-ignore a11y_autofocus -->
+								<input class="picker-search" placeholder="Search objects…" autofocus bind:value={pickQuery} />
+								<button class="close" aria-label="Close" title="Close (Esc)" onclick={() => (picking = false)}>✕</button>
+							</div>
+							<div class="picker-list">
+								{#each shownCandidates as c (c.id)}
+									<button
+										onclick={() => {
+											picking = false;
+											void setMembers([...memberIds, c.id]);
+										}}>{c.name} <span class="muted">{c.typeKey}</span></button
+									>
+								{/each}
+								{#if shownCandidates.length === 0}<span class="muted">{candidates.length === 0 ? "Nothing to add." : "No matches."}</span>{/if}
+							</div>
 						</div>
 					{/if}
 				{/if}
@@ -695,20 +715,41 @@
 	.picker {
 		display: flex;
 		flex-direction: column;
-		gap: 4px;
+		gap: 8px;
 		border: 1px solid var(--border);
 		border-radius: 10px;
 		padding: 10px;
 		margin-bottom: 14px;
+	}
+	.picker-head {
+		display: flex;
+		gap: 8px;
+		align-items: center;
+	}
+	.picker-search {
+		flex: 1;
+		background: var(--bg);
+		border: 1px solid var(--border);
+		border-radius: 8px;
+		padding: 6px 10px;
+		color: var(--fg);
+		font: inherit;
+		font-size: 13px;
+	}
+	.picker-list {
+		display: flex;
+		flex-direction: column;
+		gap: 4px;
 		max-height: 260px;
 		overflow-y: auto;
 	}
-	.picker button {
+	.picker-list button {
 		text-align: left;
 		border: none;
 	}
 	.picker .close {
 		color: var(--muted);
+		flex: none;
 	}
 	.muted {
 		color: var(--muted);
