@@ -142,6 +142,8 @@
 	let mentionIndex = $state(0);
 	/** Agents tagged for the next send; a deleted @Name untags at send time. */
 	let tagged = $state<ObjectAgentOption[]>([]);
+	/** One guest = object + agent: every guest on a task shares the task's object id. */
+	const guestKey = (option: ObjectAgentOption) => `${option.endpoint.objectId}:${option.endpoint.agentId}`;
 
 	async function ensureTagOptions(): Promise<void> {
 		if (tagOptions) return;
@@ -156,7 +158,7 @@
 		if (!mention || !tagOptions) return [];
 		const q = mention.query.toLowerCase();
 		return tagOptions
-			.filter((option) => !tagged.some((t) => t.endpoint.objectId === option.endpoint.objectId))
+			.filter((option) => !tagged.some((t) => guestKey(t) === guestKey(option)))
 			.filter((option) => !q || option.agentName.toLowerCase().includes(q) || option.name.toLowerCase().includes(q))
 			.slice(0, 8);
 	});
@@ -196,7 +198,7 @@
 		// One trailing space so the next word doesn't glue onto the tag.
 		const after = draft.slice(caret).startsWith(" ") ? draft.slice(caret) : ` ${draft.slice(caret)}`;
 		draft = `${draft.slice(0, at.start)}${label}${after}`;
-		if (!tagged.some((t) => t.endpoint.objectId === option.endpoint.objectId)) tagged = [...tagged, option];
+		if (!tagged.some((t) => guestKey(t) === guestKey(option))) tagged = [...tagged, option];
 		mention = null;
 		requestAnimationFrame(() => {
 			el.focus();
@@ -669,7 +671,7 @@
 		<div class="composer">
 			{#if mention && mentionMatches.length}
 				<div class="mention-menu" role="listbox" aria-label="Tag an agent">
-					{#each mentionMatches as option, i (option.endpoint.objectId)}
+					{#each mentionMatches as option, i (guestKey(option))}
 						<button
 							type="button"
 							role="option"
@@ -719,6 +721,8 @@
 						if (e.key === "Enter" || e.key === "Tab") { e.preventDefault(); pickMention(mentionMatches[Math.min(mentionIndex, mentionMatches.length - 1)]); return; }
 						if (e.key === "Escape") { e.preventDefault(); mention = null; return; }
 					}
+					// Mid-tag with nothing matching: Enter closes the menu instead of sending a half-typed tag.
+					if (mention && e.key === "Enter" && !e.shiftKey) { e.preventDefault(); mention = null; return; }
 					if (e.key === "Enter" && !e.shiftKey) {
 						e.preventDefault();
 						void send();
