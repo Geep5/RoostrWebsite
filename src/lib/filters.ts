@@ -7,12 +7,23 @@ import type { ObjectJSON, RelationDefJSON } from "$lib/types";
 import { SYSTEM_TYPE_KEYS } from "$lib/types";
 
 /**
- * Filter keys the engine cannot evaluate because their value is computed
- * by the host, not stored on the object. `serving` resolves per object
- * through the engine's serving resolver ($lib/serving); views apply it
- * client-side after the engine query (SetTable).
+ * Filter keys the engine cannot evaluate. `serving` is computed by the
+ * host (the engine's serving resolver, $lib/serving); `repeat` is stored,
+ * but as a map, which the engine's filters treat as no value at all. Views
+ * apply both client-side after the engine query (SetTable).
  */
-export const VIRTUAL_FILTER_KEYS: Record<string, true> = { serving: true };
+export const VIRTUAL_FILTER_KEYS: Record<string, true> = { serving: true, repeat: true };
+
+/** The stored Repeat rule of a view: "notEmpty" = only recurring objects, "empty" = only one-off ones, "" = no rule. */
+export function repeatFilterOf(object: ObjectJSON): "" | "empty" | "notEmpty" {
+	for (const item of object.fields["viewFilters"]?.valuesValue?.items ?? []) {
+		const e = item.mapValue?.entries;
+		if (e?.["key"]?.stringValue !== "repeat") continue;
+		const condition = e["condition"]?.stringValue;
+		if (condition === "empty" || condition === "notEmpty") return condition;
+	}
+	return "";
+}
 
 /** Stored serving filter rules, parsed for the client-side pass. */
 export function servingFiltersOf(object: ObjectJSON): Array<{ condition: string; value: string }> {

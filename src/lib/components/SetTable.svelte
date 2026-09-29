@@ -16,7 +16,8 @@
 	import { fetchMachines, machineName, resolveMany, servingCopy } from "$lib/serving";
 	import { store, layoutOf } from "$lib/data.svelte";
 	import type { ObjectJSON, RelationDefJSON, ValueJSON } from "$lib/types";
-	import { fieldStr } from "$lib/types";
+	import { fieldStr, repeatOf } from "$lib/types";
+	import { describeRepeat } from "$lib/repeat";
 	import { objectIcon, typeIcon } from "$lib/icons";
 
 	let {
@@ -154,6 +155,8 @@
 
 	/** Any real relation column edits inline; specials stay read-only. */
 	function isEditable(key: string): boolean {
+		// Repeat is a rule edited in the object's Repeat row, not a cell value.
+		if (key === "repeat") return false;
 		const rel = relations.find((r) => r.key === key);
 		return !!rel && !rel.readOnly;
 	}
@@ -227,12 +230,14 @@
 		{ key: "updatedAt", name: "Updated" },
 		// The object's resolved computer (its own pin, else its agent's), warning when it can't be honoured.
 		{ key: "serving", name: "Served by" },
+		// The object's recurrence, in words ("Every week on Wed at 9:00 AM · next Oct 8"); empty when it is one-off.
+		{ key: "repeat", name: "Repeat" },
 	];
 
 	/** Anytype default grid columns for a fresh view. */
 	const DEFAULT_COLUMNS = ["type", "updatedAt"];
 	/** Icons for the built-in columns, matching the filter and sort menus. */
-	const SPECIAL_EMOJI: Record<string, string> = { type: "▦", createdAt: "🗓️", updatedAt: "🗓️", serving: "🖥️" };
+	const SPECIAL_EMOJI: Record<string, string> = { type: "▦", createdAt: "🗓️", updatedAt: "🗓️", serving: "🖥️", repeat: "↻" };
 	const DEFAULT_WIDTH = 150;
 	const MIN_WIDTH = 60;
 
@@ -386,12 +391,14 @@
 	}
 
 	async function load() {
-		const { servingFilters, ...engineBody } = body as Record<string, unknown> & { servingFilters?: Array<{ condition: string; value: string }> };
+		const { servingFilters, repeatFilter, ...engineBody } = body as Record<string, unknown> & { servingFilters?: Array<{ condition: string; value: string }>; repeatFilter?: string };
 		const rules = servingFilters ?? [];
 		const effectiveKey = override?.key ?? defaultSorts[0]?.key ?? "updatedAt";
 		const effectiveType = override?.dir ?? defaultSorts[0]?.type ?? "desc";
 		const servingSort = effectiveKey === "serving" ? { type: effectiveType } : null;
-		const base = servingSort ? [{ key: "updatedAt", type: "desc" }] : override ? [{ key: effectiveKey, type: effectiveType }] : defaultSorts.length > 0 ? defaultSorts : [{ key: "updatedAt", type: "desc" }];
+		// Repeat is a map the engine can't order: sort by the next occurrence here.
+		const repeatSort = effectiveKey === "repeat" ? { type: effectiveType } : null;
+		const base = servingSort || repeatSort ? [{ key: "updatedAt", type: "desc" }] : override ? [{ key: effectiveKey, type: effectiveType }] : defaultSorts.length > 0 ? defaultSorts : [{ key: "updatedAt", type: "desc" }];
 		const sorts = base.map((s) => ({
 			key: s.key,
 			type: s.type,
@@ -399,6 +406,18 @@
 		}));
 		const res = await fetchQuery({ ...engineBody, sorts });
 		rows = res.records;
+		if (repeatFilter === "notEmpty") rows = rows.filter((r) => repeatOf(r.fields));
+		else if (repeatFilter === "empty") rows = rows.filter((r) => !repeatOf(r.fields));
+		if (repeatSort) {
+			// One-off objects last either way, like an empty cell under any engine sort.
+			const dir = repeatSort.type === "desc" ? -1 : 1;
+			const next = (r: QueryResultRow) => repeatOf(r.fields)?.next;
+			rows = [...rows].sort((a, b) => {
+				const x = next(a), y = next(b);
+				if (x === undefined || y === undefined) return x === undefined ? (y === undefined ? 0 : 1) : -1;
+				return dir * (x - y);
+			});
+		}
 		if (columns.includes("serving") || rules.length > 0 || servingSort) {
 			const { rows: machineRows, machines } = await fetchMachines();
 			const resolved = await resolveMany(rows, machineRows);
@@ -483,6 +502,10 @@
 
 	function cell(r: QueryResultRow, key: string): string {
 		if (key === "serving") return servingById.get(r.id)?.label ?? "";
+		if (key === "repeat") {
+			const rule = repeatOf(r.fields);
+			return rule ? describeRepeat(rule) : "";
+		}
 		if (key === "type") {
 			// Display name, never the raw key: "finance_task" reads as its
 			// type's name (or at worst the key with spaces).

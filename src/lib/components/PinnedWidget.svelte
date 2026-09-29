@@ -8,8 +8,9 @@
 	 */
 	import { fetchObject, fetchQuery, type QueryResultRow } from "$lib/api";
 	import type { ObjectJSON, RelationDefJSON } from "$lib/types";
+	import { repeatOf } from "$lib/types";
 	import { store, onObjectEvent } from "$lib/data.svelte";
-	import { engineFiltersOf, spaceFilterOf } from "$lib/filters";
+	import { engineFiltersOf, repeatFilterOf, spaceFilterOf } from "$lib/filters";
 	import { objectSpaceId, spaceRelations } from "$lib/relations";
 	import { objectIcon } from "$lib/icons";
 
@@ -55,7 +56,9 @@
 					})
 					.filter((x): x is { key: string; type: string; emptyPlacement: string } => !!x);
 				const res = await fetchQuery({ ...body, sorts: sorts.length > 0 ? sorts : [{ key: "updatedAt", type: "desc", emptyPlacement: "end" }], limit: 50 });
-				rows = res.records;
+				// Repeat can't be filtered by the engine (a map value): same client pass as the page.
+				const repeatFilter = repeatFilterOf(o);
+				rows = repeatFilter ? res.records.filter((r) => !!repeatOf(r.fields) === (repeatFilter === "notEmpty")) : res.records;
 				return;
 			}
 			// Tree widget: outbound links (same shapes as the graph/backlinks).

@@ -8,7 +8,8 @@
 	 * The rule is deliberately small: every N <unit>, on <weekdays | day of
 	 * month>, at <time of day>, counted from an anchor day.
 	 */
-	import type { ObjectJSON, RepeatFreq, RepeatJSON } from "$lib/types";
+	import type { ObjectJSON, RepeatJSON } from "$lib/types";
+	import { DAY, MIN, ORD, WD, describeDraft as describe, fmt, ordinalOf, sod, suffix, toDraft, type RepeatDraft as Draft } from "$lib/repeat";
 	import { repeatOf, guestAgents } from "$lib/types";
 	import { note, repeat } from "$lib/api";
 	import { store } from "$lib/data.svelte";
@@ -23,20 +24,6 @@
 		onchanged: () => Promise<void>;
 	} = $props();
 
-	/** The editable shape: the stored rule with `anchor` as local start-of-day ms instead of a day index. */
-	interface Draft {
-		freq: RepeatFreq;
-		interval: number;
-		weekdays: number[];
-		monthly: "date" | "weekday";
-		anchor: number;
-		time: number;
-	}
-
-	const DAY = 86_400_000;
-	const MIN = 60_000;
-	const WD = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-	const ORD = ["", "1st", "2nd", "3rd", "4th", "last"];
 
 	const rule = $derived(repeatOf(object.fields));
 	let open = $state(false);
@@ -85,17 +72,8 @@
 	});
 
 	// ── Dates ─────────────────────────────────────────────────────
-	const sod = (ms: number) => {
-		const d = new Date(ms);
-		d.setHours(0, 0, 0, 0);
-		return d.getTime();
-	};
-	/** Local midnight of a wall-clock day index (the engine's `anchor`). */
-	const dayToLocal = (day: number) => new Date(1970, 0, 1 + day).getTime();
-	const fmt = (ms: number) => new Date(ms).toLocaleDateString(undefined, { month: "short", day: "numeric" });
 	const fmtDay = (ms: number) => new Date(ms).toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" });
 	const fmtLong = (ms: number) => new Date(ms).toLocaleString(undefined, { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
-	const fmtTime = (minutes: number) => new Date(sod(Date.now()) + minutes * MIN).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
 	const hhmm = (minutes: number) => `${String(Math.floor(minutes / 60)).padStart(2, "0")}:${String(minutes % 60).padStart(2, "0")}`;
 	const addMonths = (ms: number, n: number, day: number) => {
 		const d = new Date(ms);
@@ -118,13 +96,6 @@
 		d.setDate(d.getDate() + 7 * (ordinal - 1));
 		return sod(d.getTime());
 	};
-	const ordinalOf = (ms: number) => {
-		const d = new Date(ms);
-		const n = Math.ceil(d.getDate() / 7);
-		const lastOfMonth = new Date(d.getFullYear(), d.getMonth() + 1, 0).getDate();
-		return d.getDate() + 7 > lastOfMonth ? 5 : n;
-	};
-	const suffix = (n: number) => (n % 10 === 1 && n !== 11 ? "st" : n % 10 === 2 && n !== 12 ? "nd" : n % 10 === 3 && n !== 13 ? "rd" : "th");
 
 	// ── Preview only ──────────────────────────────────────────────
 	// The engine computes the real `next` (core/repeat.odin). These mirror
@@ -172,29 +143,6 @@
 		return stepFrom(d, d.anchor);
 	}
 
-	function describe(d: Draft): string {
-		const every = d.interval === 1 ? "Every" : `Every ${d.interval}`;
-		const unit = d.interval === 1 ? d.freq : `${d.freq}s`;
-		const anchor = new Date(d.anchor);
-		let s: string;
-		if (d.freq === "week") {
-			const wd = [...d.weekdays].sort();
-			if (wd.length === 5 && wd.join() === "1,2,3,4,5" && d.interval === 1) s = "Every weekday";
-			else s = `${every} ${unit} on ${wd.length ? wd.map((x) => WD[x]).join(", ") : WD[anchor.getDay()]}`;
-		} else if (d.freq === "month") {
-			s =
-				d.monthly === "weekday"
-					? `${every} ${unit} on the ${ORD[ordinalOf(d.anchor)]} ${WD[anchor.getDay()]}`
-					: `${every} ${unit} on the ${anchor.getDate()}${suffix(anchor.getDate())}`;
-		} else if (d.freq === "year") {
-			s = `${every} ${unit} on ${fmt(d.anchor)}`;
-		} else {
-			s = `${every} ${unit}`;
-		}
-		return `${s} at ${fmtTime(d.time)}`;
-	}
-
-	const toDraft = (r: RepeatJSON): Draft => ({ freq: r.freq, interval: r.interval, weekdays: [...r.weekdays], monthly: r.monthly, anchor: dayToLocal(r.anchor), time: r.time });
 	const view = $derived(rule ? toDraft(rule) : null);
 	const overdue = $derived(!!rule && rule.next < Date.now());
 

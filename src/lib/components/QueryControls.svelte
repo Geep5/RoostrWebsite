@@ -172,6 +172,11 @@
 		{ id: "empty", label: "is empty", needsValue: false },
 		{ id: "notEmpty", label: "is not empty", needsValue: false },
 	];
+	/** Repeat is a rule, not a value: the only question is whether there is one. */
+	const REPEAT_CONDITIONS: ConditionDef[] = [
+		{ id: "notEmpty", label: "is recurring", needsValue: false },
+		{ id: "empty", label: "is not recurring", needsValue: false },
+	];
 	const CHECKBOX_CONDITIONS: ConditionDef[] = [
 		{ id: "equal", label: "is checked", needsValue: false },
 		{ id: "notEqual", label: "is unchecked", needsValue: false },
@@ -192,6 +197,7 @@
 
 	function conditionsFor(key: string): ConditionDef[] {
 		if (key === "serving") return SERVING_CONDITIONS;
+		if (key === "repeat") return REPEAT_CONDITIONS;
 		const f = formatOf(key);
 		if (f === "number" || f === "date") return NUMBER_CONDITIONS;
 		if (f === "tag" || f === "status") return SELECT_CONDITIONS;
@@ -219,17 +225,18 @@
 	const filterKeys = $derived.by(() => {
 		// `served_by` is covered by the resolved "serving" (Served by) key, which also knows agent pins.
 		const keys = relations.filter((r) => !r.hidden && r.key !== "setOf" && r.key !== "served_by").map((r) => r.key);
-		return [...new Set(["type", ...keys, "createdAt", "updatedAt", "serving"])];
+		return [...new Set(["type", ...keys, "createdAt", "updatedAt", "serving", "repeat"])];
 	});
 
 	/** A property choice as the menu shows it: its emoji, then its name. */
 	function optionLabel(key: string): string {
-		const glyph = key === "type" ? "▦" : key === "createdAt" || key === "updatedAt" ? "🗓️" : key === "serving" ? "🖥️" : relations.find((r) => r.key === key)?.iconEmoji || "";
+		const glyph = key === "type" ? "▦" : key === "createdAt" || key === "updatedAt" ? "🗓️" : key === "serving" ? "🖥️" : key === "repeat" ? "↻" : relations.find((r) => r.key === key)?.iconEmoji || "";
 		return glyph ? `${glyph} ${labelOf(key)}` : labelOf(key);
 	}
 
 	function labelOf(key: string): string {
 		if (key === "serving") return "Served by";
+		if (key === "repeat") return "Repeat";
 		if (key === "type") return "Type";
 		if (key === "createdAt") return "Created";
 		if (key === "updatedAt") return "Updated";
