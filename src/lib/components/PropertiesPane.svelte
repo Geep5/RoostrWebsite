@@ -5,7 +5,7 @@
 	 * icon + the property name on the left (muted), the value on the right.
 	 * Clicking a row opens the property's PropertyValue editor in a popover
 	 * anchored to the row; checkboxes toggle in place. Multi-value rows
-	 * (tag/object/agent/credentials/requires) carry a hover × per value,
+	 * (tag/object/agent/credentials/skills) carry a hover × per value,
 	 * single-value rows a hover × that removes the property.
 	 */
 	import { fieldStr, type ObjectJSON, type RelationDefJSON, type ValueJSON } from "$lib/types";
@@ -37,7 +37,7 @@
 	    machine and the project folder on it, the agent, its config, then its
 	    credentials and what it needs - the "how this object runs" block ahead
 	    of ordinary fields. */
-	const AGENT_PRIORITY = ["served_by", "repo_path", "agent", "model", "prompt", "requires", "credentials", "capability"];
+	const AGENT_PRIORITY = ["served_by", "repo_path", "agent", "model", "prompt", "skills", "credentials", "capability"];
 	const agentRank = new Map(AGENT_PRIORITY.map((k, i) => [k, i]));
 
 	/** A template edits the properties of the type it stamps out, so an
@@ -51,7 +51,7 @@
 	/** Featured order first, then the rest. */
 	const shown = $derived.by(() => {
 		const MACHINE_BOUND = ["agent", "capability", "install", "credential"].includes(typeKey);
-		const AGENT_CONFIG = typeKey === "agent" ? ["prompt", "model", "requires", "credentials", "served_by", "repo_path"] : [];
+		const AGENT_CONFIG = typeKey === "agent" ? ["prompt", "model", "skills", "credentials", "served_by", "repo_path"] : [];
 		const present = relations.filter((r) => {
 			if (RESERVED_KEYS[r.key]) return false;
 			if (AGENT_CONFIG.includes(r.key)) return true;
@@ -64,7 +64,7 @@
 			if (r.key === "served_by") return MACHINE_BOUND || r.key in object.fields;
 			// Credentials are an agent's (AGENT_CONFIG); elsewhere only when set.
 			if (r.key === "credentials") return r.key in object.fields;
-			if (["agent", "requires"].includes(r.key)) return !AGENTLESS_TYPES[typeKey] || r.key in object.fields;
+			if (["agent", "skills"].includes(r.key)) return !AGENTLESS_TYPES[typeKey] || r.key in object.fields;
 			if (r.key === "model") return typeKey === "agent" || r.key in object.fields;
 			return !r.hidden && r.key in object.fields;
 		});
@@ -92,26 +92,28 @@
 		return { text: copy.text, warning: copy.warning };
 	});
 
-	// ── Capability lookups so requires rows show live status (from the install each points at) ──
-	let capabilitiesById = $state<Map<string, { key: string; machine: string; machineName: string; status: string }>>(new Map());
+	// ── Skill lookups so Skills rows say where each machine skill works ──
+	let skillsById = $state<Map<string, { name: string; key: string; machines: string[] }>>(new Map());
 	$effect(() => {
 		void (async () => {
 			try {
-				const [rows, caps] = await Promise.all([fetchAllQuery({ type: "install" }), fetchAllQuery({ type: "capability" })]);
+				const [skills, rows, caps] = await Promise.all([fetchAllQuery({ type: "skill" }), fetchAllQuery({ type: "install" }), fetchAllQuery({ type: "capability" })]);
 				const installStatus = new Map(rows.map((r) => [r.id, r.fields["status"]?.stringValue ?? ""]));
-				const byCapId = new Map<string, { key: string; machine: string; machineName: string; status: string }>();
+				// key -> names of the machines that have it working
+				const working = new Map<string, string[]>();
 				for (const c of caps) {
 					const m = c.fields["served_by"]?.linkValue?.targetId ?? c.fields["served_by"]?.stringValue ?? "";
 					const instId = c.fields["install"]?.linkValue?.targetId ?? c.fields["install"]?.stringValue ?? "";
-					byCapId.set(c.id, {
-						key: c.fields["key"]?.stringValue ?? "",
-						machine: m,
-						machineName: m ? (servingState?.machines.find((x) => x.machineId === m)?.name ?? `${m.slice(0, 8)}…`) : "",
-						status: installStatus.get(instId) ?? "missing",
-					});
+					const key = c.fields["key"]?.stringValue ?? "";
+					if (!m || !key || installStatus.get(instId) !== "active") continue;
+					const name = servingState?.machines.find((x) => x.machineId === m)?.name ?? `${m.slice(0, 8)}…`;
+					working.set(key, [...new Set([...(working.get(key) ?? []), name])]);
 				}
-				capabilitiesById = byCapId;
-			} catch { /* capability status is optional context */ }
+				skillsById = new Map(skills.map((sk) => {
+					const key = sk.fields["key"]?.stringValue ?? "";
+					return [sk.id, { name: sk.fields["name"]?.stringValue || key || "Skill", key, machines: key ? (working.get(key) ?? []) : [] }];
+				}));
+			} catch { /* skill status is optional context */ }
 		})();
 	});
 
@@ -237,7 +239,7 @@
 			case "repo_path": return { emoji: "📁" };
 			case "credentials": return { emoji: "🔑" };
 			case "agent": return { emoji: "🤖" };
-			case "requires": return { emoji: "🧩" };
+			case "skills": return { emoji: "🧠" };
 			case "prompt": return { emoji: "📜" };
 			case "model": return { emoji: "🧬" };
 		}
@@ -266,7 +268,7 @@
 			case "repo_path": return "No project folder";
 			case "credentials": return "No credentials";
 			case "agent": return "Add agent";
-			case "requires": return "Nothing needed";
+			case "skills": return "No skills";
 		}
 		if (rel.format === "status") return "Select option";
 		if (rel.format === "tag") return "Select options";
@@ -288,7 +290,7 @@
 			case "object":
 			case "agent":
 			case "credentials":
-			case "requires": return { valuesValue: { items: [] } };
+			case "skills": return { valuesValue: { items: [] } };
 			default: return { stringValue: "" };
 		}
 	}
@@ -306,7 +308,7 @@
 	const canRepeat = $derived(!["channel", "chat", "type", "relation", "template", "query", "set", "collection", "agent"].includes(object.typeKey));
 
 	// ── Grouped display: System / Agent / Custom, each a labeled section ──
-	const AGENT_KEYS = new Set(["served_by", "repo_path", "agent", "model", "prompt", "requires", "credentials", "capability"]);
+	const AGENT_KEYS = new Set(["served_by", "repo_path", "agent", "model", "prompt", "skills", "credentials", "capability"]);
 	const SYSTEM_KEYS = new Set(["done", "due_date", "status", "tag", "description", "url", "email", "phone", "error", "created_date", "modified_date", "createdDate", "modifiedDate"]);
 	type Group = "system" | "agent" | "custom";
 	const groupOf = (key: string): Group => (AGENT_KEYS.has(key) ? "agent" : SYSTEM_KEYS.has(key) ? "system" : "custom");
@@ -406,15 +408,15 @@
 					{:else}
 						<span class="placeholder">{placeholderFor(rel)}</span>
 					{/each}
-				{:else if rel.key === "requires"}
+				{:else if rel.key === "skills"}
 					{#each plain(v, "object") as string[] as id (id)}
-						{@const cap = capabilitiesById.get(id)}
-						{@const ok = cap?.status === "active" && !!cap?.machine}
+						{@const sk = skillsById.get(id)}
+						{@const ok = !!sk && (!sk.key || sk.machines.length > 0)}
 						<span class="chip-wrap">
-							<span class="chip" class:ok class:warn={!!cap && !ok} title={cap ? `${cap.key} · ${cap.machine ? `${cap.machineName} · ` : ""}${cap.status ?? "missing install"}` : "Needs"}>
-								<span class="emoji">🧩</span>{cap ? `${cap.key}${cap.machine ? ` · ${cap.machineName}` : ""}${ok ? "" : ` (${(cap.status ?? "not set up").replaceAll("_", " ")})`}` : id.slice(0, 8)}
+							<span class="chip" class:ok={!!sk?.key && ok} class:warn={!!sk?.key && !ok} title={!sk ? "Skill" : !sk.key ? `${sk.name} · instructions` : sk.machines.length ? `${sk.name} · working on ${sk.machines.join(", ")}` : `${sk.name} · not working on any computer yet`}>
+								<span class="emoji">🧠</span>{sk?.name ?? `${id.slice(0, 8)}…`}
 							</span>
-							<button class="rm" aria-label={`Remove ${cap?.key ?? "capability"}`} title="Remove" onclick={(e) => { e.stopPropagation(); void removeValue(rel.key, id); }}>×</button>
+							<button class="rm" aria-label={`Remove ${sk?.name ?? "skill"}`} title="Remove" onclick={(e) => { e.stopPropagation(); void removeValue(rel.key, id); }}>×</button>
 						</span>
 					{:else}
 						<span class="placeholder">{placeholderFor(rel)}</span>

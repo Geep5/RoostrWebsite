@@ -14,8 +14,9 @@ export interface Serving {
 	/** "" when nothing pins the object and no machine qualifies. */
 	machineId: string;
 	reason: "self" | "pinned" | "pinned-uncapable" | "agent" | "agent-capable" | "capability" | "unsatisfied" | "unserved";
-	requires: string[];
-	/** Machine ids whose capabilities cover `requires`, sorted. */
+	/** Catalog keys of the machine skills the object's Skills need. */
+	skills: string[];
+	/** Machine ids that have every one of `skills` working, sorted. */
 	candidates: string[];
 }
 
@@ -63,21 +64,20 @@ async function guestAgentRows(objects: Array<Pick<ObjectJSON, "fields">>): Promi
 }
 
 /**
- * Capability objects ride with their installs: the resolver honours a
- * requirement only when the capability's install is active, and it finds
- * both in the same state map. Without these every object with `requires`
- * resolves pinned-uncapable - the red "cannot be honoured" row.
+ * What the resolver needs beyond machines and agents: the skill objects
+ * (their `key` says which are machine software), and the capability objects
+ * with their installs (a machine has a skill once its capability's install
+ * is active). Without these every object with Skills resolves wrongly.
  */
-async function capabilityRows(): Promise<QueryResultRow[]> {
-	// A login's capability is gated by its Credential's status, a skill's by its install.
-	const [caps, installs, credentials] = await Promise.all([fetchAllQuery({ type: "capability" }), fetchAllQuery({ type: "install" }), fetchAllQuery({ type: "credential" })]);
-	return [...caps, ...installs, ...credentials];
+async function skillStates(): Promise<{ skills: QueryResultRow[]; capabilities: QueryResultRow[] }> {
+	const [skills, caps, installs] = await Promise.all([fetchAllQuery({ type: "skill" }), fetchAllQuery({ type: "capability" }), fetchAllQuery({ type: "install" })]);
+	return { skills, capabilities: [...caps, ...installs] };
 }
 
 /** Resolve one object against the live machine roster and its agents. */
 export async function resolveServing(object: ObjectJSON): Promise<{ serving: Serving; machines: MachineRow[] }> {
-	const [{ rows, machines }, agents, capabilities] = await Promise.all([fetchMachines(), guestAgentRows([object]), capabilityRows(), initCore()]);
-	const serving = coreCall<Serving>("serving", { action: "resolve", object, agents, machines: rows, capabilities });
+	const [{ rows, machines }, agents, states] = await Promise.all([fetchMachines(), guestAgentRows([object]), skillStates(), initCore()]);
+	const serving = coreCall<Serving>("serving", { action: "resolve", object, agents, machines: rows, ...states });
 	return { serving, machines };
 }
 
@@ -86,11 +86,11 @@ export async function resolveServing(object: ObjectJSON): Promise<{ serving: Ser
  * they name. Returns one entry per input object, in order.
  */
 export async function resolveMany(objects: QueryResultRow[], machineRows: QueryResultRow[]): Promise<Serving[]> {
-	const [agentRows, capabilities] = await Promise.all([guestAgentRows(objects), capabilityRows(), initCore()]);
+	const [agentRows, states] = await Promise.all([guestAgentRows(objects), skillStates(), initCore()]);
 	const byId = new Map(agentRows.map((a) => [a.id, a]));
 	return objects.map((object) => {
 		const agents = guestAgents(object.fields).flatMap((id) => byId.get(id) ?? []);
-		return coreCall<Serving>("serving", { action: "resolve", object, agents, machines: machineRows, capabilities });
+		return coreCall<Serving>("serving", { action: "resolve", object, agents, machines: machineRows, ...states });
 	});
 }
 
@@ -132,5 +132,5 @@ export function servingCopy(serving: Serving, machines: MachineRow[]): { text: s
 }
 
 function keys(serving: Serving): string {
-	return serving.requires.map(capabilityLabel).join(", ");
+	return serving.skills.map(capabilityLabel).join(", ");
 }
