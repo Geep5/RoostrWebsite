@@ -443,7 +443,7 @@
 				{:else}
 					{@const d = display(rel)}
 					{#if d}
-						<span class="val-text">{d}</span>
+						<span class="val-text" class:wrap={rel.key === "error"}>{d}</span>
 					{:else}
 						<span class="placeholder">{placeholderFor(rel)}</span>
 					{/if}
@@ -584,6 +584,12 @@
 		overflow: hidden;
 		text-overflow: ellipsis;
 		white-space: nowrap;
+	}
+	/* Errors are read, not glanced at: show all of it. */
+	.val-text.wrap {
+		white-space: normal;
+		overflow-wrap: anywhere;
+		text-align: left;
 	}
 	.val-text.warn {
 		color: var(--red);

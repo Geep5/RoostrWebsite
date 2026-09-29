@@ -183,8 +183,8 @@
 			{/if}
 		</span>
 	</div>
-{:else if rel.format === "longtext"}
-	<textarea rows="3" placeholder="Empty" onchange={(e) => void onsave(sv(e.currentTarget.value))}>{text}</textarea>
+{:else if rel.format === "longtext" || rel.key === "error"}
+	<textarea rows={rel.key === "error" ? 5 : 3} placeholder="Empty" onchange={(e) => void onsave(sv(e.currentTarget.value))}>{text}</textarea>
 {:else}
 	<input type="text" value={text} placeholder="Empty" onchange={(e) => void onsave(sv(e.currentTarget.value))} />
 {/if}
@@ -205,6 +205,7 @@
 		font-family: inherit;
 		min-width: 0;
 		width: 100%;
+		box-sizing: border-box;
 	}
 	textarea {
 		resize: vertical;
