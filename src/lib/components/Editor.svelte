@@ -671,6 +671,9 @@
 	let structuralOp = false;
 
 	async function onKeydown(e: KeyboardEvent, id: string) {
+		// An input method is composing (Japanese, Chinese, Korean, dictation,
+		// some autocorrect): its Enter commits the candidate, it never splits.
+		if (composing || e.isComposing || e.keyCode === 229) return;
 		const latched = (e.key === "Enter" && !e.shiftKey) || e.key === "Tab";
 		// The DOM calls this and drops the promise, so a throw in here would be
 		// an invisible dead keystroke. Surface it.
@@ -1029,6 +1032,76 @@
 		}
 	}
 
+	// ── Input intent (beforeinput) and composition ─────────────────
+	/** True between compositionstart and compositionend: the text is the input method's, not ours yet. */
+	let composing = false;
+
+	const blockIdOf = (target: EventTarget | null): string => {
+		const el = target instanceof HTMLElement && target.classList.contains("text") ? target : null;
+		return el?.closest("[data-block]")?.getAttribute("data-block") ?? "";
+	};
+
+	function onCompositionStart() {
+		composing = true;
+	}
+	function onCompositionEnd(e: CompositionEvent) {
+		composing = false;
+		const id = blockIdOf(e.target);
+		// The committed text is now real input: save, slash and spell see it.
+		if (id) onInput(id);
+	}
+
+	/**
+	 * What the browser is about to do, by intent - the one input path every
+	 * keyboard shares. Desktop keys are handled at keydown (which cancels
+	 * the default, so no beforeinput follows); soft keyboards on phones send
+	 * keydown as "Unidentified" and only say what they mean here. Anything
+	 * that would put the browser's own markup or undo into a block is refused.
+	 */
+	function onBeforeInput(e: InputEvent) {
+		if (composing || e.isComposing) return;
+		const id = blockIdOf(e.target);
+		if (!id) return;
+		const synth = (key: string, shiftKey = false) => void onKeydown(new KeyboardEvent("keydown", { key, shiftKey, cancelable: true }), id);
+		switch (e.inputType) {
+			case "insertParagraph":
+				// Code blocks take a newline; everything else splits.
+				if (byId.get(id)?.content.text?.style === Style.CODE) return;
+				e.preventDefault();
+				synth("Enter");
+				return;
+			case "deleteContentBackward": {
+				const el = blockEl(id);
+				const sel = el ? selectionOffsets(el) : null;
+				if (sel && sel.from === 0 && sel.to === 0) {
+					e.preventDefault();
+					synth("Backspace");
+				}
+				return;
+			}
+			case "historyUndo":
+			case "historyRedo":
+				e.preventDefault();
+				void undoRedo(e.inputType === "historyRedo");
+				return;
+			case "formatBold":
+			case "formatItalic":
+			case "formatUnderline": {
+				e.preventDefault();
+				const type = e.inputType === "formatBold" ? MarkT.BOLD : e.inputType === "formatItalic" ? MarkT.ITALIC : MarkT.UNDERLINE;
+				void applyMark(id, type);
+				return;
+			}
+			case "insertFromDrop":
+			case "formatStrikeThrough":
+			case "formatFontColor":
+			case "formatBackColor":
+			case "formatRemove":
+				e.preventDefault();
+				return;
+		}
+	}
+
 	// ── Slash menu ────────────────────────────────────────────────
 
 	/** Track the filter typed after "/"; close if the slash was deleted. */
@@ -1054,6 +1127,7 @@
 	}
 
 	function onInput(id: string) {
+		if (composing) return;
 		updateSlash(id);
 		scheduleSave(id);
 		scheduleSpell();
@@ -1262,10 +1336,11 @@
 		const { text, marks } = fromDom(el);
 		const next = toggleMark(marks, range.from, range.to, type, param);
 		cancelPending(id);
-		await writes.blockUpdate(object.id, id, contentFor(id, text, next));
+		commit([{ kind: "content", id, content: contentFor(id, text, next) }]);
+		// The block keeps focus, and a focused block is never re-rendered from state.
+		el.innerHTML = toHtml(text, next);
 		toolbar = null;
-		focusRequest = { blockId: id, offset: range.to };
-		await refresh();
+		focusNow(id, range.to);
 	}
 
 	async function addLink(id: string) {
@@ -1713,6 +1788,9 @@
 	class="editor"
 	role="presentation"
 	bind:this={editorEl}
+	onbeforeinput={onBeforeInput}
+	oncompositionstart={onCompositionStart}
+	oncompositionend={onCompositionEnd}
 	oncontextmenucapture={onEditorContextMenu}
 	onmousedown={selMouseDown}
 	ondragover={onEditorDragOver}
