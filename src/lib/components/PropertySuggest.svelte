@@ -128,7 +128,7 @@
 		<div class="list">
 			{#each filtered as rel (rel.key)}
 				<button class="item" onclick={() => onpick(rel)}>
-					<span>{rel.name || rel.key}</span>
+					<span class="name"><span class="glyph">{rel.iconEmoji ?? ""}</span>{rel.name || rel.key}</span>
 					<span class="fmt">{rel.format}</span>
 				</button>
 			{/each}
@@ -179,6 +179,7 @@
 	.item {
 		display: flex;
 		justify-content: space-between;
+		align-items: center;
 		gap: 10px;
 		border: none;
 		background: none;
@@ -194,6 +195,18 @@
 	}
 	.item.create {
 		color: var(--accent);
+	}
+	.name {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		min-width: 0;
+	}
+	/* Fixed slot so names stay aligned whether or not a property has an emoji. */
+	.glyph {
+		width: 18px;
+		flex: none;
+		text-align: center;
 	}
 	.fmt {
 		color: var(--muted);
