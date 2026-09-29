@@ -1,32 +1,37 @@
 <script lang="ts">
 	/**
 	 * A credential object's page: one login for one service. The credential
-	 * carries its secret (pasted keys in `secret`, a browser sign-in's
-	 * cookies in `session`), so agents on any computer can use it - and
-	 * anyone in its space can read it. The computer its Served by names
-	 * opens the sign-in window and keeps the status true; Connect, Check and
-	 * Disconnect run only when this tab is paired with that computer.
+	 * carries its own sign-in recipe as plain fields (`service`,
+	 * `description`, `login_url`, `session_host` + `session_cookie`,
+	 * `key_fields`) and its secret (pasted keys in `secret`, a browser
+	 * sign-in's cookies in `session`), so agents on any computer can use it -
+	 * and anyone in its space can read it. A blank credential starts from one
+	 * of its space's credential templates, which the harness seeds. The
+	 * computer its Served by names opens the sign-in window and keeps the
+	 * status true; Connect, Check and Disconnect run only when this tab is
+	 * paired with that computer.
 	 */
 	import { onMount } from "svelte";
-	import { fetchObject, note } from "$lib/api";
+	import { fetchAllQuery, fetchObject, note, type QueryResultRow } from "$lib/api";
 	import { thisMachineId } from "$lib/capability-actions";
 	import { agoShort } from "$lib/conversations";
+	import { applyTemplate } from "$lib/create";
+	import { store } from "$lib/data.svelte";
 	import { harnessFetch, onPairingChange, pairedSession } from "$lib/local-transport";
 	import { fetchMachines, machineName, servedByMachineId, type MachineRow } from "$lib/serving";
-	import { fieldStr, type ObjectJSON } from "$lib/types";
+	import { fieldStr, type ObjectJSON, type ValueJSON } from "$lib/types";
 	import PairGate from "./PairGate.svelte";
 
-	interface ServiceField {
+	/** One `key_fields` item: a key a person pastes, stored under `key` in `secret`. */
+	interface KeyField {
 		key: string;
 		label: string;
 		secret: boolean;
 	}
-	interface Service {
-		key: string;
-		label: string;
-		note: string;
-		loginUrl?: string;
-		fields?: ServiceField[];
+	interface CredentialTemplate {
+		id: string;
+		name: string;
+		description: string;
 	}
 	interface HarnessResult {
 		status?: string;
@@ -42,8 +47,13 @@
 	const CONNECT_TIMEOUT_MS = 5 * 60_000;
 
 	let machines = $state<MachineRow[]>([]);
-	let services = $state<Service[]>([]);
-	let servicesError = $state("");
+	let templates = $state<CredentialTemplate[]>([]);
+	let templatesLoaded = $state(false);
+	let templatesError = $state("");
+	/** "Start blank" chosen: show the empty recipe editor instead of the template list. */
+	let startBlank = $state(false);
+	let keyRows = $state<KeyField[]>([]);
+	let keyRowsJson = "";
 	let paired = $state(pairedSession() !== null);
 	let thisMachine = $state("");
 	let busy = $state("");
@@ -58,6 +68,16 @@
 
 	const id = $derived(object.id);
 	const serviceKey = $derived(fieldStr(object.fields, "service"));
+	const description = $derived(fieldStr(object.fields, "description"));
+	const loginUrl = $derived(fieldStr(object.fields, "login_url"));
+	const sessionHost = $derived(fieldStr(object.fields, "session_host"));
+	const sessionCookie = $derived(fieldStr(object.fields, "session_cookie"));
+	const keyFields = $derived(parseKeyFields(object.fields["key_fields"]));
+	const channel = $derived(fieldStr(object.fields, "channel"));
+	/** Sign-in through a browser window needs the page to open and the cookie that proves it worked. */
+	const browserLogin = $derived(!!loginUrl.trim() && !!sessionHost.trim() && !!sessionCookie.trim());
+	/** No recipe at all yet: offer the space's credential templates. */
+	const blank = $derived(!serviceKey && !loginUrl && keyFields.length === 0);
 	const account = $derived(fieldStr(object.fields, "account"));
 	const status = $derived(fieldStr(object.fields, "status") || "missing");
 	const error = $derived(fieldStr(object.fields, "error"));
@@ -66,8 +86,7 @@
 	const servedBy = $derived(servedByMachineId(object.fields, machines));
 	const machine = $derived(machines.find((m) => m.machineId === servedBy));
 	const keeperName = $derived(servedBy ? machineName(machines, servedBy) : "");
-	const service = $derived(services.find((s) => s.key === serviceKey));
-	const secretFields = $derived(service?.fields ?? []);
+	const secretFields = $derived(keyFields.filter((f) => f.key.trim()));
 	/** Actions run on the keeping computer's harness, so only a tab paired with it offers them. */
 	const canAct = $derived(paired && !!thisMachine && thisMachine === servedBy);
 	const statusText = $derived(
@@ -88,22 +107,44 @@
 		return ago === "now" ? "checked just now" : `checked ${ago} ago`;
 	});
 
-	async function loadServices() {
-		if (!pairedSession()) return;
+	function parseKeyFields(v: ValueJSON | undefined): KeyField[] {
+		return (v?.valuesValue?.items ?? []).flatMap((item) => {
+			const e = item.mapValue?.entries;
+			// No flag means secret, as the harness reads it (credentials.ts recipeOf): mask by default.
+			return e ? [{ key: e["key"]?.stringValue ?? "", label: e["label"]?.stringValue ?? "", secret: e["secret"]?.boolValue ?? true }] : [];
+		});
+	}
+
+	/** Credential templates of this credential's space; every credential template when that space has none. */
+	async function loadTemplates(space: string) {
 		try {
-			const res = await harnessFetch("/credentials/services");
-			if (!res.ok) throw new Error(`Cannot load services (HTTP ${res.status}).`);
-			services = ((await res.json()) as { services: Service[] }).services;
-			servicesError = "";
+			const credentialTypes = new Set(store.types.filter((t) => t.key === "credential").map((t) => t.id));
+			const isCredential = (r: QueryResultRow) => {
+				const target = fieldStr(r.fields, "target_type");
+				return credentialTypes.has(target) || target.startsWith("bundled-type-credential-");
+			};
+			const all = (await fetchAllQuery({ type: "template" })).filter(isCredential);
+			const spaceType = `bundled-type-credential-${space.slice(0, 8)}`;
+			const own = all.filter((r) => fieldStr(r.fields, "target_type") === spaceType && fieldStr(r.fields, "channel") === space);
+			// Other spaces carry their own copies of the same seeds: list each once.
+			const seen = new Set<string>();
+			templates = (own.length ? own : all)
+				.filter((r) => {
+					const k = fieldStr(r.fields, "seed_key") || r.id;
+					return !seen.has(k) && !!seen.add(k);
+				})
+				.map((r) => ({ id: r.id, name: fieldStr(r.fields, "name"), description: fieldStr(r.fields, "description") }));
+			templatesError = "";
 		} catch (e) {
-			servicesError = e instanceof Error ? e.message : String(e);
+			templatesError = `Cannot load credential templates: ${e instanceof Error ? e.message : String(e)}`;
+		} finally {
+			templatesLoaded = true;
 		}
 	}
 
 	async function loadPairing() {
 		paired = pairedSession() !== null;
 		thisMachine = paired ? await thisMachineId() : "";
-		await loadServices();
 	}
 
 	/** The harness writes status onto the object; re-render when it did. */
@@ -184,27 +225,70 @@
 		await onchanged();
 	}
 
-	async function setField(key: string, value: string) {
+	async function setValue(key: string, value: ValueJSON): Promise<boolean> {
 		saveError = "";
 		try {
-			await note.setField(id, key, { stringValue: value });
+			await note.setField(id, key, value);
+			return true;
 		} catch (e) {
 			saveError = e instanceof Error ? e.message : String(e);
+			return false;
 		}
 	}
 
-	async function pickService(picked: Service) {
-		await setField("service", picked.key);
-		const name = fieldStr(object.fields, "name").trim();
-		if (!name || name === DEFAULT_NAME) await setField("name", picked.label);
+	const setField = (key: string, value: string) => setValue(key, { stringValue: value });
+
+	/** A plain text field of the credential, saved when it changed. */
+	async function saveText(key: string, value: string) {
+		const next = value.trim();
+		if (next === fieldStr(object.fields, key)) return;
+		await setField(key, next);
 		await onchanged();
 	}
 
-	async function saveAccount(value: string) {
-		const next = value.trim();
-		if (next === account) return;
-		await setField("account", next);
+	function blurOnEnter(e: KeyboardEvent & { currentTarget: HTMLInputElement }) {
+		if (e.key === "Enter") e.currentTarget.blur();
+	}
+
+	/** `key_fields` is saved whole: every row edit writes the full list. */
+	async function saveKeyRows() {
+		const items = keyRows.map((r) => ({
+			mapValue: { entries: { key: { stringValue: r.key.trim() }, label: { stringValue: r.label.trim() }, secret: { boolValue: r.secret } } },
+		}));
+		await setValue("key_fields", { valuesValue: { items } });
 		await onchanged();
+	}
+
+	function editKeyRow(i: number, patch: Partial<KeyField>) {
+		keyRows[i] = { ...keyRows[i], ...patch };
+		void saveKeyRows();
+	}
+
+	function addKeyRow() {
+		keyRows.push({ key: "", label: "", secret: true });
+		void saveKeyRows();
+	}
+
+	function removeKeyRow(i: number) {
+		keyRows.splice(i, 1);
+		void saveKeyRows();
+	}
+
+	/** Copy a template's recipe onto this credential; a default name takes the template's. */
+	async function startFrom(t: CredentialTemplate) {
+		if (busy) return;
+		busy = "template";
+		saveError = "";
+		try {
+			await applyTemplate(id, t.id);
+			const name = fieldStr(object.fields, "name").trim();
+			if ((!name || name === DEFAULT_NAME) && t.name) await note.setField(id, "name", { stringValue: t.name });
+		} catch (e) {
+			saveError = `Cannot start from ${t.name || "that template"}: ${e instanceof Error ? e.message : String(e)}`;
+		} finally {
+			busy = "";
+			await onchanged().catch(() => {});
+		}
 	}
 
 	// A different credential in the same page instance starts clean: no
@@ -213,7 +297,20 @@
 		void id;
 		draft = {};
 		actionError = "";
+		startBlank = false;
 		return stopWaiting;
+	});
+
+	// Key rows follow the saved list; an unchanged list leaves rows being typed in alone.
+	$effect(() => {
+		const json = JSON.stringify(keyFields);
+		if (json === keyRowsJson) return;
+		keyRowsJson = json;
+		keyRows = keyFields.map((f) => ({ ...f }));
+	});
+
+	$effect(() => {
+		if (blank) void loadTemplates(channel);
 	});
 
 	onMount(() => {
@@ -235,24 +332,66 @@
 		{#if checked}<p class="muted">{checked}</p>{/if}
 	</div>
 
-	<div class="sec">
+	<div class="sec" data-testid="credential-recipe">
 		<div class="sec-name">Service</div>
-		{#if serviceKey}
-			<p class="value">{service?.label ?? serviceKey}</p>
-			{#if service?.note}<p class="muted">{service.note}</p>{/if}
-		{:else if paired && services.length > 0}
-			<div class="choices">
-				{#each services as s (s.key)}
-					<button class="choice" data-testid={`credential-service-${s.key}`} onclick={() => void pickService(s)}>
-						<span class="choice-name">{s.label}</span>
-						{#if s.note}<span class="choice-sub">{s.note}</span>{/if}
-					</button>
-				{/each}
+		{#if blank && !startBlank}
+			{#if templates.length > 0}
+				<p class="muted">Start from</p>
+				<div class="choices">
+					{#each templates as t (t.id)}
+						<button class="choice" disabled={!!busy} data-testid="credential-template" onclick={() => void startFrom(t)}>
+							<span class="choice-name">{t.name || "Untitled template"}</span>
+							{#if t.description}<span class="choice-sub">{t.description}</span>{/if}
+						</button>
+					{/each}
+				</div>
+			{:else if templatesLoaded && !templatesError}
+				<p class="muted">No credential templates in this space yet - the Roostr harness seeds them when it runs on a computer.</p>
+			{/if}
+			{#if templatesError}<p class="error" role="alert">{templatesError}</p>{/if}
+			<div class="actions">
+				<button class="subtle-btn" disabled={!!busy} data-testid="credential-start-blank" onclick={() => (startBlank = true)}>Start blank</button>
 			</div>
 		{:else}
-			<p class="muted">No service chosen yet{paired ? "." : " - pair this tab with a Roostr computer to choose one."}</p>
+			<div class="recipe">
+				<label class="cred-field">
+					<span>Service key</span>
+					<input value={serviceKey} placeholder="x, discord-bot, …" autocomplete="off" onchange={(e) => void saveText("service", e.currentTarget.value)} onkeydown={blurOnEnter} />
+				</label>
+				<label class="cred-field">
+					<span>Description</span>
+					<input value={description} placeholder="What this login is for" autocomplete="off" onchange={(e) => void saveText("description", e.currentTarget.value)} onkeydown={blurOnEnter} />
+				</label>
+				<label class="cred-field">
+					<span>Login page URL</span>
+					<input value={loginUrl} placeholder="https://x.com/i/flow/login" autocomplete="off" onchange={(e) => void saveText("login_url", e.currentTarget.value)} onkeydown={blurOnEnter} />
+				</label>
+				<div class="cred-field">
+					<span>Signed-in cookie</span>
+					<div class="pair">
+						<input value={sessionHost} placeholder="Host, e.g. x.com" aria-label="Cookie host" autocomplete="off" onchange={(e) => void saveText("session_host", e.currentTarget.value)} onkeydown={blurOnEnter} />
+						<input value={sessionCookie} placeholder="Cookie, e.g. auth_token" aria-label="Cookie name" autocomplete="off" onchange={(e) => void saveText("session_cookie", e.currentTarget.value)} onkeydown={blurOnEnter} />
+					</div>
+				</div>
+				<div class="cred-field">
+					<span>Key fields</span>
+					{#each keyRows as row, i (i)}
+						<div class="key-row" data-testid="credential-key-field">
+							<input value={row.label} placeholder="Label, e.g. Bot token" aria-label="Key field label" autocomplete="off" onchange={(e) => editKeyRow(i, { label: e.currentTarget.value })} onkeydown={blurOnEnter} />
+							<input value={row.key} placeholder="Key, e.g. token" aria-label="Key field key" autocomplete="off" onchange={(e) => editKeyRow(i, { key: e.currentTarget.value })} onkeydown={blurOnEnter} />
+							<label class="secret-toggle"><input type="checkbox" checked={row.secret} onchange={(e) => editKeyRow(i, { secret: e.currentTarget.checked })} /> Secret</label>
+							<button class="subtle-btn" aria-label="Remove key field" onclick={() => removeKeyRow(i)}>×</button>
+						</div>
+					{/each}
+					<div class="actions">
+						<button class="subtle-btn" data-testid="credential-add-key-field" onclick={addKeyRow}>Add key field</button>
+					</div>
+				</div>
+				{#if !browserLogin && (loginUrl || sessionHost || sessionCookie)}
+					<p class="muted">Browser sign-in needs the login page, the cookie host and the cookie name.</p>
+				{/if}
+			</div>
 		{/if}
-		{#if servicesError && !serviceKey}<p class="error">{servicesError}</p>{/if}
 	</div>
 
 	<div class="sec">
@@ -262,8 +401,8 @@
 			value={account}
 			placeholder="@handle or email"
 			autocomplete="off"
-			onchange={(e) => void saveAccount(e.currentTarget.value)}
-			onkeydown={(e) => { if (e.key === "Enter") e.currentTarget.blur(); }}
+			onchange={(e) => void saveText("account", e.currentTarget.value)}
+			onkeydown={blurOnEnter}
 		/>
 	</div>
 
@@ -283,7 +422,7 @@
 		<div class="sec">
 			<div class="sec-name">Actions</div>
 			<div class="actions">
-				{#if service?.loginUrl}
+				{#if browserLogin}
 					<button class="subtle-btn" disabled={!!busy} data-testid="credential-connect" onclick={() => void connect()}>{status === "active" || status === "needs_auth" ? "Reconnect" : "Connect"}</button>
 				{/if}
 				<button class="subtle-btn" disabled={!!busy} data-testid="credential-check" onclick={() => void act("check", "/credentials/check")}>Check now</button>
@@ -291,9 +430,9 @@
 			</div>
 			{#if waiting}<p class="muted" role="status">Sign in in the Chrome window that just opened, then come back.</p>{/if}
 		</div>
-	{:else if service?.loginUrl || !paired}
+	{:else if browserLogin || !paired}
 		<div class="sec">
-			{#if service?.loginUrl}<p class="muted">Open Roostr on {keeperName || "the computer in Served by"} to sign in - the sign-in window opens on that computer.</p>{/if}
+			{#if browserLogin}<p class="muted">Open Roostr on {keeperName || "the computer in Served by"} to sign in - the sign-in window opens on that computer.</p>{/if}
 			{#if !paired}<PairGate compact onready={() => void loadPairing()} />{/if}
 		</div>
 	{/if}
@@ -306,7 +445,7 @@
 				void saveKeys();
 			}}
 		>
-			<div class="sec-name">{service?.loginUrl ? "Or API keys" : "Keys"}</div>
+			<div class="sec-name">{browserLogin ? "Or API keys" : "Keys"}</div>
 			{#each secretFields as field (field.key)}
 				<label class="cred-field">
 					<span>{field.label}</span>
@@ -350,6 +489,13 @@
 	.subtle-btn:disabled { opacity: 0.5; cursor: default; }
 	.keys { display: flex; flex-direction: column; gap: 8px; }
 	.text-input,
-	.cred-field input { background: var(--bg); border: 1px solid var(--border); border-radius: 7px; padding: 6px 10px; color: var(--fg); font: inherit; font-size: 14px; }
+	.cred-field input:not([type="checkbox"]) { background: var(--bg); border: 1px solid var(--border); border-radius: 7px; padding: 6px 10px; color: var(--fg); font: inherit; font-size: 14px; }
 	.cred-field { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); }
+	.recipe { display: flex; flex-direction: column; gap: 10px; }
+	.pair,
+	.key-row { display: flex; gap: 6px; align-items: center; }
+	.pair input,
+	.key-row input:not([type="checkbox"]) { flex: 1; min-width: 0; }
+	.secret-toggle { display: flex; gap: 4px; align-items: center; font-size: 12px; color: var(--muted); white-space: nowrap; cursor: pointer; }
+	.choice:disabled { opacity: 0.5; cursor: default; }
 </style>

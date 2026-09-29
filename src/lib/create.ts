@@ -71,8 +71,8 @@ export async function applyTemplate(objectId: string, templateId: string): Promi
 	}
 }
 
-/** A template's own identity and bookkeeping, never a default for what it creates. */
-const TEMPLATE_OWN = new Set(["name", "target_type", "channel", "error", "createdDate", "modifiedDate", "type_key", "repeat"]);
+/** A template's own identity and bookkeeping (the harness's seed_key/seed_hash included), never a default for what it creates. */
+const TEMPLATE_OWN = new Set(["name", "target_type", "channel", "error", "createdDate", "modifiedDate", "type_key", "repeat", "seed_key", "seed_hash"]);
 
 /**
  * A computer object is a machine's self-publication: it exists because a
