@@ -17,6 +17,7 @@
 	import GraphIcon from "$lib/components/GraphIcon.svelte";
 	import PaneIcon from "$lib/components/PaneIcon.svelte";
 	import PinnedWidget from "$lib/components/PinnedWidget.svelte";
+	import Icon from "$lib/components/Icon.svelte";
 	import { creatableTypes, typeGlyph, createTyped, createCollection, createQuery, seedSpaceDefaults } from "$lib/create";
 	import { CREATABLE_FORMATS, RESERVED_KEYS, createRelation, formatGlyph, spaceRelations } from "$lib/relations";
 	import type { SpaceJSON } from "$lib/types";
@@ -769,7 +770,7 @@
 								<span class="menu-graph-icon"><GraphIcon size={14} /></span> Graph
 							</button>
 							<div class="menu-sep"></div>
-							<button class="danger" onclick={() => void openDeleteProperty()}>🗑 Delete property</button>
+							<button class="danger" onclick={() => void openDeleteProperty()}><Icon name="trash" />Delete property</button>
 						</div>
 					{/if}
 				</div>
@@ -796,9 +797,9 @@
 								<span class="menu-graph-icon"><GraphIcon size={14} /></span> Graph
 							</button>
 							<button onclick={() => { showMore = false; void togglePin(); }}>
-								{isPinned ? "★ Unpin from space" : "☆ Pin to space"}
+								{#if isPinned}<Icon name="star-off" />Unpin from space{:else}<Icon name="star" />Pin to space{/if}
 							</button>
-							<button onclick={() => (showCollections = !showCollections)}>⛁ Add to collection ▸</button>
+							<button onclick={() => (showCollections = !showCollections)}><Icon name="folder-plus" />Add to collection<span class="chev"><Icon name="chevron-right" size={14} /></span></button>
 							{#if showCollections}
 								<div class="submenu">
 									{#each collections as c (c.id)}
@@ -809,7 +810,7 @@
 									{/if}
 								</div>
 							{/if}
-							<button onclick={() => (showTypePick = !showTypePick)}>⇄ Change type ▸</button>
+							<button onclick={() => (showTypePick = !showTypePick)}><Icon name="arrow-left-right" />Change type<span class="chev"><Icon name="chevron-right" size={14} /></span></button>
 							{#if showTypePick}
 								<div class="submenu">
 									{#each sidebarTypes.filter((t) => t.key !== objectSummary?.typeKey) as t (t.id)}
@@ -817,12 +818,12 @@
 									{/each}
 								</div>
 							{/if}
-							<button onclick={() => { showMore = false; void duplicateObject(); }}>⧉ Duplicate</button>
+							<button onclick={() => { showMore = false; void duplicateObject(); }}><Icon name="copy" />Duplicate</button>
 							{#if owningSpaceOf(objectSummary.channelId)}
-								<button onclick={() => { showMore = false; void copyObjectId(); }}>⧉ Copy ID</button>
+								<button onclick={() => { showMore = false; void copyObjectId(); }}><Icon name="hash" />Copy ID</button>
 							{/if}
 							<div class="menu-sep"></div>
-							<button class="danger" onclick={() => { showMore = false; void moveToBin(); }}>🗑 Move to bin</button>
+							<button class="danger" onclick={() => { showMore = false; void moveToBin(); }}><Icon name="trash" />Move to bin</button>
 						</div>
 					{/if}
 				</div>
@@ -1316,7 +1317,7 @@
 						<button class="hbtn" data-tip="More" onclick={() => { showMore = !showMore; showCollections = false; }}>⋯</button>
 						{#if showMore}
 							<div class="more-menu">
-								<button class="danger" onclick={() => void openDeleteProperty()}>🗑 Delete property</button>
+								<button class="danger" onclick={() => void openDeleteProperty()}><Icon name="trash" />Delete property</button>
 							</div>
 						{/if}
 					</div>
@@ -1326,9 +1327,9 @@
 						{#if showMore}
 							<div class="more-menu">
 								<button onclick={() => { showMore = false; void togglePin(); }}>
-									{isPinned ? "★ Unpin from space" : "☆ Pin to space"}
+									{#if isPinned}<Icon name="star-off" />Unpin from space{:else}<Icon name="star" />Pin to space{/if}
 								</button>
-								<button onclick={() => (showCollections = !showCollections)}>⛁ Add to collection ▸</button>
+								<button onclick={() => (showCollections = !showCollections)}><Icon name="folder-plus" />Add to collection<span class="chev"><Icon name="chevron-right" size={14} /></span></button>
 								{#if showCollections}
 									<div class="submenu">
 										{#each collections as c (c.id)}
@@ -1339,7 +1340,7 @@
 										{/if}
 									</div>
 								{/if}
-								<button onclick={() => (showTypePick = !showTypePick)}>⇄ Change type ▸</button>
+								<button onclick={() => (showTypePick = !showTypePick)}><Icon name="arrow-left-right" />Change type<span class="chev"><Icon name="chevron-right" size={14} /></span></button>
 								{#if showTypePick}
 									<div class="submenu">
 										{#each sidebarTypes.filter((t) => t.key !== objectSummary?.typeKey) as t (t.id)}
@@ -1347,12 +1348,12 @@
 										{/each}
 									</div>
 								{/if}
-								<button onclick={() => { showMore = false; void duplicateObject(); }}>⧉ Duplicate</button>
+								<button onclick={() => { showMore = false; void duplicateObject(); }}><Icon name="copy" />Duplicate</button>
 								{#if owningSpaceOf(objectSummary.channelId)}
-									<button onclick={() => { showMore = false; void copyObjectId(); }}>⧉ Copy ID</button>
+									<button onclick={() => { showMore = false; void copyObjectId(); }}><Icon name="hash" />Copy ID</button>
 								{/if}
 								<div class="menu-sep"></div>
-								<button class="danger" onclick={() => { showMore = false; void moveToBin(); }}>🗑 Move to bin</button>
+								<button class="danger" onclick={() => { showMore = false; void moveToBin(); }}><Icon name="trash" />Move to bin</button>
 							</div>
 						{/if}
 					</div>
@@ -2298,6 +2299,9 @@
 	}
 	.more-menu > button,
 	.submenu > button {
+		display: flex;
+		align-items: center;
+		gap: 8px;
 		text-align: left;
 		border: none;
 		background: none;
@@ -2314,6 +2318,11 @@
 	}
 	.more-menu .danger {
 		color: var(--red);
+	}
+	.more-menu .chev {
+		margin-left: auto;
+		display: flex;
+		opacity: 0.6;
 	}
 	.more-menu > button.danger:hover {
 		background: var(--red);

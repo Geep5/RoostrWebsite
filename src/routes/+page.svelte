@@ -28,7 +28,7 @@
 	<title>Roostr — your things speak</title>
 	<meta
 		name="description"
-		content="Roostr gives every note, list and project its own agent. Local-first, offline-ready, synced through Nostr."
+		content="Roostr is a workspace where people and agents work as one team. No files, no folders: notes, tasks, people and agents are linked objects you shape yourself."
 	/>
 </svelte:head>
 
@@ -46,16 +46,17 @@
 
 		<section class="hero">
 			<div class="hero-copy">
-				<span class="eyebrow">Every thing talks back</span>
+				<span class="eyebrow">Humans + agents, one workspace</span>
 				<h1>Your<br />things<br />speak<span class="dot">.</span></h1>
 				<p class="lede">
-					roostr gives every note, list and project its own agent. Talk to your
-					things — they answer, remember, and act, always with your permission.
+					No files, no folders — just objects. Notes, tasks, people, projects and the
+					agents themselves live in one linked graph. Shape it to how you work, then
+					work on it together with your agents.
 				</p>
 				<div class="cta-row">
 					<a class="btn btn-red" href="/app">Open web view</a>
 				</div>
-				<p class="meta">Local-first — runs offline, syncs via Nostr</p>
+				<p class="meta">Open source · no account · runs offline on your own machines</p>
 			</div>
 			<div class="hero-art">
 				<img
@@ -71,16 +72,16 @@
 
 		<section class="features" id="why">
 			<div class="feature">
-				<h2><span class="n">01</span>Everything answers</h2>
-				<p>Every note, card and project has its own mailbox. Message one thing, or gather several into a group exchange.</p>
+				<h2><span class="n">01</span>Objects, not files</h2>
+				<p>Everything is an object — a note, a task, a person, an agent. Link them, query them, and see them as a table, board, gallery, calendar or graph. Nothing sits in a folder; everything sits in relation.</p>
 			</div>
 			<div class="feature">
-				<h2><span class="n">02</span>Your machines</h2>
-				<p>Pair a machine with a one-use code and its agents join in. They act only after you approve, on that machine.</p>
+				<h2><span class="n">02</span>Make it yours</h2>
+				<p>Create your own types, properties and templates. Agents are objects too: give one a prompt, a model, skills and logins by setting its properties. Write a skill as a page. No wizard, no plugin store.</p>
 			</div>
 			<div class="feature">
-				<h2><span class="n">03</span>Works offline</h2>
-				<p>Identity lives in your browser. Changes queue in a durable outbox and sync through Nostr when you reconnect.</p>
+				<h2><span class="n">03</span>One team</h2>
+				<p>People and agents work on the same objects. @mention an agent anywhere and it answers in place, or gather several into one exchange. Invite people into shared spaces. Agents run on computers you pair and ask before they change anything.</p>
 			</div>
 		</section>
 
