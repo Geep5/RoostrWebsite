@@ -42,9 +42,13 @@ export function objectAgentOptions(
 	nameOf: (id: string) => string,
 ): ObjectAgentOption[] {
 	const agents = new Map(records.map((record) => [record.id, record]));
+	// A space tags its agents; an agent's own page tags the agent (its home
+	// endpoint); any other object tags the guests its Agent property names.
 	const guests = object.typeKey === "channel"
 		? records.filter((r) => (r.fields["channel"]?.stringValue ?? "") === object.id && !r.fields["spawn_parent"]?.stringValue).map((r) => r.id)
-		: guestAgents(object.fields);
+		: object.typeKey === "agent"
+			? [object.id, ...guestAgents(object.fields)]
+			: guestAgents(object.fields);
 	const out: ObjectAgentOption[] = [];
 	for (const agentId of new Set(guests)) {
 		const agent = agents.get(agentId);

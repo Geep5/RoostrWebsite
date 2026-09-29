@@ -197,6 +197,9 @@ test("@-addressable agents are exactly the object's guest list; a space object l
 	// A space's roster is its own non-sub agents, addressed on the space.
 	const space = { id: "space", typeKey: "channel", fields: {} };
 	expect(objectAgentOptions(space, agents, (id) => id).map((o) => o.endpoint.agentId)).toEqual(["amy", "zed"]);
+	// An agent's own page addresses the agent at home, with no Agent property needed.
+	const home = { id: "amy", typeKey: "agent", fields: {} };
+	expect(objectAgentOptions(home, agents, (id) => id).map((o) => o.endpoint)).toEqual([{ objectId: "amy", agentId: "amy" }]);
 });
 
 test("shared A2A history is read-only until its own mailbox copy exists; human and private threads stay writable", () => {
