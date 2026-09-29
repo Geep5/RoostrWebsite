@@ -178,24 +178,8 @@
 			}}
 		/>
 		<div class="scroll">
-			{#if canCreate}
-				<button class="row pick create" onclick={() => openEdit(query.trim(), null)}>
-					＋ Create property “{query.trim()}”
-				</button>
-				<div class="sep"></div>
-			{/if}
-			{#if matchingFormats.length > 0}
-				<div class="section">Create new</div>
-				{#each matchingFormats as f (f.id)}
-					<button class="row pick" onclick={() => openEdit(query.trim(), f.id)}>
-						<span class="r-glyph">{f.glyph}</span>
-						<span class="r-name">{f.name}</span>
-						<span class="arrow">›</span>
-					</button>
-				{/each}
-			{/if}
+			<!-- Existing properties first; creating a new one is the last resort, at the bottom. -->
 			{#if library.length > 0}
-				<div class="sep"></div>
 				<div class="section">My properties</div>
 				{#each library as rel (rel.key)}
 					<button
@@ -211,7 +195,7 @@
 				{/each}
 			{/if}
 			{#if system.length > 0}
-				<div class="sep"></div>
+				{#if library.length > 0}<div class="sep"></div>{/if}
 				<div class="section">System properties</div>
 				{#each system as rel (rel.key)}
 					<button
@@ -223,6 +207,22 @@
 					>
 						<span class="r-glyph" class:emoji={!!rel.iconEmoji}>{rel.iconEmoji || glyphFor(rel.format)}</span>
 						<span class="r-name">{rel.name || rel.key}</span>
+					</button>
+				{/each}
+			{/if}
+			{#if canCreate || matchingFormats.length > 0}
+				{#if library.length > 0 || system.length > 0}<div class="sep"></div>{/if}
+				<div class="section">Create new</div>
+				{#if canCreate}
+					<button class="row pick create" onclick={() => openEdit(query.trim(), null)}>
+						＋ Create property “{query.trim()}”
+					</button>
+				{/if}
+				{#each matchingFormats as f (f.id)}
+					<button class="row pick" onclick={() => openEdit(query.trim(), f.id)}>
+						<span class="r-glyph">{f.glyph}</span>
+						<span class="r-name">{f.name}</span>
+						<span class="arrow">›</span>
 					</button>
 				{/each}
 			{/if}
