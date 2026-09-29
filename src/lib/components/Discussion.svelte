@@ -8,9 +8,10 @@
 	import { chat, mailbox, settings } from "$lib/api";
 	import { store } from "$lib/data.svelte";
 	import { objectIcon } from "$lib/icons";
+	import { loadDraft, saveDraft } from "$lib/drafts";
 	import EmojiPicker from "./EmojiPicker.svelte";
 	import { renderMarkdown } from "$lib/markdown";
-	import { onMount } from "svelte";
+	import { onMount, untrack } from "svelte";
 	import { harnessFetch, pairedSession, onPairingChange } from "$lib/local-transport";
 
 	let {
@@ -103,7 +104,21 @@
 	$effect(() => {
 		if (isOpen) composerEl?.focus();
 	});
-	let draft = $state("");
+	// A half-typed message survives the pane switching to Properties (which
+	// unmounts the chat) and moving between objects: kept per object + thread.
+	// The first object/thread only seeds these; the effect below follows changes.
+	let draftFor = untrack(() => `${object.id}|${threadId}`);
+	let draft = $state(untrack(() => loadDraft(object.id, threadId)));
+	$effect(() => {
+		const key = `${object.id}|${threadId}`;
+		if (key === draftFor) return;
+		draftFor = key;
+		draft = loadDraft(object.id, threadId);
+	});
+	$effect(() => {
+		const [id, thread] = draftFor.split("|");
+		saveDraft(id, thread, draft);
+	});
 	let replyTo = $state("");
 	let pickerFor = $state("");
 	let sending = $state(false);

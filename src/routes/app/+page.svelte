@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { activeSpace } from "$lib/space.svelte";
-	import { objectIcon } from "$lib/icons";
+	import { objectIcon, typeIcon } from "$lib/icons";
 	import { store, refreshAll, layoutOf } from "$lib/data.svelte";
 	import { note } from "$lib/api";
 	import CheckboxIcon from "$lib/components/CheckboxIcon.svelte";
@@ -144,7 +144,7 @@
 					<span class="icon">{objectIcon(o.icon, o.typeKey)}</span>
 				{/if}
 				<span class="name">{o.name || "Untitled"}</span>
-				<span class="type">{store.types.find((t) => t.key === o.typeKey)?.name || (o.typeKey.charAt(0).toUpperCase() + o.typeKey.slice(1)).replaceAll("_", " ")}</span>
+				<span class="type">{store.types.find((x) => x.key === o.typeKey)?.icon || typeIcon(o.typeKey)} {store.types.find((x) => x.key === o.typeKey)?.name || (o.typeKey.charAt(0).toUpperCase() + o.typeKey.slice(1)).replaceAll("_", " ")}</span>
 				<span class="when">{o.updatedAt ? new Date(o.updatedAt).toLocaleString() : ""}</span>
 			</a>
 		</li>
