@@ -81,7 +81,7 @@
 			</div>
 			<div class="feature">
 				<h2><span class="n">03</span>One team</h2>
-				<p>People and agents work on the same objects. <span class="mention">@mention</span> an agent anywhere and it answers in place, or gather several into one exchange. Invite people into shared spaces. Agents run on computers you pair and ask before they change anything.</p>
+				<p>People and agents work on the same objects. <span class="mention">@mention</span> an agent anywhere and it answers in place, or gather several into one object. Invite people into shared spaces. Agents run on computers you pair and ask before they change anything.</p>
 			</div>
 		</section>
 

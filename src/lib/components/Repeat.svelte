@@ -93,6 +93,7 @@
 	/** Local midnight of a wall-clock day index (the engine's `anchor`). */
 	const dayToLocal = (day: number) => new Date(1970, 0, 1 + day).getTime();
 	const fmt = (ms: number) => new Date(ms).toLocaleDateString(undefined, { month: "short", day: "numeric" });
+	const fmtDay = (ms: number) => new Date(ms).toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" });
 	const fmtLong = (ms: number) => new Date(ms).toLocaleString(undefined, { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
 	const fmtTime = (minutes: number) => new Date(sod(Date.now()) + minutes * MIN).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
 	const hhmm = (minutes: number) => `${String(Math.floor(minutes / 60)).padStart(2, "0")}:${String(minutes % 60).padStart(2, "0")}`;
@@ -288,9 +289,7 @@
 			</span>
 			<span class="row-value">
 				{#if rule && view}
-					{describe(view)}
-					<span class="sep">·</span>
-					<span class:overdue>{overdue ? "overdue since" : "next"} {fmtLong(rule.next)}</span>
+					<span class="summary-line">{describe(view)}</span>
 				{:else}
 					<span class="placeholder">Off</span>
 				{/if}
@@ -299,11 +298,13 @@
 	</div>
 
 	{#if rule}
-		{#if agentOwned}
-			<p class="meta">
-				<span>{#if assigneeName}runs as {assigneeName} on {servingName || "its machine"}{:else}runs on {servingName || "its agent's machine"}{/if}{isIOSBackend ? " · not on this device" : ""}{#if servingWarning}<span class="overdue"> · {servingWarning}</span>{/if}</span>
-			</p>
-		{/if}
+		<!-- One quiet line under the rule: when next, and who runs it where. -->
+		<p class="meta">
+			<span class:overdue>{overdue ? `Overdue since ${fmtLong(rule.next)}` : `Next ${fmtDay(rule.next)}`}</span>
+			{#if agentOwned}
+				<span>{#if assigneeName}{assigneeName} on {servingName || "its machine"}{:else}on {servingName || "its agent's machine"}{/if}{isIOSBackend ? " · not on this device" : ""}{#if servingWarning}<span class="overdue"> · {servingWarning}</span>{/if}</span>
+			{/if}
+		</p>
 		{#if rule.fired_at !== undefined || rule.last_run}
 			<p class="meta">
 				{#if rule.fired_at !== undefined}
@@ -455,18 +456,25 @@
 	.row.empty .glyph {
 		color: inherit;
 	}
-	.sep {
-		color: var(--border);
+	.summary-line {
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
 	}
 	.overdue {
 		color: var(--red, #e5484d);
+	}
+	.meta > span + span::before {
+		content: "·";
+		margin-right: 6px;
+		color: var(--muted);
 	}
 	.meta {
 		margin: 0;
 		padding-left: 25px;
 		display: flex;
 		flex-wrap: wrap;
-		gap: 2px 12px;
+		gap: 2px 6px;
 		font-size: 11.5px;
 		color: var(--muted);
 	}
