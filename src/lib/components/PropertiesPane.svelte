@@ -65,6 +65,16 @@
 		["session_cookie", "Signed-in cookie", "shorttext", "🍪"],
 	];
 	const KEY_PREFIX = "key_";
+	/** `action_<key>` fields declare what a signed-in credential can do, as JSON {summary, access}. */
+	const ACTION_PREFIX = "action_";
+	function actionText(raw: string): string {
+		try {
+			const a = JSON.parse(raw) as { summary?: string; access?: string };
+			return a.summary ? `${a.access === "write" ? "Changes" : "Reads"}: ${a.summary}` : raw;
+		} catch {
+			return raw;
+		}
+	}
 	const isCredential = $derived(typeKey === "credential");
 	const credentialRows = $derived.by((): RelationDefJSON[] => {
 		if (!isCredential) return [];
@@ -73,11 +83,16 @@
 			?? { id: `credential-${key}`, key, format, name, iconEmoji: emoji || undefined, hidden: false, readOnly: false, maxCount: format === "status" ? 1 : 0, options: [] };
 		// `key_fields` is the pre-property recipe list the harness converts, not a pasted key.
 		const keyFields = Object.keys(object.fields).filter((k) => k.startsWith(KEY_PREFIX) && k !== "key_fields");
+		const actionFields = Object.keys(object.fields).filter((k) => k.startsWith(ACTION_PREFIX) && k.length > ACTION_PREFIX.length);
 		return [
 			...CREDENTIAL_PROPS.map(([key, name, format, emoji]) => def(key, name, format, emoji)),
 			...keyFields.map((key) => {
 				const words = key.slice(KEY_PREFIX.length).replaceAll("_", " ");
 				return def(key, words.charAt(0).toUpperCase() + words.slice(1), "shorttext", "🔑");
+			}),
+			...actionFields.map((key) => {
+				const words = key.slice(ACTION_PREFIX.length).replaceAll("_", " ");
+				return def(key, `Action: ${words}`, "shorttext", "⚡");
 			}),
 		];
 	});
@@ -503,7 +518,7 @@
 					{@const d = display(rel)}
 					{#if d}
 						<!-- A pasted key is a secret: the row says it is set; its editor shows it. -->
-						<span class="val-text" class:wrap={rel.key === "error"}>{isCredential && rel.key.startsWith(KEY_PREFIX) ? "••••••••" : d}</span>
+						<span class="val-text" class:wrap={rel.key === "error" || (isCredential && rel.key.startsWith(ACTION_PREFIX))}>{isCredential && rel.key.startsWith(KEY_PREFIX) ? "••••••••" : isCredential && rel.key.startsWith(ACTION_PREFIX) ? actionText(d) : d}</span>
 					{:else}
 						<span class="placeholder">{placeholderFor(rel)}</span>
 					{/if}
