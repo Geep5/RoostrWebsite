@@ -216,6 +216,12 @@
 		return [...new Set(["type", ...keys, "createdAt", "updatedAt", "serving"])];
 	});
 
+	/** A property choice as the menu shows it: its emoji, then its name. */
+	function optionLabel(key: string): string {
+		const glyph = key === "type" ? "▦" : key === "createdAt" || key === "updatedAt" ? "🗓️" : key === "serving" ? "🖥️" : relations.find((r) => r.key === key)?.iconEmoji || "";
+		return glyph ? `${glyph} ${labelOf(key)}` : labelOf(key);
+	}
+
 	function labelOf(key: string): string {
 		if (key === "serving") return "Served by";
 		if (key === "type") return "Type";
@@ -552,7 +558,7 @@
 			<div class="rule">
 				<select value={f.key} onchange={(e) => updateFilter(i, { key: e.currentTarget.value })}>
 					{#each filterKeys as k (k)}
-						<option value={k}>{labelOf(k)}</option>
+						<option value={k}>{optionLabel(k)}</option>
 					{/each}
 				</select>
 				<select value={f.condition} onchange={(e) => updateFilter(i, { condition: e.currentTarget.value })}>
@@ -617,7 +623,7 @@
 				<span class="chip relation">
 					<select value={s.key} onchange={(e) => void saveSorts(sorts.map((x, j) => (j === i ? { ...x, key: e.currentTarget.value } : x)))}>
 						{#each filterKeys as k (k)}
-							<option value={k}>{labelOf(k)}</option>
+							<option value={k}>{optionLabel(k)}</option>
 						{/each}
 					</select>
 				</span>
