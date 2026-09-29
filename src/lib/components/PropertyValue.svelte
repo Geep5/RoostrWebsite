@@ -12,6 +12,7 @@
 	import type { RelationDefJSON, ValueJSON } from "$lib/types";
 	import { layoutOf, store } from "$lib/data.svelte";
 	import { objectIcon } from "$lib/icons";
+	import { fetchMachines } from "$lib/serving";
 	import CalendarPicker from "./CalendarPicker.svelte";
 	import OptionPicker from "./OptionPicker.svelte";
 	import CheckboxIcon from "./CheckboxIcon.svelte";
@@ -86,7 +87,7 @@
 		const q = objectQuery.trim().toLowerCase();
 		let pool: Array<{ id: string; name: string; typeKey: string; icon?: string; done?: boolean }> = wantsAgents
 			? store.agents.filter((a) => !objectIds.includes(a.id) && (!spaceId || !a.channel || a.channel === spaceId)).map((a) => ({ id: a.id, name: a.name, typeKey: "agent", icon: a.icon }))
-			: store.summaries.filter((s) => !objectIds.includes(s.id) && (!HIDDEN_TYPES[s.typeKey] || allowedTypeKeys.has(s.typeKey)));
+			: store.summaries.filter((s) => !objectIds.some((id) => shownId(id) === s.id) && (!HIDDEN_TYPES[s.typeKey] || allowedTypeKeys.has(s.typeKey)));
 		if (!wantsAgents && allowedTypeKeys.size > 0) pool = pool.filter((s) => allowedTypeKeys.has(s.typeKey));
 		// A system prompt belongs to one space; an agent picks from its own.
 		if (spaceId && allowedTypeKeys.has("system_prompt")) pool = pool.filter((s) => "channelId" in s && s.channelId === spaceId);
@@ -94,8 +95,17 @@
 			.filter((s) => !q || (s.name ?? "").toLowerCase().includes(q))
 			.slice(0, 8);
 	});
+	/** `served_by` may hold a machine_id (what harnesses write) instead of the
+	 *  Computer object's id; chips show that Computer either way. */
+	let machineObjects = $state(new Map<string, string>());
+	$effect(() => {
+		if (rel.key !== "served_by") return;
+		void fetchMachines().then(({ machines }) => (machineObjects = new Map(machines.map((m) => [m.machineId, m.id]))));
+	});
+	const shownId = (id: string) => machineObjects.get(id) ?? id;
 	function nameOf(id: string): string {
-		return store.summaries.find((s) => s.id === id)?.name || store.agents.find((a) => a.id === id)?.name || id.slice(0, 8);
+		const oid = shownId(id);
+		return store.summaries.find((s) => s.id === oid)?.name || store.agents.find((a) => a.id === oid)?.name || id.slice(0, 8);
 	}
 	async function toggleObject(id: string) {
 		// A single-value relation (System prompt, Served by) swaps its link; a list adds.
@@ -155,12 +165,12 @@
 {:else if rel.format === "object"}
 	<div class="objects">
 		{#each objectIds as id (id)}
-			{@const s = store.summaries.find((x) => x.id === id)}
+			{@const s = store.summaries.find((x) => x.id === shownId(id))}
 			<!-- Agents first, whichever list holds them: the chip shows the same
 			     avatar as the property row (icon, else the 🤖 default). -->
 			{@const agent = store.agents.find((a) => a.id === id)}
 			<span class="obj-chip">
-				<a href="/app/object/{id}">{#if agent || s?.typeKey === "agent"}{agent?.icon || s?.icon || "🤖"}{:else if s && layoutOf(s.typeKey) === "task"}<span class="li-check" class:on={s.done === true}><CheckboxIcon checked={s.done === true} size={14} /></span>{:else}{objectIcon(s?.icon, s?.typeKey ?? "note")}{/if} {nameOf(id)}</a>
+				<a href="/app/object/{shownId(id)}">{#if agent || s?.typeKey === "agent"}{agent?.icon || s?.icon || "🤖"}{:else if s && layoutOf(s.typeKey) === "task"}<span class="li-check" class:on={s.done === true}><CheckboxIcon checked={s.done === true} size={14} /></span>{:else}{objectIcon(s?.icon, s?.typeKey ?? "note")}{/if} {nameOf(id)}</a>
 				<button title="Remove" onclick={() => void toggleObject(id)}>×</button>
 			</span>
 		{/each}

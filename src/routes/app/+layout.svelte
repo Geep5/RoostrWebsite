@@ -1114,6 +1114,17 @@
 		aria-expanded={!navHidden}
 		onclick={toggleNav}
 	>{navHidden ? "›" : "‹"}</button>
+	{#if discussionUI.available}
+		<!-- The same tab on the chat/properties pane's edge: folds it away and back. -->
+		<button
+			class="nav-drawer pane-drawer"
+			class:closed={!discussionUI.open}
+			title={discussionUI.open ? "Hide chat & properties" : "Show chat & properties"}
+			aria-label={discussionUI.open ? "Hide chat and properties" : "Show chat and properties"}
+			aria-expanded={discussionUI.open}
+			onclick={() => (discussionUI.open = !discussionUI.open)}
+		>{discussionUI.open ? "›" : "‹"}</button>
+	{/if}
 	<nav class="vault" class:wide={railWide} class:nav-hidden={navHidden}>
 		{#each orderedSpaces as c (c.id)}
 			<button
@@ -1681,6 +1692,22 @@
 		opacity: 1;
 		color: var(--fg);
 		border-color: var(--accent);
+	}
+	/* Mirror of the nav tab, on the pane's left edge (the pane is its own
+	   fixed layer, so the tab sits above it). */
+	.pane-drawer {
+		left: auto;
+		right: calc(var(--disc-w, 0px) + 3px);
+		transform: translate(50%, -50%);
+		z-index: 160;
+		transition: right 0.16s ease, opacity 0.12s ease;
+	}
+	.pane-drawer.closed {
+		right: 0;
+		transform: translate(0, -50%);
+		border-left: 1px solid var(--border);
+		border-right: none;
+		border-radius: 7px 0 0 7px;
 	}
 	/* The space rail is a lighter rounded card on the dark gutter. */
 	.vault {
