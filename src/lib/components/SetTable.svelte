@@ -231,6 +231,8 @@
 
 	/** Anytype default grid columns for a fresh view. */
 	const DEFAULT_COLUMNS = ["type", "updatedAt"];
+	/** Icons for the built-in columns, matching the filter and sort menus. */
+	const SPECIAL_EMOJI: Record<string, string> = { type: "▦", createdAt: "🗓️", updatedAt: "🗓️", serving: "🖥️" };
 	const DEFAULT_WIDTH = 150;
 	const MIN_WIDTH = 60;
 
@@ -687,9 +689,9 @@
 			...cols.map((c) => {
 				const sp = SPECIALS.find((x) => x.key === c.key);
 				const rel = relations.find((r) => r.key === c.key);
-				return { key: c.key, name: sp?.name ?? rel?.name ?? c.key, format: rel?.format ?? "shorttext", on: true };
+				return { key: c.key, name: sp?.name ?? rel?.name ?? c.key, format: rel?.format ?? "shorttext", on: true, emoji: SPECIAL_EMOJI[c.key] ?? rel?.iconEmoji };
 			}),
-			...SPECIALS.filter((sp) => !columns.includes(sp.key)).map((sp) => ({ key: sp.key, name: sp.name, format: "shorttext", on: false })),
+			...SPECIALS.filter((sp) => !columns.includes(sp.key)).map((sp) => ({ key: sp.key, name: sp.name, format: "shorttext", on: false, emoji: SPECIAL_EMOJI[sp.key] })),
 		]}
 		ontoggle={(key, on) =>
 			void saveColumns(on ? [...cols, { key, width: DEFAULT_WIDTH }] : cols.filter((c) => c.key !== key))}

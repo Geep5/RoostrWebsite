@@ -21,6 +21,8 @@
 		name: string;
 		format: string;
 		on: boolean;
+		/** The property's own emoji; absent = its format glyph. */
+		emoji?: string;
 	}
 
 	let {
@@ -139,7 +141,7 @@
 		<div class="list">
 			{#each items as it (it.key)}
 				<div class="row">
-					<span class="r-glyph">{glyphFor(it.format)}</span>
+					<span class="r-glyph" class:emoji={!!it.emoji}>{it.emoji || glyphFor(it.format)}</span>
 					<span class="r-name">{it.name}</span>
 					<button
 						class="switch"
@@ -203,7 +205,7 @@
 							onclose();
 						}}
 					>
-						<span class="r-glyph">{glyphFor(rel.format)}</span>
+						<span class="r-glyph" class:emoji={!!rel.iconEmoji}>{rel.iconEmoji || glyphFor(rel.format)}</span>
 						<span class="r-name">{rel.name || rel.key}</span>
 					</button>
 				{/each}
@@ -219,7 +221,7 @@
 							onclose();
 						}}
 					>
-						<span class="r-glyph">{glyphFor(rel.format)}</span>
+						<span class="r-glyph" class:emoji={!!rel.iconEmoji}>{rel.iconEmoji || glyphFor(rel.format)}</span>
 						<span class="r-name">{rel.name || rel.key}</span>
 					</button>
 				{/each}
@@ -324,6 +326,9 @@
 		text-align: center;
 		color: var(--muted);
 		flex: none;
+	}
+	.r-glyph.emoji {
+		color: inherit;
 	}
 	.r-name {
 		flex: 1;
