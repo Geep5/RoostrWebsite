@@ -6,7 +6,8 @@
 	 * A query also names what it queries (Anytype's "Object Type: X" chip):
 	 * its source types, each removable from the chip's card.
 	 */
-	import type { ObjectJSON } from "$lib/types";
+	import { guestAgents, repeatOf, type ObjectJSON } from "$lib/types";
+	import { describeRepeat } from "$lib/repeat";
 	import { store } from "$lib/data.svelte";
 	import { note } from "$lib/api";
 	import { badgeStyle } from "$lib/options";
@@ -57,6 +58,21 @@
 		});
 	});
 	const toggle = (which: "sources" | "backlinks") => (open = open === which ? "" : which);
+
+	/**
+	 * A recurring object runs on its agent: the first in `agent`, else
+	 * `assignee` - the harness scheduler's own order. Each occurrence goes to
+	 * that agent with this page's body as its instructions, so the header
+	 * says who, as the agent's emoji.
+	 */
+	const rule = $derived(repeatOf(object.fields));
+	const runner = $derived.by(() => {
+		if (!rule) return null;
+		const id = [...guestAgents(object.fields), ...guestAgents({ agent: object.fields["assignee"] })][0];
+		if (!id) return null;
+		const a = store.agents.find((x) => x.id === id);
+		return { id, icon: a?.icon || "🤖", name: a?.name || `${id.slice(0, 8)}…` };
+	});
 </script>
 
 <div class="meta">
@@ -66,6 +82,16 @@
 		</a>
 	{:else}
 		<span class="badge" style={badgeStyle("")} title="Type">{#if typeIcon}<span class="emoji">{typeIcon}</span>{:else}<PropIcon icon="dot" />{/if}{typeName}</span>
+	{/if}
+	{#if rule}
+		<a
+			class="badge"
+			style={badgeStyle("")}
+			title={runner ? `${runner.name} runs this · ${describeRepeat(rule)}` : `Repeats · ${describeRepeat(rule)} · no agent: add one to its Agent property`}
+			href={runner ? `/app/object/${runner.id}` : undefined}
+		>
+			<span class="emoji">{runner ? runner.icon : "↻"}</span>{runner ? runner.name : "Repeats"}
+		</a>
 	{/if}
 	{#if isQuery}
 		<span class="wrap">
