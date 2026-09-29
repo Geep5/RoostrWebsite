@@ -550,6 +550,12 @@
 	// headers collapse; a viewing preference, persisted per device.
 	// ── Resizable sidebar (invisible drag strip on its right edge) ──
 	let sideWidth = $state(typeof localStorage === "undefined" ? 220 : parseInt(localStorage.getItem("side-width") ?? "220") || 220);
+	/** The drawer tab folds the space rail and nav away for a full-width page. */
+	let navHidden = $state(typeof localStorage !== "undefined" && localStorage.getItem("nav-hidden") === "1");
+	function toggleNav() {
+		navHidden = !navHidden;
+		localStorage.setItem("nav-hidden", navHidden ? "1" : "0");
+	}
 	/** Anytype vault: the icon rail pulls out continuously - width follows
 	 * the pointer; releasing below the threshold collapses back to icons.
 	 * A plain click on the gutter toggles between icons and the last width. */
@@ -1098,8 +1104,17 @@
 		<button class="tab-new" data-tip="New tab" aria-label="New tab" onclick={() => tabs.open("/app", false)}>＋</button>
 	</div>
 {/if}
-<div class="shell" style="grid-template-columns: {railWidth}px {sideWidth}px 1fr var(--disc-w, 0px);{railDragging ? ' transition: none;' : ''}">
-	<nav class="vault" class:wide={railWide}>
+<div class="shell" style="grid-template-columns: {navHidden ? 0 : railWidth}px {navHidden ? 0 : sideWidth}px 1fr var(--disc-w, 0px);{railDragging ? ' transition: none;' : ''}">
+	<button
+		class="nav-drawer"
+		style="left: {navHidden ? 0 : railWidth + sideWidth + 3}px"
+		class:closed={navHidden}
+		title={navHidden ? "Show sidebar" : "Hide sidebar"}
+		aria-label={navHidden ? "Show sidebar" : "Hide sidebar"}
+		aria-expanded={!navHidden}
+		onclick={toggleNav}
+	>{navHidden ? "›" : "‹"}</button>
+	<nav class="vault" class:wide={railWide} class:nav-hidden={navHidden}>
 		{#each orderedSpaces as c (c.id)}
 			<button
 				class="space"
@@ -1160,7 +1175,7 @@
 		<div class="rail-resize" role="separator" aria-orientation="vertical" onpointerdown={railResizeStart}><div class="rail-handle"></div></div>
 	</nav>
 
-	<aside class="widgets">
+	<aside class="widgets" class:nav-hidden={navHidden}>
 		{#if current}
 			<div class="space-head-row" class:menu-open={showCreate}>
 				<a class="space-head" href="/app/object/{current.id}" title="Space settings">
@@ -1615,6 +1630,7 @@
 		text-decoration: none;
 	}
 	.shell {
+		position: relative;
 		display: grid;
 		/* Rail | nav | page | discussion. The fourth track is 0 until the
 		   discussion is affixed, and the object page sets --disc-w to its
@@ -1628,6 +1644,43 @@
 		/* The gutter: darker than the panes, so the 6px gaps between them
 		   read as separators (Anytype's sidebar). */
 		background: var(--gutter);
+	}
+	/* Folded away by the drawer tab: the panes keep their grid tracks (now
+	   0px) so the page stays in its own column; they just paint nothing. */
+	.vault.nav-hidden,
+	.widgets.nav-hidden {
+		visibility: hidden;
+		overflow: hidden;
+		margin: 0;
+		padding: 0;
+	}
+	.nav-drawer {
+		position: absolute;
+		top: 50%;
+		z-index: 45;
+		width: 14px;
+		height: 48px;
+		transform: translate(-50%, -50%);
+		padding: 0;
+		border: 1px solid var(--border);
+		border-radius: 7px;
+		background: var(--bg);
+		color: var(--muted);
+		font-size: 13px;
+		line-height: 1;
+		cursor: pointer;
+		opacity: 0.55;
+		transition: left 0.16s ease, opacity 0.12s ease;
+	}
+	.nav-drawer.closed {
+		transform: translate(0, -50%);
+		border-left: none;
+		border-radius: 0 7px 7px 0;
+	}
+	.nav-drawer:hover {
+		opacity: 1;
+		color: var(--fg);
+		border-color: var(--accent);
 	}
 	/* The space rail is a lighter rounded card on the dark gutter. */
 	.vault {
