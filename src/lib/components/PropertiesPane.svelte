@@ -283,12 +283,11 @@
 		}
 	}
 
-	/** The row's leading icon: an emoji for the machine-bound keys, a badge glyph otherwise. */
+	/** The row's leading icon: the property's own emoji; a badge glyph only for properties that have none. */
 	function leftIcon(rel: RelationDefJSON): { emoji: string } | { icon: BadgeIcon; color: string } {
-		if (credentialRowKeys.has(rel.key)) {
-			if (rel.key === "status") return credentialStatusBadge(credentialStatus);
-			if (rel.iconEmoji) return { emoji: rel.iconEmoji };
-		}
+		// A property's own emoji is its icon, here as in table headers and the
+		// property picker; its current state belongs to the value on the right.
+		if (rel.iconEmoji) return { emoji: rel.iconEmoji };
 		switch (rel.key) {
 			case "served_by": return { emoji: "🖥️" };
 			case "repo_path": return { emoji: "📁" };
