@@ -3,7 +3,7 @@
 	import { fetchQuery, type QueryResultRow } from "$lib/api";
 	import { store } from "$lib/data.svelte";
 	import { activeSpace } from "$lib/space.svelte";
-	import { objectIcon } from "$lib/icons";
+	import { objectIcon, typeIcon } from "$lib/icons";
 	import { createTyped } from "$lib/create";
 
 	let { onclose }: { onclose: () => void } = $props();
@@ -226,7 +226,7 @@
 							<span class="snippet">{sb}{#if sm}<mark>{sm}</mark>{/if}{sa}</span>
 						{/if}
 					</span>
-					<span class="kind">{row.typeKey}</span>
+					<span class="kind">{typeIcon(row.typeKey)} {store.types.find((t) => t.key === row.typeKey)?.name || (row.typeKey.charAt(0).toUpperCase() + row.typeKey.slice(1)).replaceAll("_", " ")}</span>
 				</button>
 			{/each}
 			{#if canCreate && !searching}
