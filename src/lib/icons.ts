@@ -1,4 +1,5 @@
 import { store } from "$lib/data.svelte";
+import { activeSpace } from "$lib/space.svelte";
 /** Object icon: the emoji when set, else the type glyph (Anytype's IconObject rule). */
 
 export const TYPE_GLYPHS: Record<string, string> = {
@@ -22,7 +23,9 @@ export const TYPE_GLYPHS: Record<string, string> = {
 
 /** The icon a type shows: its type object's emoji (people choose these), else the built-in glyph. */
 export function typeIcon(typeKey: string): string {
-	return store.types.find((t) => t.key === typeKey && t.icon)?.icon || TYPE_GLYPHS[typeKey] || "";
+	// Each space has its own copy of a type; the one you are looking at wins.
+	const withIcon = store.types.filter((t) => t.key === typeKey && t.icon);
+	return (withIcon.find((t) => t.space === activeSpace.id) ?? withIcon[0])?.icon || TYPE_GLYPHS[typeKey] || "";
 }
 
 /** An object's icon: its own emoji, else its type's. */

@@ -252,10 +252,12 @@
 			// Infrastructure instances carry real channels like everything
 			// else, so type pages space-filter them too - with one exception:
 			// a computer is a device identity filed in the home space, but its
-			// type page is the vault-wide roster. Pickers query across spaces
-			// regardless.
+			// type page is the vault-wide roster. Skills are the same: global
+			// or one agent's own, never a space's (harness skills.ts), so their
+			// page lists every skill - the same set the Skills picker offers.
+			// Pickers query across spaces regardless.
 			const typeFilters = engineFilters.filter((f) => !(f.key === "typeKey" && f.condition === "notIn" && Array.isArray(f.value) && (f.value as unknown[]).includes(key)));
-			const filters = key === "machine" ? typeFilters : [...typeFilters, spaceFilter];
+			const filters = key === "machine" || key === "skill" ? typeFilters : [...typeFilters, spaceFilter];
 			return { type: key, filters, servingFilters: servingRules, ...text };
 		}
 		if (isCollection) {
