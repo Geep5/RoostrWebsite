@@ -145,7 +145,9 @@
 
 	function plain(v: ValueJSON | undefined, format: string): string | number | boolean | string[] {
 		if (!v) return format === "checkbox" ? false : format === "tag" || format === "object" ? [] : "";
-		if (v.stringValue !== undefined) return v.stringValue;
+		// A list property holding a single plain string (an id or tag written
+		// before it became a list) is one item - never iterated as characters.
+		if (v.stringValue !== undefined) return format === "tag" || format === "object" ? [v.stringValue].filter(Boolean) : v.stringValue;
 		if (v.intValue !== undefined) return v.intValue;
 		if (v.floatValue !== undefined) return v.floatValue;
 		if (v.boolValue !== undefined) return v.boolValue;

@@ -37,7 +37,9 @@
 	const objectIds = $derived(
 		value?.linkValue?.targetId
 			? [value.linkValue.targetId]
-			: (value?.valuesValue?.items ?? []).map((i) => i.linkValue?.targetId ?? i.stringValue ?? "").filter(Boolean),
+			: value?.stringValue
+				? [value.stringValue]
+				: (value?.valuesValue?.items ?? []).map((i) => i.linkValue?.targetId ?? i.stringValue ?? "").filter(Boolean),
 	);
 
 	const sv = (s: string): ValueJSON => ({ stringValue: s });
