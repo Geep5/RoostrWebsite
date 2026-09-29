@@ -303,7 +303,7 @@
 	/** The right pane holds properties and (when the object has one) the
 	 *  chat - so it exists wherever the property row used to. */
 	// A space's page is its settings in the middle; its chat and its guest list (Properties) live in this pane.
-	const hasPane = $derived(hasDiscussion || (!!object && !isChat && !isType && !isRelation));
+	const hasPane = $derived(hasDiscussion || (!!object && !isChat && !isType && !isRelation && !isQuery && !isCollection && !isTemplate));
 	$effect(() => {
 		discussionUI.available = hasPane;
 		if (!object) {
