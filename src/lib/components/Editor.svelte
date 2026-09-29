@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { flushSync } from "svelte";
 	import { createWriteQueue, queued } from "$lib/editor/write-queue";
+	import { applyAll, History, opWrite, type Op } from "$lib/editor/doc";
 	import type { ObjectJSON, BlockJSON, MarkJSON } from "$lib/types";
 	import { Pos, Style, MarkT, Layout } from "$lib/types";
 	import { note, table, fetchObject } from "$lib/api";
@@ -24,6 +25,50 @@
 	/** Every write this editor makes, in the order it made them (lib/editor/write-queue). */
 	const writeQueue = createWriteQueue();
 	const writes = queued(note, writeQueue);
+
+	/** Undo/redo, one transaction per user action (lib/editor/doc). */
+	const history = new History();
+
+	/**
+	 * One user action: apply its ops to the page now, remember how to undo
+	 * it, and persist the same ops in order. `sync` renders this tick
+	 * (structural keys need the new block in the DOM before the caret moves).
+	 * A failed write re-reads server truth.
+	 */
+	function commit(ops: Op[], opts: { sync?: boolean; record?: boolean } = {}): Op[] {
+		let inverse: Op[] = [];
+		if (opts.sync === false) inverse = applyAll(object.blocks, ops);
+		else flushSync(() => (inverse = applyAll(object.blocks, ops)));
+		if (opts.record !== false) history.record(inverse);
+		for (const op of ops) {
+			void opWrite(writes, object.id, op).catch(async (err) => {
+				console.error("[editor] write failed, restoring server state", err);
+				await refresh();
+			});
+		}
+		return inverse;
+	}
+
+	/** Undo (or redo) the last action: pending typing first becomes its own step. */
+	async function undoRedo(redo: boolean) {
+		for (const id of [...dirty]) await flushSave(id);
+		const tx = redo ? history.takeRedo() : history.takeUndo();
+		if (!tx) return;
+		const inverse = commit(tx, { record: false });
+		if (redo) history.pushUndo(inverse);
+		else history.pushRedo(inverse);
+		// A focused block is never re-rendered from state; rewrite restored text by hand.
+		let caretBlock = "";
+		for (const op of tx) {
+			const id = op.kind === "insert" ? op.block.id : op.id;
+			if (op.kind === "content" && op.content.text) {
+				const el = blockEl(op.id);
+				if (el) el.innerHTML = toHtml(op.content.text.text, op.content.text.marks ?? []);
+			}
+			if (op.kind !== "remove" && byId.has(id)) caretBlock = id;
+		}
+		if (caretBlock) focusSync(caretBlock, blockEl(caretBlock)?.textContent?.length ?? 0);
+	}
 
 	const byId = $derived(new Map(object.blocks.map((b) => [b.id, b])));
 	const rootIds = $derived.by(() => {
@@ -400,6 +445,15 @@
 	}
 
 	async function onWindowKeydown(e: KeyboardEvent) {
+		// Editor-wide undo/redo; the browser's own contenteditable undo would
+		// fight the page state, so it never runs here.
+		const mod = e.metaKey || e.ctrlKey;
+		const inEditor = !!(e.target as HTMLElement | null)?.closest?.(".editor") || selectedIds.length > 0;
+		if (mod && inEditor && !e.altKey && (e.key.toLowerCase() === "z" || (e.key.toLowerCase() === "y" && e.ctrlKey))) {
+			e.preventDefault();
+			await undoRedo(e.key.toLowerCase() === "y" || e.shiftKey);
+			return;
+		}
 		if (!selectedIds.length) return;
 		if (e.key === "Escape") {
 			selectedIds = [];
@@ -411,11 +465,8 @@
 			e.preventDefault();
 			const tops = topmostSelected();
 			selectedIds = [];
-			for (const id of tops) {
-				cancelPending(id);
-				await writes.blockRemove(object.id, id);
-			}
-			await refresh();
+			for (const id of tops) cancelPending(id);
+			commit(tops.map((id) => ({ kind: "remove", id })));
 		}
 	}
 
@@ -508,33 +559,6 @@
 	// renders THIS tick, 2) place the caret, 3) persist the same mutation,
 	// 4) one refresh reconciles. The UI never waits on the daemon.
 
-	function localInsertAfter(nb: BlockJSON, refId: string) {
-		const idx = object.blocks.findIndex((b) => b.id === refId);
-		object.blocks.splice(idx + 1, 0, nb);
-		const par = object.blocks.find((b) => b.id !== nb.id && b.childrenIds.includes(refId));
-		if (par) par.childrenIds.splice(par.childrenIds.indexOf(refId) + 1, 0, nb.id);
-	}
-
-	function localInsertBefore(nb: BlockJSON, refId: string) {
-		const idx = object.blocks.findIndex((b) => b.id === refId);
-		object.blocks.splice(Math.max(0, idx), 0, nb);
-		const par = object.blocks.find((b) => b.id !== nb.id && b.childrenIds.includes(refId));
-		if (par) par.childrenIds.splice(par.childrenIds.indexOf(refId), 0, nb.id);
-	}
-
-	function localDetach(rid: string) {
-		for (const b of object.blocks) {
-			const j = b.childrenIds.indexOf(rid);
-			if (j >= 0) b.childrenIds.splice(j, 1);
-		}
-	}
-
-	function localRemove(rid: string) {
-		localDetach(rid);
-		const i = object.blocks.findIndex((b) => b.id === rid);
-		if (i >= 0) object.blocks.splice(i, 1);
-	}
-
 	function parentIdOf(rid: string): string {
 		for (const b of object.blocks) if (b.childrenIds.includes(rid)) return b.id;
 		return "";
@@ -553,25 +577,10 @@
 		const cur = byId.get(rid);
 		if (!cur) return false;
 		cancelPending(rid);
-		flushSync(() => {
-			if (cur.content.text) {
-				cur.content.text.text = liveText;
-				cur.content.text.marks = liveMarks;
-			}
-			localDetach(rid);
-			// Root ordering is blocks-array order: place after the parent.
-			const i = object.blocks.findIndex((b) => b.id === rid);
-			const [me] = object.blocks.splice(i, 1);
-			const pIdx = object.blocks.findIndex((b) => b.id === parentId);
-			object.blocks.splice(pIdx + 1, 0, me);
-			const gp = object.blocks.find((b) => b.childrenIds.includes(parentId));
-			if (gp) gp.childrenIds.splice(gp.childrenIds.indexOf(parentId) + 1, 0, rid);
-		});
+		const ops: Op[] = [{ kind: "move", id: rid, to: { target: parentId, position: Pos.BOTTOM } }];
+		if (cur.content.text) ops.unshift({ kind: "content", id: rid, content: contentFor(rid, liveText, liveMarks) });
+		commit(ops);
 		focusSync(rid, caretAt);
-		await persist(async () => {
-			await writes.blockUpdate(object.id, rid, contentFor(rid, liveText, liveMarks));
-			await writes.blockMove(object.id, rid, parentId, Pos.BOTTOM);
-		});
 		return true;
 	}
 
@@ -579,13 +588,8 @@
 	async function addSibling(rid: string, pos: number, style: number) {
 		const nid = crypto.randomUUID();
 		cancelPending(rid);
-		flushSync(() => {
-			const nb: BlockJSON = { id: nid, childrenIds: [], content: { text: { text: "", style } } };
-			if (pos === Pos.TOP) localInsertBefore(nb, rid);
-			else localInsertAfter(nb, rid);
-		});
+		commit([{ kind: "insert", block: { id: nid, childrenIds: [], content: { text: { text: "", style } } }, at: { target: rid, position: pos } }]);
 		focusSync(nid, 0, rid);
-		await persist(() => writes.blockAdd(object.id, { id: nid, childrenIds: [], content: { text: { text: "", style } } }, rid, pos));
 	}
 
 	/** Synchronous caret move with async rescue. */
@@ -598,25 +602,6 @@
 		if (document.activeElement !== target) focusNow(bid, offset, fallbackId);
 	}
 
-	/**
-	 * Persist trailing writes. Every caller has ALREADY applied the same
-	 * mutation to local state inside flushSync - that is the optimistic path -
-	 * so a successful write needs no re-read, and Anytype does not refetch the
-	 * object after a split either: the dispatcher patches its model in place.
-	 * We used to refetch the whole object here, which replaced `object` and
-	 * fired the query storm on every Enter; a keystroke landing inside that
-	 * window read a byId map that was about to be swapped, so its line went
-	 * missing or attached to the wrong block. A FAILED write still refetches:
-	 * there, server truth is exactly what we want.
-	 */
-	async function persist(writes: () => Promise<unknown>) {
-		try {
-			await writes();
-		} catch (err) {
-			console.error("[editor] write failed, restoring server state", err);
-			await refresh();
-		}
-	}
 
 	/** Blocks with unsaved user input. Saves ONLY fire for dirty blocks —
 	 * blur/re-render races must never persist a DOM read the user didn't type. */
@@ -660,7 +645,10 @@
 		const { text, marks } = fromDom(el);
 		const cur = byId.get(id)!.content.text;
 		if (cur && cur.text === text && JSON.stringify(cur.marks ?? []) === JSON.stringify(marks)) return;
-		await writes.blockUpdate(object.id, id, contentFor(id, text, marks));
+		// The typing since the last save is one undo step. State follows the
+		// DOM without a sync render: the focused element already shows it.
+		commit([{ kind: "content", id, content: contentFor(id, text, marks) }], { sync: false });
+		await writeQueue.idle();
 	}
 
 	// ── Keyboard ──────────────────────────────────────────────────
@@ -753,16 +741,11 @@
 			const style = text.trim() === "***" ? "dots" : "line";
 			const newId = crypto.randomUUID();
 			cancelPending(id);
-			const para: BlockJSON = { id: newId, childrenIds: [], content: { text: { text: "", style: Style.PARAGRAPH } } };
-			flushSync(() => {
-				byId.get(id)!.content = { custom: { contentType: "divider", meta: { style } } };
-				localInsertAfter(para, id);
-			});
+			commit([
+				{ kind: "content", id, content: { custom: { contentType: "divider", meta: { style } } } },
+				{ kind: "insert", block: { id: newId, childrenIds: [], content: { text: { text: "", style: Style.PARAGRAPH } } }, at: { target: id, position: Pos.BOTTOM } },
+			]);
 			focusSync(newId, 0, id);
-			await persist(async () => {
-				await writes.blockUpdate(object.id, id, { custom: { contentType: "divider", meta: { style } } });
-				await writes.blockAdd(object.id, { id: newId, childrenIds: [], content: { text: { text: "", style: Style.PARAGRAPH } } }, id, Pos.BOTTOM);
-			});
 			return true;
 		}
 
@@ -815,14 +798,8 @@
 				if (parentStyle !== undefined && LIST.includes(parentStyle) && (await outdentBlock(id, 0, "", []))) return;
 				const curText = byId.get(id)!.content.text!;
 				cancelPending(id);
-				flushSync(() => {
-					curText.text = "";
-					curText.marks = [];
-					curText.style = Style.PARAGRAPH;
-					curText.checked = false;
-				});
+				commit([{ kind: "content", id, content: { text: { text: "", marks: [], style: Style.PARAGRAPH, checked: false, color: curText.color ?? "" } } }]);
 				focusSync(id, 0);
-				await persist(() => writes.blockUpdate(object.id, id, { text: { text: "", marks: [], style: Style.PARAGRAPH, checked: false, color: curText.color ?? "" } }));
 				return;
 			}
 
@@ -887,15 +864,11 @@
 			// flushSync, so the very next keystroke already finds the caret in
 			// the right block; the writes follow and one refresh reconciles.
 			if (mode === Pos.TOP) {
-				const above = { id: newId, childrenIds: [], content: { text: { text: head, style: newStyle, marks: headMarks, checked: !!head.length && checked } } };
-				flushSync(() => {
-					if (cur.content.text) {
-						cur.content.text.text = tail;
-						cur.content.text.marks = tailMarks;
-						cur.content.text.checked = !!tail.length && checked;
-					}
-					localInsertBefore({ ...above } as BlockJSON, id);
-				});
+				const above: BlockJSON = { id: newId, childrenIds: [], content: { text: { text: head, style: newStyle, marks: headMarks, checked: !!head.length && checked } } };
+				commit([
+					{ kind: "insert", block: above, at: { target: id, position: Pos.TOP } },
+					{ kind: "content", id, content: { text: { text: tail, marks: tailMarks, style: curStyle, checked: !!tail.length && checked, color } } },
+				]);
 				// This block's own DOM changed (it lost the head), so rewrite it
 				// BEFORE focusing - the caret lands at offset 0 either way.
 				if (el) {
@@ -903,27 +876,14 @@
 					if (el.innerHTML !== tailHtml) el.innerHTML = tailHtml;
 				}
 				focusSync(id, 0);
-				await persist(async () => {
-					await writes.blockAdd(object.id, above as BlockJSON, id, Pos.TOP);
-					await writes.blockUpdate(object.id, id, { text: { text: tail, marks: tailMarks, style: curStyle, checked: !!tail.length && checked, color } });
-				});
 				return;
 			}
 
-			const born = { id: newId, childrenIds: [], content: { text: { text: tail, style: newStyle, marks: tailMarks, checked: !!tail.length && checked } } };
-			flushSync(() => {
-				if (cur.content.text) {
-					cur.content.text.text = head;
-					cur.content.text.marks = headMarks;
-					cur.content.text.checked = !!head.length && checked;
-				}
-				if (mode === Pos.INNER_FIRST) {
-					object.blocks.push({ ...born } as BlockJSON);
-					cur.childrenIds.unshift(newId);
-				} else {
-					localInsertAfter({ ...born } as BlockJSON, id);
-				}
-			});
+			const born: BlockJSON = { id: newId, childrenIds: [], content: { text: { text: tail, style: newStyle, marks: tailMarks, checked: !!tail.length && checked } } };
+			commit([
+				{ kind: "content", id, content: { text: { text: head, marks: headMarks, style: curStyle, checked: !!head.length && checked, color } } },
+				{ kind: "insert", block: born, at: { target: id, position: mode === Pos.INNER_FIRST ? Pos.INNER_FIRST : Pos.BOTTOM } },
+			]);
 			// Focus BEFORE touching the old element's DOM: rewriting the
 			// focused element destroys the live selection.
 			focusSync(newId, 0, id);
@@ -931,10 +891,6 @@
 				const headHtml = toHtml(head, headMarks);
 				if (el.innerHTML !== headHtml) el.innerHTML = headHtml;
 			}
-			await persist(async () => {
-				await writes.blockUpdate(object.id, id, { text: { text: head, marks: headMarks, style: curStyle, checked: !!head.length && checked, color } });
-				await writes.blockAdd(object.id, born as BlockJSON, id, mode === Pos.INNER_FIRST ? Pos.INNER_FIRST : Pos.BOTTOM);
-			});
 			return;
 		}
 
@@ -948,14 +904,8 @@
 					// First backspace demotes style - local flip, write behind.
 					const { text, marks } = fromDom(el);
 					cancelPending(id);
-					flushSync(() => {
-						curText.text = text;
-						curText.marks = marks;
-						curText.style = Style.PARAGRAPH;
-						curText.checked = false;
-					});
+					commit([{ kind: "content", id, content: { text: { text, marks, style: Style.PARAGRAPH, checked: false, color: curText.color ?? "" } } }]);
 					focusSync(id, 0);
-					await persist(() => writes.blockUpdate(object.id, id, { text: { text, marks, style: Style.PARAGRAPH, checked: false, color: curText.color ?? "" } }));
 					return;
 				}
 				const idx = flatText.indexOf(id);
@@ -970,21 +920,13 @@
 				];
 				cancelPending(id);
 				cancelPending(prevId);
-				const prevBlock = byId.get(prevId)!;
-				flushSync(() => {
-					if (prevBlock.content.text) {
-						prevBlock.content.text.text = prev.text + cur2.text;
-						prevBlock.content.text.marks = mergedMarks;
-					}
-					localRemove(id);
-				});
+				commit([
+					{ kind: "content", id: prevId, content: contentFor(prevId, prev.text + cur2.text, mergedMarks) },
+					{ kind: "remove", id },
+				]);
 				const prevEl = blockEl(prevId);
 				if (prevEl) prevEl.innerHTML = toHtml(prev.text + cur2.text, mergedMarks);
 				focusSync(prevId, shift);
-				await persist(async () => {
-					await writes.blockUpdate(object.id, prevId, contentFor(prevId, prev.text + cur2.text, mergedMarks));
-					await writes.blockRemove(object.id, id);
-				});
 				return;
 			}
 		}
@@ -1006,28 +948,19 @@
 				return;
 			}
 			// Indent: append under the sibling directly above.
-			const curBlock = byId.get(id)!;
 			const parentId = parentIdOf(id);
 			const siblings = parentId ? (byId.get(parentId)?.childrenIds ?? []) : rootIds;
 			const idx = siblings.indexOf(id);
 			if (idx <= 0) return;
 			const prevId = siblings[idx - 1];
 			cancelPending(id);
-			flushSync(() => {
-				if (curBlock.content.text) {
-					curBlock.content.text.text = liveText;
-					curBlock.content.text.marks = liveMarks;
-				}
-				localDetach(id);
-				byId.get(prevId)!.childrenIds.push(id);
-			});
 			// Tucking under a closed toggle would make the block vanish.
 			if (byId.get(prevId)?.content.text?.style === Style.TOGGLE) setToggleOpen(object.id, prevId, true);
+			commit([
+				{ kind: "content", id, content: contentFor(id, liveText, liveMarks) },
+				{ kind: "move", id, to: { target: prevId, position: Pos.INNER } },
+			]);
 			focusSync(id, at);
-			await persist(async () => {
-				await writes.blockUpdate(object.id, id, contentFor(id, liveText, liveMarks));
-				await writes.blockMove(object.id, id, prevId, Pos.INNER);
-			});
 			return;
 		}
 
