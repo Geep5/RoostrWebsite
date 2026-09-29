@@ -9,7 +9,7 @@ import { fetchAllQuery, fetchObject, note } from "$lib/api";
 import { thisMachineId } from "$lib/capability-actions";
 import { guestAgents, type ValueJSON } from "$lib/types";
 import { agentLinksValue } from "$lib/agent-field";
-import { TYPE_GLYPHS } from "$lib/icons";
+import { typeIcon } from "$lib/icons";
 import { store } from "$lib/data.svelte";
 import { activeSpace } from "$lib/space.svelte";
 
@@ -30,7 +30,7 @@ export function creatableTypes(): Array<{ key: string; name: string; icon: strin
 }
 
 export function typeGlyph(typeKey: string): string {
-	return (TYPE_GLYPHS as Record<string, string>)[typeKey] ?? "▨";
+	return typeIcon(typeKey) || "▨";
 }
 
 /**

@@ -12,7 +12,7 @@
 	import { badgeStyle } from "$lib/options";
 	import { typeGlyph } from "$lib/create";
 	import PropIcon from "./PropIcon.svelte";
-	import { TYPE_GLYPHS } from "$lib/icons";
+	import { TYPE_GLYPHS, objectIcon } from "$lib/icons";
 	import { fetchBacklinks, type Backlink } from "$lib/backlinks";
 	import TypeSuggest from "./TypeSuggest.svelte";
 
@@ -114,7 +114,7 @@
 					<div class="pop-name">Linked from</div>
 					{#each backlinks as b (b.id)}
 						<a class="backlink" href="/app/object/{b.id}" onclick={() => (open = "")}>
-							<span class="bl-icon">{b.icon || "▨"}</span>{b.name}
+							<span class="bl-icon">{objectIcon(b.icon, b.typeKey)}</span>{b.name}
 							<span class="bl-kind">{b.typeKey}</span>
 						</a>
 					{/each}
