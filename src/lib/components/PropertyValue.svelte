@@ -11,8 +11,6 @@
 	 */
 	import type { RelationDefJSON, ValueJSON } from "$lib/types";
 	import { layoutOf, store } from "$lib/data.svelte";
-	import { fetchAllQuery, fetchObject } from "$lib/api";
-	import { engineFiltersOf, spaceFilterOf } from "$lib/filters";
 	import { objectIcon } from "$lib/icons";
 	import CalendarPicker from "./CalendarPicker.svelte";
 	import OptionPicker from "./OptionPicker.svelte";
@@ -76,36 +74,7 @@
 	let objectOpen = $state(false);
 	const HIDDEN_TYPES: Record<string, true> = { program: true, relation: true, channel: true, pinned_fact: true, milestone: true, type: true, template: true, agent: true, skill: true };
 
-	// Relation restriction (Anytype relationFormatObjectTypes + Roostr's
-	// query/collection source). Source wins when set: its members are the
-	// only candidates. A query is evaluated at open time so membership is
-	// current; a collection reads its stored collectionIds.
-	let sourceIds = $state<Set<string> | null>(null);
-	let sourceLoadingFor = "";
-	$effect(() => {
-		if (!objectOpen || !rel.objectSource) return;
-		const srcId = rel.objectSource;
-		if (sourceLoadingFor === srcId) return;
-		sourceLoadingFor = srcId;
-		void (async () => {
-			try {
-				const src = await fetchObject(srcId);
-				if (src.typeKey === "collection") {
-					sourceIds = new Set((src.fields["collectionIds"]?.valuesValue?.items ?? []).map((i) => i.stringValue ?? "").filter(Boolean));
-				} else {
-					// setId makes the daemon resolve the query's Source (setOf)
-					// exactly as the query's own page does.
-					const recs = await fetchAllQuery({
-						setId: srcId,
-						filters: [...engineFiltersOf(src, store.relations), spaceFilterOf(src, store.channels[0]?.id ?? "")],
-					});
-					sourceIds = new Set(recs.map((r) => r.id));
-				}
-			} catch {
-				sourceIds = null;
-			}
-		})();
-	});
+	// Relation restriction (Anytype relationFormatObjectTypes): the picker offers only these types.
 	const allowedTypeKeys = $derived(
 		new Set((rel.objectTypes ?? []).map((id) => store.types.find((t) => t.id === id)?.key).filter((k): k is string => !!k)),
 	);
@@ -116,8 +85,7 @@
 		let pool: Array<{ id: string; name: string; typeKey: string; icon?: string; done?: boolean }> = wantsAgents
 			? store.agents.filter((a) => !objectIds.includes(a.id) && (!spaceId || !a.channel || a.channel === spaceId)).map((a) => ({ id: a.id, name: a.name, typeKey: "agent", icon: a.icon }))
 			: store.summaries.filter((s) => !objectIds.includes(s.id) && (!HIDDEN_TYPES[s.typeKey] || allowedTypeKeys.has(s.typeKey)));
-		if (rel.objectSource) pool = sourceIds ? pool.filter((s) => sourceIds!.has(s.id)) : [];
-		else if (!wantsAgents && allowedTypeKeys.size > 0) pool = pool.filter((s) => allowedTypeKeys.has(s.typeKey));
+		if (!wantsAgents && allowedTypeKeys.size > 0) pool = pool.filter((s) => allowedTypeKeys.has(s.typeKey));
 		// A system prompt belongs to one space; an agent picks from its own.
 		if (spaceId && allowedTypeKeys.has("system_prompt")) pool = pool.filter((s) => "channelId" in s && s.channelId === spaceId);
 		return pool

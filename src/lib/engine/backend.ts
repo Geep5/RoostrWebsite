@@ -443,7 +443,6 @@ class WebBackend {
 				readOnly: o.fields["readOnly"]?.boolValue === true,
 				maxCount: o.fields["maxCount"]?.intValue ?? 0,
 				objectTypes: (o.fields["object_types"]?.valuesValue?.items ?? []).map((i) => i.stringValue ?? "").filter(Boolean),
-				objectSource: fstr(o.fields, "object_source") || undefined,
 				options,
 			});
 		}
