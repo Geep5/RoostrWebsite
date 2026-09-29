@@ -239,8 +239,8 @@
 			case "repo_path": return { emoji: "📁" };
 			case "credentials": return { emoji: "🔑" };
 			case "agent": return { emoji: "🤖" };
-			case "skills": return { emoji: "🧠" };
-			case "prompt": return { emoji: "📜" };
+			case "skills": return { emoji: "🛠️" };
+			case "prompt": return { emoji: "🧠" };
 			case "model": return { emoji: "🧬" };
 		}
 		if (rel.format === "status") {
@@ -414,7 +414,7 @@
 						{@const ok = !!sk && (!sk.key || sk.machines.length > 0)}
 						<span class="chip-wrap">
 							<span class="chip" class:ok={!!sk?.key && ok} class:warn={!!sk?.key && !ok} title={!sk ? "Skill" : !sk.key ? `${sk.name} · instructions` : sk.machines.length ? `${sk.name} · working on ${sk.machines.join(", ")}` : `${sk.name} · not working on any computer yet`}>
-								<span class="emoji">🧠</span>{sk?.name ?? `${id.slice(0, 8)}…`}
+								<span class="emoji">🛠️</span>{sk?.name ?? `${id.slice(0, 8)}…`}
 							</span>
 							<button class="rm" aria-label={`Remove ${sk?.name ?? "skill"}`} title="Remove" onclick={(e) => { e.stopPropagation(); void removeValue(rel.key, id); }}>×</button>
 						</span>
