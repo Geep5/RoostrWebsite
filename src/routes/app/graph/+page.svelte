@@ -23,11 +23,17 @@
 	// ?focus=<objectId>: highlight + center that object (Anytype's
 	// "show in graph" from an open object).
 	const focusId = $derived(page.url.searchParams.get("focus") ?? "");
+	/** Tag and status values as their own nodes (Anytype's "show relations"); remembered per browser. */
+	let showValues = $state(typeof localStorage === "undefined" || localStorage.getItem("graph.values") !== "off");
+	$effect(() => {
+		localStorage.setItem("graph.values", showValues ? "on" : "off");
+	});
 
 	$effect(() => {
 		const id = channelId;
 		const el = canvasEl; // dep: re-run when the keyed canvas remounts
 		const isDefault = id === defaultChannelId && id !== "";
+		const valueRels = showValues ? spaceRelations(store.relations, id) : [];
 		if (!id) {
 			void refreshAll(); // channels not loaded yet; effect re-runs when they land
 			return;
@@ -38,7 +44,7 @@
 		status = "Loading graph…";
 
 		void (async () => {
-			const graph: ObjectGraph = await buildGraph(id, isDefault);
+			const graph: ObjectGraph = await buildGraph(id, isDefault, valueRels);
 			status = graph.nodes.length === 0 ? "Nothing in this space yet." : "";
 			if (!canvasEl || cancelled || graph.nodes.length === 0) return;
 
@@ -175,7 +181,10 @@
 				cardTimer = setTimeout(() => {
 					cardFor = i;
 					const node = graph.nodes[i];
-					void renderCard(node.id).then((html) => {
+					const html = node.value
+						? Promise.resolve(`<div class="gc-title">${esc(node.name)}</div><div class="gc-row"><span class="gc-k">${esc(store.relations.find((r) => r.id === node.ref)?.name || node.value.relationKey)}</span><span class="gc-v">${node.value.count} objects</span></div>`)
+						: renderCard(node.id);
+					void html.then((html) => {
 						if (cardFor !== i) return;
 						card.innerHTML = html;
 						card.style.display = "block";
@@ -262,7 +271,7 @@
 			});
 			el.addEventListener("pointerup", (e) => {
 				if (dragNode >= 0 && moved < 4) {
-					void goto(`/app/object/${graph.nodes[dragNode].id}`);
+					void goto(`/app/object/${graph.nodes[dragNode].ref}`);
 				}
 				dragNode = -1;
 				panning = false;
@@ -391,14 +400,33 @@
 <svelte:head><title>Graph — glon</title></svelte:head>
 
 <div class="stage">
-	{#key channelId}
+	{#key `${channelId}:${showValues}`}
 		<canvas bind:this={canvasEl}></canvas>
 		<div class="labels" bind:this={labelHost}></div>
 	{/key}
 	{#if status}<p class="status">{status}</p>{/if}
+	<label class="toggle" title="Show tag and status values as nodes linking the objects that share them">
+		<input type="checkbox" bind:checked={showValues} /> Properties
+	</label>
 </div>
 
 <style>
+	.toggle {
+		position: absolute;
+		top: 12px;
+		right: 14px;
+		display: flex;
+		align-items: center;
+		gap: 6px;
+		padding: 5px 10px;
+		border-radius: 8px;
+		background: var(--hl-light);
+		border: 1px solid var(--border);
+		font-size: 12px;
+		color: var(--fg);
+		cursor: pointer;
+		user-select: none;
+	}
 	.stage {
 		position: relative;
 		width: 100%;

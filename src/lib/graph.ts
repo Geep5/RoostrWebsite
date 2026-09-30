@@ -5,7 +5,7 @@
  */
 
 import { fetchQuery, type QueryResultRow } from "$lib/api";
-import { guestAgents, type ValueJSON } from "$lib/types";
+import { guestAgents, type RelationDefJSON, type ValueJSON } from "$lib/types";
 
 export interface GraphNode {
 	id: string;
@@ -16,6 +16,10 @@ export interface GraphNode {
 	cluster: number;
 	/** The object names an agent of its own (faint ring in the render). */
 	hasAgent: boolean;
+	/** A property value node ("Status: Done"), not an object: `ref` is its property's page. */
+	value?: { relationKey: string; text: string; count: number };
+	/** What a click opens: the object itself, or a value node's property. */
+	ref: string;
 	x: number;
 	y: number;
 	vx: number;
@@ -79,6 +83,10 @@ const LINK_COLOR: [number, number, number, number] = [0.55, 0.65, 0.85, 0.5];
 const CLUSTER_COLOR: [number, number, number, number] = [1.0, 0.63, 0.18, 0.16];
 const COLLECTION_COLOR: [number, number, number, number] = [0.95, 0.75, 0.35, 0.4];
 const QUERY_COLOR: [number, number, number, number] = [0.8, 0.52, 0.95, 0.3];
+const VALUE_COLOR: [number, number, number, number] = [0.85, 0.85, 0.9, 0.22];
+const VALUE_NODE: [number, number, number] = [0.72, 0.72, 0.78];
+/** Formats whose values are shared categories - worth a node each. */
+const VALUE_FORMATS = new Set(["tag", "status"]);
 
 function strItems(v: ValueJSON | undefined): string[] {
 	return (v?.valuesValue?.items ?? []).map((i) => i.stringValue).filter((s): s is string => typeof s === "string");
@@ -89,7 +97,7 @@ function strItems(v: ValueJSON | undefined): string[] {
  * Unassigned objects belong to the default channel. The channel itself
  * is not a node — the graph shows its contents.
  */
-export async function buildGraph(channelId: string, isDefaultChannel: boolean): Promise<ObjectGraph> {
+export async function buildGraph(channelId: string, isDefaultChannel: boolean, valueRelations: RelationDefJSON[] = []): Promise<ObjectGraph> {
 	const res = await fetchQuery({ limit: 2000 });
 	const rows = res.records.filter((r) => {
 		if (HIDDEN_KINDS[r.typeKey] || r.typeKey === "channel") return false;
@@ -107,6 +115,7 @@ export async function buildGraph(channelId: string, isDefaultChannel: boolean): 
 			kind: r.typeKey,
 			radius: 10,
 			hasAgent: false,
+			ref: r.id,
 			color: typeColor(r.typeKey),
 			cluster: -1,
 			x: (Math.random() - 0.5) * 600,
@@ -173,10 +182,53 @@ export async function buildGraph(channelId: string, isDefaultChannel: boolean): 
 		n.hasAgent = guestAgents(rows[i].fields).length > 0;
 	}
 
+	// ── Property values (Anytype's graph with relations shown): every tag
+	// or status value is a node, linked to each object that has it, so
+	// objects gather by what they share. Only values two or more objects
+	// share - a value on one object is already on its card. ────────────
+	const objectCount = nodes.length;
+	const valueNodes = new Map<string, { rel: RelationDefJSON; text: string; members: number[] }>();
+	const byKey = new Map(valueRelations.filter((r) => VALUE_FORMATS.has(r.format)).map((r) => [r.key, r]));
+	for (const [i, r] of rows.entries()) {
+		for (const [key, v] of Object.entries(r.fields)) {
+			const rel = byKey.get(key);
+			if (!rel) continue;
+			const texts = v.stringValue ? [v.stringValue] : strItems(v);
+			for (const text of new Set(texts.filter(Boolean))) {
+				const id = `${key}\u0000${text}`;
+				const hit = valueNodes.get(id) ?? { rel, text, members: [] };
+				hit.members.push(i);
+				valueNodes.set(id, hit);
+			}
+		}
+	}
+	for (const { rel, text, members } of valueNodes.values()) {
+		if (members.length < 2) continue;
+		const vi = nodes.length;
+		// Seeded at its members' centre once the clusters below have placed them.
+		nodes.push({
+			id: `value:${rel.key}:${text}`,
+			name: `${rel.iconEmoji || "🏷️"} ${text}`,
+			kind: "",
+			radius: 4 + 1.4 * Math.sqrt(members.length),
+			hasAgent: false,
+			value: { relationKey: rel.key, text, count: members.length },
+			ref: rel.id,
+			color: VALUE_NODE,
+			cluster: -1,
+			x: 0,
+			y: 0,
+			vx: 0,
+			vy: 0,
+		});
+		degree.push(0);
+		for (const m of members) push(vi, m, VALUE_COLOR);
+	}
+
 	// ── Type clustering: every kind gets a home on a ring sized by the
 	// vault, so groups read as neighborhoods instead of one soup. ─────
 	const byKind = new Map<string, number[]>();
-	for (const [i, n] of nodes.entries()) {
+	for (const [i, n] of nodes.slice(0, objectCount).entries()) {
 		const g = byKind.get(n.kind);
 		if (g) g.push(i);
 		else byKind.set(n.kind, [i]);
@@ -225,6 +277,13 @@ export async function buildGraph(channelId: string, isDefaultChannel: boolean): 
 			nodes[i].x = ax + Math.cos(a) * rr;
 			nodes[i].y = ay + Math.sin(a) * rr;
 		}
+	}
+	// Value nodes start at the middle of the objects that share them.
+	for (const e of edges) {
+		const v = nodes[e.a].value ? e.a : -1;
+		if (v < 0) continue;
+		nodes[v].x += nodes[e.b].x / nodes[v].value!.count;
+		nodes[v].y += nodes[e.b].y / nodes[v].value!.count;
 	}
 	return { nodes, edges, anchors };
 }
