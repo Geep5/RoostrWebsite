@@ -49,9 +49,9 @@
 	let open = $state<"" | "sources" | "backlinks">("");
 	$effect(() => {
 		const id = object.id;
-		// A query with no type yet shows nothing: open its type card so the
-		// first thing asked is what to query.
-		open = object.typeKey === "query" && sourceKeys.length === 0 ? "sources" : "";
+		// A query with no type queries all objects - a real choice, so its
+		// type card waits to be clicked instead of popping up on every visit.
+		open = "";
 		backlinks = [];
 		void fetchBacklinks(id).then((b) => {
 			if (object.id === id) backlinks = b;
@@ -99,7 +99,7 @@
 				{#if sources.length}
 					<span class="emoji">{sources[0].icon}</span>Object {sources.length === 1 ? "Type" : "Types"}: {sources.map((s) => s.name).join(", ")}
 				{:else}
-					<PropIcon icon="dot" />Choose an object type
+					<PropIcon icon="dot" />All objects
 				{/if}
 			</button>
 			{#if open === "sources"}
