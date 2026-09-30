@@ -13,8 +13,11 @@
 	import { engineFiltersOf, repeatFilterOf, spaceFilterOf } from "$lib/filters";
 	import { objectSpaceId, spaceRelations } from "$lib/relations";
 	import { objectIcon } from "$lib/icons";
+	import { page } from "$app/state";
 
 	let { id }: { id: string } = $props();
+	/** The object open in the main pane: its row or card here reads as the current one, like the widget head does. */
+	const currentId = $derived(page.params.id ?? "");
 
 	const LIMIT = 4;
 	/* The card grid breathes better than rows - give it more slots. */
@@ -190,7 +193,7 @@
 		{:else if viewType === "gallery"}
 			<div class="w-cards">
 				{#each rows.slice(0, GALLERY_LIMIT) as r (r.id)}
-					<a class="w-card" href="/app/object/{r.id}">
+					<a class="w-card" class:current={r.id === currentId} aria-current={r.id === currentId ? "page" : undefined} href="/app/object/{r.id}">
 						<span class="w-icon">{objectIcon(r.fields["iconEmoji"]?.stringValue, r.typeKey)}</span>
 						<span class="w-name">{r.fields["name"]?.stringValue || "Untitled"}</span>
 					</a>
@@ -201,7 +204,7 @@
 			</div>
 		{:else}
 			{#each rows.slice(0, LIMIT) as r (r.id)}
-				<a class="w-row" href="/app/object/{r.id}">
+				<a class="w-row" class:current={r.id === currentId} aria-current={r.id === currentId ? "page" : undefined} href="/app/object/{r.id}">
 					<span class="w-icon">{objectIcon(r.fields["iconEmoji"]?.stringValue, r.typeKey)}</span>
 					<span class="w-name">{r.fields["name"]?.stringValue || "Untitled"}</span>
 				</a>
@@ -294,6 +297,15 @@
 	}
 	.w-card .w-icon {
 		font-size: 15px;
+	}
+	/* The open object, same highlight as the current widget head. */
+	.w-row.current {
+		background: var(--hl-med);
+		color: var(--fg);
+	}
+	.w-card.current {
+		background: var(--hl-med);
+		border-color: color-mix(in srgb, var(--border) 40%, var(--fg));
 	}
 	.w-cal {
 		padding: 2px 8px 6px 0;
