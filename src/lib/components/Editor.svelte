@@ -659,22 +659,27 @@
 
 	// ── Keyboard ──────────────────────────────────────────────────
 	/**
-	 * Anytype onEnterBlock's re-entry guard (editor/page.tsx:1900-1912):
+	 * Enter and Tab reshape the tree, so two must never run at once: a second
+	 * one against a half-applied tree glitched, dropped a line, or put one a
+	 * couple of rows above. Anytype drops a Return that arrives mid-op and
+	 * then holds the latch 30 ms more (editor/page.tsx:1900-1912); we did too,
+	 * and at typing speed that silently ate Returns - six fast "Enter + word"
+	 * gave one line reading "a1a2a3a4a5a6".
 	 *
-	 *   if (isEnterProcessing.current) { e.preventDefault(); return; };
-	 *   isEnterProcessing.current = true;
-	 *   const releaseEnterGuard = () => {
-	 *     window.setTimeout(() => { isEnterProcessing.current = false; }, 30);
-	 *   };
-	 *
-	 * Their reason is ours: "focus changes during block creation can trigger
-	 * synthetic key events ... causing an infinite loop of block creation".
-	 * A second Return arriving while the first is still in flight ran against
-	 * a half-applied tree - which is what glitched, dropped a line, or put one
-	 * a couple of rows above. Tab moves structure too, so it shares the latch;
-	 * Backspace does not, because dropping a delete would lose real intent.
+	 * The common split is synchronous (state + caret in one flushSync), so it
+	 * is finished before the next key event can arrive. Only the async paths
+	 * (outdent, refresh) are ever in flight - a key that lands during one
+	 * queues and replays, in order, on whatever line then has the caret.
+	 * Backspace is not latched: dropping or delaying a delete loses intent.
 	 */
 	let structuralOp = false;
+	const structuralQueue: Array<{ key: string; shiftKey: boolean }> = [];
+
+	/** The block holding the caret now, for a replayed key. */
+	function focusedBlockId(): string {
+		const ae = document.activeElement as HTMLElement | null;
+		return (ae?.classList.contains("text") && ae.closest?.("[data-block]")?.getAttribute("data-block")) || "";
+	}
 
 	async function onKeydown(e: KeyboardEvent, id: string) {
 		// An input method is composing (Japanese, Chinese, Korean, dictation,
@@ -692,20 +697,29 @@
 			return;
 		}
 		if (structuralOp) {
-			// Anytype drops it too. Logged because a burst of these is the
-			// fingerprint of a slow op, which is exactly what used to glitch.
-			console.debug("[editor] dropped", e.key, "- previous structural op still in flight");
 			e.preventDefault();
+			structuralQueue.push({ key: e.key, shiftKey: e.shiftKey });
 			return;
 		}
 		structuralOp = true;
 		try {
 			await onKeydownInner(e, id);
+			// Keys that arrived while that was in flight, in order.
+			while (structuralQueue.length > 0) {
+				const next = structuralQueue.shift()!;
+				const at = focusedBlockId();
+				if (!at) {
+					structuralQueue.length = 0;
+					break;
+				}
+				await onKeydownInner({ ...next, isComposing: false, keyCode: 0, preventDefault() {} } as unknown as KeyboardEvent, at);
+			}
 		} catch (err) {
+			structuralQueue.length = 0;
 			console.error("[editor] structural key failed", e.key, err);
 			await refresh();
 		} finally {
-			setTimeout(() => (structuralOp = false), 30);
+			structuralOp = false;
 		}
 	}
 
@@ -1609,6 +1623,34 @@
 		await refresh();
 	}
 
+	/**
+	 * A click on the page's own background (not on a line). Beside the lines
+	 * it puts the caret at the end of the nearest one; below them it goes to
+	 * the last line when that is already an empty paragraph, and only adds a
+	 * line when the page ends in text. It used to add one on every click, after
+	 * everything - so a page ending in blank lines grew another at the very
+	 * bottom, far below the text.
+	 */
+	function onBackgroundClick(y: number) {
+		const texts = rootIds.map((rid) => ({ rid, el: blockEl(rid) })).filter((r): r is { rid: string; el: HTMLElement } => !!r.el);
+		if (texts.length === 0) return void appendBlock();
+		const lastRow = texts[texts.length - 1].el.closest("[data-block]") ?? texts[texts.length - 1].el;
+		if (y < lastRow.getBoundingClientRect().bottom) {
+			let best = texts[0];
+			let gap = Infinity;
+			for (const r of texts) {
+				const box = (r.el.closest("[data-block]") ?? r.el).getBoundingClientRect();
+				const d = y < box.top ? box.top - y : y > box.bottom ? y - box.bottom : 0;
+				if (d < gap) [best, gap] = [r, d];
+			}
+			return focusSync(best.rid, best.el.textContent?.length ?? 0);
+		}
+		const last = rootIds[rootIds.length - 1];
+		const t = byId.get(last)?.content.text;
+		if (t && !t.text && (t.style ?? Style.PARAGRAPH) === Style.PARAGRAPH) return focusSync(last, 0);
+		void addSibling(last, Pos.BOTTOM, Style.PARAGRAPH);
+	}
+
 	async function removeBlockById(id: string) {
 		cancelPending(id);
 		await writes.blockRemove(object.id, id);
@@ -1830,7 +1872,7 @@
 	ondragover={onEditorDragOver}
 	ondrop={(e) => void onEditorDrop(e)}
 	onclick={(e) => {
-		if (e.target === e.currentTarget && !selectedIds.length) void appendBlock();
+		if (e.target === e.currentTarget && !selectedIds.length) onBackgroundClick(e.clientY);
 	}}
 >
 	{#each rootIds as id (id)}
