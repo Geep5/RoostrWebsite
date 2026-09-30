@@ -121,9 +121,13 @@ export async function newAgent(channelId: string, name = ""): Promise<string> {
 		? undefined
 		: (await fetchAllQuery({ type: "system_prompt", filters: [{ key: "channel", condition: "equal", value: channelId }] }))
 			.find((r) => r.fields["name"]?.stringValue === "Assistant");
+	// A normal agent can run commands and fetch the web: those are the
+	// grant skills (skill.grants), listed unless its template says otherwise.
+	const grants = tpl?.fields["skills"] ? [] : (await fetchAllQuery({ type: "skill" })).filter((r) => r.fields["grants"]?.stringValue);
 	const { id: agentId } = await note.create(name.trim() || "New agent", "agent", {
 		...channelField(channelId),
 		...(assistant ? { prompt: { linkValue: { targetId: assistant.id, relationKey: "prompt" } } } : {}),
+		...(grants.length ? { skills: { valuesValue: { items: grants.map((g) => ({ linkValue: { targetId: g.id, relationKey: "skills" } })) } } } : {}),
 	});
 	if (tpl) await applyTemplate(agentId, tpl.id);
 	return agentId;
