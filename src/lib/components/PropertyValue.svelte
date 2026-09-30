@@ -13,6 +13,7 @@
 	import { layoutOf, store } from "$lib/data.svelte";
 	import { objectIcon } from "$lib/icons";
 	import { fetchMachines } from "$lib/serving";
+	import { newAgent } from "$lib/create";
 	import CalendarPicker from "./CalendarPicker.svelte";
 	import OptionPicker from "./OptionPicker.svelte";
 	import CheckboxIcon from "./CheckboxIcon.svelte";
@@ -107,6 +108,19 @@
 		const oid = shownId(id);
 		return store.summaries.find((s) => s.id === oid)?.name || store.agents.find((a) => a.id === oid)?.name || id.slice(0, 8);
 	}
+	/** "+ New agent": made from the space's default Agent template, named by what was typed, linked here. */
+	let creatingAgent = $state(false);
+	async function addNewAgent() {
+		if (creatingAgent) return;
+		creatingAgent = true;
+		try {
+			const id = await newAgent(spaceId || store.channels[0]?.id || "", objectQuery);
+			objectOpen = false;
+			await toggleObject(id);
+		} finally {
+			creatingAgent = false;
+		}
+	}
 	async function toggleObject(id: string) {
 		// A single-value relation (System prompt, Served by) swaps its link; a list adds.
 		const next = objectIds.includes(id) ? objectIds.filter((x) => x !== id) : rel.maxCount === 1 ? [id] : [...objectIds, id];
@@ -189,6 +203,11 @@
 						>
 					{/each}
 					{#if candidates.length === 0}<span class="tk pad">No matches</span>{/if}
+					{#if wantsAgents}
+						<button class="obj-item new-agent" disabled={creatingAgent} onclick={() => void addNewAgent()}>
+							<span class="obj-name">＋ New agent{objectQuery.trim() ? ` “${objectQuery.trim()}”` : ""}</span>
+						</button>
+					{/if}
 				</div>
 			{/if}
 		</span>
@@ -200,6 +219,10 @@
 {/if}
 
 <style>
+	.new-agent {
+		border-top: 1px solid var(--border);
+		margin-top: 2px;
+	}
 	input[type="text"],
 	input[type="number"],
 	input[type="url"],

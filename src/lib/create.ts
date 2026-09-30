@@ -104,6 +104,17 @@ async function createMachine(): Promise<string> {
  * Error property.
  */
 async function createAgent(channelId: string, name = ""): Promise<string> {
+	const agentId = await newAgent(channelId, name);
+	await goto(`/app/object/${agentId}`);
+	return agentId;
+}
+
+/**
+ * A new agent in the space, from the agent type's default template there
+ * (its model, prompt, skills, credentials, computer), else pointed at the
+ * space's "Assistant" prompt. Stays where you are - for pickers that link it.
+ */
+export async function newAgent(channelId: string, name = ""): Promise<string> {
 	const tplId = defaultTemplateOf("agent", channelId);
 	const tpl = tplId ? await fetchObject(tplId).catch(() => null) : null;
 	const assistant = tpl?.fields["prompt"]
@@ -115,7 +126,6 @@ async function createAgent(channelId: string, name = ""): Promise<string> {
 		...(assistant ? { prompt: { linkValue: { targetId: assistant.id, relationKey: "prompt" } } } : {}),
 	});
 	if (tpl) await applyTemplate(agentId, tpl.id);
-	await goto(`/app/object/${agentId}`);
 	return agentId;
 }
 /** The type's default template in this space: every space carries its own copy of a bundled type. */
