@@ -63,8 +63,6 @@
 		["login_url", "Login page", "url", "🔗"],
 		["session_host", "Signed-in host", "shorttext", "🌐"],
 		["session_cookie", "Signed-in cookie", "shorttext", "🍪"],
-		// Which of the service's actions agents may use; what each does is the harness's.
-		["actions", "Allowed actions", "tag", "⚡"],
 	];
 	const KEY_PREFIX = "key_";
 	const isCredential = $derived(typeKey === "credential");
