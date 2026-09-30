@@ -319,7 +319,8 @@
 			// up, an agent is born with a kind and a server, a file starts
 			// from its bytes (create.ts).
 			if (typeKey === "machine" || typeKey === "agent" || typeKey === "file") {
-				await createTyped(typeKey, channelId);
+				// The name typed in the table's entry row names it.
+				await createTyped(typeKey, channelId, name);
 				return;
 			}
 			const fields: Record<string, ValueJSON> = {};

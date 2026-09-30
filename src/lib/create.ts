@@ -103,14 +103,14 @@ async function createMachine(): Promise<string> {
  * its Served by names a computer; until then the engine shows that on its
  * Error property.
  */
-async function createAgent(channelId: string): Promise<string> {
+async function createAgent(channelId: string, name = ""): Promise<string> {
 	const tplId = defaultTemplateOf("agent", channelId);
 	const tpl = tplId ? await fetchObject(tplId).catch(() => null) : null;
 	const assistant = tpl?.fields["prompt"]
 		? undefined
 		: (await fetchAllQuery({ type: "system_prompt", filters: [{ key: "channel", condition: "equal", value: channelId }] }))
 			.find((r) => r.fields["name"]?.stringValue === "Assistant");
-	const { id: agentId } = await note.create("New agent", "agent", {
+	const { id: agentId } = await note.create(name.trim() || "New agent", "agent", {
 		...channelField(channelId),
 		...(assistant ? { prompt: { linkValue: { targetId: assistant.id, relationKey: "prompt" } } } : {}),
 	});
@@ -162,7 +162,7 @@ async function createFile(channelId: string): Promise<string> {
 }
 export async function createTyped(typeKey: string, channelId: string, name = ""): Promise<string> {
 	const key = typeKey.trim().toLowerCase();
-	if (key === "agent") return createAgent(channelId);
+	if (key === "agent") return createAgent(channelId, name);
 	if (key === "machine") return createMachine();
 	if (key === "credential") return createCredential(channelId, name);
 	if (key === "file") return createFile(channelId);
