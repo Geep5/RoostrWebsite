@@ -175,7 +175,6 @@
 
 
 	const isChat = $derived(object?.typeKey === "chat");
-	const isAgent = $derived(object?.typeKey === "agent");
 	const isCapability = $derived(object?.typeKey === "capability");
 	const isInstall = $derived(object?.typeKey === "install");
 	const isFile = $derived(object?.typeKey === "file");
@@ -487,7 +486,6 @@
 			<SpaceManage {object} {spaceInfo} onchanged={refresh} />
 		{:else if isChat}
 			<Discussion {object} full onchanged={refresh} />
-		{:else if isAgent}
 		{:else if isCapability}
 			<CapabilitySetup {object} onchanged={refresh} />
 		{:else if isInstall}
