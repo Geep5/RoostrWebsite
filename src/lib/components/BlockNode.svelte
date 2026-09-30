@@ -54,6 +54,27 @@
 	} = $props();
 
 	const block = $derived(byId.get(id));
+	/**
+	 * A numbered item's number: its place in the run of numbered siblings
+	 * (1, 2, 3 - any other block restarts the count), under its parent or at
+	 * the page root. Every item used to read "1.".
+	 */
+	const ordinal = $derived.by(() => {
+		if (block?.content.text?.style !== Style.NUMBERED) return 0;
+		let siblings: string[] | undefined;
+		for (const b of byId.values()) if (b.childrenIds.includes(id)) siblings = b.childrenIds;
+		if (!siblings) {
+			const referenced = new Set<string>();
+			for (const b of object.blocks) for (const c of b.childrenIds) referenced.add(c);
+			siblings = object.blocks.filter((b) => !referenced.has(b.id)).map((b) => b.id);
+		}
+		let n = 0;
+		for (const sid of siblings) {
+			n = byId.get(sid)?.content.text?.style === Style.NUMBERED ? n + 1 : 0;
+			if (sid === id) return n;
+		}
+		return 1;
+	});
 	/** 0 none, a Pos value for this row, 12 for its targetBot strip. */
 	const zone = $derived(!dropHint || dropHint.id !== id ? 0 : dropHint.bot ? 12 : dropHint.position);
 	let textEl: HTMLElement | undefined = $state();
@@ -209,7 +230,7 @@
 				</button>
 			{/if}
 			{#if t.style === Style.BULLET}<span class="marker">•</span>{/if}
-			{#if t.style === Style.NUMBERED}<span class="marker">1.</span>{/if}
+			{#if t.style === Style.NUMBERED}<span class="marker">{ordinal}.</span>{/if}
 			{#if t.style === Style.TOGGLE}
 				<!-- Anytype markerToggle: 24x24 rounded chevron, rotates 90 when open. -->
 				<button class="toggle-arrow" class:open={toggleOpen} aria-label={toggleOpen ? "Collapse" : "Expand"} onclick={flipToggle}>
