@@ -75,7 +75,7 @@
 		<section class="features" id="why">
 			<div class="feature">
 				<h2><span class="n">01</span>Objects, not files</h2>
-				<p>Everything has properties and links. See any set as a table, board, gallery, calendar or graph. Files go peer to peer over WebRTC, coordinated by Roostr.</p>
+				<p>Everything has properties and links. See any set as a table, board, gallery, calendar or graph. Files go peer to peer over WebRTC, coordinated over Nostr.</p>
 			</div>
 			<div class="feature">
 				<h2><span class="n">02</span>Agents are objects</h2>
