@@ -125,6 +125,15 @@
 		textEl.dataset.ready = "1";
 	});
 
+	// Code blocks: copy the whole block. The live element wins over the
+	// stored text so words typed but not yet saved are included.
+	let copied = $state(false);
+	async function copyCode(stored: string) {
+		await navigator.clipboard.writeText(textEl?.innerText ?? stored);
+		copied = true;
+		setTimeout(() => (copied = false), 1200);
+	}
+
 	function widthOf(colId: string): string {
 		const col = byId.get(colId);
 		const w = col?.fields?.entries?.["width"];
@@ -267,6 +276,9 @@
 				{...IOS_KEYBOARD_OFF}
 				data-placeholder={t.style === Style.TITLE ? "Untitled" : "Type / for commands"}
 			></div>
+			{#if t.style === Style.CODE}
+				<button class="code-copy" class:copied title="Copy code" aria-label="Copy code" onclick={() => copyCode(t.text)}>{copied ? "Copied" : "Copy"}</button>
+			{/if}
 		</div>
 			{#if block.childrenIds.length > 0 && (!isToggle || toggleOpen)}
 				<div class="nested">
@@ -660,6 +672,28 @@
 	.title { font-size: 34px; font-weight: 750; }
 	.quote { border-left: 3px solid var(--accent); padding-left: 12px; font-style: italic; }
 	.codeblock { font-family: ui-monospace, monospace; background: var(--panel); border-radius: 6px; padding: 8px 10px; font-size: 13px; tab-size: 4; }
+	/* A flex item after the code text, pulled back over its top-right corner;
+	   sticky so it stays in view while scrolling through a long block, just
+	   below the object page's sticky header (60px). */
+	.code-copy {
+		position: sticky;
+		top: 68px;
+		flex-shrink: 0;
+		margin: 6px 6px 0 -64px;
+		width: 58px;
+		z-index: 1;
+		padding: 2px 8px;
+		font-size: 11px;
+		border-radius: 4px;
+		border: 1px solid var(--border);
+		background: var(--panel);
+		color: var(--muted);
+		cursor: pointer;
+		opacity: 0;
+		transition: opacity 0.12s;
+	}
+	.block:hover .code-copy, .code-copy:focus-visible, .code-copy.copied { opacity: 1; }
+	.code-copy:hover { color: var(--fg); background: var(--hover); }
 	.callout { background: var(--panel); border-radius: 8px; padding: 10px 12px; }
 	.description { color: var(--muted); }
 	/* Checked text dims (Anytype), no strikethrough. */
