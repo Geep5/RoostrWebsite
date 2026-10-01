@@ -96,12 +96,12 @@
 			if (credentialRowKeys.has(r.key) || (isCredential && (r.key === "key_fields" || r.key === "secret"))) return false;
 			if (RESERVED_KEYS[r.key]) return false;
 			if (AGENT_CONFIG.includes(r.key) || TOOL_CONFIG.includes(r.key)) return true;
-			// The error badge is how the harness surfaces a problem on a
-			// machine-bound object (no server, a holdup, a failed run); show it
-			// there even before one is written, so its absence reads as "ok".
+			// The error badge is how problems surface on any object (a failed
+			// run, a check that failed, a tool that didn't load, a holdup):
+			// shown everywhere even before one is written, so its absence reads as "ok".
+			if (r.key === "error") return true;
 			// A space's one editable property is its guest list: who answers its chat.
 			if (typeKey === "channel") return r.key === "agent";
-			if (r.key === "error") return (MACHINE_BOUND && object.typeKey !== "template") || r.key in object.fields;
 			if (r.key === "served_by") return MACHINE_BOUND || r.key in object.fields;
 			// Credentials, Skills and Tools are an agent's own (AGENT_CONFIG); elsewhere only when set.
 			if (r.key === "credentials" || r.key === "skills" || r.key === "tools") return r.key in object.fields;
