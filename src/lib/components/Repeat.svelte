@@ -5,11 +5,13 @@
 	 * lets a person edit the cadence or turn repeating off. Advancing an
 	 * occurrence is the agent's job (`occurrence_complete`), never a button.
 	 *
-	 * The rule is deliberately small: every N <unit>, on <weekdays | day of
-	 * month>, at <time of day>, counted from an anchor day.
+	 * The rule is deliberately small: every N minutes or hours across the
+	 * day (or only between two times, optionally only on some weekdays), or
+	 * every N days/weeks/months/years on <weekdays | day of month> at one or
+	 * more times of day, counted from an anchor day.
 	 */
-	import type { ObjectJSON, RepeatJSON } from "$lib/types";
-	import { DAY, MIN, ORD, WD, describeDraft as describe, fmt, ordinalOf, sod, suffix, toDraft, type RepeatDraft as Draft } from "$lib/repeat";
+	import type { ObjectJSON, RepeatFreq } from "$lib/types";
+	import { DAY, DAY_MINUTES, MIN, ORD, WD, describeDraft as describe, isSubDaily, manyADay, ordinalOf, sod, sortedTimes, suffix, toDraft, type RepeatDraft as Draft } from "$lib/repeat";
 	import { repeatOf, guestAgents } from "$lib/types";
 	import { note, repeat } from "$lib/api";
 	import { store } from "$lib/data.svelte";
@@ -99,21 +101,37 @@
 
 	// ── Preview only ──────────────────────────────────────────────
 	// The engine computes the real `next` (core/repeat.odin). These mirror
-	// its stepping so the popover can show the upcoming dates while the
-	// user edits; nothing here is written back.
+	// its stepping so the popover can show the upcoming occurrences while
+	// the user edits; nothing here is written back.
+
+	/** Whether the rule runs on the local day starting at `ms` (the engine's repeat_day_fits). */
+	function dayFits(d: Draft, ms: number): boolean {
+		if (isSubDaily(d.freq)) return d.weekdays.length === 0 || d.weekdays.includes(new Date(ms).getDay());
+		return d.freq !== "week" || d.weekdays.includes(new Date(ms).getDay());
+	}
+
+	/** Local midnight `n` days after local midnight `ms`: the half day of slack absorbs a DST hour either way. */
+	const addDays = (ms: number, n: number) => sod(ms + n * DAY + DAY / 2);
 
 	/** Next occurrence day strictly after `from` (an occurrence day). */
 	function stepFrom(d: Draft, from: number): number {
 		const anchor = new Date(d.anchor);
 		switch (d.freq) {
+			case "minute":
+			case "hour": {
+				// The interval spaces the times within a day; every allowed day runs.
+				let cur = addDays(from, 1);
+				for (let i = 0; i < 7 && !dayFits(d, cur); i++) cur = addDays(cur, 1);
+				return cur;
+			}
 			case "day":
-				return from + d.interval * DAY;
+				return addDays(from, d.interval);
 			case "week": {
 				const days = d.weekdays.length ? d.weekdays : [anchor.getDay()];
-				const weekStart = (ms: number) => sod(ms - new Date(ms).getDay() * DAY);
+				const weekStart = (ms: number) => addDays(ms, -new Date(ms).getDay());
 				const w0 = weekStart(d.anchor);
-				let cur = from + DAY;
-				for (let i = 0; i < 400; i++, cur += DAY) {
+				let cur = addDays(from, 1);
+				for (let i = 0; i < 400; i++, cur = addDays(cur, 1)) {
 					const weeks = Math.round((weekStart(cur) - w0) / (7 * DAY));
 					if (weeks % d.interval === 0 && days.includes(new Date(cur).getDay())) return cur;
 				}
@@ -136,27 +154,40 @@
 		}
 	}
 
-	/** The anchor day itself when it fits the rule and its time is still ahead; otherwise the next match. */
-	function firstOccurrence(d: Draft): number {
-		const fits = d.freq !== "week" || d.weekdays.includes(new Date(d.anchor).getDay());
-		if (fits && d.anchor + d.time * MIN > Date.now()) return d.anchor;
-		return stepFrom(d, d.anchor);
+	/** The occurrence times (minutes after local midnight) on a day the rule runs: the stored times, or the minute/hour grid. */
+	function dayTimes(d: Draft): number[] {
+		if (!isSubDaily(d.freq)) return sortedTimes(d.times);
+		const [from, until] = d.window ?? [0, DAY_MINUTES - 1];
+		const period = d.interval * (d.freq === "hour" ? 60 : 1);
+		const out: number[] = [];
+		for (let t = from; t <= until; t += period) out.push(t);
+		return out;
 	}
 
 	const view = $derived(rule ? toDraft(rule) : null);
 	const overdue = $derived(!!rule && rule.next < Date.now());
 
 	// ── Editing ───────────────────────────────────────────────────
+	const FREQS: RepeatFreq[] = ["minute", "hour", "day", "week", "month", "year"];
+	const maxInterval = (freq: RepeatFreq) => (freq === "hour" ? 23 : 999);
 	const seed = (): Draft => {
 		const anchor = sod(Date.now());
-		return { freq: "week", interval: 1, weekdays: [new Date(anchor).getDay()], monthly: "date", anchor, time: 9 * 60 };
+		return { freq: "week", interval: 1, weekdays: [new Date(anchor).getDay()], monthly: "date", anchor, times: [9 * 60], window: null };
 	};
 	let draft = $state<Draft>(seed());
+	/** The next five occurrences from now: the first fitting day from the anchor, then each step. */
 	const preview = $derived.by(() => {
-		const out = [firstOccurrence(draft)];
-		while (out.length < 5) out.push(stepFrom(draft, out[out.length - 1]));
-		return out.map((day) => day + draft.time * MIN);
+		const times = dayTimes(draft);
+		const now = Date.now();
+		const out: number[] = [];
+		let day = dayFits(draft, draft.anchor) ? draft.anchor : stepFrom(draft, draft.anchor);
+		for (let i = 0; i < 400 && out.length < 5; i++, day = stepFrom(draft, day)) {
+			for (const t of times) if (out.length < 5 && day + t * MIN > now) out.push(day + t * MIN);
+		}
+		return out;
 	});
+	/** The engine refuses a window that ends before it starts. */
+	const invalid = $derived(isSubDaily(draft.freq) && draft.window && draft.window[0] > draft.window[1] ? "The window ends before it starts." : "");
 
 	function openEditor() {
 		draft = rule ? toDraft(rule) : seed();
@@ -166,13 +197,39 @@
 		assignee = g.includes(object.fields["assignee"]?.stringValue ?? "") ? (object.fields["assignee"]?.stringValue ?? "") : (g[0] ?? "");
 		open = true;
 	}
+	function setFreq(value: string) {
+		const freq = FREQS.find((f) => f === value);
+		if (!freq) return;
+		// Minute/hour weekdays filter the days (none = every day); a week's
+		// weekdays are the days it runs. Neither carries over to the other.
+		if (isSubDaily(freq) !== isSubDaily(draft.freq)) draft.weekdays = isSubDaily(freq) ? [] : [new Date(draft.anchor).getDay()];
+		draft.freq = freq;
+		draft.interval = Math.min(draft.interval, maxInterval(freq));
+	}
 	function toggleWeekday(d: number) {
 		draft.weekdays = draft.weekdays.includes(d) ? draft.weekdays.filter((x) => x !== d) : [...draft.weekdays, d];
-		if (!draft.weekdays.length) draft.weekdays = [d];
+		// A week needs a day to run on; minute/hour with none run every day.
+		if (!draft.weekdays.length && draft.freq === "week") draft.weekdays = [d];
 	}
-	function setTime(value: string) {
+	/** "HH:MM" from a time input as minutes after midnight, or null while it is incomplete. */
+	function minutesOf(value: string): number | null {
 		const [h, m] = value.split(":").map(Number);
-		if (Number.isInteger(h) && Number.isInteger(m)) draft.time = h * 60 + m;
+		return Number.isInteger(h) && Number.isInteger(m) ? h * 60 + m : null;
+	}
+	function setTime(i: number, value: string) {
+		const t = minutesOf(value);
+		if (t !== null) draft.times[i] = t;
+	}
+	/** A new time an hour after the last, skipping ones already listed. */
+	function addTime() {
+		let t = ((draft.times[draft.times.length - 1] ?? 9 * 60) + 60) % DAY_MINUTES;
+		for (let i = 0; i < 24 && draft.times.includes(t); i++) t = (t + 60) % DAY_MINUTES;
+		draft.times = [...draft.times, t];
+	}
+	function setWindow(edge: 0 | 1, value: string) {
+		const t = minutesOf(value);
+		if (t === null || !draft.window) return;
+		draft.window = edge === 0 ? [t, draft.window[1]] : [draft.window[0], t];
 	}
 
 	async function run(op: () => Promise<unknown>) {
@@ -188,9 +245,18 @@
 		}
 	}
 	function sameRule(a: Draft, b: Draft): boolean {
-		return a.freq === b.freq && a.interval === b.interval && a.monthly === b.monthly && a.time === b.time && a.anchor === b.anchor && [...a.weekdays].sort().join() === [...b.weekdays].sort().join();
+		return (
+			a.freq === b.freq &&
+			a.interval === b.interval &&
+			a.monthly === b.monthly &&
+			a.anchor === b.anchor &&
+			sortedTimes(a.times).join() === sortedTimes(b.times).join() &&
+			(a.window?.join() ?? "") === (b.window?.join() ?? "") &&
+			[...a.weekdays].sort().join() === [...b.weekdays].sort().join()
+		);
 	}
 	async function save() {
+		if (invalid) return;
 		open = false;
 		// Re-saving an identical rule would recompute `next` from the anchor
 		// and could resurrect an occurrence that was already completed.
@@ -200,14 +266,17 @@
 			return;
 		}
 		const d = $state.snapshot(draft);
+		const sub = isSubDaily(d.freq);
 		await run(async () => {
 			await saveAssignee();
 			await repeat.set(object.id, {
 				freq: d.freq,
 				interval: d.interval,
-				weekdays: d.freq === "week" ? d.weekdays : [],
+				weekdays: d.freq === "week" || sub ? d.weekdays : [],
 				monthly: d.monthly,
-				time: d.time,
+				times: sub ? [] : sortedTimes(d.times),
+				// No window = the whole day.
+				...(sub && d.window ? { window: d.window } : {}),
 				tz: Intl.DateTimeFormat().resolvedOptions().timeZone,
 				// Noon, so the engine lands on the same wall-clock day even when
 				// today's UTC offset differs from the anchor day's (DST).
@@ -248,7 +317,7 @@
 	{#if rule}
 		<!-- One quiet line under the rule: when next, and who runs it where. -->
 		<p class="meta">
-			<span class:overdue>{overdue ? `Overdue since ${fmtLong(rule.next)}` : `Next ${fmtDay(rule.next)}`}</span>
+			<span class:overdue>{overdue ? `Overdue since ${fmtLong(rule.next)}` : `Next ${manyADay(rule) ? fmtLong(rule.next) : fmtDay(rule.next)}`}</span>
 			{#if agentOwned}
 				<span>{#if assigneeName}{assigneeName} on {servingName || "its machine"}{:else}on {servingName || "its agent's machine"}{/if}{isIOSBackend ? " · not on this device" : ""}{#if servingWarning}<span class="overdue"> · {servingWarning}</span>{/if}</span>
 			{/if}
@@ -291,8 +360,17 @@
 
 				<div class="field">
 					<span class="lbl">Every</span>
-					<input class="n" type="number" min="1" max="99" bind:value={draft.interval} oninput={() => (draft.interval = Math.max(1, Math.floor(draft.interval || 1)))} />
-					<select bind:value={draft.freq}>
+					<input
+						class="n"
+						type="number"
+						min="1"
+						max={maxInterval(draft.freq)}
+						bind:value={draft.interval}
+						oninput={() => (draft.interval = Math.min(maxInterval(draft.freq), Math.max(1, Math.floor(draft.interval || 1))))}
+					/>
+					<select value={draft.freq} onchange={(e) => setFreq(e.currentTarget.value)}>
+						<option value="minute">{draft.interval === 1 ? "minute" : "minutes"}</option>
+						<option value="hour">{draft.interval === 1 ? "hour" : "hours"}</option>
 						<option value="day">{draft.interval === 1 ? "day" : "days"}</option>
 						<option value="week">{draft.interval === 1 ? "week" : "weeks"}</option>
 						<option value="month">{draft.interval === 1 ? "month" : "months"}</option>
@@ -300,7 +378,25 @@
 					</select>
 				</div>
 
-				{#if draft.freq === "week"}
+				{#if isSubDaily(draft.freq)}
+					<div class="field">
+						<span class="lbl">Hours</span>
+						<div class="seg">
+							<button class:on={!draft.window} onclick={() => (draft.window = null)}>All day</button>
+							<button class:on={!!draft.window} onclick={() => (draft.window ??= [8 * 60, 20 * 60])}>Only between</button>
+						</div>
+					</div>
+					{#if draft.window}
+						<div class="field">
+							<span class="lbl"></span>
+							<input type="time" value={hhmm(draft.window[0])} onchange={(e) => setWindow(0, e.currentTarget.value)} aria-label="From" />
+							<span class="to">–</span>
+							<input type="time" value={hhmm(draft.window[1])} onchange={(e) => setWindow(1, e.currentTarget.value)} aria-label="Until" />
+						</div>
+					{/if}
+				{/if}
+
+				{#if draft.freq === "week" || isSubDaily(draft.freq)}
 					<div class="field">
 						<span class="lbl">On</span>
 						<div class="days">
@@ -308,6 +404,7 @@
 								<button class="day" class:on={draft.weekdays.includes(i)} onclick={() => toggleWeekday(i)}>{d[0]}</button>
 							{/each}
 						</div>
+						{#if !draft.weekdays.length}<span class="aside">every day</span>{/if}
 					</div>
 				{/if}
 
@@ -321,13 +418,25 @@
 					</div>
 				{/if}
 
-				<div class="field">
-					<span class="lbl">At</span>
-					<input type="time" value={hhmm(draft.time)} onchange={(e) => setTime(e.currentTarget.value)} />
-				</div>
+				{#if !isSubDaily(draft.freq)}
+					<div class="field top">
+						<span class="lbl">At</span>
+						<div class="time-list">
+							{#each draft.times as t, i (i)}
+								<span class="time">
+									<input type="time" value={hhmm(t)} onchange={(e) => setTime(i, e.currentTarget.value)} />
+									{#if draft.times.length > 1}
+										<button class="time-rm" aria-label="Remove time" title="Remove time" onclick={() => (draft.times = draft.times.filter((_, j) => j !== i))}>×</button>
+									{/if}
+								</span>
+							{/each}
+							<button class="add-time" onclick={addTime}>+ Add time</button>
+						</div>
+					</div>
+				{/if}
 
 				<div class="summary">
-					<div class="desc">{describe(draft)}</div>
+					<div class="desc" class:overdue={!!invalid}>{invalid || describe(draft)}</div>
 					<div class="next">
 						{#each preview as p, i (p)}<span class:first={i === 0}>{fmtLong(p)}</span>{/each}
 						<span>…</span>
@@ -339,7 +448,7 @@
 				{#if rule}<button class="pop-rm" disabled={busy} onclick={() => void clear()}>Turn off repeating</button>{/if}
 				<span class="spacer"></span>
 				<button class="act" onclick={() => (open = false)}>Cancel</button>
-				<button class="act primary" disabled={busy || !hasGuests} onclick={() => void save()}>{rule ? "Update" : "Repeat"}</button>
+				<button class="act primary" disabled={busy || !hasGuests || !!invalid} onclick={() => void save()}>{rule ? "Update" : "Repeat"}</button>
 			</div>
 		</div>
 		<button class="backdrop" aria-label="Close" onclick={() => (open = false)}></button>
@@ -494,6 +603,12 @@
 		flex-wrap: wrap;
 		gap: 6px;
 	}
+	.field.top {
+		align-items: flex-start;
+	}
+	.field.top .lbl {
+		padding-top: 5px;
+	}
 	.lbl {
 		width: 52px;
 		flex: none;
@@ -515,6 +630,47 @@
 	}
 	input[type="time"] {
 		color-scheme: dark;
+	}
+	.to,
+	.aside {
+		font-size: 12px;
+		color: var(--muted);
+	}
+	.time-list {
+		flex: 1;
+		min-width: 0;
+		display: flex;
+		flex-wrap: wrap;
+		align-items: center;
+		gap: 6px;
+	}
+	.time {
+		display: inline-flex;
+		align-items: center;
+		gap: 2px;
+	}
+	.time-rm {
+		border: none;
+		background: none;
+		color: var(--muted);
+		font-size: 14px;
+		line-height: 1;
+		padding: 0 3px;
+		cursor: pointer;
+	}
+	.time-rm:hover {
+		color: var(--red, #e5484d);
+	}
+	.add-time {
+		border: none;
+		background: none;
+		color: var(--muted);
+		font-size: 12px;
+		padding: 3px 4px;
+		cursor: pointer;
+	}
+	.add-time:hover {
+		color: var(--fg);
 	}
 	.days {
 		display: flex;

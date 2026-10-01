@@ -15,6 +15,7 @@
 		block,
 		byId,
 		objectId,
+		readonly,
 		onrefresh,
 		oninput,
 		onblur,
@@ -22,6 +23,8 @@
 		block: BlockJSON;
 		byId: Map<string, BlockJSON>;
 		objectId: string;
+		/** Cells show, never edit; no row/column controls. */
+		readonly: boolean;
 		onrefresh: () => void | Promise<void>;
 		oninput: (id: string) => void;
 		onblur: (id: string) => void;
@@ -93,11 +96,13 @@
 </script>
 
 <div class="table-wrap">
-	<div class="col-gutter" style="grid-template-columns: repeat({colIds.length}, 1fr)">
-		{#each colIds as colId (colId)}
-			<button class="mini" title="Delete column" onclick={() => void removeCol(colId)} disabled={colIds.length <= 1}>×</button>
-		{/each}
-	</div>
+	{#if !readonly}
+		<div class="col-gutter" style="grid-template-columns: repeat({colIds.length}, 1fr)">
+			{#each colIds as colId (colId)}
+				<button class="mini" title="Delete column" onclick={() => void removeCol(colId)} disabled={colIds.length <= 1}>×</button>
+			{/each}
+		</div>
+	{/if}
 	<div class="grid-row">
 		<table>
 			<tbody>
@@ -111,7 +116,7 @@
 										class="text"
 										role="textbox"
 										tabindex="0"
-										contenteditable="true"
+										contenteditable={readonly ? undefined : "true"}
 										{@attach cellContent(cellId)}
 										onkeydown={(e) => cellKeydown(e, rowIdx, colIdx)}
 										oninput={() => oninput(cellId)}
@@ -120,16 +125,18 @@
 								{/if}
 							</td>
 						{/each}
-						<td class="row-gutter">
-							<button class="mini" title="Delete row" onclick={() => void removeRow(rowId)} disabled={rowIds.length <= 1}>×</button>
-						</td>
+						{#if !readonly}
+							<td class="row-gutter">
+								<button class="mini" title="Delete row" onclick={() => void removeRow(rowId)} disabled={rowIds.length <= 1}>×</button>
+							</td>
+						{/if}
 					</tr>
 				{/each}
 			</tbody>
 		</table>
-		<button class="edge col" title="Add column" onclick={() => void addCol()}>+</button>
+		{#if !readonly}<button class="edge col" title="Add column" onclick={() => void addCol()}>+</button>{/if}
 	</div>
-	<button class="edge row" title="Add row" onclick={() => void addRow()}>+</button>
+	{#if !readonly}<button class="edge row" title="Add row" onclick={() => void addRow()}>+</button>{/if}
 </div>
 
 <style>

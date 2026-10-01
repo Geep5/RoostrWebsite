@@ -18,7 +18,7 @@
 	import { fetchMachines, machineName, resolveMany, servingCopy } from "$lib/serving";
 	import { store, layoutOf } from "$lib/data.svelte";
 	import type { ObjectJSON, RelationDefJSON, ValueJSON } from "$lib/types";
-	import { fieldStr, repeatOf } from "$lib/types";
+	import { fieldStr, isBuiltinTool, repeatOf } from "$lib/types";
 	import { describeRepeat } from "$lib/repeat";
 	import { objectIcon, typeIcon } from "$lib/icons";
 
@@ -636,7 +636,7 @@
 							<!-- The harness writes a credential's status: shown in words like its Properties row, never hand-edited here. -->
 							{@const st = fieldStr(r.fields, "status")}
 							<td><span class="cred-status" style={badgeStyle(credentialStatusBadge(st).color)}><PropIcon icon={credentialStatusBadge(st).icon} size={14} />{credentialStatusText(st)}</span></td>
-						{:else if isEditable(c)}
+						{:else if isEditable(c) && !isBuiltinTool(r.fields)}
 							{@const rel = relations.find((x) => x.key === c)}
 							{@const fmt = formatOf(c)}
 							<td class="editable" onclick={(e) => onCellClick(e, r.id, c)}>

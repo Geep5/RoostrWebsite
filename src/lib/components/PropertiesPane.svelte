@@ -5,10 +5,11 @@
 	 * icon + the property name on the left (muted), the value on the right.
 	 * Clicking a row opens the property's PropertyValue editor in a popover
 	 * anchored to the row; checkboxes toggle in place. Multi-value rows
-	 * (tag/object/agent/credentials/skills) carry a hover × per value,
-	 * single-value rows a hover × that removes the property.
+	 * (tag/object/agent/credentials/skills/tools) carry a hover × per value,
+	 * single-value rows a hover × that removes the property. A built-in
+	 * Tool (the harness writes it) and read-only properties show, never edit.
 	 */
-	import { fieldStr, type ObjectJSON, type RelationDefJSON, type ValueJSON } from "$lib/types";
+	import { fieldStr, isBuiltinTool, repeatOf, type ObjectJSON, type RelationDefJSON, type ValueJSON } from "$lib/types";
 	import { note, fetchAllQuery, type QueryResultRow } from "$lib/api";
 	import { layoutOf, store } from "$lib/data.svelte";
 	import { RESERVED_KEYS } from "$lib/relations";
@@ -39,7 +40,7 @@
 	    machine and the project folder on it, the agent, its config, then its
 	    credentials and what it needs - the "how this object runs" block ahead
 	    of ordinary fields. */
-	const AGENT_PRIORITY = ["served_by", "repo_path", "agent", "model", "prompt", "skills", "credentials", "capability"];
+	const AGENT_PRIORITY = ["served_by", "repo_path", "agent", "model", "prompt", "skills", "tools", "credentials", "capability"];
 	const agentRank = new Map(AGENT_PRIORITY.map((k, i) => [k, i]));
 
 	/** A template edits the properties of the type it stamps out, so an
@@ -86,12 +87,15 @@
 	/** Featured order first, then the rest. */
 	const shown = $derived.by(() => {
 		const MACHINE_BOUND = ["agent", "capability", "install", "credential"].includes(typeKey);
-		const AGENT_CONFIG = typeKey === "agent" ? ["prompt", "model", "skills", "credentials", "served_by", "repo_path"] : [];
+		const AGENT_CONFIG = typeKey === "agent" ? ["prompt", "model", "skills", "tools", "credentials", "served_by", "repo_path"] : [];
+		// A Tool's own: what the model is told, its inputs, and whether the harness owns it.
+		const TOOL_CONFIG = typeKey === "tool" ? ["description", "tool_inputs", "tool_builtin"] : [];
+		const repeating = !!repeatOf(object.fields);
 		const present = relations.filter((r) => {
 			// Legacy credential shapes (`key_fields` list, `secret` JSON) stay for old harnesses; never rows.
 			if (credentialRowKeys.has(r.key) || (isCredential && (r.key === "key_fields" || r.key === "secret"))) return false;
 			if (RESERVED_KEYS[r.key]) return false;
-			if (AGENT_CONFIG.includes(r.key)) return true;
+			if (AGENT_CONFIG.includes(r.key) || TOOL_CONFIG.includes(r.key)) return true;
 			// The error badge is how the harness surfaces a problem on a
 			// machine-bound object (no server, a holdup, a failed run); show it
 			// there even before one is written, so its absence reads as "ok".
@@ -99,8 +103,10 @@
 			if (typeKey === "channel") return r.key === "agent";
 			if (r.key === "error") return (MACHINE_BOUND && object.typeKey !== "template") || r.key in object.fields;
 			if (r.key === "served_by") return MACHINE_BOUND || r.key in object.fields;
-			// Credentials and Skills are an agent's own (AGENT_CONFIG); elsewhere only when set.
-			if (r.key === "credentials" || r.key === "skills") return r.key in object.fields;
+			// Credentials, Skills and Tools are an agent's own (AGENT_CONFIG); elsewhere only when set.
+			if (r.key === "credentials" || r.key === "skills" || r.key === "tools") return r.key in object.fields;
+			// Check first belongs to the repeat: the tool run before each occurrence.
+			if (r.key === "check_first") return repeating || r.key in object.fields;
 			if (r.key === "agent") return !AGENTLESS_TYPES[typeKey] || r.key in object.fields;
 			if (r.key === "model") return typeKey === "agent" || r.key in object.fields;
 			return !r.hidden && r.key in object.fields;
@@ -151,6 +157,19 @@
 					return [sk.id, { name: sk.fields["name"]?.stringValue || key || "Skill", key, machines: key ? (working.get(key) ?? []) : [] }];
 				}));
 			} catch { /* skill status is optional context */ }
+		})();
+	});
+
+	// ── The Tool objects the tools row links, so a broken one (its `error`) shows as such ──
+	const toolIdsKey = $derived((plain(object.fields["tools"], "object") as string[]).join(","));
+	let toolsById = $state<Map<string, { name: string; error: string; builtin: boolean }>>(new Map());
+	$effect(() => {
+		const ids = toolIdsKey ? toolIdsKey.split(",") : [];
+		void (async () => {
+			try {
+				const rows = ids.length > 0 ? await fetchAllQuery({ filters: [{ key: "id", condition: "in", value: ids }] }) : [];
+				toolsById = new Map(rows.map((r) => [r.id, { name: fieldStr(r.fields, "name") || "Tool", error: fieldStr(r.fields, "error"), builtin: isBuiltinTool(r.fields) }]));
+			} catch { /* tool status is optional context */ }
 		})();
 	});
 
@@ -255,14 +274,19 @@
 		await onchanged();
 	}
 
-	function toggleEdit(key: string) {
-		editing = editing === key ? null : key;
+	/** A built-in Tool is the harness's to write: nothing on it edits here, nor does a read-only property anywhere. */
+	const locked = $derived(isBuiltinTool(object.fields));
+	const editable = (rel: RelationDefJSON) => !locked && !rel.readOnly;
+
+	function toggleEdit(rel: RelationDefJSON) {
+		if (!editable(rel)) return;
+		editing = editing === rel.key ? null : rel.key;
 	}
 
-	function onRowKey(e: KeyboardEvent, key: string) {
+	function onRowKey(e: KeyboardEvent, rel: RelationDefJSON) {
 		if (e.key === "Enter" || e.key === " ") {
 			e.preventDefault();
-			toggleEdit(key);
+			toggleEdit(rel);
 		}
 	}
 
@@ -294,6 +318,8 @@
 			case "credentials": return { emoji: "🔑" };
 			case "agent": return { emoji: "🤖" };
 			case "skills": return { emoji: "🛠️" };
+			case "tools": return { emoji: "🧰" };
+			case "check_first": return { emoji: "🔎" };
 			case "prompt": return { emoji: "🧠" };
 			case "model": return { emoji: "🧬" };
 		}
@@ -325,6 +351,8 @@
 			case "credentials": return "No credentials";
 			case "agent": return "Add agent";
 			case "skills": return "No skills";
+			case "tools": return "No tools";
+			case "check_first": return "None";
 		}
 		if (rel.format === "status") return "Select option";
 		if (rel.format === "tag") return "Select options";
@@ -360,20 +388,25 @@
 	}
 
 	/** Repeat is a property of the object too: it rows first, only for the
-	    plain objects that can recur. */
-	const canRepeat = $derived(!["channel", "chat", "type", "relation", "template", "query", "set", "collection", "agent"].includes(object.typeKey));
+	    plain objects that can recur. A Tool runs when called, never on a schedule. */
+	const canRepeat = $derived(!["channel", "chat", "type", "relation", "template", "query", "set", "collection", "agent", "tool"].includes(object.typeKey));
 
-	// ── Grouped display: System / Agent / Custom, each a labeled section ──
-	const AGENT_KEYS = new Set(["served_by", "repo_path", "agent", "model", "prompt", "skills", "credentials", "capability"]);
-	const SYSTEM_KEYS = new Set(["done", "due_date", "status", "tag", "description", "url", "email", "phone", "error", "created_date", "modified_date", "createdDate", "modifiedDate"]);
-	type Group = "credential" | "system" | "agent" | "custom";
-	const groupOf = (key: string): Group => (AGENT_KEYS.has(key) ? "agent" : SYSTEM_KEYS.has(key) ? "system" : "custom");
+	// ── Grouped display: System / Tool / Agent / Custom, each a labeled section ──
+	const AGENT_KEYS = new Set(["served_by", "repo_path", "agent", "model", "prompt", "skills", "tools", "credentials", "capability"]);
+	const SYSTEM_KEYS = new Set(["done", "due_date", "status", "tag", "description", "url", "email", "phone", "error", "created_date", "modified_date", "createdDate", "modifiedDate", "check_first"]);
+	const TOOL_KEYS = new Set(["tool_inputs", "tool_builtin"]);
+	type Group = "credential" | "system" | "tool" | "agent" | "custom";
+	const groupOf = (key: string): Group => (AGENT_KEYS.has(key) ? "agent" : SYSTEM_KEYS.has(key) ? "system" : TOOL_KEYS.has(key) ? "tool" : "custom");
 	const groups = $derived.by(() => {
 		const out: Array<{ id: Group; label: string; rows: typeof shown }> = [];
 		// System first, and Repeat first within it: the one row every object shares sits at the very top.
-		for (const [id, label] of [["system", "System"], ["credential", "Credential"], ["agent", "Agent"], ["custom", "Custom"]] as Array<[Group, string]>) {
+		for (const [id, label] of [["system", "System"], ["credential", "Credential"], ["tool", "Tool"], ["agent", "Agent"], ["custom", "Custom"]] as Array<[Group, string]>) {
 			const rows = id === "credential" ? credentialRows : shown.filter((r) => groupOf(r.key) === id);
-			if (id === "system" && canRepeat) rows.unshift({ key: "__repeat__", name: "Repeat" } as unknown as (typeof shown)[number]);
+			if (id === "system" && canRepeat) {
+				// Check first rides right under Repeat: it runs before each occurrence.
+				const at = rows.findIndex((r) => r.key === "check_first");
+				rows.unshift({ key: "__repeat__", name: "Repeat" } as unknown as (typeof shown)[number], ...(at >= 0 ? rows.splice(at, 1) : []));
+			}
 			if (rows.length) out.push({ id, label, rows });
 		}
 		return out;
@@ -388,13 +421,14 @@
 	{:else}
 	{@const v = object.fields[rel.key]}
 	{@const li = leftIcon(rel)}
-	<div class="row-wrap">
+	<div class="row-wrap" class:ro={!editable(rel)}>
 		<div
 			class="row"
 			role="button"
-			tabindex="0"
-			onclick={() => toggleEdit(rel.key)}
-			onkeydown={(e) => onRowKey(e, rel.key)}
+			tabindex={editable(rel) ? 0 : -1}
+			aria-disabled={!editable(rel)}
+			onclick={() => toggleEdit(rel)}
+			onkeydown={(e) => onRowKey(e, rel)}
 		>
 			<span class="row-label">
 				{#if "emoji" in li}
@@ -417,6 +451,7 @@
 						aria-checked={on}
 						role="checkbox"
 						title={rel.name || rel.key}
+						disabled={!editable(rel)}
 						onclick={(e) => { e.stopPropagation(); void saveValue(rel.key, { boolValue: !on }); }}
 					>{on ? "✓" : ""}</button>
 				{:else if rel.format === "tag"}
@@ -482,6 +517,18 @@
 					{:else}
 						<span class="placeholder">{placeholderFor(rel)}</span>
 					{/each}
+				{:else if rel.key === "tools"}
+					{#each plain(v, "object") as string[] as id (id)}
+						{@const tl = toolsById.get(id)}
+						<span class="chip-wrap">
+							<span class="chip" class:warn={!!tl?.error} title={!tl ? "Tool" : tl.error ? `${tl.name} · ${tl.error}` : `${tl.name} · ${tl.builtin ? "built-in tool" : "tool"}`}>
+								<span class="emoji">🧰</span>{tl?.name ?? `${id.slice(0, 8)}…`}
+							</span>
+							<button class="rm" aria-label={`Remove ${tl?.name ?? "tool"}`} title="Remove" onclick={(e) => { e.stopPropagation(); void removeValue(rel.key, id); }}>×</button>
+						</span>
+					{:else}
+						<span class="placeholder">{placeholderFor(rel)}</span>
+					{/each}
 				{:else if rel.format === "object"}
 					{#each plain(v, "object") as string[] as id (id)}
 						{@const o = store.summaries.find((x) => x.id === id)}
@@ -510,7 +557,7 @@
 				{/if}
 			</span>
 		</div>
-		{#if rowRemovable(rel)}
+		{#if rowRemovable(rel) && editable(rel)}
 			<button class="rm row-rm" aria-label={`Remove ${rel.name || rel.key}`} title="Remove property" onclick={(e) => { e.stopPropagation(); void removeProp(rel.key); }}>×</button>
 		{/if}
 		{#if editing === rel.key}
@@ -543,13 +590,15 @@
 {#if editing}
 	<button class="backdrop" aria-label="Close" onclick={() => (editing = null)}></button>
 {/if}
-<button
-	class="add-prop"
-	onclick={(e) => {
-		const r = e.currentTarget.getBoundingClientRect();
-		addPos = { x: r.left, y: r.bottom + 4 };
-	}}
->＋ Add property</button>
+{#if !locked}
+	<button
+		class="add-prop"
+		onclick={(e) => {
+			const r = e.currentTarget.getBoundingClientRect();
+			addPos = { x: r.left, y: r.bottom + 4 };
+		}}
+	>＋ Add property</button>
+{/if}
 {#if addPos}
 	<PropertySuggest
 		x={addPos.x}
@@ -613,6 +662,16 @@
 	}
 	.row:hover {
 		background: var(--hover);
+	}
+	/* Read-only: shown, not editable - no hover, no per-value ×. */
+	.ro .row {
+		cursor: default;
+	}
+	.ro .row:hover {
+		background: none;
+	}
+	.ro .rm {
+		display: none;
 	}
 	.row-label {
 		display: flex;
@@ -737,8 +796,11 @@
 		cursor: pointer;
 		flex: none;
 	}
-	.chk:hover {
+	.chk:hover:not(:disabled) {
 		border-color: var(--accent);
+	}
+	.chk:disabled {
+		cursor: default;
 	}
 	.chk.on {
 		background: var(--accent);

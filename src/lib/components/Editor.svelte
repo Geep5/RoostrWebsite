@@ -22,7 +22,16 @@
 	import type { RelationDefJSON } from "$lib/types";
 	import { getProcessorByUrl, getEmbedUrl, isSingleUrl, type EmbedProcessor } from "$lib/embed";
 
-	let { object, onchanged }: { object: ObjectJSON; onchanged: () => Promise<void> } = $props();
+	let {
+		object,
+		onchanged,
+		readonly = false,
+	}: {
+		object: ObjectJSON;
+		onchanged: () => Promise<void>;
+		/** Show the body, never edit it: no caret, menus, selection or undo (a built-in Tool's body is the harness's). */
+		readonly?: boolean;
+	} = $props();
 
 	/** Every write this editor makes, in the order it made them (lib/editor/write-queue). */
 	const writeQueue = createWriteQueue();
@@ -192,6 +201,7 @@
 	}
 
 	function onEditorContextMenu(e: MouseEvent) {
+		if (readonly) return;
 		const hit = misspelledAt(e.clientX, e.clientY);
 		if (hit) {
 			e.preventDefault();
@@ -319,7 +329,7 @@
 	}
 
 	function selMouseDown(e: MouseEvent) {
-		if (e.button !== 0) return;
+		if (e.button !== 0 || readonly) return;
 		const t = e.target as HTMLElement;
 		const blockDiv = t.closest("[data-block]");
 		if (blockDiv && (e.shiftKey || e.metaKey || e.ctrlKey)) {
@@ -429,7 +439,7 @@
 	/** Arm from the page margins around the editor (Anytype's provider wraps
 	 *  the whole window, so margin drags select too). */
 	function marginMouseDown(e: MouseEvent) {
-		if (e.button !== 0 || !editorEl || dragSel) return;
+		if (e.button !== 0 || readonly || !editorEl || dragSel) return;
 		const t = e.target as HTMLElement;
 		if (editorEl.contains(t)) return; // the editor's own handler owns this
 		// The page margins live in the content column around the article
@@ -447,6 +457,7 @@
 	}
 
 	async function onWindowKeydown(e: KeyboardEvent) {
+		if (readonly) return;
 		// Editor-wide undo/redo; the browser's own contenteditable undo would
 		// fight the page state, so it never runs here.
 		const mod = e.metaKey || e.ctrlKey;
@@ -684,7 +695,7 @@
 	async function onKeydown(e: KeyboardEvent, id: string) {
 		// An input method is composing (Japanese, Chinese, Korean, dictation,
 		// some autocorrect): its Enter commits the candidate, it never splits.
-		if (composing || e.isComposing || e.keyCode === 229) return;
+		if (readonly || composing || e.isComposing || e.keyCode === 229) return;
 		const latched = (e.key === "Enter" && !e.shiftKey) || e.key === "Tab";
 		// The DOM calls this and drops the promise, so a throw in here would be
 		// an invisible dead keystroke. Surface it.
@@ -1240,6 +1251,7 @@
 	// ── URL paste (Anytype editor/page.tsx onPasteUrl) ───────────
 
 	function onPasteText(e: ClipboardEvent, id: string) {
+		if (readonly) return;
 		const text = e.clipboardData?.getData("text/plain") ?? "";
 		if (!isSingleUrl(text)) return; // ordinary paste
 		e.preventDefault();
@@ -1361,6 +1373,7 @@
 
 	// ── Marks toolbar ─────────────────────────────────────────────
 	function onSelect(id: string) {
+		if (readonly) return;
 		const el = blockEl(id);
 		if (!el) return;
 		const sel = selectionOffsets(el);
@@ -1601,6 +1614,7 @@
 
 	/** Empty-toggle placeholder click: create + focus the first child. */
 	async function onEmptyToggle(id: string) {
+		if (readonly) return;
 		const innerId = crypto.randomUUID();
 		await writes.blockAdd(object.id, { id: innerId, childrenIds: [], content: { text: { text: "", style: Style.PARAGRAPH } } }, id, Pos.INNER_FIRST);
 		focusRequest = { blockId: innerId, offset: 0 };
@@ -1608,6 +1622,7 @@
 	}
 
 	async function toggleChecked(id: string, checked: boolean) {
+		if (readonly) return;
 		const cur = byId.get(id)!.content.text!;
 		const el = blockEl(id);
 		const { text, marks } = el ? fromDom(el) : { text: cur.text, marks: cur.marks ?? [] };
@@ -1661,6 +1676,7 @@
 	let blockMenu = $state<{ blockId: string; x: number; y: number; group: string[] | null } | null>(null);
 
 	function openBlockMenu(id: string, x: number, y: number) {
+		if (readonly) return;
 		toolbar = null;
 		slash = null;
 		// Opened on a block inside a multi-selection: styling ops apply to
@@ -1862,6 +1878,7 @@
 
 <div
 	class="editor"
+	class:readonly
 	role="presentation"
 	bind:this={editorEl}
 	onbeforeinput={onBeforeInput}
@@ -1872,7 +1889,7 @@
 	ondragover={onEditorDragOver}
 	ondrop={(e) => void onEditorDrop(e)}
 	onclick={(e) => {
-		if (e.target === e.currentTarget && !selectedIds.length) onBackgroundClick(e.clientY);
+		if (!readonly && e.target === e.currentTarget && !selectedIds.length) onBackgroundClick(e.clientY);
 	}}
 >
 	{#each rootIds as id (id)}
@@ -1880,6 +1897,7 @@
 			{id}
 			{byId}
 			{object}
+			{readonly}
 			{draggingId}
 			{dropHint}
 			selectedIds={selectedSet}
@@ -1899,7 +1917,7 @@
 			onpaste={onPasteText}
 		/>
 	{/each}
-	{#if rootIds.length === 0}
+	{#if rootIds.length === 0 && !readonly}
 		<button class="empty-hint" onclick={() => void appendBlock()}>Click to start writing…</button>
 	{/if}
 </div>
@@ -1985,6 +2003,13 @@
 		min-height: 240px;
 		padding-bottom: 120px;
 		cursor: text;
+	}
+	/* Read-only: nothing to grab or drag. */
+	.editor.readonly {
+		cursor: default;
+	}
+	.editor.readonly :global(.handle) {
+		display: none;
 	}
 	.empty-hint {
 		margin-left: 48px;

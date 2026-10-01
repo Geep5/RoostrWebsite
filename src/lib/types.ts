@@ -242,18 +242,26 @@ export function guestAgents(fields: Record<string, ValueJSON>): string[] {
 	return (v.valuesValue?.items ?? []).flatMap((i) => (i.stringValue ? [i.stringValue] : i.linkValue?.targetId ? [i.linkValue.targetId] : []));
 }
 
-export type RepeatFreq = "day" | "week" | "month" | "year";
+/** A Tool object the harness writes and keeps current (`tool_builtin`): read-only here. */
+export function isBuiltinTool(fields: Record<string, ValueJSON>): boolean {
+	return fields["tool_builtin"]?.boolValue === true;
+}
+
+export type RepeatFreq = "minute" | "hour" | "day" | "week" | "month" | "year";
 
 /** `repeat_set` rule params. `anchor_ms` (epoch ms on the day the cadence counts from) defaults to today. */
 export interface RepeatRuleJSON {
 	freq: RepeatFreq;
+	/** 1..999; hour: 1..23. Minute/hour: the spacing of the day's grid. */
 	interval: number;
-	/** 0 = Sun … 6 = Sat. Weekly only. */
+	/** 0 = Sun … 6 = Sat. Weekly: which days. Minute/hour: only these days, [] = every day. */
 	weekdays: number[];
 	/** Monthly only: same calendar day, or same "2nd Tuesday". */
 	monthly: "date" | "weekday";
-	/** Minutes after local midnight. */
-	time: number;
+	/** Day/week/month/year: minutes after local midnight, one occurrence each on every day it runs; [] for minute/hour. */
+	times: number[];
+	/** Minute/hour: the grid runs from..until (minutes after local midnight, inclusive) each day; absent = the whole day. */
+	window?: [number, number];
 	/** IANA zone the rule was written in (informational). */
 	tz: string;
 	anchor_ms?: number;
@@ -273,26 +281,33 @@ export interface RepeatJSON extends Omit<RepeatRuleJSON, "anchor_ms"> {
 	last_run?: { at: number; machine: string; conversation: string; error?: string };
 }
 
-const REPEAT_FREQS: readonly string[] = ["day", "week", "month", "year"];
+const REPEAT_FREQS: readonly string[] = ["minute", "hour", "day", "week", "month", "year"];
 
 export function repeatOf(fields: Record<string, ValueJSON>): RepeatJSON | null {
 	const e = fields["repeat"]?.mapValue?.entries;
 	if (!e) return null;
 	const int = (v: ValueJSON | undefined) => (typeof v?.intValue === "number" ? v.intValue : undefined);
 	const str = (v: ValueJSON | undefined) => (typeof v?.stringValue === "string" ? v.stringValue : undefined);
+	const ints = (v: ValueJSON | undefined) => (v?.valuesValue?.items ?? []).map(int).filter((n): n is number => n !== undefined);
 	const freq = str(e["freq"]);
-	const time = int(e["time"]);
 	const anchor = int(e["anchor"]);
 	const next = int(e["next"]);
-	if (!freq || !REPEAT_FREQS.includes(freq) || time === undefined || anchor === undefined || next === undefined) return null;
+	if (!freq || !REPEAT_FREQS.includes(freq) || anchor === undefined || next === undefined) return null;
+	const subDaily = freq === "minute" || freq === "hour";
+	// Rules stored before `times` carry a single `time`.
+	const legacy = int(e["time"]);
+	const times = e["times"] ? ints(e["times"]) : legacy !== undefined ? [legacy] : [];
+	if (!subDaily && times.length === 0) return null;
+	const span = ints(e["window"]);
 	const run = e["last_run"]?.mapValue?.entries;
 	const runAt = run && int(run["at"]);
 	return {
 		freq: freq as RepeatFreq,
 		interval: int(e["interval"]) ?? 1,
-		weekdays: (e["weekdays"]?.valuesValue?.items ?? []).map(int).filter((d): d is number => d !== undefined),
+		weekdays: ints(e["weekdays"]),
 		monthly: str(e["monthly"]) === "weekday" ? "weekday" : "date",
-		time,
+		times,
+		window: subDaily && span.length === 2 ? [span[0], span[1]] : undefined,
 		tz: str(e["tz"]) ?? "",
 		anchor,
 		next,

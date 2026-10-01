@@ -15,10 +15,13 @@
 	let {
 		block,
 		object,
+		readonly,
 		onrefresh,
 	}: {
 		block: { content: { custom?: { meta?: Record<string, string> } } };
 		object: ObjectJSON;
+		/** The value shows; its editor never opens. */
+		readonly: boolean;
 		onrefresh: () => void | Promise<void>;
 	} = $props();
 
@@ -29,7 +32,8 @@
 {#if rel}
 	<div class="relation">
 		<span class="rel-name" title={rel.format}>{rel.name || rel.key}</span>
-		<div class="rel-value">
+		<!-- Read-only: the value shows, its editor never opens. -->
+		<div class="rel-value" inert={readonly}>
 			<PropertyValue
 				{rel}
 				value={object.fields[key]}

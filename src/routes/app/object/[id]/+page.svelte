@@ -4,7 +4,7 @@
 	import { page } from "$app/state";
 	import { goto } from "$app/navigation";
 	import type { ObjectJSON } from "$lib/types";
-	import { fieldStr } from "$lib/types";
+	import { fieldStr, isBuiltinTool } from "$lib/types";
 	import { engineFiltersOf, repeatFilterOf, servingFiltersOf, spaceFilterOf } from "$lib/filters";
 	import { spaceRelations } from "$lib/relations";
 	import { fetchObject, fetchQuery, note } from "$lib/api";
@@ -181,6 +181,8 @@
 	const isType = $derived(object?.typeKey === "type");
 	const isTemplate = $derived(object?.typeKey === "template");
 	const isRelation = $derived(object?.typeKey === "relation");
+	/** The harness writes a built-in Tool's page from the code that runs: shown, never edited. */
+	const builtinTool = $derived(!!object && isBuiltinTool(object.fields));
 
 	/** A template renders with its TARGET type's layout (so a task template shows the checkbox). */
 	const effectiveTypeKey = $derived.by(() => {
@@ -429,7 +431,8 @@
 				<button
 					class="obj-emoji"
 					class:placeholder={!object.fields["iconEmoji"]?.stringValue}
-					title="Set icon"
+					title={builtinTool ? "" : "Set icon"}
+					disabled={builtinTool}
 					onclick={() => (showEmoji = !showEmoji)}
 				>
 					{#if object.fields["iconImage"]?.stringValue}
@@ -461,6 +464,7 @@
 				class="title"
 				placeholder="Untitled"
 				rows="1"
+				readonly={builtinTool}
 				bind:value={nameDraft}
 				bind:this={titleEl}
 				oninput={() => {
@@ -481,6 +485,9 @@
 		<ObjectMeta {object} />
 		{#if isTemplate}
 			<p class="tpl-note">Template{templateTargetName ? ` of ${templateTargetName}` : ""} — new objects copy these blocks.</p>
+		{/if}
+		{#if builtinTool}
+			<p class="tpl-note">Built-in tool — its computer's harness writes this page from the code that runs; it is read-only here.</p>
 		{/if}
 		{#if isChannel}
 			<SpaceManage {object} {spaceInfo} onchanged={refresh} />
@@ -586,7 +593,7 @@
 				{/if}
 			</div>
 		{:else}
-			<Editor bind:this={editor} {object} onchanged={refresh} />
+			<Editor bind:this={editor} {object} readonly={builtinTool} onchanged={refresh} />
 		{/if}
 
 	</article>
@@ -675,8 +682,12 @@
 		align-items: center;
 		justify-content: center;
 	}
-	.obj-emoji:hover {
+	.obj-emoji:hover:not(:disabled) {
 		background: var(--hover);
+	}
+	.obj-emoji:disabled {
+		cursor: default;
+		color: inherit;
 	}
 	.obj-emoji.placeholder {
 		color: var(--muted);

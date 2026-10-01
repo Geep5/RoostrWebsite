@@ -14,6 +14,7 @@
 		id,
 		byId,
 		object,
+		readonly,
 		draggingId,
 		dropHint,
 		selectedIds,
@@ -32,6 +33,8 @@
 		id: string;
 		byId: Map<string, BlockJSON>;
 		object: ObjectJSON;
+		/** Shown, never edited: no caret, and nothing that writes. */
+		readonly: boolean;
 		draggingId: string;
 		/** Resolved drop target for the whole document (Anytype's hoverData). */
 		dropHint: { id: string; position: number; bot?: boolean } | null;
@@ -134,13 +137,13 @@
 	{#if block.content.layout?.style === Layout.ROW}
 		<div class="row" style="grid-template-columns: {block.childrenIds.map(widthOf).join(' ')}">
 			{#each block.childrenIds as cid (cid)}
-				<BlockNode id={cid} {byId} {object} {draggingId} {dropHint} {selectedIds} {onkeydown} {oninput} {onblur} {onselect} {ondragbegin} {ondrop} {ontogglecheck} {onmenu} {onrefresh} {onpaste} {onemptytoggle} />
+				<BlockNode id={cid} {byId} {object} {readonly} {draggingId} {dropHint} {selectedIds} {onkeydown} {oninput} {onblur} {onselect} {ondragbegin} {ondrop} {ontogglecheck} {onmenu} {onrefresh} {onpaste} {onemptytoggle} />
 			{/each}
 		</div>
 	{:else if block.content.layout?.style === Layout.COLUMN}
 		<div class="col">
 			{#each block.childrenIds as cid (cid)}
-				<BlockNode id={cid} {byId} {object} {draggingId} {dropHint} {selectedIds} {onkeydown} {oninput} {onblur} {onselect} {ondragbegin} {ondrop} {ontogglecheck} {onmenu} {onrefresh} {onpaste} {onemptytoggle} />
+				<BlockNode id={cid} {byId} {object} {readonly} {draggingId} {dropHint} {selectedIds} {onkeydown} {oninput} {onblur} {onselect} {ondragbegin} {ondrop} {ontogglecheck} {onmenu} {onrefresh} {onpaste} {onemptytoggle} />
 			{/each}
 		</div>
 	{:else if block.content.table}
@@ -171,7 +174,7 @@
 					<svg viewBox="0 0 2 12" fill="none" xmlns="http://www.w3.org/2000/svg"><path fill-rule="evenodd" clip-rule="evenodd" d="M0 1C0 0.447716 0.447715 0 1 0C1.55228 0 2 0.447716 2 1C2 1.55228 1.55228 2 1 2C0.447715 2 0 1.55228 0 1ZM0 6C0 5.44772 0.447715 5 1 5C1.55228 5 2 5.44772 2 6C2 6.55228 1.55228 7 1 7C0.447715 7 0 6.55228 0 6ZM1 10C0.447715 10 0 10.4477 0 11C0 11.5523 0.447715 12 1 12C1.55228 12 2 11.5523 2 11C2 10.4477 1.55228 10 1 10Z" fill="currentColor" /></svg>
 				</button>
 			</div>
-			<TableBlock {block} {byId} objectId={object.id} {onrefresh} {oninput} {onblur} />
+			<TableBlock {block} {byId} objectId={object.id} {readonly} {onrefresh} {oninput} {onblur} />
 		</div>
 	{:else if block.content.text}
 		{@const t = block.content.text}
@@ -213,8 +216,8 @@
 				<!-- Anytype's circular checkbox: outlined circle → accent-filled circle + white check. -->
 				<button
 					class="check-circle"
-					class:on={t.checked ?? false}
 					aria-label={t.checked ? "Mark undone" : "Mark done"}
+					disabled={readonly}
 					onclick={() => ontogglecheck(block.id, !(t.checked ?? false))}
 				>
 					{#if t.checked}
@@ -250,7 +253,7 @@
 				aria-multiline="false"
 				class="text {STYLE_CLASS[t.style] ?? 'p'} {t.checked && t.style === Style.CHECKBOX ? 'done' : ''}"
 				style="{t.color ? `color:${t.color};` : ''}{block.align ? `text-align:${['left', 'center', 'right', 'justify'][block.align]};` : ''}"
-				contenteditable="true"
+				contenteditable={readonly ? undefined : "true"}
 				bind:this={textEl}
 				onkeydown={(e) => onkeydown(e, block.id)}
 				onpaste={(e) => onpaste(e, block.id)}
@@ -268,13 +271,13 @@
 			{#if block.childrenIds.length > 0 && (!isToggle || toggleOpen)}
 				<div class="nested">
 					{#each block.childrenIds as cid (cid)}
-						<BlockNode id={cid} {byId} {object} {draggingId} {dropHint} {selectedIds} {onkeydown} {oninput} {onblur} {onselect} {ondragbegin} {ondrop} {ontogglecheck} {onmenu} {onrefresh} {onpaste} {onemptytoggle} />
+						<BlockNode id={cid} {byId} {object} {readonly} {draggingId} {dropHint} {selectedIds} {onkeydown} {oninput} {onblur} {onselect} {ondragbegin} {ondrop} {ontogglecheck} {onmenu} {onrefresh} {onpaste} {onemptytoggle} />
 					{/each}
 				</div>
 				<!-- Anytype targetBot (block/index.tsx:1219): a thin strip below
 				     the children; dropping here lands AFTER this whole subtree. -->
 				<div class="bot-strip" class:over={zone === 12} data-drop-bot={block.id}></div>
-			{:else if isToggle && toggleOpen && block.childrenIds.length === 0}
+			{:else if isToggle && toggleOpen && block.childrenIds.length === 0 && !readonly}
 				<!-- Anytype .emptyToggle: muted hint, click creates the first child. -->
 				<button class="empty-toggle" onclick={() => onemptytoggle(block.id)}>Empty toggle. Click or drop Block inside</button>
 			{/if}
@@ -346,7 +349,7 @@
 					<svg viewBox="0 0 2 12" fill="none" xmlns="http://www.w3.org/2000/svg"><path fill-rule="evenodd" clip-rule="evenodd" d="M0 1C0 0.447716 0.447715 0 1 0C1.55228 0 2 0.447716 2 1C2 1.55228 1.55228 2 1 2C0.447715 2 0 1.55228 0 1ZM0 6C0 5.44772 0.447715 5 1 5C1.55228 5 2 5.44772 2 6C2 6.55228 1.55228 7 1 7C0.447715 7 0 6.55228 0 6ZM1 10C0.447715 10 0 10.4477 0 11C0 11.5523 0.447715 12 1 12C1.55228 12 2 11.5523 2 11C2 10.4477 1.55228 10 1 10Z" fill="currentColor" /></svg>
 				</button>
 			</div>
-			<RelationBlock {block} {object} {onrefresh} />
+			<RelationBlock {block} {object} {readonly} {onrefresh} />
 		</div>
 	{:else if block.content.custom?.contentType === "embed" || block.content.custom?.contentType === "bookmark" || block.content.custom?.contentType === "file"}
 		{@const meta = block.content.custom.meta ?? {}}
@@ -466,7 +469,7 @@
 			{#if block.childrenIds.length > 0}
 				<div class="nested">
 					{#each block.childrenIds as cid (cid)}
-						<BlockNode id={cid} {byId} {object} {draggingId} {dropHint} {selectedIds} {onkeydown} {oninput} {onblur} {onselect} {ondragbegin} {ondrop} {ontogglecheck} {onmenu} {onrefresh} {onpaste} {onemptytoggle} />
+						<BlockNode id={cid} {byId} {object} {readonly} {draggingId} {dropHint} {selectedIds} {onkeydown} {oninput} {onblur} {onselect} {ondragbegin} {ondrop} {ontogglecheck} {onmenu} {onrefresh} {onpaste} {onemptytoggle} />
 					{/each}
 				</div>
 			{/if}
@@ -656,7 +659,7 @@
 	.h3 { font-size: 18px; font-weight: 600; line-height: 1.3; }
 	.title { font-size: 34px; font-weight: 750; }
 	.quote { border-left: 3px solid var(--accent); padding-left: 12px; font-style: italic; }
-	.codeblock { font-family: ui-monospace, monospace; background: var(--panel); border-radius: 6px; padding: 8px 10px; font-size: 13px; }
+	.codeblock { font-family: ui-monospace, monospace; background: var(--panel); border-radius: 6px; padding: 8px 10px; font-size: 13px; tab-size: 4; }
 	.callout { background: var(--panel); border-radius: 8px; padding: 10px 12px; }
 	.description { color: var(--muted); }
 	/* Checked text dims (Anytype), no strikethrough. */

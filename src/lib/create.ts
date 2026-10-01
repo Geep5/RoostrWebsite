@@ -7,7 +7,7 @@
 import { goto } from "$app/navigation";
 import { fetchAllQuery, fetchObject, note } from "$lib/api";
 import { thisMachineId } from "$lib/capability-actions";
-import { guestAgents, type ValueJSON } from "$lib/types";
+import { guestAgents, isBuiltinTool, type ValueJSON } from "$lib/types";
 import { agentLinksValue } from "$lib/agent-field";
 import { typeIcon } from "$lib/icons";
 import { store } from "$lib/data.svelte";
@@ -109,9 +109,12 @@ async function createAgent(channelId: string, name = ""): Promise<string> {
 	return agentId;
 }
 
+/** The built-in Tools (by callable name) a new agent gets when its template sets none. */
+const DEFAULT_TOOLS = ["shell_exec", "web_fetch"];
+
 /**
  * A new agent in the space, from the agent type's default template there
- * (its model, prompt, skills, credentials, computer), else pointed at the
+ * (its model, prompt, skills, tools, credentials, computer), else pointed at the
  * space's "Assistant" prompt. Stays where you are - for pickers that link it.
  */
 export async function newAgent(channelId: string, name = ""): Promise<string> {
@@ -121,13 +124,17 @@ export async function newAgent(channelId: string, name = ""): Promise<string> {
 		? undefined
 		: (await fetchAllQuery({ type: "system_prompt", filters: [{ key: "channel", condition: "equal", value: channelId }] }))
 			.find((r) => r.fields["name"]?.stringValue === "Assistant");
-	// A normal agent can run commands and fetch the web: those are the
-	// grant skills (skill.grants), listed unless its template says otherwise.
-	const grants = tpl?.fields["skills"] ? [] : (await fetchAllQuery({ type: "skill" })).filter((r) => r.fields["grants"]?.stringValue);
+	// A normal agent can run commands and fetch the web: those are its
+	// space's built-in shell_exec and web_fetch Tools, linked unless its
+	// template sets Tools.
+	const tools = tpl?.fields["tools"]
+		? []
+		: (await fetchAllQuery({ type: "tool", filters: [{ key: "channel", condition: "equal", value: channelId }] }))
+			.filter((r) => isBuiltinTool(r.fields) && DEFAULT_TOOLS.includes(r.fields["name"]?.stringValue ?? ""));
 	const { id: agentId } = await note.create(name.trim() || "New agent", "agent", {
 		...channelField(channelId),
 		...(assistant ? { prompt: { linkValue: { targetId: assistant.id, relationKey: "prompt" } } } : {}),
-		...(grants.length ? { skills: { valuesValue: { items: grants.map((g) => ({ linkValue: { targetId: g.id, relationKey: "skills" } })) } } } : {}),
+		...(tools.length ? { tools: { valuesValue: { items: tools.map((t) => ({ linkValue: { targetId: t.id, relationKey: "tools" } })) } } } : {}),
 	});
 	if (tpl) await applyTemplate(agentId, tpl.id);
 	return agentId;

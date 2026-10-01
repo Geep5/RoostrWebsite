@@ -17,8 +17,14 @@ export interface RepeatDraft {
 	weekdays: number[];
 	monthly: "date" | "weekday";
 	anchor: number;
-	time: number;
+	/** Day/week/month/year: the day's occurrence times (minutes after local midnight). */
+	times: number[];
+	/** Minute/hour: the hours the grid runs in; null = the whole day. */
+	window: [number, number] | null;
 }
+
+export const DAY_MINUTES = 1440;
+export const isSubDaily = (freq: RepeatFreq) => freq === "minute" || freq === "hour";
 
 export const sod = (ms: number) => {
 	const d = new Date(ms);
@@ -36,18 +42,45 @@ export const ordinalOf = (ms: number) => {
 	return d.getDate() + 7 > lastOfMonth ? 5 : n;
 };
 export const suffix = (n: number) => (n % 10 === 1 && n !== 11 ? "st" : n % 10 === 2 && n !== 12 ? "nd" : n % 10 === 3 && n !== 13 ? "rd" : "th");
+/** Times as the engine stores them: ascending, each once. */
+export const sortedTimes = (times: number[]) => [...new Set(times)].sort((a, b) => a - b);
 
-export const toDraft = (r: RepeatJSON): RepeatDraft => ({ freq: r.freq, interval: r.interval, weekdays: [...r.weekdays], monthly: r.monthly, anchor: dayToLocal(r.anchor), time: r.time });
+/** A rule that runs more than once on a day, so "when next" needs the time, not just the date. */
+export const manyADay = (r: { freq: RepeatFreq; times: number[] }) => isSubDaily(r.freq) || r.times.length > 1;
+
+export const toDraft = (r: RepeatJSON): RepeatDraft => ({
+	freq: r.freq,
+	interval: r.interval,
+	weekdays: [...r.weekdays],
+	monthly: r.monthly,
+	anchor: dayToLocal(r.anchor),
+	// A minute/hour rule has no times; switching it to daily starts from 9:00.
+	times: r.times.length ? [...r.times] : [9 * 60],
+	// The engine stores the whole day as [0, 1439]: that is no window.
+	window: r.window && (r.window[0] > 0 || r.window[1] < DAY_MINUTES - 1) ? [r.window[0], r.window[1]] : null,
+});
+
+/** "Mon–Fri" for a run of three or more days, else "Mon, Wed". */
+function dayList(weekdays: number[]): string {
+	const wd = [...new Set(weekdays)].sort((a, b) => a - b);
+	const run = wd.length >= 3 && wd.every((x, i) => i === 0 || x === wd[i - 1] + 1);
+	return run ? `${WD[wd[0]]}–${WD[wd[wd.length - 1]]}` : wd.map((x) => WD[x]).join(", ");
+}
 
 export function describeDraft(d: RepeatDraft): string {
 	const every = d.interval === 1 ? "Every" : `Every ${d.interval}`;
 	const unit = d.interval === 1 ? d.freq : `${d.freq}s`;
+	if (isSubDaily(d.freq)) {
+		const days = d.weekdays.length ? ` on ${dayList(d.weekdays)}` : "";
+		const span = d.window ? `, ${fmtTime(d.window[0])}–${fmtTime(d.window[1])}` : "";
+		return `${every} ${unit}${days}${span}`;
+	}
 	const anchor = new Date(d.anchor);
 	let s: string;
 	if (d.freq === "week") {
 		const wd = [...d.weekdays].sort();
 		if (wd.length === 5 && wd.join() === "1,2,3,4,5" && d.interval === 1) s = "Every weekday";
-		else s = `${every} ${unit} on ${wd.length ? wd.map((x) => WD[x]).join(", ") : WD[anchor.getDay()]}`;
+		else s = `${every} ${unit} on ${wd.length ? dayList(wd) : WD[anchor.getDay()]}`;
 	} else if (d.freq === "month") {
 		s =
 			d.monthly === "weekday"
@@ -58,10 +91,11 @@ export function describeDraft(d: RepeatDraft): string {
 	} else {
 		s = `${every} ${unit}`;
 	}
-	return `${s} at ${fmtTime(d.time)}`;
+	return `${s} at ${sortedTimes(d.times).map(fmtTime).join(", ")}`;
 }
 
-/** A table cell's words: the rule and when it next runs. */
+/** A table cell's words: the rule and when it next runs (with the time when it runs more than once a day). */
 export function describeRepeat(rule: RepeatJSON): string {
-	return `${describeDraft(toDraft(rule))} · next ${fmt(rule.next)}`;
+	const when = manyADay(rule) ? `${fmt(rule.next)}, ${new Date(rule.next).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })}` : fmt(rule.next);
+	return `${describeDraft(toDraft(rule))} · next ${when}`;
 }
