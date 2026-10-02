@@ -1596,7 +1596,27 @@
 		return false;
 	}
 
+	/** A drag carrying files from outside (Finder, another tab), not one of our blocks. */
+	const carriesFiles = (e: DragEvent) => !draggingId && !!e.dataTransfer?.types.includes("Files");
+	let fileDrag = false;
+
 	function onEditorDragOver(e: DragEvent) {
+		if (carriesFiles(e)) {
+			e.preventDefault();
+			if (readonly) {
+				if (e.dataTransfer) e.dataTransfer.dropEffect = "none";
+				return;
+			}
+			if (e.dataTransfer) e.dataTransfer.dropEffect = "copy";
+			if (!fileDrag) {
+				fileDrag = true;
+				buildDragRects();
+			}
+			const hit = resolveDrop(e.clientX, e.clientY);
+			dropHint = hit;
+			if (hit) lastValidDrop = { id: hit.id, position: hit.position };
+			return;
+		}
 		if (!draggingId) return;
 		e.preventDefault();
 		dragPoint = { x: e.clientX, y: e.clientY };
@@ -1604,6 +1624,34 @@
 		dropHint = hit;
 		if (hit) lastValidDrop = { id: hit.id, position: hit.position };
 		if (!dragScrollTimer) dragScrollTimer = setTimeout(dragScrollTick, 50);
+	}
+
+	/** Files dragged out of the page again: drop the hint. */
+	function onEditorDragLeave(e: DragEvent) {
+		if (!fileDrag || (e.relatedTarget instanceof Node && editorEl?.contains(e.relatedTarget))) return;
+		fileDrag = false;
+		dragRects = [];
+		dropHint = null;
+		lastValidDrop = null;
+	}
+
+	/** Dropped files become File blocks at the drop line, in the order dropped. */
+	async function dropFiles(files: File[], targetId: string, position: number) {
+		if (!isLocalBackend) {
+			alert(FILES_NEED_LOCAL);
+			return;
+		}
+		// A file never nests inside a text block: "inside" drops land below it.
+		const at = position === Pos.INNER_FIRST || position === Pos.INNER ? Pos.BOTTOM : position;
+		let prev = "";
+		for (const file of files) {
+			const content = await fileContent(file);
+			if (!content) break;
+			const id = crypto.randomUUID();
+			await writes.blockAdd(object.id, { id, childrenIds: [], content }, prev || targetId, prev ? Pos.BOTTOM : at);
+			prev = id;
+		}
+		await refresh();
 	}
 
 	/** scrollOnMove: crawl the document while the pointer sits at an edge. */
@@ -1634,6 +1682,19 @@
 	}
 
 	async function onEditorDrop(e: DragEvent) {
+		if (fileDrag || carriesFiles(e)) {
+			e.preventDefault();
+			const hint = dropHint ?? lastValidDrop;
+			fileDrag = false;
+			dragRects = [];
+			dropHint = null;
+			lastValidDrop = null;
+			const files = [...(e.dataTransfer?.files ?? [])];
+			const target = hint?.id ?? rootIds[rootIds.length - 1];
+			if (readonly || files.length === 0 || !target) return;
+			await dropFiles(files, target, hint?.position ?? Pos.BOTTOM);
+			return;
+		}
 		if (!draggingId) return;
 		e.preventDefault();
 		// The pointer can be between targets on the frame the drop lands, so
@@ -1926,6 +1987,7 @@
 	oncontextmenucapture={onEditorContextMenu}
 	onmousedown={selMouseDown}
 	ondragover={onEditorDragOver}
+	ondragleave={onEditorDragLeave}
 	ondrop={(e) => void onEditorDrop(e)}
 	onclick={(e) => {
 		if (!readonly && e.target === e.currentTarget && !selectedIds.length) onBackgroundClick(e.clientY);

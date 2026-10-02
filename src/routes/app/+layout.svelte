@@ -1489,7 +1489,20 @@
 {/if}
 {/if}
 
-<svelte:window onkeydown={onGlobalKeydown} />
+<!-- A file dropped anywhere a page isn't listening must not make the browser
+     open it in place of the app (pages catch their own drops first). -->
+<svelte:window
+	onkeydown={onGlobalKeydown}
+	ondragover={(e) => {
+		if (e.dataTransfer?.types.includes("Files") && !e.defaultPrevented) {
+			e.preventDefault();
+			e.dataTransfer.dropEffect = "none";
+		}
+	}}
+	ondrop={(e) => {
+		if (e.dataTransfer?.types.includes("Files")) e.preventDefault();
+	}}
+/>
 
 <style>
 	:global(:root) {
