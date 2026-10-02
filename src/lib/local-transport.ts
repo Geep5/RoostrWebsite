@@ -5,13 +5,20 @@
  * after 24 hours and dies with the daemon's in-memory session table on a
  * daemon restart; origin binding and the 0600 service-token anchor are
  * unchanged.
+ *
+ * Two ways in: the local build pairs with the daemon's one-use code; the
+ * hosted app (roostr.space) proves it holds the vault owner key by signing a
+ * one-use challenge the harness issued to this origin (pairWithOwnerKey).
  */
+import { finalizeEvent } from "nostr-tools";
 export interface PairedSession { token: string; expiresAt: number; role: "ui" }
 const SESSION_KEY = "roostr-local-pairing";
 const listeners = new Set<() => void>();
 let expiryTimer: ReturnType<typeof setTimeout> | undefined;
 export const LOCAL_API = "http://127.0.0.1:7333";
 const HARNESS_API = "http://127.0.0.1:7334";
+/** NIP-98 HTTP auth: the harness accepts exactly this kind for owner pairing. */
+const OWNER_PAIR_KIND = 27235;
 export class PairingError extends Error {
 	constructor(message = "Pair this browser with your local daemon first.") { super(message); this.name = "PairingError"; }
 }
@@ -44,6 +51,16 @@ export function unpairLocal(): void {
 	if (typeof localStorage !== "undefined") localStorage.removeItem(SESSION_KEY);
 	notify();
 }
+/** Keep a session the daemon minted, after checking its shape. */
+function storeSession(value: { token?: unknown; expiresAt?: unknown; role?: unknown }): void {
+	const { token, expiresAt } = value;
+	if (typeof token !== "string" || !/^[a-f0-9]{64}$/i.test(token) || value.role !== "ui" || typeof expiresAt !== "number" || !Number.isFinite(expiresAt) || expiresAt <= Date.now()) {
+		throw new PairingError("The daemon returned an invalid pairing session.");
+	}
+	localStorage.setItem(SESSION_KEY, JSON.stringify({ token, expiresAt, role: "ui" }));
+	scheduleExpiry(expiresAt);
+	notify();
+}
 export async function pairLocal(code: string): Promise<void> {
 	if (!code.trim()) throw new PairingError("Enter the one-use code printed in your daemon terminal.");
 	const response = await fetch(`${LOCAL_API}/api/pair`, {
@@ -51,12 +68,33 @@ export async function pairLocal(code: string): Promise<void> {
 		body: JSON.stringify({ code: code.trim() }), credentials: "omit", redirect: "error",
 	});
 	if (!response.ok) throw new PairingError("Pairing failed. The code may have expired or already been used; obtain a new code from the daemon terminal.");
-	const value = await response.json();
-	const expiresAt = value.expiresAt;
-	if (!/^[a-f0-9]{64}$/i.test(value.token ?? "") || value.role !== "ui" || !Number.isFinite(expiresAt) || expiresAt <= Date.now()) throw new PairingError("The daemon returned an invalid pairing session.");
-	localStorage.setItem(SESSION_KEY, JSON.stringify({ token: value.token, expiresAt, role: "ui" }));
-	scheduleExpiry(expiresAt);
-	notify();
+	storeSession(await response.json());
+}
+/**
+ * Pair by proof of ownership: the harness issues a one-use challenge bound to
+ * this origin, `secretKey` (the vault owner key this tab already signs with)
+ * signs it together with the origin and endpoint, and the harness - only if
+ * that key is its own computer's identity - has the daemon mint the usual
+ * origin-bound session. A network failure (no Roostr here) throws TypeError.
+ */
+export async function pairWithOwnerKey(secretKey: Uint8Array): Promise<void> {
+	const issued = await fetch(`${HARNESS_API}/pair/challenge`, { credentials: "omit", redirect: "error", cache: "no-store" });
+	const { challenge } = await issued.json().catch(() => ({ challenge: undefined }));
+	if (!issued.ok || typeof challenge !== "string" || !/^[a-f0-9]{64}$/.test(challenge)) throw new PairingError(`Roostr on this computer did not offer pairing (${issued.status}).`);
+	const url = `${HARNESS_API}/pair/owner`;
+	const event = finalizeEvent({
+		kind: OWNER_PAIR_KIND,
+		created_at: Math.floor(Date.now() / 1000),
+		content: "",
+		tags: [["u", url], ["method", "POST"], ["challenge", challenge], ["origin", location.origin]],
+	}, secretKey);
+	const response = await fetch(url, {
+		method: "POST", headers: { "Content-Type": "application/json" },
+		body: JSON.stringify({ event }), credentials: "omit", redirect: "error",
+	});
+	const value = await response.json().catch(() => ({}));
+	if (!response.ok) throw new PairingError(typeof value.error === "string" && value.error ? value.error : `Roostr on this computer refused pairing (${response.status}).`);
+	storeSession(value);
 }
 function endpoint(base: string, path: string): string {
 	if (!path.startsWith("/") || path.startsWith("//") || path.includes("\\")) throw new Error("Local API paths must be relative to the paired daemon.");

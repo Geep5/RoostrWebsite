@@ -42,7 +42,7 @@ function fixture(handler: (url: string, init?: RequestInit) => Response | Promis
 	});
 	function seedPairing(expiresAt = Date.now() + 60_000) {
 		const value = { token: TOKEN, expiresAt, role: "ui" as const };
-		session.setItem(SESSION_KEY, JSON.stringify(value));
+		local.setItem(SESSION_KEY, JSON.stringify(value));
 		return value;
 	}
 	return { session, local, requests, seedPairing };
@@ -130,7 +130,7 @@ describe("explicit local pairing", () => {
 			cleanup.push(onPairingChange(() => { changes++; }));
 			await expect(request("/status")).rejects.toBeInstanceOf(PairingError);
 			expect(pairedSession()).toBeNull();
-			expect(f.session.getItem(SESSION_KEY)).toBeNull();
+			expect(f.local.getItem(SESSION_KEY)).toBeNull();
 			expect(changes).toBe(1);
 			await expect(request("/status")).rejects.toBeInstanceOf(PairingError);
 			expect(f.requests).toHaveLength(1);

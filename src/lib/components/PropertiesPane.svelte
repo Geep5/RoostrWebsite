@@ -102,6 +102,8 @@
 			if (r.key === "error") return true;
 			// A space's one editable property is its guest list: who answers its chat.
 			if (typeKey === "channel") return r.key === "agent";
+			// A computer's "Keep every file" switch shows, unticked, before it is ever set.
+			if (r.key === "keep_all_files") return typeKey === "machine" || r.key in object.fields;
 			if (r.key === "served_by") return MACHINE_BOUND || r.key in object.fields;
 			// Credentials, Skills and Tools are an agent's own (AGENT_CONFIG); elsewhere only when set.
 			if (r.key === "credentials" || r.key === "skills" || r.key === "tools") return r.key in object.fields;

@@ -12,8 +12,7 @@ import { agentLinksValue } from "$lib/agent-field";
 import { typeIcon } from "$lib/icons";
 import { store } from "$lib/data.svelte";
 import { activeSpace } from "$lib/space.svelte";
-import { isLocalBackend } from "$lib/client-backend";
-import { FILES_NEED_LOCAL, pickFile, uploadFile } from "$lib/files";
+import { FILES_NEED_LOCAL, addFailureText, filesSupported, pickFile, uploadFile } from "$lib/files";
 
 const channelField = (channelId: string): Record<string, ValueJSON> =>
 	channelId ? { channel: { stringValue: channelId } } : {};
@@ -161,12 +160,13 @@ async function createCredential(channelId: string, name: string): Promise<string
 	return id;
 }
 /**
- * A file is its bytes: the picker comes first, and the paired harness
- * stores them and creates the File object. A cancelled pick creates
- * nothing. Without a local harness there is nowhere to keep the bytes.
+ * A file is its bytes: the picker comes first, and the harness on this
+ * computer stores them and creates the File object. A cancelled pick
+ * creates nothing. Without a Roostr computer (the iOS app) there is
+ * nowhere to keep the bytes.
  */
 async function createFile(channelId: string): Promise<string> {
-	if (!isLocalBackend) {
+	if (!filesSupported) {
 		alert(FILES_NEED_LOCAL);
 		return "";
 	}
@@ -177,7 +177,7 @@ async function createFile(channelId: string): Promise<string> {
 		await goto(`/app/object/${id}`);
 		return id;
 	} catch (e) {
-		alert(`Could not add ${file.name}: ${e instanceof Error ? e.message : String(e)}`);
+		alert(addFailureText(e, file.name));
 		return "";
 	}
 }

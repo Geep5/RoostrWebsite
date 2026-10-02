@@ -3,13 +3,14 @@
 	 * A file object's page. The object carries only facts (name, hash,
 	 * size, MIME, which computers hold the bytes); the bytes live in each
 	 * computer's harness and move between them peer-to-peer. This tab asks
-	 * its paired harness for them, which fetches from a peer first when this
+	 * the harness on its own computer for them (the hosted app pairs with it
+	 * by owner key on first use), which fetches from a peer first when this
 	 * computer lacks them - that can take a few seconds.
 	 */
 	import { onMount, untrack } from "svelte";
 	import { thisMachineId } from "$lib/capability-actions";
 	import { isLocalBackend } from "$lib/client-backend";
-	import { FILES_NEED_LOCAL, fetchFileBlob, humanSize } from "$lib/files";
+	import { FILES_NEED_LOCAL, fetchFileBlob, filesSupported, humanSize, viewFailureText } from "$lib/files";
 	import { objectIcon } from "$lib/icons";
 	import { onPairingChange, pairedSession } from "$lib/local-transport";
 	import { fetchMachines, machineName, type MachineRow } from "$lib/serving";
@@ -66,7 +67,7 @@
 		const mine = ++generation;
 		release();
 		fetchError = "";
-		if (!isLocalBackend || !paired || !hash) {
+		if (!filesSupported || (isLocalBackend && !paired) || !hash) {
 			loading = false;
 			return;
 		}
@@ -82,7 +83,7 @@
 			blobType = blob.type;
 			text = preview;
 		} catch (e) {
-			if (mine === generation) fetchError = e instanceof Error ? e.message : String(e);
+			if (mine === generation) fetchError = viewFailureText(e);
 		} finally {
 			if (mine === generation) loading = false;
 		}
@@ -99,11 +100,12 @@
 		thisMachine = paired ? await thisMachineId() : "";
 	}
 
-	// New bytes (another file, or a pairing that just arrived): fetch them;
-	// the previous object URL is revoked on change and on teardown.
+	// New bytes (another file, or - in the local build - a pairing that just
+	// arrived): fetch them; the previous object URL is revoked on change and
+	// on teardown. The hosted app pairs inside the fetch itself.
 	$effect(() => {
 		void hash;
-		void paired;
+		if (isLocalBackend) void paired;
 		untrack(() => void load());
 		return () => {
 			generation++;
@@ -112,7 +114,7 @@
 	});
 
 	onMount(() => {
-		if (!isLocalBackend) return;
+		if (!filesSupported) return;
 		void fetchMachines().then(({ machines: roster }) => (machines = roster)).catch(() => {});
 		void loadPairing();
 		return onPairingChange(() => void loadPairing());
@@ -128,9 +130,9 @@
 
 	{#if objectError}<p class="error" role="alert" data-testid="file-error">{objectError}</p>{/if}
 
-	{#if !isLocalBackend}
+	{#if !filesSupported}
 		<p class="muted" data-testid="file-local-only">{FILES_NEED_LOCAL}</p>
-	{:else if !paired}
+	{:else if isLocalBackend && !paired}
 		<PairGate compact onready={() => void loadPairing()} />
 	{:else if !hash}
 		<p class="muted">This file has no bytes yet.</p>
@@ -138,7 +140,7 @@
 		<div class="sec">
 			{#if loading}
 				<p class="muted" role="status" data-testid="file-loading">{fetchingFrom ? `Fetching from ${fetchingFrom}…` : "Loading…"}</p>
-			{:else if fetchError}
+			{:else if fetchError && fetchError !== objectError}
 				<p class="error" role="alert" data-testid="file-fetch-error">{fetchError}</p>
 			{:else if url}
 				{#if kind === "image"}

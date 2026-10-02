@@ -3,14 +3,16 @@
 	 * A File object shown inside a page: images inline, PDFs in the
 	 * browser's own viewer, anything else as a card. The block only names
 	 * the File (`fileId`, `hash`); the bytes come from this computer's
-	 * harness, which fetches them peer-to-peer when it lacks them.
+	 * harness, which fetches them peer-to-peer when it lacks them. When it
+	 * cannot (Roostr not running here, or no holder online - the harness's
+	 * reason, also written as the File's `error`) the block says so in place,
+	 * with Retry.
 	 *
 	 * Images never grow past the page column, and can be resized by
 	 * dragging their bottom-right corner; the width (percent of the column)
 	 * is kept on the block as `width`.
 	 */
-	import { isLocalBackend } from "$lib/client-backend";
-	import { FILES_NEED_LOCAL, fetchFileBlob } from "$lib/files";
+	import { FILES_NEED_LOCAL, fetchFileBlob, filesSupported, viewFailureText } from "$lib/files";
 	import { store } from "$lib/data.svelte";
 	import { note } from "$lib/api";
 
@@ -46,7 +48,7 @@
 	$effect(() => {
 		const hash = meta["hash"] ?? "";
 		void attempt;
-		if (!isLocalBackend || !inline || !hash) return;
+		if (!filesSupported || !inline || !hash) return;
 		let cancelled = false;
 		let made = "";
 		error = "";
@@ -58,7 +60,7 @@
 				url = made;
 			})
 			.catch((err) => {
-				if (!cancelled) error = err instanceof Error ? err.message : String(err);
+				if (!cancelled) error = viewFailureText(err);
 			});
 		return () => {
 			cancelled = true;
@@ -96,7 +98,7 @@
 </script>
 
 <div class="file-block">
-	{#if !isLocalBackend}
+	{#if !filesSupported}
 		<p class="note">{FILES_NEED_LOCAL}</p>
 	{:else if inline && error}
 		<p class="err">{error} <button onclick={() => attempt++}>Retry</button></p>

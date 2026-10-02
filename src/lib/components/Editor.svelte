@@ -17,8 +17,7 @@
 	import LinkPicker from "./LinkPicker.svelte";
 	import { store, refreshAll } from "$lib/data.svelte";
 	import { RESERVED_KEYS, emptyValueFor, objectSpaceId, spaceRelations } from "$lib/relations";
-	import { FILES_NEED_LOCAL, pickFile, uploadFile } from "$lib/files";
-	import { isLocalBackend } from "$lib/client-backend";
+	import { FILES_NEED_LOCAL, addFailureText, filesSupported, pickFile, uploadFile } from "$lib/files";
 	import type { RelationDefJSON } from "$lib/types";
 	import { getProcessorByUrl, getEmbedUrl, isSingleUrl, type EmbedProcessor } from "$lib/embed";
 
@@ -1207,8 +1206,8 @@
 				focusRequest = { blockId: id, offset: start };
 			}
 		} else if (pick.kind === "file") {
-			const file = isLocalBackend ? await pickFile() : null;
-			if (!isLocalBackend) alert(FILES_NEED_LOCAL);
+			const file = filesSupported ? await pickFile() : null;
+			if (!filesSupported) fileNotice = FILES_NEED_LOCAL;
 			if (file) await insertFile(id, file, clean, marks);
 		} else if (pick.kind === "relation") {
 			await insertRelationBlock(id, clean, marks, pick.key);
@@ -1247,21 +1246,25 @@
 		return fileId;
 	}
 
+	/** Why the last file could not be added: shown under the page (not an alert) until dismissed or a file lands. */
+	let fileNotice = $state("");
+
 	/** Upload `file` and build the block content that points at it; null (after saying why) when the upload fails. */
 	async function fileContent(file: File): Promise<BlockJSON["content"] | null> {
 		try {
 			const uploaded = await uploadFile(file, objectSpaceId(object));
+			fileNotice = "";
 			return { custom: { contentType: "file", meta: { fileId: uploaded.id, hash: uploaded.hash, mime: file.type, name: file.name } } };
 		} catch (err) {
-			alert(`Could not add ${file.name}: ${err instanceof Error ? err.message : String(err)}`);
+			fileNotice = addFailureText(err, file.name);
 			return null;
 		}
 	}
 
 	/** Pasted image files (a screenshot, a copied image) become File blocks - the browser would otherwise drop a raw, unsaved <img> into the text. */
 	async function pasteFiles(id: string, files: File[]) {
-		if (!isLocalBackend) {
-			alert(FILES_NEED_LOCAL);
+		if (!filesSupported) {
+			fileNotice = FILES_NEED_LOCAL;
 			return;
 		}
 		const el = blockEl(id);
@@ -1637,8 +1640,8 @@
 
 	/** Dropped files become File blocks at the drop line, in the order dropped. */
 	async function dropFiles(files: File[], targetId: string, position: number) {
-		if (!isLocalBackend) {
-			alert(FILES_NEED_LOCAL);
+		if (!filesSupported) {
+			fileNotice = FILES_NEED_LOCAL;
 			return;
 		}
 		// A file never nests inside a text block: "inside" drops land below it.
@@ -2023,6 +2026,13 @@
 	{/if}
 </div>
 
+{#if fileNotice}
+	<div class="file-notice" role="status" data-testid="file-notice">
+		<span>{fileNotice}</span>
+		<button onclick={() => (fileNotice = "")}>Dismiss</button>
+	</div>
+{/if}
+
 {#if spellMenu}
 	<div class="spell-menu" style="left:{spellMenu.x}px; top:{spellMenu.y + 6}px" role="menu">
 		{#if spellMenu.options.length}
@@ -2120,6 +2130,38 @@
 		font-size: 15px;
 		padding: 8px 0;
 		cursor: text;
+	}
+	.file-notice {
+		position: fixed;
+		left: 50%;
+		bottom: 24px;
+		transform: translateX(-50%);
+		z-index: 50;
+		display: flex;
+		align-items: center;
+		gap: 12px;
+		max-width: min(560px, calc(100vw - 32px));
+		padding: 10px 14px;
+		border: 1px solid var(--border);
+		border-radius: 10px;
+		background: var(--bg);
+		box-shadow: 0 6px 24px rgba(0, 0, 0, 0.18);
+		color: var(--fg);
+		font-size: 13px;
+		line-height: 1.45;
+	}
+	.file-notice button {
+		flex: none;
+		border: 1px solid var(--border);
+		border-radius: 7px;
+		background: none;
+		color: var(--muted);
+		font: inherit;
+		padding: 3px 10px;
+		cursor: pointer;
+	}
+	.file-notice button:hover {
+		color: var(--fg);
 	}
 	.toolbar {
 		position: fixed;

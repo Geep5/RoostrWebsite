@@ -16,6 +16,14 @@ Backend selection is explicit: `VITE_ROOSTR_BACKEND=local` selects the local
 adapter. Pairing a browser-mode page with a machine grants access to its harness
 controls; it does not replace the browser's identity or switch its vault.
 
+Files (pasted/dropped images, `/file`, File pages) need the Roostr running on
+the same computer: the bytes live in its harness. In browser mode the first file
+action pairs automatically by proof of ownership - the tab signs a one-use,
+origin-bound harness challenge with the vault key it already holds, and only the
+computer whose identity is that key accepts (see glonOdin README, API). Without
+a reachable Roostr the file block says so in place; the iOS app has no Roostr
+under it, so files stay unavailable there.
+
 For local mode, start the daemon and independent sync service from the sibling
 `glonOdin` repository:
 
