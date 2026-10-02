@@ -1233,17 +1233,25 @@
 	async function insertFile(id: string, file: File, clean: string, marks: ReturnType<typeof fromDom>["marks"]): Promise<string> {
 		const block = await fileContent(file);
 		if (!block) return "";
-		if (clean === "") {
-			const paraId = crypto.randomUUID();
-			await writes.blockUpdate(object.id, id, block);
-			await writes.blockAdd(object.id, { id: paraId, childrenIds: [], content: { text: { text: "", style: Style.PARAGRAPH } } }, id, Pos.BOTTOM);
-			focusRequest = { blockId: paraId, offset: 0 };
-			return id;
+		// The bytes are a File object by now; placing it on the page is a
+		// separate write. If that fails (e.g. this tab's session lapsed), say
+		// so - it used to fail silently and the page stayed empty.
+		try {
+			if (clean === "") {
+				const paraId = crypto.randomUUID();
+				await writes.blockUpdate(object.id, id, block);
+				await writes.blockAdd(object.id, { id: paraId, childrenIds: [], content: { text: { text: "", style: Style.PARAGRAPH } } }, id, Pos.BOTTOM);
+				focusRequest = { blockId: paraId, offset: 0 };
+				return id;
+			}
+			const fileId = crypto.randomUUID();
+			await writes.blockUpdate(object.id, id, contentFor(id, clean, marks));
+			await writes.blockAdd(object.id, { id: fileId, childrenIds: [], content: block }, id, Pos.BOTTOM);
+			return fileId;
+		} catch (err) {
+			fileNotice = `${file.name} was uploaded (it's a File in this space), but it couldn't be placed on this page: ${err instanceof Error ? err.message : String(err)}. Reload and try again.`;
+			return "";
 		}
-		const fileId = crypto.randomUUID();
-		await writes.blockUpdate(object.id, id, contentFor(id, clean, marks));
-		await writes.blockAdd(object.id, { id: fileId, childrenIds: [], content: block }, id, Pos.BOTTOM);
-		return fileId;
 	}
 
 	/** Why the last file could not be added: shown under the page (not an alert) until dismissed or a file lands. */
