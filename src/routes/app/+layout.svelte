@@ -9,6 +9,7 @@
 	import { tabs, HOME_PATH } from "$lib/tabs.svelte";
 	import CheckboxIcon from "$lib/components/CheckboxIcon.svelte";
 	import { backend, isLocalBackend, isIOSBackend, type SyncStatus } from "$lib/client-backend";
+	import { IOSBackend } from "$lib/ios-backend";
 	import { pairedSession, onPairingChange } from "$lib/local-transport";
 	import PairGate from "$lib/components/PairGate.svelte";
 	import { loadKey } from "$lib/engine/keys";
@@ -782,10 +783,15 @@
 			</span>
 			{#if objectRelation}
 				<div class="m-actions">
-				<span
+				<!-- On iOS a tap reconnects the relays and catches up (sync now). -->
+				<button
+					type="button"
 					class="m-sync"
 					class:ok={sync.phase === "live" && !(sync.pending ?? 0)}
 					class:busy={sync.phase === "backfill" || (sync.pending ?? 0) > 0}
+					disabled={!isIOSBackend}
+					aria-label="Sync now"
+					onclick={() => { if (backend instanceof IOSBackend) void backend.syncNow(); }}
 					data-tip={sync.pending
 						? `${sync.pending} change(s) not yet published`
 						: sync.phase === "live"
@@ -793,7 +799,7 @@
 							: sync.phase === "backfill"
 								? sync.detail ?? "Syncing…"
 								: "Not syncing"}
-				><span class="m-sync-dot"></span></span>
+				><span class="m-sync-dot"></span></button>
 				<div class="more-wrap">
 					<button class="m-btn" data-tip="More" onclick={() => { showMore = !showMore; showCollections = false; }}>⋯</button>
 					{#if showMore}
@@ -809,10 +815,14 @@
 				</div>
 			{:else if objectSummary}
 				<div class="m-actions">
-				<span
+				<button
+					type="button"
 					class="m-sync"
 					class:ok={sync.phase === "live" && !(sync.pending ?? 0)}
 					class:busy={sync.phase === "backfill" || (sync.pending ?? 0) > 0}
+					disabled={!isIOSBackend}
+					aria-label="Sync now"
+					onclick={() => { if (backend instanceof IOSBackend) void backend.syncNow(); }}
 					data-tip={sync.pending
 						? `${sync.pending} change(s) not yet published`
 						: sync.phase === "live"
@@ -820,7 +830,7 @@
 							: sync.phase === "backfill"
 								? sync.detail ?? "Syncing…"
 								: "Not syncing"}
-				><span class="m-sync-dot"></span></span>
+				><span class="m-sync-dot"></span></button>
 				<div class="more-wrap">
 					<button class="m-btn" data-tip="More" onclick={() => { showMore = !showMore; showCollections = false; }}>⋯</button>
 					{#if showMore}
@@ -2823,10 +2833,16 @@
 		height: 40px;
 		border-radius: 50%;
 		background: var(--panel);
+		border: none;
+		padding: 0;
+		cursor: pointer;
 		display: flex;
 		align-items: center;
 		justify-content: center;
 		flex: none;
+	}
+	.m-sync:disabled {
+		cursor: default;
 	}
 	.m-sync-dot {
 		display: block;

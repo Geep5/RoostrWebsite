@@ -138,6 +138,11 @@ export class IOSBackend {
 	exportKey(): Promise<{ nsec: string; hex: string }> { return call("exportKey"); }
 	importKey(key: string): Promise<void> { return call("importKey", key); }
 	fetchStatus(): Promise<SyncStatus> { return call("status"); }
+	/** Reconnect the host's relays and catch up from its cursor (a page reload does the same). */
+	async syncNow(): Promise<void> {
+		const status = await call<unknown>("syncNow");
+		if (isStatus(status)) this.update(status);
+	}
 	fetchObject(id: string): Promise<ObjectJSON> { return call("fetchObject", id); }
 	fetchObjects(): Promise<ObjectSummary[]> { return call("fetchObjects"); }
 	fetchChannels(): Promise<SpaceJSON[]> { return call("fetchChannels"); }
