@@ -10,6 +10,7 @@
 	import { objectIcon } from "$lib/icons";
 	import { store } from "$lib/data.svelte";
 	import { currentSpaceId } from "$lib/relations";
+	import { tagStyle } from "$lib/options";
 
 	let { object }: { object: ObjectJSON } = $props();
 
@@ -25,6 +26,15 @@
 
 	const key = $derived(fieldStr(object.fields, "key"));
 	const format = $derived(fieldStr(object.fields, "format") || "shorttext");
+	/** Tag/status options with their colors, so values show as the same pills tables use. */
+	const options = $derived(store.relations.find((r) => r.id === object.id)?.options ?? []);
+	const chipped = $derived(format === "tag" || format === "status");
+	/** A tag/status value's option texts (a list, or a single string). */
+	function optionTexts(v: ValueJSON | undefined): string[] {
+		if (!v) return [];
+		if (v.stringValue !== undefined) return v.stringValue ? [v.stringValue] : [];
+		return (v.valuesValue?.items ?? []).map((i) => i.stringValue ?? "").filter(Boolean);
+	}
 
 	let rows = $state<QueryResultRow[]>([]);
 	let loaded = $state(false);
@@ -99,6 +109,10 @@
 									{@const o = linkedObject(id)}
 									<a class="linked" href="/app/object/{id}"><span class="obj-icon">{objectIcon(o?.icon, o?.typeKey ?? "")}</span>{o?.name || "Untitled"}</a>
 								{/each}
+							{:else if chipped}
+								{#each optionTexts(r.fields[key]) as t, i (i)}
+									<span class="tag-chip" style={tagStyle(options.find((o) => o.text === t)?.color ?? "")}>{t}</span>
+								{/each}
 							{:else}
 								{fmt(r.fields[key])}
 							{/if}
@@ -165,6 +179,15 @@
 	}
 	td a:hover {
 		text-decoration: underline;
+	}
+	.tag-chip {
+		display: inline-block;
+		border-radius: 10px;
+		padding: 0 6px;
+		margin-right: 4px;
+		font-size: 12px;
+		line-height: 20px;
+		height: 20px;
 	}
 	.val {
 		color: var(--fg);
