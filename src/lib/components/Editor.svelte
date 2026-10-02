@@ -1207,33 +1207,9 @@
 				focusRequest = { blockId: id, offset: start };
 			}
 		} else if (pick.kind === "file") {
-			// Bytes become a File object (held by this computer, fetched
-			// peer-to-peer elsewhere); the block only points at it.
-			if (!isLocalBackend) {
-				alert(FILES_NEED_LOCAL);
-				return;
-			}
-			const file = await pickFile();
-			if (!file) return;
-			let uploaded: { id: string; hash: string };
-			try {
-				uploaded = await uploadFile(file, objectSpaceId(object));
-			} catch (err) {
-				alert(`Could not add ${file.name}: ${err instanceof Error ? err.message : String(err)}`);
-				return;
-			}
-			const block = { custom: { contentType: "file", meta: { fileId: uploaded.id, hash: uploaded.hash, mime: file.type, name: file.name } } };
-			if (clean === "") {
-				// Like a divider: the empty block becomes the file, and a fresh
-				// paragraph below keeps somewhere to type.
-				const paraId = crypto.randomUUID();
-				await writes.blockUpdate(object.id, id, block);
-				await writes.blockAdd(object.id, { id: paraId, childrenIds: [], content: { text: { text: "", style: Style.PARAGRAPH } } }, id, Pos.BOTTOM);
-				focusRequest = { blockId: paraId, offset: 0 };
-			} else {
-				await writes.blockUpdate(object.id, id, contentFor(id, clean, marks));
-				await writes.blockAdd(object.id, { id: crypto.randomUUID(), childrenIds: [], content: block }, id, Pos.BOTTOM);
-			}
+			const file = isLocalBackend ? await pickFile() : null;
+			if (!isLocalBackend) alert(FILES_NEED_LOCAL);
+			if (file) await insertFile(id, file, clean, marks);
 		} else if (pick.kind === "relation") {
 			await insertRelationBlock(id, clean, marks, pick.key);
 		} else if (pick.kind === "link_object") {
@@ -1248,10 +1224,73 @@
 		}
 		await refresh();
 	}
-	// ── URL paste (Anytype editor/page.tsx onPasteUrl) ───────────
+	/**
+	 * Bytes become a File object (held by this computer, fetched
+	 * peer-to-peer elsewhere); the block only points at it. Like a divider:
+	 * an empty block becomes the file, with a fresh paragraph below to keep
+	 * somewhere to type; a block with text keeps it and the file lands below.
+	 * Returns the file block's id ("" when the upload failed).
+	 */
+	async function insertFile(id: string, file: File, clean: string, marks: ReturnType<typeof fromDom>["marks"]): Promise<string> {
+		const block = await fileContent(file);
+		if (!block) return "";
+		if (clean === "") {
+			const paraId = crypto.randomUUID();
+			await writes.blockUpdate(object.id, id, block);
+			await writes.blockAdd(object.id, { id: paraId, childrenIds: [], content: { text: { text: "", style: Style.PARAGRAPH } } }, id, Pos.BOTTOM);
+			focusRequest = { blockId: paraId, offset: 0 };
+			return id;
+		}
+		const fileId = crypto.randomUUID();
+		await writes.blockUpdate(object.id, id, contentFor(id, clean, marks));
+		await writes.blockAdd(object.id, { id: fileId, childrenIds: [], content: block }, id, Pos.BOTTOM);
+		return fileId;
+	}
+
+	/** Upload `file` and build the block content that points at it; null (after saying why) when the upload fails. */
+	async function fileContent(file: File): Promise<BlockJSON["content"] | null> {
+		try {
+			const uploaded = await uploadFile(file, objectSpaceId(object));
+			return { custom: { contentType: "file", meta: { fileId: uploaded.id, hash: uploaded.hash, mime: file.type, name: file.name } } };
+		} catch (err) {
+			alert(`Could not add ${file.name}: ${err instanceof Error ? err.message : String(err)}`);
+			return null;
+		}
+	}
+
+	/** Pasted image files (a screenshot, a copied image) become File blocks - the browser would otherwise drop a raw, unsaved <img> into the text. */
+	async function pasteFiles(id: string, files: File[]) {
+		if (!isLocalBackend) {
+			alert(FILES_NEED_LOCAL);
+			return;
+		}
+		const el = blockEl(id);
+		const { text, marks } = el ? fromDom(el) : { text: "", marks: [] };
+		cancelPending(id);
+		// Clipboard screenshots arrive as "image.png" with no real name.
+		const named = files.map((f) => (f.name && f.name !== "image.png" ? f : new File([f], `Pasted image ${new Date().toLocaleString()}.${f.type.split("/")[1] || "png"}`, { type: f.type })));
+		let last = await insertFile(id, named[0], text, marks);
+		for (const file of named.slice(1)) {
+			if (!last) break;
+			const block = await fileContent(file);
+			if (!block) break;
+			const next = crypto.randomUUID();
+			await writes.blockAdd(object.id, { id: next, childrenIds: [], content: block }, last, Pos.BOTTOM);
+			last = next;
+		}
+		await refresh();
+	}
+
+	// ── Paste: images, then URLs (Anytype editor/page.tsx onPasteUrl) ──
 
 	function onPasteText(e: ClipboardEvent, id: string) {
 		if (readonly) return;
+		const images = [...(e.clipboardData?.files ?? [])].filter((f) => f.type.startsWith("image/"));
+		if (images.length > 0) {
+			e.preventDefault();
+			void pasteFiles(id, images);
+			return;
+		}
 		const text = e.clipboardData?.getData("text/plain") ?? "";
 		if (!isSingleUrl(text)) return; // ordinary paste
 		e.preventDefault();

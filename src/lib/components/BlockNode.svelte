@@ -393,7 +393,7 @@
 				</button>
 			</div>
 			{#if block.content.custom.contentType === "file"}
-				<FileBlock {meta} />
+				<FileBlock {meta} objectId={object.id} blockId={block.id} {readonly} {onrefresh} />
 			{:else if block.content.custom.contentType === "embed"}
 				<iframe
 					class="embed"
@@ -672,6 +672,8 @@
 	.title { font-size: 34px; font-weight: 750; }
 	.quote { border-left: 3px solid var(--accent); padding-left: 12px; font-style: italic; }
 	.codeblock { font-family: ui-monospace, monospace; background: var(--panel); border-radius: 6px; padding: 8px 10px; font-size: 13px; tab-size: 4; }
+	/* Anything image-like that lands inside a text line (rich paste) never spills past the column. */
+	.text :global(img) { max-width: 100%; height: auto; }
 	/* A flex item after the code text, pulled back over its top-right corner;
 	   sticky so it stays in view while scrolling through a long block, just
 	   below the object page's sticky header (60px). */
