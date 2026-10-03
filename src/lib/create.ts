@@ -37,13 +37,18 @@ export function typeGlyph(typeKey: string): string {
 /**
  * Copy a template into a fresh object (Anytype: ObjectCreate with
  * type.defaultTemplateId): its content blocks with ids remapped, and its
- * properties as the new object's defaults - an Agent template's Served by,
- * System prompt, Model, Requires… The discussion subtree and the fields that
+ * properties as the new object's DEFAULTS - an Agent template's Served by,
+ * System prompt, Model, Skills… The discussion subtree and the fields that
  * describe the template itself (TEMPLATE_OWN) stay behind; the guest list
  * is normalized to the link-list shape however the template stored it.
+ *
+ * Defaults never overwrite: a property the new object already has wins.
+ * Those come from where it was made - a filtered view's Status, the
+ * computer a credential is pinned to, an agent's default prompt and tools -
+ * and are more specific than the template's guess.
  */
 export async function applyTemplate(objectId: string, templateId: string): Promise<void> {
-	const tpl = await fetchObject(templateId);
+	const [tpl, target] = await Promise.all([fetchObject(templateId), fetchObject(objectId)]);
 	// Everything reachable from __discussion__ is conversation, not content.
 	const byId = new Map(tpl.blocks.map((b) => [b.id, b]));
 	const skip = new Set<string>();
@@ -65,9 +70,18 @@ export async function applyTemplate(objectId: string, templateId: string): Promi
 		});
 	}
 	for (const [key, value] of Object.entries(tpl.fields)) {
-		if (TEMPLATE_OWN.has(key)) continue;
+		if (TEMPLATE_OWN.has(key) || hasValue(target.fields[key])) continue;
 		await note.setField(objectId, key, key === "agent" ? agentLinksValue(guestAgents(tpl.fields)) : value);
 	}
+}
+
+/** Whether a field holds something: blank text and empty lists count as unset, so a template may fill them. */
+function hasValue(v: ValueJSON | undefined): boolean {
+	if (!v) return false;
+	if (v.stringValue !== undefined) return v.stringValue !== "";
+	if (v.valuesValue) return v.valuesValue.items.length > 0;
+	if (v.listValue) return v.listValue.values.length > 0;
+	return true;
 }
 
 /** A template's own identity and bookkeeping (the harness's seed_key/seed_hash included), never a default for what it creates. */

@@ -99,7 +99,8 @@
 			// The error badge is how problems surface on any object (a failed
 			// run, a check that failed, a tool that didn't load, a holdup):
 			// shown everywhere even before one is written, so its absence reads as "ok".
-			if (r.key === "error") return true;
+			// A template's own Error is never copied, so it is no default to set.
+			if (r.key === "error") return object.typeKey !== "template";
 			// A space's one editable property is its guest list: who answers its chat.
 			if (typeKey === "channel") return r.key === "agent";
 			// A computer's "Keep every file" switch shows, unticked, before it is ever set.

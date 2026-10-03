@@ -343,7 +343,8 @@
 	/** The right pane holds properties and (when the object has one) the
 	 *  chat - so it exists wherever the property row used to. */
 	// A space's page is its settings in the middle; its chat and its guest list (Properties) live in this pane.
-	const hasPane = $derived(hasDiscussion || (!!object && !isChat && !isType && !isRelation && !isTemplate));
+	// A template has no chat, but its Properties are the defaults every object made from it starts with.
+	const hasPane = $derived(hasDiscussion || (!!object && !isChat && !isType && !isRelation));
 	$effect(() => {
 		discussionUI.available = hasPane;
 		if (!object) {
@@ -484,7 +485,7 @@
 		</div>
 		<ObjectMeta {object} />
 		{#if isTemplate}
-			<p class="tpl-note">Template{templateTargetName ? ` of ${templateTargetName}` : ""} — new objects copy these blocks.</p>
+			<p class="tpl-note">Template{templateTargetName ? ` of ${templateTargetName}` : ""} — new objects copy these blocks, and its properties fill in any the new object doesn't already have.</p>
 		{/if}
 		{#if builtinTool}
 			<p class="tpl-note">Built-in tool — its computer's harness writes this page from the code that runs; it is read-only here.</p>
