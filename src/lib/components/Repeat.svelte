@@ -11,7 +11,7 @@
 	 * more times of day, counted from an anchor day.
 	 */
 	import type { ObjectJSON, RepeatFreq } from "$lib/types";
-	import { DAY, DAY_MINUTES, MIN, ORD, WD, describeDraft as describe, isSubDaily, manyADay, ordinalOf, sod, sortedTimes, suffix, toDraft, type RepeatDraft as Draft } from "$lib/repeat";
+	import { DAY, DAY_MINUTES, MIN, WD, describeDraft as describe, isSubDaily, manyADay, ordinalOf, sod, sortedTimes, toDraft, type RepeatDraft as Draft } from "$lib/repeat";
 	import { repeatOf, guestAgents } from "$lib/types";
 	import { note, repeat } from "$lib/api";
 	import { store } from "$lib/data.svelte";
@@ -436,9 +436,10 @@
 					<div class="field">
 						<span class="lbl">On</span>
 						<div class="seg">
-							<button class:on={draft.monthly === "date"} onclick={() => (draft.monthly = "date")}>the {new Date(draft.anchor).getDate()}{suffix(new Date(draft.anchor).getDate())}</button>
-							<button class:on={draft.monthly === "weekday"} onclick={() => (draft.monthly = "weekday")}>the {ORD[ordinalOf(draft.anchor)]} {WD[new Date(draft.anchor).getDay()]}</button>
+							<button class:on={draft.monthly === "date"} onclick={() => (draft.monthly = "date")} title="The same date every month">Day {new Date(draft.anchor).getDate()}</button>
+							<button class:on={draft.monthly === "weekday"} onclick={() => (draft.monthly = "weekday")} title="The same weekday of the same week every month">{["", "First", "Second", "Third", "Fourth", "Last"][ordinalOf(draft.anchor)]} {new Date(draft.anchor).toLocaleDateString("en-US", { weekday: "long" })}</button>
 						</div>
+						<span class="aside">of the month</span>
 					</div>
 				{/if}
 
