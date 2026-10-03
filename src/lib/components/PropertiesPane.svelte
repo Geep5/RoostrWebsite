@@ -9,7 +9,7 @@
 	 * single-value rows a hover × that removes the property. A built-in
 	 * Tool (the harness writes it) and read-only properties show, never edit.
 	 */
-	import { fieldStr, isBuiltinTool, repeatOf, type ObjectJSON, type RelationDefJSON, type ValueJSON } from "$lib/types";
+	import { fieldStr, isBuiltinTool, isLockedTool, repeatOf, type ObjectJSON, type RelationDefJSON, type ValueJSON } from "$lib/types";
 	import { note, fetchAllQuery, type QueryResultRow } from "$lib/api";
 	import { layoutOf, store } from "$lib/data.svelte";
 	import { RESERVED_KEYS } from "$lib/relations";
@@ -88,8 +88,8 @@
 	const shown = $derived.by(() => {
 		const MACHINE_BOUND = ["agent", "capability", "install", "credential"].includes(typeKey);
 		const AGENT_CONFIG = typeKey === "agent" ? ["prompt", "model", "skills", "tools", "credentials", "served_by", "repo_path"] : [];
-		// A Tool's own: what the model is told, its inputs, and whether the harness owns it.
-		const TOOL_CONFIG = typeKey === "tool" ? ["description", "tool_inputs", "tool_builtin"] : [];
+		// A Tool's own: what the model is told, its inputs, whether it ships with Roostr, and which version of its code runs.
+		const TOOL_CONFIG = typeKey === "tool" ? ["description", "tool_inputs", "tool_builtin", "tool_version"] : [];
 		const repeating = !!repeatOf(object.fields);
 		const present = relations.filter((r) => {
 			// Legacy credential shapes (`key_fields` list, `secret` JSON) stay for old harnesses; never rows.
@@ -277,8 +277,8 @@
 		await onchanged();
 	}
 
-	/** A built-in Tool is the harness's to write: nothing on it edits here, nor does a read-only property anywhere. */
-	const locked = $derived(isBuiltinTool(object.fields));
+	/** A harness-run built-in Tool is the harness's to write: nothing on it edits here, nor does a read-only property anywhere. */
+	const locked = $derived(isLockedTool(object.fields));
 	const editable = (rel: RelationDefJSON) => !locked && !rel.readOnly;
 
 	function toggleEdit(rel: RelationDefJSON) {
@@ -397,7 +397,7 @@
 	// ── Grouped display: System / Tool / Agent / Custom, each a labeled section ──
 	const AGENT_KEYS = new Set(["served_by", "repo_path", "agent", "model", "prompt", "skills", "tools", "credentials", "capability"]);
 	const SYSTEM_KEYS = new Set(["done", "due_date", "status", "tag", "description", "url", "email", "phone", "error", "created_date", "modified_date", "createdDate", "modifiedDate", "check_first"]);
-	const TOOL_KEYS = new Set(["tool_inputs", "tool_builtin"]);
+	const TOOL_KEYS = new Set(["tool_inputs", "tool_builtin", "tool_version"]);
 	type Group = "credential" | "system" | "tool" | "agent" | "custom";
 	const groupOf = (key: string): Group => (AGENT_KEYS.has(key) ? "agent" : SYSTEM_KEYS.has(key) ? "system" : TOOL_KEYS.has(key) ? "tool" : "custom");
 	const groups = $derived.by(() => {

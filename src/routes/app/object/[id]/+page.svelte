@@ -4,7 +4,7 @@
 	import { page } from "$app/state";
 	import { goto } from "$app/navigation";
 	import type { ObjectJSON } from "$lib/types";
-	import { fieldStr, isBuiltinTool } from "$lib/types";
+	import { fieldStr, isBuiltinTool, isLockedTool } from "$lib/types";
 	import { engineFiltersOf, repeatFilterOf, servingFiltersOf, spaceFilterOf } from "$lib/filters";
 	import { spaceRelations } from "$lib/relations";
 	import { fetchObject, fetchQuery, note } from "$lib/api";
@@ -181,8 +181,10 @@
 	const isType = $derived(object?.typeKey === "type");
 	const isTemplate = $derived(object?.typeKey === "template");
 	const isRelation = $derived(object?.typeKey === "relation");
-	/** The harness writes a built-in Tool's page from the code that runs: shown, never edited. */
+	/** A built-in Tool's name is what agents call and how the harness finds it: never renamed here. */
 	const builtinTool = $derived(!!object && isBuiltinTool(object.fields));
+	/** A harness-run built-in's page shows the code the harness runs: shown, never edited. */
+	const lockedTool = $derived(!!object && isLockedTool(object.fields));
 
 	/** A template renders with its TARGET type's layout (so a task template shows the checkbox). */
 	const effectiveTypeKey = $derived.by(() => {
@@ -487,8 +489,13 @@
 		{#if isTemplate}
 			<p class="tpl-note">Template{templateTargetName ? ` of ${templateTargetName}` : ""} — new objects copy these blocks, and its properties fill in any the new object doesn't already have.</p>
 		{/if}
-		{#if builtinTool}
+		{#if lockedTool}
 			<p class="tpl-note">Built-in tool — its computer's harness writes this page from the code that runs; it is read-only here.</p>
+		{:else if builtinTool}
+			<p class="tpl-note">Built-in tool, shipped with Roostr — the code below is what runs, so editing it changes this tool for every agent in the space. If an edit breaks it, each computer keeps running the last version that worked there and says so under Error.</p>
+			{#if object.fields["tool_update_available"]}
+				<p class="tpl-note">Roostr now ships a different version of this tool. It was edited here, so your version was kept.</p>
+			{/if}
 		{/if}
 		{#if isChannel}
 			<SpaceManage {object} {spaceInfo} onchanged={refresh} />
@@ -594,7 +601,7 @@
 				{/if}
 			</div>
 		{:else}
-			<Editor bind:this={editor} {object} readonly={builtinTool} onchanged={refresh} />
+			<Editor bind:this={editor} {object} readonly={lockedTool} onchanged={refresh} />
 		{/if}
 
 	</article>

@@ -242,9 +242,18 @@ export function guestAgents(fields: Record<string, ValueJSON>): string[] {
 	return (v.valuesValue?.items ?? []).flatMap((i) => (i.stringValue ? [i.stringValue] : i.linkValue?.targetId ? [i.linkValue.targetId] : []));
 }
 
-/** A Tool object the harness writes and keeps current (`tool_builtin`): read-only here. */
+/** A Tool shipped with Roostr and seeded by the harness (`tool_builtin`). */
 export function isBuiltinTool(fields: Record<string, ValueJSON>): boolean {
 	return fields["tool_builtin"]?.boolValue === true;
+}
+
+/**
+ * A built-in the harness runs from its own code: its page only shows that
+ * code, so it is read-only here. A built-in whose code lives in its object
+ * (`tool_runtime: "object"`) runs what the page holds, and people edit it.
+ */
+export function isLockedTool(fields: Record<string, ValueJSON>): boolean {
+	return isBuiltinTool(fields) && fields["tool_runtime"]?.stringValue !== "object";
 }
 
 export type RepeatFreq = "minute" | "hour" | "day" | "week" | "month" | "year";
