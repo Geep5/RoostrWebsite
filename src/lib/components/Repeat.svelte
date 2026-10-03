@@ -206,6 +206,20 @@
 		draft.freq = freq;
 		draft.interval = Math.min(draft.interval, maxInterval(freq));
 	}
+	/** A local day as the date input's "YYYY-MM-DD". */
+	function ymd(ms: number): string {
+		const d = new Date(ms);
+		return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+	}
+	/** Start the cadence on another day. A week still on its default day (the old start's weekday) follows it. */
+	function setAnchor(value: string) {
+		const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+		if (!m) return;
+		const next = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3])).getTime();
+		const oldDay = new Date(draft.anchor).getDay();
+		if (draft.freq === "week" && draft.weekdays.length === 1 && draft.weekdays[0] === oldDay) draft.weekdays = [new Date(next).getDay()];
+		draft.anchor = next;
+	}
 	function toggleWeekday(d: number) {
 		draft.weekdays = draft.weekdays.includes(d) ? draft.weekdays.filter((x) => x !== d) : [...draft.weekdays, d];
 		// A week needs a day to run on; minute/hour with none run every day.
@@ -377,6 +391,16 @@
 						<option value="year">{draft.interval === 1 ? "year" : "years"}</option>
 					</select>
 				</div>
+
+				{#if !isSubDaily(draft.freq)}
+					<!-- The day the cadence counts from: it decides "the 1st" vs "the 3rd",
+					     a yearly date, and which weeks an every-2-weeks lands on. It
+					     used to be fixed to the day the repeat was made. -->
+					<div class="field">
+						<span class="lbl">Starts</span>
+						<input type="date" value={ymd(draft.anchor)} onchange={(e) => setAnchor(e.currentTarget.value)} />
+					</div>
+				{/if}
 
 				{#if isSubDaily(draft.freq)}
 					<div class="field">
@@ -628,7 +652,8 @@
 		font-size: 12.5px;
 		font: inherit;
 	}
-	input[type="time"] {
+	input[type="time"],
+	input[type="date"] {
 		color-scheme: dark;
 	}
 	.to,
