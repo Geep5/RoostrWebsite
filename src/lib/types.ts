@@ -248,9 +248,11 @@ export function isBuiltinTool(fields: Record<string, ValueJSON>): boolean {
 }
 
 /**
- * A built-in the harness runs from its own code: its page only shows that
- * code, so it is read-only here. A built-in whose code lives in its object
- * (`tool_runtime: "object"`) runs what the page holds, and people edit it.
+ * A built-in Tool still showing an older harness's own handler (it predates
+ * `tool_runtime: "object"`): that harness runs its own code, not the page,
+ * and a current harness replaces the page with the shipped code, so it is
+ * read-only here. Every built-in a current harness writes runs what its
+ * page holds, and people edit it.
  */
 export function isLockedTool(fields: Record<string, ValueJSON>): boolean {
 	return isBuiltinTool(fields) && fields["tool_runtime"]?.stringValue !== "object";

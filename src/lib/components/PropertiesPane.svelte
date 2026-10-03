@@ -277,7 +277,7 @@
 		await onchanged();
 	}
 
-	/** A harness-run built-in Tool is the harness's to write: nothing on it edits here, nor does a read-only property anywhere. */
+	/** A built-in Tool an older harness wrote from its own handler is that harness's to write: nothing on it edits here, nor does a read-only property anywhere. */
 	const locked = $derived(isLockedTool(object.fields));
 	const editable = (rel: RelationDefJSON) => !locked && !rel.readOnly;
 
