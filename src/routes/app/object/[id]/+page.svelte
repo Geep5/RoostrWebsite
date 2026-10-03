@@ -478,9 +478,11 @@
 				}}
 				onblur={() => void saveName()}
 				onkeydown={(e) => {
-					if (e.key === "Enter") {
+					if (e.key === "Enter" && !e.isComposing) {
 						e.preventDefault();
 						e.currentTarget.blur();
+						// Straight into the body to keep typing (Notion/Anytype).
+						void editor?.focusStart();
 					}
 				}}
 			></textarea>

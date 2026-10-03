@@ -516,6 +516,25 @@
 		}
 	}
 
+	/**
+	 * Enter in the title: the caret goes to the top of the body - into the
+	 * first line when it is an empty text line, else into a fresh empty line
+	 * added above whatever comes first (nothing existing is edited).
+	 */
+	export async function focusStart(): Promise<void> {
+		if (readonly) return;
+		const first = rootIds[0] ? byId.get(rootIds[0]) : undefined;
+		const t = first?.content.text;
+		if (first && t && t.text === "" && t.style !== Style.TITLE && t.style !== Style.CODE) {
+			focusNow(first.id, 0);
+			return;
+		}
+		const id = crypto.randomUUID();
+		await writes.blockAdd(object.id, { id, childrenIds: [], content: { text: { text: "", style: Style.PARAGRAPH } } }, first?.id ?? "", first ? Pos.TOP : Pos.BOTTOM);
+		focusRequest = { blockId: id, offset: 0 };
+		await refresh();
+	}
+
 	const blockEl = (id: string): HTMLElement | null => document.querySelector(`[data-block="${id}"] .text`);
 
 	async function refresh() {
