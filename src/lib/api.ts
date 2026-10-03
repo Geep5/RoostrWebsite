@@ -119,6 +119,8 @@ export const space = {
 	memberRemove: (channelId: string, npub: string) =>
 		mutate("channel_member_remove", { channel_id: channelId, npub }),
 	keyRotate: (channelId: string) => mutate("channel_key_rotate", { channel_id: channelId }),
+	/** A member's delete: only this identity's copies go; the owner and other members keep the space. */
+	leave: (channelId: string) => mutate("space_leave", { channel_id: channelId }),
 };
 
 export interface NostrSettings {

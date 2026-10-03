@@ -16,10 +16,17 @@ interface AuthorizeFixture {
 	/** Envelope-level rejection: the call must throw a domain CoreError with this message. */
 	error?: string;
 }
+interface VanishedEntry {
+	objectId: string;
+	at: number;
+	left?: true;
+}
 interface VanishedFixture {
 	name: string;
 	ledger: ObjectJSON | null;
-	expected: Array<{ objectId: string; at: number }>;
+	/** Host stubs the space rule judges, as the browser passes them. */
+	objects?: Array<{ id: string; channel: string }>;
+	expected: VanishedEntry[];
 }
 interface AuthorityFixtures {
 	authorize: AuthorizeFixture[];
@@ -29,7 +36,7 @@ interface AuthorityFixtures {
 // Native authority_test.odin embeds this same hand-authored corpus, so every
 // replica's gate is checked against one set of expected outcomes.
 const fixtures: AuthorityFixtures = JSON.parse(readFileSync(
-	new URL("../../Roostr/core/authority_fixtures.json", import.meta.url), "utf8",
+	new URL("../../glonOdin/core/authority_fixtures.json", import.meta.url), "utf8",
 ));
 await initCore({ wasmBytes: readFileSync(new URL("../static/engine.wasm", import.meta.url)) });
 
@@ -43,10 +50,10 @@ for (const { name, change, provenance, space, trustedSpace, existing, ok, reason
 	deepStrictEqual(coreCall<{ ok: boolean; reason: string }>("sync", payload), { ok, reason }, `authorize ${name}`);
 }
 
-for (const { name, ledger, expected } of fixtures.vanished) {
-	const actual = coreCall<Array<{ objectId: string; at: number }>>("sync", { action: "vanished", ledger });
+for (const { name, ledger, objects, expected } of fixtures.vanished) {
+	const actual = coreCall<VanishedEntry[]>("sync", { action: "vanished", ledger, objects });
 	equal(actual.length, expected.length, `vanished ${name}: entry count`);
-	const sorted = (xs: Array<{ objectId: string; at: number }>) => [...xs].sort((a, b) => a.objectId.localeCompare(b.objectId));
+	const sorted = (xs: VanishedEntry[]) => [...xs].sort((a, b) => a.objectId.localeCompare(b.objectId));
 	deepStrictEqual(sorted(actual), sorted(expected), `vanished ${name}`);
 }
 

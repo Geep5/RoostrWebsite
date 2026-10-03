@@ -133,6 +133,9 @@ export interface SpaceJSON {
 	members: Array<{ npub: string; role: string }>;
 	keyId: number;
 	createdAt: number;
+	/** Who administers the space: "" when this identity does, otherwise the
+	 * owner's hex pubkey. Owners delete a space for everyone; members leave. */
+	owner: string;
 	/** Drag-reorder position for the rail. Absent = fall back to createdAt. */
 	order?: number;
 }

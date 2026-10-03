@@ -50,6 +50,14 @@ export function spaceKeyAll(): Record<string, SpaceKeyEntry> {
 	return readFile().channels;
 }
 
+/** Who administers a space, as SpaceJSON.owner reports it: "" when this
+ * identity does (a space created here, or an imported entry naming our own
+ * key), otherwise the owner's hex pubkey. */
+export function spaceOwner(entry: SpaceKeyEntry | null | undefined, localPk: string): string {
+	const owner = entry?.owner ?? "";
+	return owner === localPk ? "" : owner;
+}
+
 /** Create a key for a locally-created space (keyId 1). Idempotent. */
 export function spaceKeyEnsure(spaceId: string): SpaceKeyEntry {
 	const file = readFile();
@@ -80,4 +88,12 @@ export function spaceKeyImport(spaceId: string, key: string, keyId: number, owne
 	file.channels[spaceId] = entry;
 	writeFile(file);
 	return entry;
+}
+
+/** Forget a space's key: this identity left a space it does not own. */
+export function spaceKeyRemove(spaceId: string): void {
+	const file = readFile();
+	if (!(spaceId in file.channels)) return;
+	delete file.channels[spaceId];
+	writeFile(file);
 }

@@ -45,6 +45,13 @@ const CHANGE_KIND = 1078;
 const CHECKPOINT_KIND = 1079;
 /** Every relay filter that pulls DAG events; the core session ingests both kinds. */
 const DAG_KINDS = [CHANGE_KIND, CHECKPOINT_KIND];
+/** NIP-09 deletion. On a space stream it is an h-deletion: from the space's
+ * owner, the signal that the space was deleted for everyone. */
+const DELETION_KIND = 5;
+/** Every #h filter of a shared space: its DAG events plus h-deletions. */
+const SPACE_KINDS = [...DAG_KINDS, DELETION_KIND];
+/** Spaces whose h-deletion a relay accepted: published once per space. */
+const SPACE_DELETIONS_STORAGE = "roostr-space-deletions-sent";
 const ALLOWLIST_KIND = 30100;
 const ALLOWLIST_D = "roostr-allowlist";
 /** NIP-59 gift wrap: space-key invites and join requests, addressed by npub. */
@@ -210,6 +217,8 @@ interface IngestResult {
 	decryptFailure?: boolean;
 	decodeFailure?: boolean;
 	hTag?: string;
+	/** A kind-5 h-deletion by the owner of this installed space. */
+	spaceVanished?: string;
 }
 
 /** The core's receive session is process-global and single-flight; only its
@@ -266,6 +275,10 @@ export interface RelaySyncOptions {
 	onRawEvent?: (event: Event) => void;
 	/** objectId -> owning space id ("" = personal). Channels own themselves. */
 	spaceOf?: (objectId: string) => string;
+	/** The owner of an installed shared space deleted it for everyone (their kind-5 h-deletion). */
+	onSpaceVanished?: (spaceId: string) => void;
+	/** The space is vanished or left here: its invite keys are ignored. */
+	spaceGone?: (spaceId: string) => boolean;
 }
 
 export interface SyncStats {
@@ -312,6 +325,8 @@ export class RelaySync implements RelaySyncApi {
 	private readonly onSpaceKey?: () => void;
 	private wrapSub: { close(): void } | null = null;
 	private readonly spaceOf: (objectId: string) => string;
+	private readonly onSpaceVanished?: (spaceId: string) => void;
+	private readonly spaceGone: (spaceId: string) => boolean;
 	private sharedSpaces = new Map<string, SharedSpace>();
 	private spaceSub: { close(): void } | null = null;
 
@@ -359,6 +374,8 @@ export class RelaySync implements RelaySyncApi {
 		this.onRawEvent = options.onRawEvent;
 		this.onSpaceKey = options.onSpaceKey;
 		this.spaceOf = options.spaceOf ?? (() => "");
+		this.onSpaceVanished = options.onSpaceVanished;
+		this.spaceGone = options.spaceGone ?? (() => false);
 	}
 
 	private get sessionOpen(): boolean {
@@ -373,7 +390,8 @@ export class RelaySync implements RelaySyncApi {
 			pk: this.pk,
 			conversationKey: this.conversationKey,
 			secret: this.secretHex,
-			spaces: [...this.sharedSpaces.values()].map((sp) => ({ spaceId: sp.spaceId, keyHex: sp.keyHex, keyId: sp.keyId })),
+			// A keyring entry without an imported owner is this identity's own space.
+			spaces: [...this.sharedSpaces.values()].map((sp) => ({ spaceId: sp.spaceId, keyHex: sp.keyHex, keyId: sp.keyId, owner: sp.owner || this.pk })),
 			cursor: this.cursor,
 			replayGroups,
 		});
@@ -410,7 +428,7 @@ export class RelaySync implements RelaySyncApi {
 		}
 		this.sharedSpaces = next;
 		if (this.sessionOpen) {
-			coreCall("sync", { action: "spaces", spaces: [...next.values()].map((sp) => ({ spaceId: sp.spaceId, keyHex: sp.keyHex, keyId: sp.keyId })) });
+			coreCall("sync", { action: "spaces", spaces: [...next.values()].map((sp) => ({ spaceId: sp.spaceId, keyHex: sp.keyHex, keyId: sp.keyId, owner: sp.owner || this.pk })) });
 		}
 		const tags = [...next.values()].map((sp) => sp.spaceTag);
 		const fresh = [...next.values()].some((sp) => !prevTags.has(sp.spaceTag));
@@ -422,7 +440,7 @@ export class RelaySync implements RelaySyncApi {
 		}
 		this.spaceSub = null;
 		if (tags.length > 0) {
-			this.spaceSub = this.pool.subscribeMany(this.relays, { kinds: DAG_KINDS, "#h": tags, since: this.cursor + 1 }, {
+			this.spaceSub = this.pool.subscribeMany(this.relays, { kinds: SPACE_KINDS, "#h": tags, since: this.cursor + 1 }, {
 				onevent: (event) => {
 					this.liveChain = this.liveChain.then(() => this.handleLiveEvent(event)).catch(() => {});
 				},
@@ -474,6 +492,42 @@ export class RelaySync implements RelaySyncApi {
 		}
 	}
 
+	private spaceDeletionsSent(): Set<string> {
+		try {
+			return new Set(JSON.parse(localStorage.getItem(SPACE_DELETIONS_STORAGE) ?? "[]") as string[]);
+		} catch {
+			return new Set();
+		}
+	}
+
+	/**
+	 * h-deletion of a vanished space: asks the relays to drop every event in
+	 * the space this identity authored - and, from the owner, every event that
+	 * names it as owner, which is also the signal members vanish the space on.
+	 * Sent until a relay accepts it, then never again.
+	 */
+	async publishSpaceDeletion(spaceId: string, keyHex: string): Promise<void> {
+		if (this.stopped || this.spaceDeletionsSent().has(spaceId)) return;
+		try {
+			const event = finalizeEvent(
+				{
+					kind: DELETION_KIND,
+					created_at: Math.floor(Date.now() / 1000),
+					tags: [["h", blindShared(keyHex, `space:${spaceId}`)], ["k", String(CHANGE_KIND)], ["k", String(CHECKPOINT_KIND)]],
+					content: "space deleted",
+				},
+				this.sk,
+			);
+			await Promise.any(this.pool.publish(this.relays, event));
+			// Re-read: another space's deletion may have been recorded meanwhile.
+			const sent = this.spaceDeletionsSent();
+			sent.add(spaceId);
+			localStorage.setItem(SPACE_DELETIONS_STORAGE, JSON.stringify([...sent]));
+		} catch {
+			/* no relay accepted it; retried on next refresh */
+		}
+	}
+
 	// ── Gift wraps: key invites in, join requests in, key invites out ──
 
 	private wrapsSeen(): Set<string> {
@@ -495,6 +549,9 @@ export class RelaySync implements RelaySyncApi {
 				const p = JSON.parse(rumor.content) as { t?: string; space?: string; name?: string; key?: string; keyId?: number };
 				if (p.t !== "space-invite" || !p.space || !/^[0-9a-f]{64}$/.test(p.key ?? "")) return;
 				if (!Number.isSafeInteger(p.keyId) || p.keyId! < 1) return;
+				// A vanished or left space stays gone: a late key must not
+				// replace the one its h-deletion is addressed with.
+				if (this.spaceGone(p.space)) return;
 				const previous = spaceKeyGet(p.space);
 				if (previous && rumor.pubkey !== (previous.owner || this.pk)) return;
 				spaceKeyImport(p.space, p.key!, typeof p.keyId === "number" && p.keyId > 0 ? p.keyId : 1, rumor.pubkey);
@@ -636,7 +693,7 @@ export class RelaySync implements RelaySyncApi {
 		);
 		const spaceTags = [...this.sharedSpaces.values()].map((sp) => sp.spaceTag);
 		this.spaceSub = spaceTags.length > 0
-			? this.pool.subscribeMany(this.relays, { kinds: DAG_KINDS, "#h": spaceTags, since: this.cursor + 1 }, {
+			? this.pool.subscribeMany(this.relays, { kinds: SPACE_KINDS, "#h": spaceTags, since: this.cursor + 1 }, {
 					onevent: (event) => {
 						this.liveChain = this.liveChain.then(() => this.handleLiveEvent(event)).catch(() => {});
 					},
@@ -822,7 +879,7 @@ export class RelaySync implements RelaySyncApi {
 		// this device must hold in full (docs/checkpoint-sync.md).
 		const full = since <= 1;
 		const filters: Array<Parameters<SimplePool["querySync"]>[1]> = [{ kinds: DAG_KINDS, authors: [this.pk], since }];
-		for (const sp of this.sharedSpaces.values()) filters.push({ kinds: DAG_KINDS, "#h": [sp.spaceTag], since });
+		for (const sp of this.sharedSpaces.values()) filters.push({ kinds: SPACE_KINDS, "#h": [sp.spaceTag], since });
 		await Promise.all(this.relays.flatMap((relay) => filters.map(async (filter) => {
 			let until: number | undefined = resumeUntil;
 			for (;;) {
@@ -936,7 +993,7 @@ export class RelaySync implements RelaySyncApi {
 	private async ingestEvent(event: Event): Promise<ImportItem | null> {
 		this.stats.events++;
 		this.onRawEvent?.(event);
-		if ((event.kind !== CHANGE_KIND && event.kind !== CHECKPOINT_KIND) || !verifyEvent(event)) return null;
+		if ((event.kind !== CHANGE_KIND && event.kind !== CHECKPOINT_KIND && event.kind !== DELETION_KIND) || !verifyEvent(event)) return null;
 		await this.ensureSession();
 		if (!this.sessionOpen) return null; // stopped
 		const r = coreCall<IngestResult>("sync", {
@@ -950,6 +1007,8 @@ export class RelaySync implements RelaySyncApi {
 		if (r.decodeFailure) this.stats.decodeFailures++;
 		if (r.faultAt !== undefined) this.recordReplayFault(r.faultAt);
 		if (r.replayGroups) this.replayGroups = new Map(r.replayGroups);
+		// The core only reports an h-deletion signed by the space's owner.
+		if (r.spaceVanished) this.onSpaceVanished?.(r.spaceVanished);
 		if (!r.item) return null;
 		const item: ImportItem = {
 			objectId: "",

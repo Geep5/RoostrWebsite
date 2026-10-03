@@ -20,7 +20,7 @@ import { computeObject } from "./replay";
 import { loadCorpus, needsColdLoad, runQuery } from "./query";
 import { ChangeStore, destroyDatabase, StorageUnavailableError } from "./store";
 import { RelaySync, DEFAULT_RELAYS, npubToHex, type SharedSpaceInfo } from "./sync";
-import { spaceKeyAll } from "./spacekeys";
+import { spaceKeyAll, spaceOwner } from "./spacekeys";
 import { getPublicKey } from "nostr-tools";
 import { loadKey, authorIdFor } from "./keys";
 import { runMutation } from "./mutate";
@@ -31,6 +31,13 @@ function fstr(fields: Record<string, ValueJSON> | undefined, k: string): string 
 
 /** The synced vanish ledger object (src/vanish.odin); the core reads its entries. */
 const VANISH_LOG_ID = "__vanished__";
+
+/** One id the core's `sync`/`vanished` method reports gone; `left` when only this identity left that space. */
+interface VanishedEntry {
+	objectId: string;
+	at: number;
+	left?: boolean;
+}
 
 export interface SyncStatus {
 	phase: "idle" | "backfill" | "live" | "error";
@@ -59,6 +66,10 @@ class WebBackend {
 	status: SyncStatus = { phase: "idle", imported: 0, bootstrapped: false };
 	private statusListeners = new Set<(s: SyncStatus) => void>();
 	author = "";
+	/** This identity's hex pubkey: who owns a space is decided against it. */
+	private pk = "";
+	/** Owner deletion signals, applied one at a time. */
+	private ownerSignals: Promise<void> = Promise.resolve();
 	private started = false;
 	private loggingOut = false;
 	private mutations = 0;
@@ -73,6 +84,7 @@ class WebBackend {
 		await initCore();
 		this.started = true;
 		this.author = authorIdFor(key);
+		this.pk = key.pk;
 		await this.store.open();
 		this.allDirty = true;
 		this.sync = new RelaySync(key.sk, this.relays(), this.store, {
@@ -91,6 +103,15 @@ class WebBackend {
 			},
 		}, {
 			onSpaceKey: () => void this.refreshShared(),
+			// Serialized: live and history both deliver the owner's signal, and
+			// the second must see the ledger entry the first one wrote.
+			onSpaceVanished: (spaceId) => {
+				this.ownerSignals = this.ownerSignals.then(async () => {
+					await this.ensure();
+					if (!this.vanished.has(spaceId)) await this.mutate("vanish", { object_ids: [spaceId] }, true);
+				}).catch((err: unknown) => console.warn(`[replica] owner deletion of space ${spaceId} failed:`, err));
+			},
+			spaceGone: (spaceId) => this.vanished.has(spaceId),
 			spaceOf: (objectId) => {
 				const o = this.states.get(objectId);
 				if (!o) return "";
@@ -124,8 +145,12 @@ class WebBackend {
 		const infos: SharedSpaceInfo[] = [];
 		const memberHexesBySpace = new Map<string, string[]>();
 		const nameBySpace = new Map<string, string>();
-		for (const [spaceId, entry] of Object.entries(spaceKeyAll())) {
+		const keys = spaceKeyAll();
+		for (const [spaceId, entry] of Object.entries(keys)) {
 			if (!entry.key || entry.key.length !== 64) continue;
+			// Vanished or left: no subscription, publish or invite. The key
+			// stays in the keyring only to address the h-deletion below.
+			if (this.vanished.has(spaceId)) continue;
 			const stateObj = this.states.get(spaceId);
 			const writers = new Set<string>([entry.owner ?? myPk]);
 			const memberHexes: string[] = [];
@@ -146,6 +171,19 @@ class WebBackend {
 			infos.push({ spaceId, keyHex: entry.key, keyId: entry.keyId ?? 1, writers: [...writers], owner: entry.owner });
 		}
 		this.sync.setSharedSpaces(infos);
+
+		// A vanished space whose key is still here owes the relays one
+		// h-deletion: from its owner the signal every member vanishes it on,
+		// from a member the end of its own copies. A space this identity only
+		// left keeps its events for the members who stayed.
+		if (this.vanished.size > 0) {
+			const ledger = coreCall<VanishedEntry[]>("sync", { action: "vanished", ledger: this.states.get(VANISH_LOG_ID) ?? null });
+			for (const { objectId, left } of ledger) {
+				const entry = keys[objectId];
+				if (left || !entry?.key || entry.key.length !== 64) continue;
+				void this.sync.publishSpaceDeletion(objectId, entry.key);
+			}
+		}
 
 		// Owner duty: every member holds the current key - gift-wrap it to
 		// anyone that hasn't received this keyId yet (adds and rotations).
@@ -302,30 +340,38 @@ class WebBackend {
 	 * The ledger wins over whatever replayed. A relay copy of a vanished
 	 * object can arrive ahead of — or entirely without — the delete change
 	 * that tombstones it, since NIP-09 is advisory and a peer may republish
-	 * after the deletion was requested. The ledger is read by the core's
+	 * after the deletion was requested. The ledger and its space rule (an
+	 * object in a vanished or left space is gone too, even one this device
+	 * never saw before the space went) are read by the core's
 	 * `sync`/`vanished` method, shared with the desktop's
 	 * enforce_vanished_locked(), which is why the two agree on what exists.
 	 */
 	private enforceVanished(rebuilt: boolean, touched: string[]): void {
 		const ledgerChanged = touched.includes(VANISH_LOG_ID);
-		if (rebuilt || ledgerChanged) {
-			const entries = coreCall<Array<{ objectId: string; at: number }>>("sync", {
-				action: "vanished",
-				ledger: this.states.get(VANISH_LOG_ID) ?? null,
-			});
-			this.vanished = new Set<string>(entries.map((e) => e.objectId));
+		const sweep = rebuilt || ledgerChanged;
+		if (!sweep && this.vanished.size === 0) return;
+		// Ledger (re)loaded: judge every state — boot, or the ledger moved.
+		// Otherwise just the objects that were replayed can have come back,
+		// so the steady-state cost is the size of that batch.
+		const candidates = sweep ? [...this.states.values()] : touched.flatMap((id) => this.states.get(id) ?? []);
+		const entries = coreCall<VanishedEntry[]>("sync", {
+			action: "vanished",
+			ledger: this.states.get(VANISH_LOG_ID) ?? null,
+			objects: candidates.map((o) => ({ id: o.id, channel: o.fields["channel"]?.stringValue ?? "" })),
+		});
+		// Only a rebuild puts every stored object back in front of the core.
+		// Otherwise an object dropped earlier is no longer a candidate, so its
+		// verdict stands: ledger entries are never retracted.
+		if (rebuilt) this.vanished = new Set<string>();
+		for (const { objectId } of entries) {
+			this.vanished.add(objectId);
+			// Every state removal is a query removal too, or the core keeps
+			// serving rows for objects this replica no longer has.
+			if (this.states.delete(objectId)) this.queryRemoved.add(objectId);
 		}
-		if (this.vanished.size === 0) return;
-		// Ledger (re)loaded: sweep everything it names — O(vanished), boot
-		// only. Otherwise just the objects that were replayed can have come
-		// back, so the steady-state cost is the size of that batch.
-		// Every state removal is a query removal too, or the core keeps
-		// serving rows for objects this replica no longer has.
-		const drop = (id: string) => {
-			if (this.states.delete(id)) this.queryRemoved.add(id);
-		};
-		if (rebuilt || ledgerChanged) for (const id of this.vanished) drop(id);
-		else for (const id of touched) if (this.vanished.has(id)) drop(id);
+		// A space that just went (here or on another device) stops syncing
+		// and owes its h-deletion; boot reconciles in start().
+		if (ledgerChanged && !rebuilt) void this.refreshShared();
 	}
 
 	/**
@@ -382,6 +428,7 @@ class WebBackend {
 	async fetchChannels(): Promise<SpaceJSON[]> {
 		await this.ensure();
 		const out: SpaceJSON[] = [];
+		const keys = spaceKeyAll();
 		for (const o of this.states.values()) {
 			if (o.deleted || o.typeKey !== "channel") continue;
 			const members = (o.fields["members"]?.valuesValue?.items ?? [])
@@ -398,6 +445,7 @@ class WebBackend {
 				members,
 				keyId: o.fields["keyId"]?.intValue ?? 1,
 				createdAt: o.createdAt,
+				owner: spaceOwner(keys[o.id], this.pk),
 				// Display order for the rail, set by drag-reorder. Absent means
 				// "use createdAt", so both live in one number space and an
 				// unordered vault needs no migration. Deliberately does NOT
@@ -494,7 +542,9 @@ class WebBackend {
 		return result;
 	}
 
-	async mutate(action: string, params: Record<string, unknown>): Promise<Record<string, unknown>> {
+	/** `ownerSignal`: applying a space owner's kind-5 deletion, the one path
+	 * allowed to vanish a space this identity does not own (see runMutation). */
+	async mutate(action: string, params: Record<string, unknown>, ownerSignal = false): Promise<Record<string, unknown>> {
 		if (this.loggingOut) throw new Error("Logout in progress");
 		this.mutations++;
 		// A claim is a read/plan/commit transaction, not just one WASM call.
@@ -510,6 +560,8 @@ class WebBackend {
 					return [...this.states.values()];
 				},
 				author: this.author,
+				pk: this.pk,
+				ownerSignal,
 				dagFor: async (id) => {
 					const [changes, checkpoint] = await Promise.all([this.store.changesFor(id), this.store.getCheckpoint(id)]);
 					return { changes, checkpoint: checkpoint?.bytes };

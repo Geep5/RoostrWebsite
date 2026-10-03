@@ -9,6 +9,8 @@ interface MutationFixture {
 	name: string;
 	payload: unknown;
 	error?: boolean;
+	/** The exact refusal text, where the fixture pins one. */
+	expected_error?: string;
 	expected_changes: unknown[];
 	expected_result: unknown;
 	expected_vanish_ids: string[];
@@ -22,11 +24,12 @@ interface MutationResult {
 }
 
 await initCore({ wasmBytes: readFileSync(new URL("../static/engine.wasm", import.meta.url)) });
-const fixtureUrl = new URL("../../Roostr/core/mutation_fixtures.json", import.meta.url);
+const fixtureUrl = new URL("../../glonOdin/core/mutation_fixtures.json", import.meta.url);
 const fixtures = JSON.parse(readFileSync(fixtureUrl, "utf8")) as MutationFixture[];
 for (const fixture of fixtures) {
 	if (fixture.error) {
-		assert.throws(() => coreCall("mutation", fixture.payload), undefined, fixture.name);
+		const message = fixture.expected_error;
+		assert.throws(() => coreCall("mutation", fixture.payload), message === undefined ? undefined : (e: unknown) => e instanceof Error && e.message === message, fixture.name);
 		continue;
 	}
 	const result = unpackCoreValueMaps<MutationResult>(coreCall("mutation", fixture.payload));

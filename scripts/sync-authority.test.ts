@@ -425,9 +425,10 @@ describe("history completion", () => {
 		const pages = spyOn(internals, "queryRelayPage").mockResolvedValue([]);
 		await sync.start();
 		await internals.backfillChain;
-		// Both scopes, changes and checkpoints together, from event zero - not cursor+1.
+		// Both scopes, changes and checkpoints together, from event zero - not cursor+1;
+		// the space stream also carries its owner's kind-5 h-deletion.
 		expect(pages.mock.calls.map(([, filter]) => filter.since)).toEqual([1, 1]);
-		expect(pages.mock.calls.every(([, filter]) => (filter.kinds as number[]).join() === "1078,1079")).toBe(true);
+		expect(pages.mock.calls.map(([, filter]) => (filter.kinds as number[]).join())).toEqual(["1078,1079", "1078,1079,5"]);
 		expect(live.find((filter) => Array.isArray(filter.authors))!.since).toBe(701);
 		expect(await store.getBootstrapped()).toBe(true); // the clean walk re-earned it
 		// Starting again is an ordinary incremental walk: the floor record is gone.

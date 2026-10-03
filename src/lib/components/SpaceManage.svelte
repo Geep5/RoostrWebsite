@@ -25,17 +25,22 @@
 		if (confirmDelete) deleteInputEl?.focus();
 	});
 
-	/** Vanish the space and every object in it. The ledger entry rides sync,
-	 * so the deletion propagates to every device and can't resurrect. */
-	async function deleteSpace() {
+	/** Owner: vanish the space and every object in it. The ledger entry rides
+	 * sync and the space's h-deletion tells every member's devices, so it is
+	 * gone everywhere and can't resurrect. Member: leave - only this
+	 * identity's copies go; everyone else keeps the space. */
+	async function removeSpace() {
 		deleting = true;
 		try {
-			// Every object, not a page of them: the space goes with them, so
-			// anything left behind is unreachable — there is no space to
-			// browse it from.
-			const records = await fetchAllQuery({ filters: [{ key: "channel", condition: "equal", value: object.id }] });
-			const ids = [object.id, ...records.map((r) => r.id)];
-			await note.vanish(ids);
+			if (isOwner) {
+				// Every object, not a page of them: the space goes with them, so
+				// anything left behind is unreachable — there is no space to
+				// browse it from.
+				const records = await fetchAllQuery({ filters: [{ key: "channel", condition: "equal", value: object.id }] });
+				await note.vanish([object.id, ...records.map((r) => r.id)]);
+			} else {
+				await spaceApi.leave(object.id);
+			}
 			await refreshAll();
 			const next = store.channels[0]?.id ?? "";
 			activeSpace.id = next;
@@ -124,12 +129,14 @@
 	} = $props();
 
 	const members = $derived(spaceInfo?.members ?? []);
+	/** SpaceJSON.owner is "" when this identity administers the space. */
+	const isOwner = $derived(!spaceInfo?.owner);
 	const spaceName = $derived(object.fields["name"]?.stringValue?.trim() ?? "");
 	/** The space's own name, not the word "delete": the gate should cost a
 	 * look at WHICH space this is, and muscle memory from every other
 	 * confirm box shouldn't clear it. A space with no name has nothing to
-	 * type, so it keeps the word. */
-	const deletePhrase = $derived(spaceName || "delete");
+	 * type, so it keeps the action's word. */
+	const deletePhrase = $derived(spaceName || (isOwner ? "delete" : "leave"));
 	const deleteArmed = $derived(deleteDraft.trim().toLowerCase() === deletePhrase.toLowerCase());
 	let npubDraft = $state("");
 	let confirmRemove = $state("");
@@ -318,9 +325,10 @@
 			{/each}
 		</div>
 	{/if}
-	{#if store.channels.length > 1}
+	<!-- An owner keeps at least one space; a member may always leave. -->
+	{#if !isOwner || store.channels.length > 1}
 		<h3>Danger zone</h3>
-		<button class="danger" onclick={() => { confirmDelete = true; deleteDraft = ""; }}>Delete this space…</button>
+		<button class="danger" onclick={() => { confirmDelete = true; deleteDraft = ""; }}>{isOwner ? "Delete for everyone…" : "Leave space…"}</button>
 	{/if}
 
 	{#if confirmEmpty}
@@ -353,12 +361,21 @@
 
 	{#if confirmDelete}
 		<div class="del-overlay" role="presentation" onclick={(e) => { if (e.target === e.currentTarget && !deleting) confirmDelete = false; }}>
-			<div class="del-modal" role="dialog" aria-label="Delete space">
-				<h3 class="del-title">Delete {spaceName || "this space"}?</h3>
-				<p class="hint">
-					This permanently deletes the space and every object in it — on every device, forever.
-					This cannot be undone.
-				</p>
+			<div class="del-modal" role="dialog" aria-label={isOwner ? "Delete space for everyone" : "Leave space"}>
+				{#if isOwner}
+					<h3 class="del-title">Delete {spaceName || "this space"} for everyone?</h3>
+					<p class="hint">
+						This permanently deletes the space and everything in it — for every member, on every device, forever.
+						This cannot be undone.
+					</p>
+				{:else}
+					<h3 class="del-title">Leave {spaceName || "this space"}?</h3>
+					<p class="hint">
+						Only your own copies go: the space and everything in it disappear from your devices.
+						The other members keep the space and everything in it, including what you added.
+						This cannot be undone.
+					</p>
+				{/if}
 				<p class="hint">Type <b>{deletePhrase}</b> to confirm.</p>
 				<input
 					class="del-input"
@@ -367,13 +384,13 @@
 					autocomplete="off"
 					bind:this={deleteInputEl}
 					onkeydown={(e) => {
-						if (e.key === "Enter" && deleteArmed && !deleting) void deleteSpace();
+						if (e.key === "Enter" && deleteArmed && !deleting) void removeSpace();
 					}}
 				/>
 				<div class="del-actions">
 					<button class="subtle-btn" disabled={deleting} onclick={() => (confirmDelete = false)}>Cancel</button>
-					<button class="del-btn" disabled={!deleteArmed || deleting} onclick={() => void deleteSpace()}>
-						{deleting ? "Deleting…" : "Delete forever"}
+					<button class="del-btn" disabled={!deleteArmed || deleting} onclick={() => void removeSpace()}>
+						{#if isOwner}{deleting ? "Deleting…" : "Delete for everyone"}{:else}{deleting ? "Leaving…" : "Leave space"}{/if}
 					</button>
 				</div>
 			</div>
