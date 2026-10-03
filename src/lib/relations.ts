@@ -108,16 +108,19 @@ export function slugKey(name: string): string {
  * `objectTypes` are type object ids and apply to the `object` format only -
  * Anytype's relationFormatObjectTypes: the value picker then offers those
  * types alone. Empty means any object.
+ *
+ * `spaceId` owns the property: the active space unless the caller is
+ * working on an object of another space (a view opened from search).
  */
-export async function createRelation(name: string, format: string, objectTypes: string[] = []): Promise<RelationDefJSON | undefined> {
+export async function createRelation(name: string, format: string, objectTypes: string[] = [], spaceId = currentSpaceId()): Promise<RelationDefJSON | undefined> {
 	const key = slugKey(name);
 	// Dedupe within THIS space only - another space's same-named
 	// property is a different property.
-	const existing = spaceRelations(store.relations, currentSpaceId()).find((r) => r.key === key);
+	const existing = spaceRelations(store.relations, spaceId).find((r) => r.key === key);
 	if (existing) return existing;
 	const limits = format === "object" ? objectTypes : [];
 	await note.create(name, "relation", {
-		channel: { stringValue: currentSpaceId() },
+		channel: { stringValue: spaceId },
 		key: { stringValue: key },
 		name: { stringValue: name },
 		format: { stringValue: format },
@@ -129,5 +132,5 @@ export async function createRelation(name: string, format: string, objectTypes: 
 		...(limits.length > 0 ? { object_types: { valuesValue: { items: limits.map((id) => ({ stringValue: id })) } } } : {}),
 	});
 	await refreshAll();
-	return spaceRelations(store.relations, currentSpaceId()).find((r) => r.key === key);
+	return spaceRelations(store.relations, spaceId).find((r) => r.key === key);
 }

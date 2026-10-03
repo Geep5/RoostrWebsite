@@ -516,6 +516,7 @@
 					bind:this={queryControls}
 					{object}
 					relations={scopedRelations}
+					body={tableBody}
 					onchanged={refresh}
 					onsearch={(q) => (searchText = q)}
 					mode="type"
@@ -580,6 +581,7 @@
 					bind:this={queryControls}
 					{object}
 					relations={scopedRelations}
+					body={tableBody}
 					onchanged={refresh}
 					onsearch={(q) => (searchText = q)}
 					mode={isQuery ? "query" : "collection"}

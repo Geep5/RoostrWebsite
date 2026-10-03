@@ -1,7 +1,8 @@
 <script lang="ts">
 	import { goto } from "$app/navigation";
 	import LayoutIcon from "./LayoutIcon.svelte";
-	import { createRelation } from "$lib/relations";
+	import { createRelation, currentSpaceId, formatGlyph, objectSpaceId } from "$lib/relations";
+	import { spaceFilterOf } from "$lib/filters";
 	import type { ObjectJSON, RelationDefJSON, ValueJSON } from "$lib/types";
 	import { fetchQuery, note } from "$lib/api";
 	import { applyTemplate, createTyped } from "$lib/create";
@@ -17,6 +18,7 @@
 	let {
 		object,
 		relations,
+		body = null,
 		onchanged,
 		onsearch,
 		mode = "query",
@@ -26,6 +28,8 @@
 	}: {
 		object: ObjectJSON;
 		relations: RelationDefJSON[];
+		/** The view's record query - ranks the properties its records use first. */
+		body?: Record<string, unknown> | null;
 		onchanged: () => Promise<void>;
 		onsearch?: (q: string) => void;
 		mode?: "query" | "collection" | "type";
@@ -244,60 +248,125 @@
 	}
 
 	// ── View layout (Anytype: menu/dataview/view/layout.tsx) ───────
-	// viewType: table | kanban | calendar. Kanban groups by a
+	// viewType: table | gallery | kanban | calendar. Kanban groups by a
 	// select/multi-select/checkbox relation; calendar by a date relation
 	// (createdDate / modifiedDate system timestamps, or e.g. dueDate).
 	const viewType = $derived(object.fields["viewType"]?.stringValue || "table");
 	const groupKey = $derived(object.fields["viewGroupKey"]?.stringValue || "");
 	const dateKey = $derived(object.fields["viewDateKey"]?.stringValue || "createdDate");
+	const LAYOUTS = [
+		["table", "Table"],
+		["gallery", "Gallery"],
+		["kanban", "Kanban"],
+		["calendar", "Calendar"],
+	];
 
-	/** Anytype getGroupOptions ordering: select first, then multi, then checkbox. */
-	const groupOptions = $derived.by(() => {
-		const rank: Record<string, number> = { status: 0, tag: 1, checkbox: 2 };
-		return relations
-			.filter((r) => !r.hidden && r.format in rank)
-			.toSorted((a, b) => rank[a.format] - rank[b.format]);
+	/** A property a board can group by or a calendar can place records on. */
+	interface ViewProp {
+		key: string;
+		name: string;
+		emoji: string;
+	}
+
+	/** Property keys this view's objects - or its source types' objects -
+	 *  hold a value for. Types declare no property list here, so "belongs
+	 *  to the source type" is read off the type's objects in this space. */
+	let usedKeys = $state(new Set<string>());
+	const USED_SAMPLE = 500;
+
+	function hasValue(v: ValueJSON): boolean {
+		// A checkbox always reads as checked or unchecked.
+		if (v.boolValue !== undefined) return true;
+		if (v.valuesValue) return v.valuesValue.items.length > 0;
+		if (v.stringValue !== undefined) return v.stringValue !== "";
+		return !!(v.intValue || v.floatValue);
+	}
+
+	async function loadUsedKeys() {
+		const typeKey = object.fields["key"]?.stringValue ?? "";
+		const types = mode === "type" ? (typeKey ? [typeKey] : []) : sources;
+		const results = await Promise.all([
+			body ? fetchQuery({ ...body, limit: USED_SAMPLE }) : null,
+			types.length > 0 ? fetchQuery({ filters: [{ key: "typeKey", condition: "in", value: types }, spaceFilterOf(object, currentSpaceId())], limit: USED_SAMPLE }) : null,
+		]);
+		const keys = new Set<string>();
+		for (const res of results) {
+			for (const r of res?.records ?? []) {
+				for (const [k, v] of Object.entries(r.fields)) if (hasValue(v)) keys.add(k);
+			}
+		}
+		usedKeys = keys;
+	}
+
+	/** The property's own emoji, else its format glyph (the property picker's rule). */
+	function viewProp(r: RelationDefJSON): ViewProp {
+		return { key: r.key, name: r.name || r.key, emoji: r.iconEmoji || formatGlyph(r.format) };
+	}
+
+	/** Anytype getGroupOptions (select, then multi-select, then checkbox;
+	 *  by name within each), split: properties this view's records use
+	 *  first, then the rest. */
+	const GROUP_RANK: Record<string, number> = { status: 0, tag: 1, checkbox: 2 };
+	const groupChoices = $derived.by(() => {
+		const all = relations
+			.filter((r) => !r.hidden && r.format in GROUP_RANK)
+			.toSorted((a, b) => GROUP_RANK[a.format] - GROUP_RANK[b.format] || (a.name || a.key).localeCompare(b.name || b.key))
+			.map(viewProp);
+		return { used: all.filter((p) => usedKeys.has(p.key)), rest: all.filter((p) => !usedKeys.has(p.key)) };
 	});
-	const dateOptions = $derived.by(() => [
-		{ key: "createdDate", name: "Created date" },
-		{ key: "modifiedDate", name: "Modified date" },
-		...relations.filter((r) => !r.hidden && r.format === "date" && !["createdDate", "modifiedDate"].includes(r.key)).map((r) => ({ key: r.key, name: r.name || r.key })),
-	]);
 
-	async function setView(v: string) {
-		await note.setField(object.id, "viewType", { stringValue: v });
-		// Kanban needs a group relation: default to the first available.
-		if (v === "kanban" && !groupKey && groupOptions.length > 0) {
-			await note.setField(object.id, "viewGroupKey", { stringValue: groupOptions[0].key });
+	/** Calendar dates: used date properties, then the timestamps every
+	 *  object has (Created/Modified), then the space's other dates. */
+	const SYSTEM_DATES: Record<string, string> = { createdDate: "Created date", modifiedDate: "Modified date" };
+	const dateChoices = $derived.by(() => {
+		const dates = relations
+			.filter((r) => !r.hidden && r.format === "date" && !(r.key in SYSTEM_DATES))
+			.map(viewProp)
+			.toSorted((a, b) => a.name.localeCompare(b.name));
+		const stamps = Object.entries(SYSTEM_DATES).map(([key, name]) => {
+			const r = relations.find((x) => x.key === key);
+			return r ? viewProp(r) : { key, name, emoji: formatGlyph("date") };
+		});
+		return { used: [...dates.filter((p) => usedKeys.has(p.key)), ...stamps], rest: dates.filter((p) => !usedKeys.has(p.key)) };
+	});
+
+	const choosesProp = $derived(viewType === "kanban" || viewType === "calendar");
+	const propTitle = $derived(viewType === "calendar" ? "Date" : "Group by");
+	const choices = $derived(viewType === "calendar" ? dateChoices : groupChoices);
+	const currentKey = $derived(viewType === "calendar" ? dateKey : groupKey);
+	const current = $derived([...choices.used, ...choices.rest].find((p) => p.key === currentKey));
+
+	/** Layout tile click. Kanban and calendar open their property list
+	 *  every time, over the saved default until the user picks. */
+	async function pickLayout(v: string) {
+		propListOpen = false;
+		const choosing = v === "kanban" || v === "calendar";
+		await Promise.all([note.setField(object.id, "viewType", { stringValue: v }), choosing ? loadUsedKeys() : null]);
+		if (v === "kanban") {
+			// A board needs a group property: the top of the list stands in,
+			// saved, until one is picked (Anytype getGroupOption).
+			const all = [...groupChoices.used, ...groupChoices.rest];
+			if (all.length > 0 && !all.some((p) => p.key === groupKey)) {
+				await note.setField(object.id, "viewGroupKey", { stringValue: all[0].key });
+			}
 		}
 		await onchanged();
+		propListOpen = choosing;
 	}
 
-	async function setGroupKey(k: string) {
-		await note.setField(object.id, "viewGroupKey", { stringValue: k });
+	async function pickProp(key: string) {
+		propListOpen = chipOpen = false;
+		await note.setField(object.id, viewType === "calendar" ? "viewDateKey" : "viewGroupKey", { stringValue: key });
 		await onchanged();
 	}
 
-	async function setDateKey(k: string) {
-		await note.setField(object.id, "viewDateKey", { stringValue: k });
-		await onchanged();
-	}
-
-	/** "＋ New … property" entries create the relation, then select it. */
-	async function onGroupPick(v: string) {
-		if (v !== "__new__") return void setGroupKey(v);
-		const name = prompt("New tag property name:");
+	/** "＋ New … property" creates the relation, then picks it. */
+	async function newProp() {
+		const format = viewType === "calendar" ? "date" : "tag";
+		const name = prompt(`New ${format} property name:`);
 		if (!name?.trim()) return;
-		const rel = await createRelation(name.trim(), "tag");
-		if (rel) await setGroupKey(rel.key);
-	}
-
-	async function onDatePick(v: string) {
-		if (v !== "__new__") return void setDateKey(v);
-		const name = prompt("New date property name:");
-		if (!name?.trim()) return;
-		const rel = await createRelation(name.trim(), "date");
-		if (rel) await setDateKey(rel.key);
+		const rel = await createRelation(name.trim(), format, [], objectSpaceId(object));
+		if (rel) await pickProp(rel.key);
 	}
 
 	// ── New record (Anytype's accent New button, dataview.tsx recordCreate) ──
@@ -400,15 +469,34 @@
 		return createRecord();
 	};
 
-	// ── View settings menu (Anytype dataviewViewSettings) ───────────
-	// The controls row carries a single settings button; Layout (and the
-	// board/calendar config rows) live in its two-pane popover menu.
+	// ── View settings menu (Anytype dataviewViewLayout) ─────────────
+	// The controls row carries a single settings button; its menu is the
+	// layout tiles with the board/calendar property row beneath, whose
+	// property list opens beside it. The toolbar chip opens the same list.
 	let settingsOpen = $state(false);
-	let settingsPane = $state<"root" | "layout" | "group" | "date">("root");
+	let propListOpen = $state(false);
+	let chipOpen = $state(false);
 
 	function toggleSettings() {
 		settingsOpen = !settingsOpen;
-		settingsPane = "root";
+		propListOpen = chipOpen = false;
+	}
+
+	function toggleChip() {
+		chipOpen = !chipOpen;
+		settingsOpen = false;
+		if (chipOpen) void loadUsedKeys();
+	}
+
+	function togglePropList() {
+		propListOpen = !propListOpen;
+		if (propListOpen) void loadUsedKeys();
+	}
+
+	function onWindowMouseDown(e: MouseEvent) {
+		if (!(e.target instanceof Element)) return;
+		if (settingsOpen && !e.target.closest(".settings-anchor")) settingsOpen = false;
+		if (chipOpen && !e.target.closest(".prop-chip")) chipOpen = false;
 	}
 
 	// ── UI state ──────────────────────────────────────────────────
@@ -446,11 +534,58 @@
 	}
 </script>
 
-<svelte:window onmousedown={(e) => { if (settingsOpen && !(e.target as HTMLElement).closest(".settings-anchor")) settingsOpen = false; }} onkeydown={(e) => { if (e.key === "Escape") settingsOpen = false; }} />
+<svelte:window
+	onmousedown={onWindowMouseDown}
+	onkeydown={(e) => {
+		if (e.key === "Escape") settingsOpen = chipOpen = false;
+	}}
+/>
+
+<!-- The board/calendar property list (Anytype's groupRelationKey select
+     menu): properties the view's records use, a divider, the space's
+     other candidates, then "＋ New … property". `side` = beside the
+     settings row; otherwise it drops under the toolbar chip. -->
+{#snippet propList(side: boolean)}
+	<div class="plist" class:side role="menu" aria-label={propTitle}>
+		<span class="ptitle">{propTitle}</span>
+		<div class="pscroll">
+			{#each choices.used as p (p.key)}
+				{@render propRow(p)}
+			{/each}
+			{#if choices.used.length > 0 && choices.rest.length > 0}<div class="sort-div"></div>{/if}
+			{#each choices.rest as p (p.key)}
+				{@render propRow(p)}
+			{/each}
+		</div>
+		<div class="sort-div"></div>
+		<button class="vrow" onclick={() => void newProp()}><span>＋ New {viewType === "calendar" ? "date" : "tag"} property…</span></button>
+	</div>
+{/snippet}
+
+{#snippet propRow(p: ViewProp)}
+	<button class="vrow" role="menuitemradio" aria-checked={p.key === currentKey} onclick={() => void pickProp(p.key)}>
+		<span><span class="pemoji">{p.emoji}</span>{p.name}</span>
+		{#if p.key === currentKey}<span class="vcheck">✓</span>{/if}
+	</button>
+{/snippet}
+
+{#snippet propCaption()}
+	{#if current}<span class="pemoji">{current.emoji}</span><span class="pname">{current.name}</span>{:else}<span class="pname">{currentKey || "Select"}</span>{/if}
+{/snippet}
 
 <div class="controls">
 	<span class="spacer"></span>
 	<span class="view-chip"><LayoutIcon kind={viewType} size={16} /> {viewType[0].toUpperCase() + viewType.slice(1)}</span>
+	{#if choosesProp}
+		<span class="prop-chip">
+			<button class="pchip" class:on={chipOpen} title="Choose the property this {viewType === 'calendar' ? 'calendar places records by' : 'board groups by'}" onclick={toggleChip}>
+				<span class="pchip-title">{propTitle}:</span>
+				{@render propCaption()}
+				<span class="pchip-caret">▾</span>
+			</button>
+			{#if chipOpen}{@render propList(false)}{/if}
+		</span>
+	{/if}
 	<!-- Anytype dataviewControlsSideRight: search, then the collapsible
 	     filter/sort buttons (accent "on" state when rules exist), then the
 	     persistent settings button; their exact 20x20 icons. -->
@@ -480,71 +615,25 @@
 			<svg viewBox="0 0 20 20" width="20" height="20" fill="none"><path fill-rule="evenodd" clip-rule="evenodd" d="M13.75 6C13.75 6.69036 13.1903 7.25 12.5 7.25C11.8097 7.25 11.25 6.69036 11.25 6C11.25 5.30964 11.8097 4.75 12.5 4.75C13.1903 4.75 13.75 5.30964 13.75 6ZM14.8856 6.75C14.567 7.76428 13.6194 8.5 12.5 8.5C11.3806 8.5 10.433 7.76428 10.1144 6.75H3.58333C3.26117 6.75 3 6.41421 3 6C3 5.58579 3.26117 5.25 3.58333 5.25H10.1144C10.433 4.23572 11.3806 3.5 12.5 3.5C13.6194 3.5 14.567 4.23572 14.8856 5.25H16.4167C16.7388 5.25 17 5.58579 17 6C17 6.41421 16.7388 6.75 16.4167 6.75H14.8856ZM6.25 14C6.25 14.6903 6.80964 15.25 7.5 15.25C8.19036 15.25 8.75 14.6903 8.75 14C8.75 13.3097 8.19036 12.75 7.5 12.75C6.80964 12.75 6.25 13.3097 6.25 14ZM3.58333 13.25H5.11445C5.43301 12.2357 6.38059 11.5 7.5 11.5C8.61941 11.5 9.56699 12.2357 9.88555 13.25H16.4167C16.7388 13.25 17 13.5858 17 14C17 14.4142 16.7388 14.75 16.4167 14.75H9.88555C9.56699 15.7643 8.61941 16.5 7.5 16.5C6.38059 16.5 5.43301 15.7643 5.11445 14.75H3.58333C3.26117 14.75 3 14.4142 3 14C3 13.5858 3.26117 13.25 3.58333 13.25Z" fill="currentColor" /></svg>
 		</button>
 		{#if settingsOpen}
-			<!-- Anytype dataviewViewSettings: Layout row (caption = current
-			     layout) opening the dataviewViewLayout picker; board group
-			     and calendar date rows for those layouts. -->
+			<!-- Anytype dataviewViewLayout: layout tiles, then the layout's
+			     setting row (Group by / Date) whose list opens beside it. -->
 			<div class="vmenu" role="menu">
-				{#if settingsPane === "root"}
-					<button class="vrow" onclick={() => (settingsPane = "layout")}>
-						<span>Layout</span>
-						<span class="vcap">{viewType[0].toUpperCase() + viewType.slice(1)} ›</span>
-					</button>
-					{#if viewType === "kanban"}
-						<button class="vrow" onclick={() => (settingsPane = "group")}>
-							<span>Group by</span>
-							<span class="vcap">{groupOptions.find((g) => g.key === groupKey)?.name || groupKey || "—"} ›</span>
-						</button>
-					{/if}
-					{#if viewType === "calendar"}
-						<button class="vrow" onclick={() => (settingsPane = "date")}>
-							<span>Date</span>
-							<span class="vcap">{dateOptions.find((d) => d.key === dateKey)?.name || dateKey} ›</span>
-						</button>
-					{/if}
-				{:else if settingsPane === "layout"}
-					<button class="vback" onclick={() => (settingsPane = "root")}>‹ Layout</button>
-					{#each [["table", "Table"], ["gallery", "Gallery"], ["kanban", "Kanban"], ["calendar", "Calendar"]] as [v, label] (v)}
-						<button
-							class="vrow"
-							onclick={() => {
-								void setView(v);
-								settingsPane = "root";
-							}}
-						>
-							<span class="vlabel"><LayoutIcon kind={v} size={22} /> {label}</span>
-							{#if viewType === v}<span class="vcheck">✓</span>{/if}
+				<div class="vlayouts">
+					{#each LAYOUTS as [v, label] (v)}
+						<button class="vlayout" class:active={viewType === v} aria-pressed={viewType === v} onclick={() => void pickLayout(v)}>
+							<LayoutIcon kind={v} size={44} />
+							<span>{label}</span>
 						</button>
 					{/each}
-				{:else if settingsPane === "group"}
-					<button class="vback" onclick={() => (settingsPane = "root")}>‹ Group by</button>
-					{#each groupOptions as g (g.key)}
-						<button
-							class="vrow"
-							onclick={() => {
-								void onGroupPick(g.key);
-								settingsPane = "root";
-							}}
-						>
-							<span>{g.name || g.key}</span>
-							{#if groupKey === g.key}<span class="vcheck">✓</span>{/if}
+				</div>
+				{#if choosesProp}
+					<div class="vsub">
+						<button class="vrow" class:active={propListOpen} onclick={togglePropList}>
+							<span>{propTitle}</span>
+							<span class="vcap">{@render propCaption()}<span class="varrow">›</span></span>
 						</button>
-					{/each}
-					<button class="vrow" onclick={() => void onGroupPick("__new__")}><span>＋ New tag property…</span></button>
-				{:else if settingsPane === "date"}
-					<button class="vback" onclick={() => (settingsPane = "root")}>‹ Date</button>
-					{#each dateOptions as d (d.key)}
-						<button
-							class="vrow"
-							onclick={() => {
-								void onDatePick(d.key);
-								settingsPane = "root";
-							}}
-						>
-							<span>{d.name}</span>
-							{#if dateKey === d.key}<span class="vcheck">✓</span>{/if}
-						</button>
-					{/each}
-					<button class="vrow" onclick={() => void onDatePick("__new__")}><span>＋ New date property…</span></button>
+						{#if propListOpen}{@render propList(true)}{/if}
+					</div>
 				{/if}
 			</div>
 		{/if}
@@ -790,11 +879,6 @@
 		font-size: 12px;
 		align-self: center;
 	}
-	.vlabel {
-		display: inline-flex;
-		align-items: center;
-		gap: 8px;
-	}
 	.settings-anchor {
 		position: relative;
 		display: inline-block;
@@ -807,7 +891,7 @@
 		display: flex;
 		flex-direction: column;
 		gap: 2px;
-		min-width: 220px;
+		min-width: 300px;
 		background: var(--panel, #1a1d23);
 		border: 1px solid var(--border);
 		border-radius: 10px;
@@ -828,27 +912,160 @@
 		font-size: 13px;
 		text-align: left;
 	}
-	.vrow:hover {
+	.vrow:hover,
+	.vrow.active {
 		background: var(--hl-med);
 	}
 	.vcap {
+		display: inline-flex;
+		align-items: center;
 		color: var(--muted);
 		font-size: 12px;
+		white-space: nowrap;
 	}
 	.vcheck {
 		color: var(--accent);
 	}
-	.vback {
+	/* Anytype's layout tiles: icon over label, the current one ringed. */
+	.vlayouts {
+		display: grid;
+		grid-template-columns: repeat(4, 1fr);
+		gap: 4px;
+	}
+	.vlayouts:not(:last-child) {
+		padding-bottom: 6px;
+		margin-bottom: 4px;
+		border-bottom: 1px solid var(--border);
+	}
+	.vlayout {
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		gap: 2px;
 		background: none;
-		border: none;
+		border: 1px solid transparent;
+		border-radius: 8px;
+		padding: 4px 2px 6px;
 		color: var(--muted);
 		font-size: 12px;
-		text-align: left;
-		padding: 4px 8px;
 		cursor: pointer;
 	}
-	.vback:hover {
+	.vlayout:hover {
+		background: var(--hl-med);
 		color: var(--fg);
+	}
+	.vlayout.active {
+		border-color: var(--accent);
+		color: var(--fg);
+	}
+	.vsub {
+		position: relative;
+		display: flex;
+		flex-direction: column;
+	}
+	.plist {
+		position: absolute;
+		left: 0;
+		top: calc(100% + 6px);
+		z-index: 120;
+		display: flex;
+		flex-direction: column;
+		gap: 2px;
+		width: 260px;
+		background: var(--panel, #1a1d23);
+		border: 1px solid var(--border);
+		border-radius: 10px;
+		padding: 6px;
+		box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5);
+	}
+	/* Beside the settings row; the menu hugs the right edge, so it opens leftward. */
+	.plist.side {
+		left: auto;
+		right: calc(100% + 12px);
+		top: -6px;
+	}
+	.ptitle {
+		color: var(--muted);
+		font-size: 11px;
+		text-transform: uppercase;
+		letter-spacing: 0.4px;
+		padding: 2px 8px 4px;
+	}
+	.pscroll {
+		display: flex;
+		flex-direction: column;
+		gap: 2px;
+		max-height: 320px;
+		overflow-y: auto;
+	}
+	/* A scrolling flex column squeezes content-less children: keep the divider. */
+	.pscroll > * {
+		flex-shrink: 0;
+	}
+	.pemoji {
+		flex: none;
+		display: inline-block;
+		min-width: 18px;
+		margin-right: 6px;
+		text-align: center;
+	}
+	.pname {
+		min-width: 0;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+	/* Shrinks before the toolbar buttons do; a long name ellipsizes. */
+	.prop-chip {
+		position: relative;
+		align-self: center;
+		display: flex;
+		min-width: 0;
+		max-width: 260px;
+	}
+	.pchip {
+		display: inline-flex;
+		align-items: center;
+		min-width: 0;
+		max-width: 100%;
+		height: 28px;
+		background: none;
+		border: 1px solid var(--border);
+		border-radius: 8px;
+		padding: 0 8px;
+		color: var(--fg);
+		font-size: 12px;
+		white-space: nowrap;
+		cursor: pointer;
+	}
+	.pchip:hover,
+	.pchip.on {
+		background: var(--hl-med);
+	}
+	.pchip-title {
+		flex: none;
+		color: var(--muted);
+		margin-right: 6px;
+	}
+	.pchip-caret {
+		flex: none;
+		color: var(--muted);
+		font-size: 10px;
+		margin-left: 6px;
+	}
+	.varrow {
+		margin-left: 4px;
+	}
+	@media (max-width: 720px) {
+		/* No room beside the menu on a phone: the list unfolds under its row. */
+		.plist.side {
+			position: static;
+			width: auto;
+			margin-top: 4px;
+			box-shadow: none;
+		}
+		.pchip-title {
+			display: none;
+		}
 	}
 	.sort-panel {
 		display: flex;
