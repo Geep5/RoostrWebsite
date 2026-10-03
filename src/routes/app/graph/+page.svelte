@@ -15,6 +15,8 @@
 	let status = $state("Loading graph…");
 
 	const MAX_LABELS = 100; // Anytype's visible-label cull
+	/** Settling done off-screen before the first paint (ms); the bulk of the layout motion fits in it. */
+	const WARM_MS = 600;
 
 	// Each channel gets its own graph (Anytype: one graph per space).
 	const defaultChannelId = $derived(store.channels[0]?.id ?? "");
@@ -45,8 +47,28 @@
 
 		void (async () => {
 			const graph: ObjectGraph = await buildGraph(id, isDefault, valueRels);
-			status = graph.nodes.length === 0 ? "Nothing in this space yet." : "";
-			if (!canvasEl || cancelled || graph.nodes.length === 0) return;
+			if (graph.nodes.length === 0) {
+				status = "Nothing in this space yet.";
+				return;
+			}
+			// Warm start (d3's simulation.tick() before the first paint): the
+			// layout does nearly all its moving in the first few dozen steps, and
+			// drawing those is the jitter you saw on open. Run them off-screen,
+			// in short slices so the page stays responsive; what's left to settle
+			// on screen moves well under a pixel a frame.
+			let warmAlpha = 1;
+			const warmUntil = performance.now() + WARM_MS;
+			while (warmAlpha > 0.003 && performance.now() < warmUntil) {
+				const slice = Math.min(warmUntil, performance.now() + 40);
+				while (warmAlpha > 0.003 && performance.now() < slice) {
+					simStep(graph, warmAlpha);
+					warmAlpha *= 0.99; // the frame loop's 0.98 per two steps
+				}
+				await new Promise((r) => setTimeout(r, 0));
+				if (cancelled) return;
+			}
+			status = "";
+			if (!canvasEl || cancelled) return;
 
 			// iOS Safari sizes the WebGPU swapchain when the context is
 			// configured and does NOT track later canvas resizes (Chrome
@@ -88,7 +110,7 @@
 			let scale = 1;
 			let offsetX = 0;
 			let offsetY = 0;
-			let alpha = 1;
+			let alpha = warmAlpha;
 			let hovered = -1;
 			const focused = focusId ? graph.nodes.findIndex((node) => node.id === focusId) : -1;
 			let dragNode = -1;
