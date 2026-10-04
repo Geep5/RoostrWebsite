@@ -1,5 +1,6 @@
 <script lang="ts">
 	import type { BlockJSON, ObjectJSON } from "$lib/types";
+	import type { LintProblem } from "$lib/codelint";
 	import { Pos, Style, Layout } from "$lib/types";
 	import { toHtml } from "$lib/marks";
 	import BlockNode from "./BlockNode.svelte";
@@ -15,6 +16,7 @@
 		byId,
 		object,
 		readonly,
+		lint,
 		draggingId,
 		dropHint,
 		selectedIds,
@@ -35,6 +37,8 @@
 		object: ObjectJSON;
 		/** Shown, never edited: no caret, and nothing that writes. */
 		readonly: boolean;
+		/** A Tool's code problems by Code block id (lib/codelint); empty elsewhere. */
+		lint: Map<string, LintProblem[]>;
 		draggingId: string;
 		/** Resolved drop target for the whole document (Anytype's hoverData). */
 		dropHint: { id: string; position: number; bot?: boolean } | null;
@@ -146,13 +150,13 @@
 	{#if block.content.layout?.style === Layout.ROW}
 		<div class="row" style="grid-template-columns: {block.childrenIds.map(widthOf).join(' ')}">
 			{#each block.childrenIds as cid (cid)}
-				<BlockNode id={cid} {byId} {object} {readonly} {draggingId} {dropHint} {selectedIds} {onkeydown} {oninput} {onblur} {onselect} {ondragbegin} {ondrop} {ontogglecheck} {onmenu} {onrefresh} {onpaste} {onemptytoggle} />
+				<BlockNode id={cid} {byId} {object} {readonly} {lint} {draggingId} {dropHint} {selectedIds} {onkeydown} {oninput} {onblur} {onselect} {ondragbegin} {ondrop} {ontogglecheck} {onmenu} {onrefresh} {onpaste} {onemptytoggle} />
 			{/each}
 		</div>
 	{:else if block.content.layout?.style === Layout.COLUMN}
 		<div class="col">
 			{#each block.childrenIds as cid (cid)}
-				<BlockNode id={cid} {byId} {object} {readonly} {draggingId} {dropHint} {selectedIds} {onkeydown} {oninput} {onblur} {onselect} {ondragbegin} {ondrop} {ontogglecheck} {onmenu} {onrefresh} {onpaste} {onemptytoggle} />
+				<BlockNode id={cid} {byId} {object} {readonly} {lint} {draggingId} {dropHint} {selectedIds} {onkeydown} {oninput} {onblur} {onselect} {ondragbegin} {ondrop} {ontogglecheck} {onmenu} {onrefresh} {onpaste} {onemptytoggle} />
 			{/each}
 		</div>
 	{:else if block.content.table}
@@ -280,10 +284,17 @@
 				<button class="code-copy" class:copied title="Copy code" aria-label="Copy code" onclick={() => copyCode(t.text)}>{copied ? "Copied" : "Copy"}</button>
 			{/if}
 		</div>
+			{#if t.style === Style.CODE && lint.get(block.id)?.length}
+				<ul class="code-lint">
+					{#each lint.get(block.id) ?? [] as p, i (i)}
+						<li class={p.severity}><span class="where">Line {p.line}:{p.col}</span> {p.message}</li>
+					{/each}
+				</ul>
+			{/if}
 			{#if block.childrenIds.length > 0 && (!isToggle || toggleOpen)}
 				<div class="nested">
 					{#each block.childrenIds as cid (cid)}
-						<BlockNode id={cid} {byId} {object} {readonly} {draggingId} {dropHint} {selectedIds} {onkeydown} {oninput} {onblur} {onselect} {ondragbegin} {ondrop} {ontogglecheck} {onmenu} {onrefresh} {onpaste} {onemptytoggle} />
+						<BlockNode id={cid} {byId} {object} {readonly} {lint} {draggingId} {dropHint} {selectedIds} {onkeydown} {oninput} {onblur} {onselect} {ondragbegin} {ondrop} {ontogglecheck} {onmenu} {onrefresh} {onpaste} {onemptytoggle} />
 					{/each}
 				</div>
 				<!-- Anytype targetBot (block/index.tsx:1219): a thin strip below
@@ -481,7 +492,7 @@
 			{#if block.childrenIds.length > 0}
 				<div class="nested">
 					{#each block.childrenIds as cid (cid)}
-						<BlockNode id={cid} {byId} {object} {readonly} {draggingId} {dropHint} {selectedIds} {onkeydown} {oninput} {onblur} {onselect} {ondragbegin} {ondrop} {ontogglecheck} {onmenu} {onrefresh} {onpaste} {onemptytoggle} />
+						<BlockNode id={cid} {byId} {object} {readonly} {lint} {draggingId} {dropHint} {selectedIds} {onkeydown} {oninput} {onblur} {onselect} {ondragbegin} {ondrop} {ontogglecheck} {onmenu} {onrefresh} {onpaste} {onemptytoggle} />
 					{/each}
 				</div>
 			{/if}
@@ -672,6 +683,13 @@
 	.title { font-size: 34px; font-weight: 750; }
 	.quote { border-left: 3px solid var(--accent); padding-left: 12px; font-style: italic; }
 	.codeblock { font-family: ui-monospace, monospace; background: var(--panel); border-radius: 6px; padding: 8px 10px; font-size: 13px; tab-size: 4; }
+	/* Tool code lint: one line per problem under the Code block, past the gutter; the text carries the matching wavy underline (Editor). */
+	.code-lint { list-style: none; margin: 4px 0 2px 48px; padding: 0 10px; font-size: 12px; line-height: 1.5; }
+	.code-lint li { color: var(--muted); }
+	.code-lint li::before { content: "●"; margin-right: 6px; font-size: 9px; vertical-align: 1px; }
+	.code-lint li.error::before { color: #ff453a; }
+	.code-lint li.warning::before { color: #ffd60a; }
+	.code-lint .where { font-family: ui-monospace, monospace; }
 	/* Anything image-like that lands inside a text line (rich paste) never spills past the column. */
 	.text :global(img) { max-width: 100%; height: auto; }
 	/* A flex item after the code text, pulled back over its top-right corner;
@@ -871,6 +889,9 @@
 		.gutter {
 			width: 16px;
 			flex: 0 0 16px;
+		}
+		.code-lint {
+			margin-left: 16px;
 		}
 		.block {
 			padding-right: 16px;

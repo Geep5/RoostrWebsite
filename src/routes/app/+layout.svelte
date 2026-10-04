@@ -908,7 +908,7 @@
 				<!-- A phone has no hover, so the rail's sync dot is invisible
 				     there: a first load that is still importing history used
 				     to look like a vault with spaces missing. -->
-				<p class="m-importing">Loading your vault… {sync.imported.toLocaleString()} changes imported. Spaces appear as they arrive.</p>
+				<p class="m-importing">Loading your vault… {sync.detail ?? `${sync.imported.toLocaleString()} changes imported`}. Spaces appear as they arrive.</p>
 			{/if}
 			<div class="m-cards">
 				{#each orderedSpaces as c (c.id)}

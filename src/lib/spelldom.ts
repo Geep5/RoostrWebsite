@@ -10,12 +10,13 @@ import { checkText, dictionaryLoaded, loadDictionary, RETRY_MS } from "$lib/spel
 const HIGHLIGHT = "spell";
 let retryTimer: ReturnType<typeof setTimeout> | undefined;
 
-interface NodeSpan {
+export interface NodeSpan {
 	node: Text;
 	start: number; // global offset of this node's first char
 }
 
-function textNodes(root: HTMLElement): NodeSpan[] {
+/** An editable's text nodes, each with its offset in the block's text. */
+export function textNodes(root: HTMLElement): NodeSpan[] {
 	const out: NodeSpan[] = [];
 	const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
 	let offset = 0;
@@ -26,7 +27,8 @@ function textNodes(root: HTMLElement): NodeSpan[] {
 	return out;
 }
 
-function rangeFor(spans: NodeSpan[], from: number, to: number): Range | null {
+/** A DOM Range over block-text offsets [from, to), or null when they fall outside the nodes. */
+export function rangeFor(spans: NodeSpan[], from: number, to: number): Range | null {
 	let a: { node: Text; off: number } | null = null;
 	let b: { node: Text; off: number } | null = null;
 	for (const s of spans) {
@@ -50,7 +52,8 @@ export async function refreshSpell(root: HTMLElement): Promise<void> {
 	// backoff even if nothing is typed, so a page being read still gets checked.
 	if (!dictionaryLoaded() && root.isConnected) retryTimer = setTimeout(() => void refreshSpell(root), RETRY_MS + 100);
 	const ranges: Range[] = [];
-	for (const el of root.querySelectorAll<HTMLElement>("[contenteditable]")) {
+	// Code isn't prose: Code blocks get no spell marks (a Tool's get lint marks instead, lib/codelint).
+	for (const el of root.querySelectorAll<HTMLElement>("[contenteditable]:not(.codeblock)")) {
 		const spans = textNodes(el);
 		const text = spans.map((s) => s.node.data).join("");
 		for (const miss of checkText(text)) {
@@ -67,7 +70,7 @@ export function misspelledAt(x: number, y: number): { word: string; el: HTMLElem
 	if (!caret) return null;
 	const node = caret.startContainer;
 	if (node.nodeType !== Node.TEXT_NODE) return null;
-	const el = (node.parentElement as HTMLElement)?.closest<HTMLElement>("[contenteditable]");
+	const el = (node.parentElement as HTMLElement)?.closest<HTMLElement>("[contenteditable]:not(.codeblock)");
 	if (!el) return null;
 	const spans = textNodes(el);
 	const span = spans.find((s) => s.node === node);

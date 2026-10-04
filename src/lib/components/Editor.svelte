@@ -7,7 +7,8 @@
 	import { note, table, fetchObject } from "$lib/api";
 	import { fromDom, selectionOffsets, setCaret, toggleMark, toHtml } from "$lib/marks";
 	import { isToggleOpen, setToggleOpen } from "$lib/toggles";
-	import { refreshSpell, misspelledAt } from "$lib/spelldom";
+	import { refreshSpell, misspelledAt, rangeFor, textNodes } from "$lib/spelldom";
+	import { lintToolCode, type LintProblem } from "$lib/codelint";
 	import { addToDictionary, suggestions } from "$lib/spell";
 	import BlockNode from "./BlockNode.svelte";
 	import BlockMenu from "./BlockMenu.svelte";
@@ -155,6 +156,52 @@
 	$effect(() => {
 		void object.blocks;
 		scheduleSpell();
+	});
+
+	// ── Tool code lint (lib/codelint) ─────────────────────────────
+	/** A Tool's Code blocks are the code its harness runs; anywhere else a code block is just text. */
+	const lintsCode = $derived(object.typeKey === "tool" && !readonly);
+	/** Problems by Code block id, from the last finished run. */
+	let lint = $state(new Map<string, LintProblem[]>());
+	let lintTimer: ReturnType<typeof setTimeout> | undefined;
+	/** Bumped per run so a slow run never overwrites a newer one. */
+	let lintRun = 0;
+
+	function scheduleLint() {
+		clearTimeout(lintTimer);
+		lintTimer = setTimeout(() => void refreshLint(), 350);
+	}
+
+	/** Lint the live text (typing not yet saved included) and underline each problem in place. */
+	async function refreshLint() {
+		const run = ++lintRun;
+		const els = lintsCode && editorEl ? [...editorEl.querySelectorAll<HTMLElement>(".text.codeblock")] : [];
+		const spans = els.map(textNodes);
+		const problems = await lintToolCode(spans.map((s) => s.map((n) => n.node.data).join("")));
+		if (run !== lintRun) return;
+		const next = new Map<string, LintProblem[]>();
+		const ranges = { error: [] as Range[], warning: [] as Range[] };
+		els.forEach((el, i) => {
+			const id = el.closest<HTMLElement>("[data-block]")?.dataset.block;
+			if (!id || !problems[i].length) return;
+			next.set(id, problems[i]);
+			for (const p of problems[i]) {
+				const r = rangeFor(spans[i], p.from, p.to);
+				if (r) ranges[p.severity].push(r);
+			}
+		});
+		lint = next;
+		if (typeof CSS !== "undefined" && "highlights" in CSS) {
+			CSS.highlights.set("lint-error", new Highlight(...ranges.error));
+			CSS.highlights.set("lint-warning", new Highlight(...ranges.warning));
+		}
+	}
+
+	$effect(() => {
+		void object.blocks;
+		void lintsCode;
+		scheduleLint();
+		return () => clearTimeout(lintTimer);
 	});
 
 	/**
@@ -1180,6 +1227,7 @@
 		updateSlash(id);
 		scheduleSave(id);
 		scheduleSpell();
+		scheduleLint();
 	}
 
 	/** Apply a slash pick: strip "/filter" from the block, then act. */
@@ -2029,6 +2077,7 @@
 			{byId}
 			{object}
 			{readonly}
+			{lint}
 			{draggingId}
 			{dropHint}
 			selectedIds={selectedSet}
@@ -2265,6 +2314,14 @@
 	}
 	:global(::highlight(spell)) {
 		text-decoration: underline wavy #e2400c 1px;
+		text-decoration-skip-ink: none;
+	}
+	:global(::highlight(lint-error)) {
+		text-decoration: underline wavy #ff453a 1.5px;
+		text-decoration-skip-ink: none;
+	}
+	:global(::highlight(lint-warning)) {
+		text-decoration: underline wavy #ffd60a 1.5px;
 		text-decoration-skip-ink: none;
 	}
 	.spell-menu {
