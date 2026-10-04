@@ -143,6 +143,20 @@ export interface ObjectHistory {
 	changes: Uint8Array[];
 }
 
+/**
+ * One relay event this device holds, per relay stream it belongs to: scope ""
+ * is the self stream (`authors:[pk]`), otherwise the space-stream `#h` tag.
+ * An event authored here inside a shared space belongs to both. The NIP-77
+ * local item set of a stream filter is its rows of the filter's kinds.
+ */
+export interface RelayEventRow {
+	/** Event id, hex. */
+	id: string;
+	createdAt: number;
+	kind: number;
+	scope: string;
+}
+
 export interface ChangeStoreApi {
 	open(): Promise<void>;
 	/** Add raw changes (idempotent by content address). Returns # new. */
@@ -189,6 +203,10 @@ export interface ChangeStoreApi {
 	/** Change ids already published to relays. */
 	isPublished(changeId: string): Promise<boolean>;
 	markPublished(changeId: string): Promise<void>;
+	/** Record relay events this device holds (idempotent per scope + id). */
+	recordRelayEvents(rows: RelayEventRow[]): Promise<void>;
+	/** Held relay events of one stream scope, any of `kinds`. */
+	relayEvents(scope: string, kinds: number[]): Promise<Array<{ id: string; createdAt: number }>>;
 }
 
 // ── sync.ts ───────────────────────────────────────────────────────

@@ -45,6 +45,23 @@ interface MutationPlan {
 	vanish_changes: ChangeJSON[];
 }
 
+/**
+ * The states a mutation plans over. The planner reads blocks only of the
+ * objects its params name (targets, senders, recipients); every other state
+ * goes without its blocks, which are most of a vault's bytes and would
+ * overrun the core's per-request arena on a large one.
+ */
+export function mutationObjects(objects: ObjectJSON[], params: Record<string, unknown>): ObjectJSON[] {
+	const named = new Set<string>();
+	const collect = (value: unknown): void => {
+		if (typeof value === "string") named.add(value);
+		else if (Array.isArray(value)) value.forEach(collect);
+		else if (value && typeof value === "object") Object.values(value).forEach(collect);
+	};
+	collect(params);
+	return objects.map((object) => (named.has(object.id) || !object.blocks ? object : { ...object, blocks: [] }));
+}
+
 export async function runMutation(
 	ctx: MutateCtx,
 	action: string,
@@ -64,7 +81,7 @@ export async function runMutation(
 			throw new Error("Only the space's owner can delete it for everyone: leave it instead.");
 		}
 	}
-	const objects = await ctx.allObjects();
+	const objects = mutationObjects(await ctx.allObjects(), params);
 	const rotating = action === "channel_member_remove" || action === "channel_key_rotate";
 	const keyId = rotating ? (spaceKeyGet(channelId)?.keyId ?? 0) + 1 : 0;
 	const plan = unpackCoreValueMaps(coreCall<MutationPlan>("mutation", packCoreValueMaps({

@@ -14,21 +14,25 @@
  *                boots don't re-replay the whole vault; invalidated per
  *                object when its change count grows or its checkpoint moves
  *                (changes are append-only and content-addressed).
+ *   relay-events keyed by [scope, eventId] → { id, createdAt, kind, scope }:
+ *                the relay events this device holds per stream, the local
+ *                item set of NIP-77 reconciliation; 'scopeKind' index.
  *
  * Runs on raw IndexedDB. Under bun (no global indexedDB) it lazily pulls
  * fake-indexeddb; the specifier goes through a variable so Vite never
  * bundles the dev dependency.
  */
 
-import type { ChangeJSON, ChangeStoreApi, CheckpointRow, ObjectHistory, PendingPublish } from "./contracts";
+import type { ChangeJSON, ChangeStoreApi, CheckpointRow, ObjectHistory, PendingPublish, RelayEventRow } from "./contracts";
 import { checkpointSupersedes } from "./proto";
 
 const DB_NAME = "roostr";
-const DB_VERSION = 3;
+const DB_VERSION = 4;
 const CHANGES = "changes";
 const CHECKPOINTS = "checkpoints";
 const META = "meta";
 const STATES = "states";
+const RELAY_EVENTS = "relay-events";
 const CURSOR_KEY = "cursor";
 /** Pre-cache-contract manifest floors; see forgetCheckpointFloors. */
 const CHECKPOINT_FLOORS_KEY = "checkpoint-floors";
@@ -117,6 +121,10 @@ export class ChangeStore implements ChangeStoreApi {
 			if (!db.objectStoreNames.contains(CHECKPOINTS)) db.createObjectStore(CHECKPOINTS);
 			if (!db.objectStoreNames.contains(META)) db.createObjectStore(META);
 			if (!db.objectStoreNames.contains(STATES)) db.createObjectStore(STATES);
+			// v4: devices upgrading hold no record yet; their first reconcile re-fetches everything once.
+			if (!db.objectStoreNames.contains(RELAY_EVENTS)) {
+				db.createObjectStore(RELAY_EVENTS, { keyPath: ["scope", "id"] }).createIndex("scopeKind", ["scope", "kind"], { unique: false });
+			}
 		};
 		r.onsuccess = () => resolve(r.result);
 		r.onerror = () => reject(r.error);
@@ -376,6 +384,20 @@ export class ChangeStore implements ChangeStoreApi {
 		tx.objectStore(META).put(true, `published:${changeId}`);
 		tx.objectStore(META).delete(`pending:${changeId}`);
 		await txDone(tx);
+	}
+
+	async recordRelayEvents(rows: RelayEventRow[]): Promise<void> {
+		if (rows.length === 0) return;
+		const tx = this.handle().transaction(RELAY_EVENTS, "readwrite");
+		const store = tx.objectStore(RELAY_EVENTS);
+		for (const row of rows) store.put({ id: row.id, createdAt: row.createdAt, kind: row.kind, scope: row.scope } satisfies RelayEventRow);
+		await txDone(tx);
+	}
+
+	async relayEvents(scope: string, kinds: number[]): Promise<Array<{ id: string; createdAt: number }>> {
+		const index = this.handle().transaction(RELAY_EVENTS, "readonly").objectStore(RELAY_EVENTS).index("scopeKind");
+		const groups = (await Promise.all(kinds.map((kind) => req(index.getAll([scope, kind]))))) as RelayEventRow[][];
+		return groups.flat().map((row) => ({ id: row.id, createdAt: row.createdAt }));
 	}
 }
 

@@ -57,6 +57,7 @@ interface SyncInternals {
 	pool: { publish(relays: string[], event: Event): Promise<string>[]; querySync(): Promise<Event[]>; subscribeMany(): { close(): void }; close(): void };
 	queryRelayPage(url: string, filter: Record<string, unknown>): Promise<Event[]>;
 	backfillChain: Promise<boolean>;
+	negentropyUnsupported: Set<string>;
 }
 interface StoreInternals {
 	handle(): IDBDatabase;
@@ -64,6 +65,8 @@ interface StoreInternals {
 function syncFixture(store: ChangeStore, relays: string[] = []) {
 	const sync = new RelaySync(ownerSk, relays, store, { onObjects() {}, onStatus() {} });
 	const internals = sync as unknown as SyncInternals;
+	// Relays here don't speak NIP-77: these tests pin the paged walk (scripts/sync-negentropy.test.ts covers reconcile).
+	for (const relay of relays) internals.negentropyUnsupported.add(relay);
 	sync.setSharedSpaces([space]);
 	cleanup.push(() => stopSettled(sync, internals));
 	return { sync, internals };
@@ -295,8 +298,8 @@ describe("history completion", () => {
 		expect(repair.mock.calls.every(([, filter]) => filter.since === 0)).toBe(true);
 		expect(await store.getCursor()).toBe(100);
 		expect(await store.getReplayGroups()).toEqual([]);
-		// One relay, two scopes (one DAG filter each); the original walker never ran again.
-		expect(pages).toHaveBeenCalledTimes(2);
+		// One relay, two scopes, a checkpoint pass then a change pass each; the original walker never ran again.
+		expect(pages).toHaveBeenCalledTimes(4);
 	});
 	test("import failure preserves recovery across reload and a later successful scan retires it", async () => {
 		const store = await storeFixture();
@@ -425,10 +428,10 @@ describe("history completion", () => {
 		const pages = spyOn(internals, "queryRelayPage").mockResolvedValue([]);
 		await sync.start();
 		await internals.backfillChain;
-		// Both scopes, changes and checkpoints together, from event zero - not cursor+1;
-		// the space stream also carries its owner's kind-5 h-deletion.
-		expect(pages.mock.calls.map(([, filter]) => filter.since)).toEqual([1, 1]);
-		expect(pages.mock.calls.map(([, filter]) => (filter.kinds as number[]).join())).toEqual(["1078,1079", "1078,1079,5"]);
+		// Both scopes from event zero - not cursor+1 - checkpoints first, then changes;
+		// the space's checkpoint pass also carries its owner's kind-5 h-deletion.
+		expect(pages.mock.calls.map(([, filter]) => filter.since)).toEqual([1, 1, 1, 1]);
+		expect(pages.mock.calls.map(([, filter]) => (filter.kinds as number[]).join())).toEqual(["1079", "1079,5", "1078", "1078"]);
 		expect(live.find((filter) => Array.isArray(filter.authors))!.since).toBe(701);
 		expect(await store.getBootstrapped()).toBe(true); // the clean walk re-earned it
 		// Starting again is an ordinary incremental walk: the floor record is gone.
@@ -445,6 +448,7 @@ describe("history completion", () => {
 		await store.setBootstrapped();
 		const sync = new RelaySync(ownerSk, ["wss://invalid.test"], store, { onObjects() {}, onStatus() {} });
 		const internals = sync as unknown as SyncInternals;
+		internals.negentropyUnsupported.add("wss://invalid.test");
 		cleanup.push(() => stopSettled(sync, internals));
 		internals.pool = {
 			publish: () => [Promise.resolve("ok")],
@@ -461,8 +465,9 @@ describe("history completion", () => {
 		sync.setSharedSpaces([space]);
 		await internals.backfillChain;
 		const spaceWalks = pages.mock.calls.filter(([, filter]) => filter["#h"]);
-		expect(spaceWalks.length).toBe(1);
-		expect(spaceWalks[0][1].since).toBe(1);
+		// One checkpoint pass and one change pass over the space stream, both from event zero.
+		expect(spaceWalks.map(([, filter]) => (filter.kinds as number[]).join())).toEqual(["1079,5", "1078"]);
+		expect(spaceWalks.every(([, filter]) => filter.since === 1)).toBe(true);
 	});
 	test("a suffix-first repair and later duplicate suffixes do not recreate partial groups", async () => {
 		const store = await storeFixture();

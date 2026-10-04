@@ -20,22 +20,28 @@
  * seals a change on its first attempt; this class signs the sealed parts,
  * persists the exact signed events, sends them and reports the outcome.
  *
- * Backfill pages querySync backwards via `until` (since cursor+1), paced
- * between pages so public relays don't rate-limit us; live is a
- * subscribeMany since cursor+1. Sends are paced one event per
+ * History sync is NIP-77 (Negentropy) per relay and stream filter: the
+ * events this device holds (store `relayEvents`) are reconciled against the
+ * relay's set, every needed id is fetched with REQ {ids} in batches and
+ * imported; checkpoints first, then changes. A relay that refuses or ignores
+ * NEG-OPEN gets the paged walk instead: querySync backwards via `until`
+ * (since cursor+1), paced between pages so public relays don't rate-limit
+ * us. Live is a subscribeMany since cursor+1. Sends are paced one event per
  * PUBLISH_SPACING_MS.
  */
 
-import { SimplePool, finalizeEvent, getPublicKey, nip19, nip44, verifyEvent, type Event } from "nostr-tools";
+import { SimplePool, finalizeEvent, getPublicKey, nip19, nip44, verifyEvent, type Event, type Filter } from "nostr-tools";
 import { unwrapEvent, wrapEvent } from "nostr-tools/nip59";
+import type { AbstractRelay } from "nostr-tools/abstract-relay";
 import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
-import type { ChangeJSON, ChangeStoreApi, CheckpointRow, PendingPublish, RelaySyncApi, SharedProvenance, SyncEvents } from "./contracts";
+import type { ChangeJSON, ChangeStoreApi, CheckpointRow, PendingPublish, RelayEventRow, RelaySyncApi, SharedProvenance, SyncEvents } from "./contracts";
 import type { ObjectJSON } from "$lib/types";
 import { computeObject } from "./replay";
 import { CoreError, coreCall } from "./core";
 import { unpackCoreValueMaps } from "./core-values";
 import { base64ToBytes, bytesToBase64 } from "./proto";
 import { loadKey } from "./keys";
+import { Negentropy, NegentropyStorage } from "./negentropy";
 import { spaceKeyGet, spaceKeyImport } from "./spacekeys";
 
 export const DEFAULT_RELAYS = ["wss://roostr-relay.fly.dev"];
@@ -195,6 +201,10 @@ interface ImportItem {
 	checkpoint?: CheckpointSummary;
 	provenance?: SharedProvenance;
 	chunkKey?: string;
+	/** Relay events this payload came from (every part of a chunk group), recorded once it imports. */
+	held?: RelayEventRow[];
+	/** Host identity of the chunk group (see `partKey`), remembered once it imports. */
+	partKey?: string;
 }
 
 export function blindShared(keyHex: string, id: string): string {
@@ -260,12 +270,35 @@ const PAGE_SPACING_MS = 400;
 const MIN_PAGE_SPACING_MS = 40;
 // Keep full-sized 40k-character encrypted chunks inside the 8 MiB relay budget.
 export const PAGE_LIMIT = 128;
+/** Ids per REQ {ids} fetch after a reconcile: checkpoint parts run ~40k chars, so stay well inside the 8 MiB budget. */
+export const FETCH_BATCH = 100;
+/** Negentropy frame cap in bytes; hex doubles it, keeping each NEG-MSG under the relay's 1 MiB message cap. */
+const NEG_FRAME_LIMIT = 250_000;
+/** No NEG-MSG within this window: before the first answer the relay is taken not to speak NIP-77. */
+const NEG_TIMEOUT_MS = 15_000;
 const NOTIFY_DEBOUNCE_MS = 100;
 
 function sleep(ms: number): Promise<void> {
 	const { promise, resolve } = Promise.withResolvers<void>();
 	setTimeout(resolve, ms);
 	return promise;
+}
+
+/** A reconcile that never got a NEG-MSG answer: the caller walks this filter instead. */
+class NegentropyFallback extends Error {
+	/** The relay said no (NEG-ERR, NOTICE) or stayed silent: don't ask it again this session. */
+	constructor(message: string, readonly unsupported: boolean) {
+		super(message);
+	}
+}
+
+/** NOTICE is per connection, not per subscription: every reconcile on a relay listens through one hook. */
+const noticeListeners = new WeakMap<AbstractRelay, Set<(notice: string) => void>>();
+
+/** One relay stream filter the history sync covers, with the store scope of its held events. */
+interface StreamFilter {
+	scope: string;
+	filter: Filter;
 }
 
 export interface RelaySyncOptions {
@@ -341,6 +374,8 @@ export class RelaySync implements RelaySyncApi {
 	private sessionOpening: Promise<void> | null = null;
 	private importChain: Promise<void> = Promise.resolve();
 	private historyComplete = false;
+	/** A walk's checkpoint pass has run: every object has its cached state, history is still streaming in. */
+	private checkpointsLoaded = false;
 	private discardedChunkFloor = Infinity;
 	private replayFaultGeneration = 0;
 	private activeLiveEvents = 0;
@@ -354,6 +389,14 @@ export class RelaySync implements RelaySyncApi {
 	/** Mirror of the core outbox's queued-not-in-flight count, for the status dot. */
 	private pendingCount = 0;
 	private queueRunning = false;
+	/** Relays that answered NEG-OPEN with NEG-ERR/NOTICE or silence: walked instead, for this session. */
+	private readonly negentropyUnsupported = new Set<string>();
+	/** Per relay: the reconcile negotiation in flight, so a pass opens one NEG session at a time. */
+	private readonly negotiations = new Map<string, Promise<unknown>>();
+	/** Ingested parts of chunk groups not yet imported, by `partKey`: recorded as held once the group imports. */
+	private readonly pendingParts = new Map<string, RelayEventRow[]>();
+	/** `partKey`s whose group imported here: a late duplicate part is held at once. */
+	private readonly importedParts = new Set<string>();
 
 	private readonly pendingObjects = new Set<string>();
 	private notifyTimer: number | null = null;
@@ -461,7 +504,7 @@ export class RelaySync implements RelaySyncApi {
 	 */
 	private statusDetail(): string | undefined {
 		if (this.historyComplete) return undefined;
-		return `verifying full history in background · ${this.stats.imported} changes so far`;
+		return `${this.checkpointsLoaded ? "verifying full history in background" : "loading spaces"} · ${this.stats.imported} changes so far`;
 	}
 
 	private emitLiveStatus(): void {
@@ -819,7 +862,12 @@ export class RelaySync implements RelaySyncApi {
 
 	// ── Backfill ───────────────────────────────────────────────────
 
-	/** Returns true only when EVERY relay was walked to exhaustion. */
+	/**
+	 * Returns true only when EVERY relay covered every stream: reconciled with
+	 * every needed event imported, or (no NIP-77) walked to exhaustion. A
+	 * reconcile always covers the whole stream; `since`/`resumeUntil` only
+	 * shape the fallback walk.
+	 */
 	private backfill(since: number, resumeUntil?: number): Promise<boolean> {
 		const run = this.backfillChain.then(async () => {
 			try {
@@ -874,14 +922,23 @@ export class RelaySync implements RelaySyncApi {
 			if (batch.length > 0) await this.importBatch(batch, true);
 		};
 		let complete = this.relays.length > 0;
-		// Checkpoints (1079) never shorten the walk: they are replay caches,
+		// Some relay/filter fell back to the paged walk: coverage then only
+		// reaches back to `since`. A reconcile always covers the whole stream.
+		let walked = false;
+		// Checkpoints (1079) never shorten the sync: they are replay caches,
 		// and the kind-1078 history - including the vanish ledger - is what
-		// this device must hold in full (docs/checkpoint-sync.md).
-		const full = since <= 1;
-		const filters: Array<Parameters<SimplePool["querySync"]>[1]> = [{ kinds: DAG_KINDS, authors: [this.pk], since }];
-		for (const sp of this.sharedSpaces.values()) filters.push({ kinds: SPACE_KINDS, "#h": [sp.spaceTag], since });
-		await Promise.all(this.relays.flatMap((relay) => filters.map(async (filter) => {
-			let until: number | undefined = resumeUntil;
+		// this device must hold in full (docs/checkpoint-sync.md). They are
+		// covered FIRST so every object renders early; that pass is short and
+		// re-walked whole on every resume, so it neither starts from nor moves
+		// the bootstrap floor.
+		const checkpointFilters: StreamFilter[] = [{ scope: "", filter: { kinds: [CHECKPOINT_KIND], authors: [this.pk] } }];
+		const changeFilters: StreamFilter[] = [{ scope: "", filter: { kinds: [CHANGE_KIND], authors: [this.pk] } }];
+		for (const sp of this.sharedSpaces.values()) {
+			checkpointFilters.push({ scope: sp.spaceTag, filter: { kinds: [CHECKPOINT_KIND, DELETION_KIND], "#h": [sp.spaceTag] } });
+			changeFilters.push({ scope: sp.spaceTag, filter: { kinds: [CHANGE_KIND], "#h": [sp.spaceTag] } });
+		}
+		const walk = async (relay: string, filter: Filter, resume: number | undefined, track: boolean): Promise<void> => {
+			let until: number | undefined = resume;
 			for (;;) {
 				if (this.stopped) { complete = false; return; }
 				// A relay that fails, stalls, or saturates is this walk's
@@ -892,13 +949,14 @@ export class RelaySync implements RelaySyncApi {
 				let page: Event[];
 				const pageStarted = Date.now();
 				try {
-					page = await this.queryRelayPage(relay, { ...filter, until, limit: PAGE_LIMIT });
+					page = await this.queryRelayPage(relay, { ...filter, since, until, limit: PAGE_LIMIT });
 				} catch (err) {
 					complete = false;
 					this.events.onStatus({ phase: "backfill", detail: `${relay}: ${String(err).slice(0, 100)}` });
 					return;
 				}
 				await importPage(page);
+				this.emitLiveStatus();
 				if (page.length < PAGE_LIMIT) return;
 				const oldest = Math.min(...page.map((e) => e.created_at));
 				if (until !== undefined && oldest >= until) {
@@ -908,7 +966,7 @@ export class RelaySync implements RelaySyncApi {
 				}
 				until = oldest;
 				// Coverage is only as deep as the slowest concurrent walker.
-				if (trackFloor) {
+				if (track) {
 					coveredUntil = coveredUntil === undefined ? until : Math.min(coveredUntil, until);
 					await this.store.setBootstrapFloor(coveredUntil);
 				}
@@ -919,7 +977,24 @@ export class RelaySync implements RelaySyncApi {
 				// never longer than the old ceiling.
 				await sleep(Math.min(PAGE_SPACING_MS, Math.max(MIN_PAGE_SPACING_MS, Date.now() - pageStarted)));
 			}
+		};
+		const claimed = new Set<string>();
+		const cover = (filters: StreamFilter[], resume: number | undefined, track: boolean) => Promise.all(this.relays.flatMap((relay) => filters.map(async ({ scope, filter }) => {
+			if (!this.negentropyUnsupported.has(relay)) {
+				const outcome = await this.reconcileStream(relay, scope, filter, claimed, importPage);
+				if (outcome !== "unsupported") {
+					if (outcome === "incomplete") complete = false;
+					return;
+				}
+			}
+			walked = true;
+			await walk(relay, filter, resume, track);
 		})));
+		await cover(checkpointFilters, undefined, false);
+		this.checkpointsLoaded = true;
+		this.emitLiveStatus();
+		await cover(changeFilters, resumeUntil, trackFloor);
+		const covered = walked ? since : 0;
 		// Live subscriptions replay the same backlog concurrently (cold start
 		// subscribes from cursor 0) and a page import may still be committing.
 		// An event mid-flight is not a fault: let it land, then judge the
@@ -932,11 +1007,11 @@ export class RelaySync implements RelaySyncApi {
 		// cache, so the core retires those - a change group stays until a
 		// covering repair, since a missing change is missing data.
 		if (complete && !this.stopped && this.replayFaultGeneration === checkpoint && this.sessionOpen) {
-			const r = coreCall<{ replayGroups?: Array<[string, number]> }>("sync", { action: "retire", since: full ? 0 : since });
+			const r = coreCall<{ replayGroups?: Array<[string, number]> }>("sync", { action: "retire", since: covered <= 1 ? 0 : covered });
 			if (r.replayGroups) this.replayGroups = new Map(r.replayGroups);
 		}
 		this.historyComplete = complete && !this.stopped && this.replayGroups.size === 0 &&
-			this.replayFaultGeneration === checkpoint && since <= this.discardedChunkFloor;
+			this.replayFaultGeneration === checkpoint && covered <= this.discardedChunkFloor;
 		if (this.historyComplete) {
 			this.discardedChunkFloor = Infinity;
 			if (trackFloor) await this.store.setBootstrapFloor(undefined);
@@ -984,6 +1059,144 @@ export class RelaySync implements RelaySyncApi {
 		}
 	}
 
+	/**
+	 * NIP-77 cover of one stream filter on one relay: reconcile the held set,
+	 * then fetch every needed id in batches and import it through the walk's
+	 * page path. "unsupported" = the relay never answered NEG-OPEN with a
+	 * NEG-MSG; the caller walks this filter instead. `claimed` is shared by
+	 * every stream of one sync pass: an event in two streams (our own event in
+	 * a space) is fetched once, and the run is only complete if that fetch is.
+	 */
+	private async reconcileStream(relay: string, scope: string, filter: Filter, claimed: Set<string>, importPage: (page: Event[]) => Promise<void>): Promise<"complete" | "incomplete" | "unsupported"> {
+		// A store failure propagates: the recovery obligation must outlive the scan.
+		const held = await this.store.relayEvents(scope, filter.kinds ?? []);
+		let need: string[];
+		try {
+			// One negotiation at a time per relay (relays cap concurrent NEG sessions); fetching overlaps freely.
+			const run = (this.negotiations.get(relay) ?? Promise.resolve()).then(() => {
+				if (this.negentropyUnsupported.has(relay)) throw new NegentropyFallback("relay does not speak NIP-77", true);
+				return this.reconcileRelay(relay, filter, held);
+			}).catch((err: unknown) => {
+				if (err instanceof NegentropyFallback && err.unsupported) this.negentropyUnsupported.add(relay);
+				throw err;
+			});
+			this.negotiations.set(relay, run.catch(() => {}));
+			const needed = await run;
+			need = needed.filter((id) => !claimed.has(id));
+			for (const id of need) claimed.add(id);
+		} catch (err) {
+			if (err instanceof NegentropyFallback) return "unsupported";
+			this.events.onStatus({ phase: "backfill", detail: `${relay}: ${String(err).slice(0, 100)}` });
+			return "incomplete";
+		}
+		let missing = 0;
+		for (let i = 0; i < need.length; i += FETCH_BATCH) {
+			if (this.stopped) return "incomplete";
+			const ids = need.slice(i, i + FETCH_BATCH);
+			const started = Date.now();
+			let page: Event[];
+			try {
+				page = await this.queryRelayPage(relay, { ids, limit: ids.length });
+			} catch (err) {
+				this.events.onStatus({ phase: "backfill", detail: `${relay}: ${String(err).slice(0, 100)}` });
+				return "incomplete";
+			}
+			const wanted = new Set(ids);
+			page = page.filter((event) => wanted.delete(event.id));
+			// A needed id the relay doesn't return (deleted meanwhile, or a response cut short) is incomplete: asked again next run.
+			missing += wanted.size;
+			await importPage(page);
+			this.emitLiveStatus();
+			if (i + FETCH_BATCH < need.length) await sleep(Math.min(PAGE_SPACING_MS, Math.max(MIN_PAGE_SPACING_MS, Date.now() - started)));
+		}
+		if (missing > 0) {
+			this.events.onStatus({ phase: "backfill", detail: `${relay}: ${missing} reconciled events not returned` });
+			return "incomplete";
+		}
+		return "complete";
+	}
+
+	/** NIP-77 initiator over one filter: the ids the relay holds that `held` lacks. Ids we hold and it lacks are the outbox's business. */
+	private async reconcileRelay(url: string, filter: Filter, held: Array<{ id: string; createdAt: number }>): Promise<string[]> {
+		let answered = false;
+		try {
+			const storage = new NegentropyStorage();
+			for (const row of held) storage.insert(row.createdAt, row.id);
+			storage.seal();
+			const neg = new Negentropy(storage, NEG_FRAME_LIMIT);
+			const relay = await this.pool.ensureRelay(url, { connectionTimeout: 15_000 });
+			const done = Promise.withResolvers<string[]>();
+			done.promise.catch(() => {}); // settled by sub.close() too, after an early throw nobody awaits it
+			const need: string[] = [];
+			let errored = false;
+			const sub = relay.prepareSubscription([filter], { label: "neg", onclose: (reason) => done.reject(new Error(`closed: ${reason}`)) });
+			let timer: ReturnType<typeof setTimeout> | undefined;
+			const arm = () => {
+				clearTimeout(timer);
+				timer = setTimeout(() => done.reject(answered ? new Error("NEG-MSG timeout") : new NegentropyFallback("no answer to NEG-OPEN", true)), NEG_TIMEOUT_MS);
+			};
+			sub.oncustom = (msg) => {
+				if (msg[0] === "NEG-MSG") {
+					answered = true;
+					try {
+						const r = neg.reconcile(msg[2]);
+						need.push(...r.needIds);
+						if (r.next === null) done.resolve(need);
+						else {
+							arm();
+							relay.send(JSON.stringify(["NEG-MSG", sub.id, r.next])).catch((err) => done.reject(err));
+						}
+					} catch (err) {
+						done.reject(err);
+					}
+				} else if (msg[0] === "NEG-ERR") {
+					errored = true;
+					done.reject(answered ? new Error(`NEG-ERR ${msg[2]}`) : new NegentropyFallback(`NEG-ERR ${msg[2]}`, true));
+				}
+			};
+			let listeners = noticeListeners.get(relay);
+			if (!listeners) {
+				const all = new Set<(notice: string) => void>();
+				const previous = relay.onnotice;
+				relay.onnotice = (notice) => {
+					previous(notice);
+					for (const listener of all) listener(notice);
+				};
+				noticeListeners.set(relay, (listeners = all));
+			}
+			// A relay without NIP-77 typically answers the unknown verb with a NOTICE.
+			const onNotice = (notice: string) => {
+				if (!answered) done.reject(new NegentropyFallback(`NOTICE ${notice}`, true));
+			};
+			listeners.add(onNotice);
+			try {
+				arm();
+				await relay.send(JSON.stringify(["NEG-OPEN", sub.id, filter, neg.initiate()]));
+				return await done.promise;
+			} finally {
+				clearTimeout(timer);
+				listeners.delete(onNotice);
+				if (!errored) relay.send(JSON.stringify(["NEG-CLOSE", sub.id])).catch(() => {});
+				sub.closed = true; // NEG-CLOSE ends it relay-side; no REQ CLOSE for a sub that never fired
+				sub.close();
+			}
+		} catch (err) {
+			// Anything before the first NEG-MSG (no socket, no NIP-77): walk this filter.
+			if (!answered && !(err instanceof NegentropyFallback)) throw new NegentropyFallback(String(err), false);
+			throw err;
+		}
+	}
+
+	/** This event's rows in the held-events table: the self stream when we signed it, and every installed space stream it is tagged into. */
+	private heldRows(event: Event): RelayEventRow[] {
+		const rows: RelayEventRow[] = [];
+		if (event.pubkey === this.pk) rows.push({ id: event.id, createdAt: event.created_at, kind: event.kind, scope: "" });
+		for (const sp of this.sharedSpaces.values()) {
+			if (event.tags.some((t) => t[0] === "h" && t[1] === sp.spaceTag)) rows.push({ id: event.id, createdAt: event.created_at, kind: event.kind, scope: sp.spaceTag });
+		}
+		return rows;
+	}
+
 	// ── Event → change / checkpoint ────────────────────────────────
 
 	/** Feed one signature-verified relay event to the core session; returns the
@@ -1009,13 +1222,30 @@ export class RelaySync implements RelaySyncApi {
 		if (r.replayGroups) this.replayGroups = new Map(r.replayGroups);
 		// The core only reports an h-deletion signed by the space's owner.
 		if (r.spaceVanished) this.onSpaceVanished?.(r.spaceVanished);
-		if (!r.item) return null;
+		// What this device holds of the relay's streams (the NIP-77 item set).
+		// Recorded only once its payload imported: a part waits for its group,
+		// a faulted event is never held, so the next reconcile asks again.
+		const rows = this.heldRows(event);
+		const chunk = event.tags.find((t) => t[0] === "c");
+		const partKey = chunk && `${event.pubkey}|${event.tags.filter((t) => t[0] === "h").map((t) => t[1]).join(",")}|${chunk[1]}|${event.kind}`;
+		if (!r.item) {
+			if (r.faultAt !== undefined) {
+				if (partKey) this.pendingParts.delete(partKey);
+			} else if (partKey && !r.decryptFailure && !this.importedParts.has(partKey)) {
+				this.pendingParts.set(partKey, [...(this.pendingParts.get(partKey) ?? []), ...rows]);
+			} else await this.store.recordRelayEvents(rows);
+			return null;
+		}
+		const held = partKey ? [...(this.pendingParts.get(partKey) ?? []), ...rows] : rows;
+		if (partKey) this.pendingParts.delete(partKey);
 		const item: ImportItem = {
 			objectId: "",
 			bytes: base64ToBytes(r.item.bytes),
 			b64: r.item.bytes,
 			chunkKey: r.item.chunkKey,
 			provenance: r.item.provenance,
+			held,
+			partKey,
 		};
 		if (r.item.checkpoint) {
 			item.checkpoint = r.item.checkpoint;
@@ -1076,6 +1306,8 @@ export class RelaySync implements RelaySyncApi {
 		this.activeImports++;
 		const imported = new Set<string>();
 		const run = this.importChain.then(async () => {
+			const held: RelayEventRow[] = [];
+			const parts: string[] = [];
 			for (const item of batch) {
 				if (item.provenance && !(await this.authorized(item, item.provenance))) continue;
 				if (item.checkpoint) {
@@ -1091,7 +1323,12 @@ export class RelaySync implements RelaySyncApi {
 					imported.add(item.chunkKey);
 					this.settle(item.chunkKey, true);
 				}
+				held.push(...(item.held ?? []));
+				if (item.partKey) parts.push(item.partKey);
 			}
+			// Unauthorized payloads stay unheld: a later reconcile re-judges them against newer state.
+			await this.store.recordRelayEvents(held);
+			for (const key of parts) this.importedParts.add(key);
 			if (immediateNotify) this.flushObjectNotify();
 			else this.scheduleObjectNotify();
 		}).catch(async (err) => {
@@ -1280,6 +1517,8 @@ export class RelaySync implements RelaySyncApi {
 				await Promise.any(this.pool.publish(this.relays, event));
 				if (pending.events.length > 1) await sleep(PUBLISH_SPACING_MS);
 			}
+			// Their ids are known at signing: the next reconcile need not fetch our own writes back.
+			await this.store.recordRelayEvents(pending.events.flatMap((event) => this.heldRows(event)));
 			await this.store.markPublished(item.key);
 			return { ok: true, sealed };
 		} catch (err) {

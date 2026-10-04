@@ -37,6 +37,7 @@ interface SyncInternals {
 	backfill(since: number): Promise<boolean>;
 	queryRelayPage(url: string, filter: Record<string, unknown>): Promise<Event[]>;
 	backfillChain: Promise<boolean>;
+	negentropyUnsupported: Set<string>;
 }
 
 async function storeFixture(): Promise<ChangeStore> {
@@ -78,6 +79,8 @@ test("a page is in the store before the walk finishes", async () => {
 	sync.setSharedSpaces([space]);
 	// Unchecked by necessity: the walk and its paging hook are private.
 	const internals = sync as unknown as SyncInternals;
+	// A relay without NIP-77: this test pins the paged walk (scripts/sync-negentropy.test.ts covers reconcile).
+	internals.negentropyUnsupported.add("wss://one.test");
 	cleanup.push(async () => {
 		sync.stop();
 		await internals.backfillChain;

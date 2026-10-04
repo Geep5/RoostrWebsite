@@ -53,6 +53,14 @@ bookkeeping via the `sync` method) use the same Odin sources as the native
 daemon, compiled to WebAssembly. IndexedDB, network transport and DOM
 integration remain platform adapters.
 
+History sync uses NIP-77 (Negentropy V1, `src/lib/engine/negentropy.ts`): per
+relay and stream filter (self `authors:[pk]`, each space `#h`; checkpoints
+before changes) the relay events this device holds — the IndexedDB
+`relay-events` store — are reconciled against the relay's set, and only the
+missing ids are fetched with `REQ {ids}` and imported. History is complete once
+every needed id came back and imported cleanly. Relays that answer `NEG-OPEN`
+with `NEG-ERR`/`NOTICE` or silence get the older paged `until` walk.
+
 ```sh
 npm run build:core   # requires Odin and sibling ../glonOdin
 npm run verify:core
@@ -98,7 +106,7 @@ opens. Agents list the credentials they may use in their Credentials property.
 ## Verification
 
 ```sh
-bun test scripts/core-abi.test.ts scripts/sync-authority.test.ts scripts/local-transport.test.ts
+bun test scripts/core-abi.test.ts scripts/sync-authority.test.ts scripts/local-transport.test.ts scripts/negentropy.test.ts scripts/sync-negentropy.test.ts
 bun run scripts/parity-codec.ts
 bun run scripts/parity-replay-fixtures.ts
 bun run scripts/parity-query-fixtures.ts
