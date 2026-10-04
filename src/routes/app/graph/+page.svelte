@@ -15,8 +15,10 @@
 	let status = $state("Loading graph…");
 
 	const MAX_LABELS = 100; // Anytype's visible-label cull
-	/** Settling done off-screen before the first paint (ms); the bulk of the layout motion fits in it. */
-	const WARM_MS = 600;
+	/** Off-screen settling before the first paint: until it is essentially still, at most this long (ms). */
+	const WARM_MS = 1200;
+	/** "Essentially still": the layout energy the warm-up settles to before drawing. */
+	const WARM_DONE = 0.02;
 
 	// Each channel gets its own graph (Anytype: one graph per space).
 	const defaultChannelId = $derived(store.channels[0]?.id ?? "");
@@ -58,9 +60,9 @@
 			// on screen moves well under a pixel a frame.
 			let warmAlpha = 1;
 			const warmUntil = performance.now() + WARM_MS;
-			while (warmAlpha > 0.003 && performance.now() < warmUntil) {
+			while (warmAlpha > WARM_DONE && performance.now() < warmUntil) {
 				const slice = Math.min(warmUntil, performance.now() + 40);
-				while (warmAlpha > 0.003 && performance.now() < slice) {
+				while (warmAlpha > WARM_DONE && performance.now() < slice) {
 					simStep(graph, warmAlpha);
 					warmAlpha *= 0.99; // the frame loop's 0.98 per two steps
 				}
@@ -110,7 +112,10 @@
 			let scale = 1;
 			let offsetX = 0;
 			let offsetY = 0;
-			let alpha = warmAlpha;
+			// Opening is static: whatever settling is left would show as connected
+			// nodes untangling on screen. The layout only moves again when a node
+			// is dragged (that reheats it, as before).
+			let alpha = 0;
 			let hovered = -1;
 			const focused = focusId ? graph.nodes.findIndex((node) => node.id === focusId) : -1;
 			let dragNode = -1;
@@ -251,6 +256,8 @@
 				offsetX = 0;
 				offsetY = 0;
 			};
+
+			fit(); // once, on the settled layout - the frame loop only re-fits while it moves
 
 			// ── Interaction ─────────────────────────────────────────
 			const el = canvasEl!;
