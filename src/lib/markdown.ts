@@ -2,9 +2,35 @@
  * Minimal, safe markdown renderer for chat messages (Discussion).
  * Escapes all input, then applies a chat-appropriate subset:
  * fenced code blocks, inline code, bold, italic, strikethrough,
- * links (+ bare URLs), lists, blockquotes, headings, paragraphs.
+ * links (+ bare URLs), lists, blockquotes, headings, tables, paragraphs.
  * No dependency, no raw HTML passthrough.
  */
+
+/** A `| a | b |` line (a table row or header). */
+const isRow = (line: string): boolean => /^\s*\|.*\|\s*$/.test(line);
+/** The `|---|:---:|` line under a table's header. */
+const isSeparator = (line: string): boolean => isRow(line) && cells(line).every((c) => /^:?-+:?$/.test(c));
+/** A row's cells, outer pipes dropped; `\|` stays a literal pipe. */
+function cells(line: string): string[] {
+	return line
+		.trim()
+		.replace(/^\|/, "")
+		.replace(/\|$/, "")
+		.split(/(?<!\\)\|/)
+		.map((c) => c.trim().replace(/\\\|/g, "|"));
+}
+/** A column of amounts and counts reads right-aligned, like a spreadsheet. */
+const numeric = (c: string): boolean => /^[-+]?[$€£¥]?\s?[\d,.]+%?[kKmM]?$/.test(c.trim());
+function table(head: string[], aligns: string[], rows: string[][]): string {
+	const align = head.map((_, i) => aligns[i] || (rows.length && rows.every((r) => !r[i] || numeric(r[i])) ? "right" : ""));
+	// Number columns keep their figures on one line; text columns wrap, so a
+	// table fits a narrow chat pane instead of pushing its numbers off-screen.
+	const td = (tag: "th" | "td", text: string, i: number) =>
+		`<${tag}${align[i] === "right" ? ' class="num"' : ""}${align[i] ? ` style="text-align:${align[i]}"` : ""}>${inline(text ?? "")}</${tag}>`;
+	return `<div class="md-table"><table><thead><tr>${head.map((h, i) => td("th", h, i)).join("")}</tr></thead><tbody>${rows
+		.map((r) => `<tr>${head.map((_, i) => td("td", r[i] ?? "", i)).join("")}</tr>`)
+		.join("")}</tbody></table></div>`;
+}
 
 const escapeHtml = (s: string): string =>
 	s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
@@ -85,11 +111,24 @@ export function renderMarkdown(src: string): string {
 		flushQuote();
 	};
 
-	for (const line of lines) {
+	for (let li = 0; li < lines.length; li++) {
+		const line = lines[li];
 		const blockMatch = line.match(/^\x00B(\d+)\x00$/);
 		if (blockMatch) {
 			flushAll();
 			out.push(blocks[Number(blockMatch[1])] ?? "");
+			continue;
+		}
+		// GFM table: a | row, then a |---| separator, then rows until one isn't a | row.
+		if (isRow(line) && li + 1 < lines.length && isSeparator(lines[li + 1])) {
+			flushAll();
+			const head = cells(line);
+			const aligns = cells(lines[li + 1]).map((c) => (/^:-+:$/.test(c) ? "center" : /^-+:$/.test(c) ? "right" : /^:-+$/.test(c) ? "left" : ""));
+			const rows: string[][] = [];
+			li += 2;
+			while (li < lines.length && isRow(lines[li])) rows.push(cells(lines[li++]));
+			li -= 1;
+			out.push(table(head, aligns, rows));
 			continue;
 		}
 		const h = line.match(/^(#{1,3})\s+(.*)$/);

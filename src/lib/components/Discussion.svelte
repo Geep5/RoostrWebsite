@@ -1067,6 +1067,39 @@
 		border-top: 1px solid var(--border, #2a2a2a);
 		margin: 8px 0;
 	}
+	/* Tables: compact, lined like the app's own tables; a wide one scrolls
+	   sideways inside the bubble instead of stretching the chat. */
+	.md :global(.md-table) {
+		margin: 6px 0;
+		overflow-x: auto;
+		max-width: 100%;
+	}
+	.md :global(.md-table table) {
+		border-collapse: collapse;
+		font-size: 13px;
+		line-height: 1.35;
+	}
+	.md :global(.md-table th),
+	.md :global(.md-table td) {
+		padding: 4px 8px;
+		border-bottom: 1px solid var(--border, #2a2a2a);
+		vertical-align: top;
+	}
+	.md :global(.md-table .num) {
+		white-space: nowrap;
+	}
+	.md :global(.md-table th) {
+		text-align: left;
+		font-weight: 600;
+		color: var(--muted);
+		border-bottom-color: color-mix(in srgb, var(--border, #2a2a2a) 50%, var(--fg));
+	}
+	.md :global(.md-table tr:last-child td) {
+		border-bottom: none;
+	}
+	.md :global(.md-table td) {
+		font-variant-numeric: tabular-nums;
+	}
 	.md :global(a) {
 		color: var(--accent);
 	}
