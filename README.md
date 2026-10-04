@@ -80,14 +80,20 @@ audience; **Private** starts a separate exchange. Delivery and local processing
 status are displayed separately. The shared exchange ID is a UI grouping key,
 not a shared conversation object.
 
-Skill and Google-account requests also use object mailboxes; an Installation
-page shows requests waiting for local approval and failed operations.
+A Capability page is one catalog skill on one computer: its Status, Error,
+Served by, Key and last Check are written by that computer's harness. In a tab
+paired with that computer the Status popover stages Install / Check / Switch
+off / Switch on / Uninstall as mailbox requests on the capability, and lists
+its waiting requests with Approve / Reject; approval runs on that computer.
+What the software is and how agents use it lives on its Skill object.
 
 A Credential page (New → Credential) is one login for one service. Keys typed
 there are saved on the credential itself (readable by everyone in its space);
 Connect / Check / Disconnect run on the computer in its Served by, which opens
-the Chrome sign-in window and keeps the status current. Agents list the
-credentials they may use in their Credentials property.
+the Chrome sign-in window and keeps the status current. A Google account is a
+credential with service `google-account` and the address as its Account:
+Connect runs `gws auth login` there and signs in through the browser window gws
+opens. Agents list the credentials they may use in their Credentials property.
 
 ## Verification
 

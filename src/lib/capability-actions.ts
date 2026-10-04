@@ -1,26 +1,51 @@
 /**
- * Capability requests, staged and resolved from object pages. The DAG
- * carries only the intent - a mailbox message on the installation object;
- * execution waits for a paired human's approval on the owning machine.
- *
- * Shared by the capability page (choose machine, request setup) and the
- * installation page (act on one row, approve what waits). The retired
- * machine modal's copies lived in Machine.svelte.
+ * Capability requests, staged and resolved from a capability's page. The DAG
+ * carries only the intent - a mailbox message on the capability object;
+ * execution waits for a paired human's approval on the computer that serves
+ * it (its `served_by`).
  */
 
-import { fetchAllQuery, mailbox, note } from "$lib/api";
+import { fetchAllQuery, mailbox } from "$lib/api";
 import { harnessFetch } from "$lib/local-transport";
+import type { BadgeIcon } from "$lib/options";
 import { fieldStr } from "$lib/types";
 
+/** A capability's status in words, as its serving computer's harness wrote it. */
+export function capabilityStatusText(status: string): string {
+	switch (status || "missing") {
+		case "active": return "Active";
+		case "needs_auth": return "Needs sign-in";
+		case "needs_approval": return "Awaiting approval";
+		case "processing": return "Working…";
+		case "disabled": return "Switched off";
+		case "broken": return "Broken";
+		case "missing": return "Not installed";
+		default: return status.replaceAll("_", " ");
+	}
+}
+
+/** The status row's badge: glyph and options.ts colour name. */
+export function capabilityStatusBadge(status: string): { icon: BadgeIcon; color: string } {
+	switch (status || "missing") {
+		case "active": return { icon: "check", color: "lime" };
+		case "needs_auth":
+		case "needs_approval":
+		case "processing": return { icon: "clock", color: "orange" };
+		case "broken": return { icon: "x", color: "red" };
+		default: return { icon: "dashed", color: "" };
+	}
+}
+
 export interface CapabilityRequest {
+	/** The capability object the request was staged on. */
 	objectId: string;
 	messageId: string;
 	key: string;
-	account: string;
 	operation: string;
 	sender: { objectId: string; agentId: string };
 	status: string;
 	error: string;
+	sentAt: number;
 	canApprove: boolean;
 }
 
@@ -43,43 +68,30 @@ export async function thisMachineId(): Promise<string> {
 }
 
 /**
- * Stage one operation into the owning installation's mailbox. Throws with a
- * human-readable reason. Dedupes: the same open request is not sent twice.
- * Works from any device that can write the vault - delivery reaches the
- * owning machine through sync.
+ * Stage one operation into a capability's mailbox, sent by this machine's
+ * own machine object. Only the computer that serves the capability may
+ * stage on it: the request runs there after a paired approval. Throws with
+ * a human-readable reason; the same open request is not sent twice.
  */
-export async function stageCapabilityRequest(key: string, operation: string, account = ""): Promise<void> {
+export async function stageCapabilityRequest(capabilityId: string, key: string, operation: string): Promise<void> {
 	const id = await thisMachineId();
-	if (!id) throw new Error("Cannot identify the owning machine. Is the harness running?");
-	const [installRows, machineRows] = await Promise.all([fetchAllQuery({ type: "install" }), fetchAllQuery({ type: "machine" })]);
-	let installationId = installRows.find((row) => fieldStr(row.fields, "key") === key && fieldStr(row.fields, "machine_id") === id && fieldStr(row.fields, "account") === account)?.id;
-	if (!installationId && key === "google" && account) {
-		installationId = (await note.create(`Google ${account}`, "install", { key: { stringValue: key }, machine_id: { stringValue: id }, account: { stringValue: account }, status: { stringValue: "missing" } })).id;
-	}
-	if (!installationId) throw new Error("This machine has not published the installation object yet.");
-	const source = machineRows.find((row) => fieldStr(row.fields, "machine_id") === id);
-	if (!source) throw new Error("This machine has not published its object yet.");
-	await sendCapabilityRequest(source.id, installationId, key, operation, account);
-}
-
-/**
- * Stage onto a specific installation object, sender already known - the
- * /setup checklist's shape, where the target machine may not be this one.
- * Dedupes against open requests for the same operation.
- */
-export async function sendCapabilityRequest(senderObjectId: string, installationId: string, key: string, operation: string, account = ""): Promise<void> {
+	if (!id) throw new Error("Cannot identify this computer. Is the harness running?");
+	const source = (await fetchAllQuery({ type: "machine" })).find((row) => fieldStr(row.fields, "machine_id") === id);
+	if (!source) throw new Error("This computer has not published its object yet.");
 	const open = await listCapabilityRequests().catch(() => [] as CapabilityRequest[]);
-	if (open.some((r) => r.objectId === installationId && r.operation === operation && ["pending", "awaiting_approval", "processing"].includes(r.status))) {
+	if (open.some((r) => r.objectId === capabilityId && r.operation === operation && OPEN_REQUEST.includes(r.status))) {
 		throw new Error("This request is already waiting for approval.");
 	}
-	await mailbox.send({ id: crypto.randomUUID(), exchangeId: crypto.randomUUID(), sender: { objectId: senderObjectId, agentId: "" }, recipients: [{ objectId: installationId, agentId: "" }], text: `Request ${operation} for ${key}${account ? ` (${account})` : ""}.`, replyTo: "", sentAt: Date.now(), title: "Capability request", requestReply: true, historical: false, operation, author: "" });
+	await mailbox.send({ id: crypto.randomUUID(), exchangeId: crypto.randomUUID(), sender: { objectId: source.id, agentId: "" }, recipients: [{ objectId: capabilityId, agentId: "" }], text: `Request ${operation} for ${key}.`, replyTo: "", sentAt: Date.now(), title: "Capability request", requestReply: true, historical: false, operation, author: "" });
 }
 
-/** Approve, reject, or confirm a login. Approval executes on this machine's harness. */
-export async function resolveCapabilityRequest(request: CapabilityRequest, action: "approve" | "reject" | "finish-login"): Promise<{ active?: boolean }> {
+/** Request statuses still waiting on a human or running. */
+export const OPEN_REQUEST = ["pending", "awaiting_approval", "processing"];
+
+/** Approve or reject a waiting request. Approval executes on this machine's harness. */
+export async function resolveCapabilityRequest(request: CapabilityRequest, action: "approve" | "reject"): Promise<void> {
 	const body = { objectId: request.objectId, messageId: request.messageId };
 	const res = await harnessFetch(`/capability-requests/${action}`, { method: "POST", body: JSON.stringify(body) });
-	const result = (await res.json().catch(() => ({}))) as { error?: string; active?: boolean };
+	const result = (await res.json().catch(() => ({}))) as { error?: string };
 	if (!res.ok || result.error) throw new Error(result.error ?? `HTTP ${res.status}`);
-	return result;
 }

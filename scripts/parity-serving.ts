@@ -6,9 +6,11 @@ import type { ObjectJSON } from "../src/lib/types";
 interface ResolveFixture {
 	name: string;
 	object?: ObjectJSON;
-	space?: ObjectJSON;
-	machines: unknown[];
-	expected?: { machineId: string; reason: string; requires: string[]; candidates: string[] };
+	agents?: unknown[];
+	machines?: unknown[];
+	skills?: unknown[];
+	capabilities?: unknown;
+	expected?: { machineId: string; reason: string; skills: string[]; candidates: string[] };
 	error?: string;
 }
 
@@ -19,8 +21,8 @@ const fixtures: { resolve: ResolveFixture[] } = JSON.parse(readFileSync(
 ));
 await initCore({ wasmBytes: readFileSync(new URL("../static/engine.wasm", import.meta.url)) });
 
-for (const { name, object, space, machines, expected, error } of fixtures.resolve) {
-	const payload = { action: "resolve", object: object ?? null, space: space ?? null, machines };
+for (const { name, expected, error, ...inputs } of fixtures.resolve) {
+	const payload = { action: "resolve", ...inputs };
 	if (error !== undefined) {
 		throws(() => coreCall("serving", payload),
 			(e: unknown) => e instanceof CoreError && e.code === "domain" && e.message === error, `resolve ${name}: domain error "${error}"`);

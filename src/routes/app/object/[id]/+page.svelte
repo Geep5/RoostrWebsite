@@ -12,7 +12,6 @@
 	import { activeSpace } from "$lib/space.svelte";
 	import Editor from "$lib/components/Editor.svelte";
 	import Discussion from "$lib/components/Discussion.svelte";
-	import Installation from "$lib/components/Installation.svelte";
 	import File from "$lib/components/File.svelte";
 	import ConversationDrawer from "$lib/components/ConversationDrawer.svelte";
 	import { objectThreads } from "$lib/conversations";
@@ -23,7 +22,6 @@
 	import GalleryView from "$lib/components/GalleryView.svelte";
 	import SpaceManage from "$lib/components/SpaceManage.svelte";
 	import ObjectMeta from "$lib/components/ObjectMeta.svelte";
-	import CapabilitySetup from "$lib/components/CapabilitySetup.svelte";
 	import TypePanel from "$lib/components/TypePanel.svelte";
 	import PropertyPanel from "$lib/components/PropertyPanel.svelte";
 	import EmojiPicker from "$lib/components/EmojiPicker.svelte";
@@ -175,8 +173,6 @@
 
 
 	const isChat = $derived(object?.typeKey === "chat");
-	const isCapability = $derived(object?.typeKey === "capability");
-	const isInstall = $derived(object?.typeKey === "install");
 	const isFile = $derived(object?.typeKey === "file");
 	const isType = $derived(object?.typeKey === "type");
 	const isTemplate = $derived(object?.typeKey === "template");
@@ -252,7 +248,7 @@
 			if (!key) return null;
 			// A type page names its own type: never apply the unsourced-query
 			// system exclusion (typeKey notIn [… agent/machine …]) - it would
-			// hide agent/capability/install/computer instances from their own page.
+			// hide agent/capability/computer instances from their own page.
 			// Infrastructure instances carry real channels like everything
 			// else, so type pages space-filter them too - with one exception:
 			// a computer is a device identity filed in the home space, but its
@@ -503,10 +499,6 @@
 			<SpaceManage {object} {spaceInfo} onchanged={refresh} />
 		{:else if isChat}
 			<Discussion {object} full onchanged={refresh} />
-		{:else if isCapability}
-			<CapabilitySetup {object} onchanged={refresh} />
-		{:else if isInstall}
-			<Installation {object} />
 		{:else if isFile}
 			<File {object} onchanged={refresh} />
 		{:else if isType}

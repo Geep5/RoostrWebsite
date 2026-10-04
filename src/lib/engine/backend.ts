@@ -404,7 +404,7 @@ class WebBackend {
 	}
 
 	/** The Odin server's GET /api/objects summary exclusions, verbatim. */
-	private static readonly HIDDEN_LIST_TYPES = new Set(["program", "typescript", "json", "proto", "relation", "channel", "peer", "pinned_fact", "milestone", "descriptor", "install", "vanish_log"]);
+	private static readonly HIDDEN_LIST_TYPES = new Set(["program", "typescript", "json", "proto", "relation", "channel", "peer", "pinned_fact", "milestone", "vanish_log"]);
 
 	async fetchObjects(): Promise<ObjectSummary[]> {
 		await this.ensure();

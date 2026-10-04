@@ -89,8 +89,8 @@ const TEMPLATE_OWN = new Set(["name", "target_type", "channel", "error", "create
 
 /**
  * A computer object is a machine's self-publication: it exists because a
- * running harness announced itself (stable machine id, live capabilities).
- * Hand-crafting one would mint an inert twin nothing serves, so New →
+ * running harness announced itself (stable machine id). Hand-crafting one
+ * would mint an inert twin nothing serves, so New →
  * Computer adopts this device's row when its harness already published it,
  * and otherwise goes to setup - the machine creates its own object.
  */

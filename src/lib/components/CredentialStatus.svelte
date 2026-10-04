@@ -7,7 +7,7 @@
 	 */
 	import { onMount } from "svelte";
 	import { thisMachineId } from "$lib/capability-actions";
-	import { credentialStatusText, hasBrowserSignIn, runCredentialAction, type CredentialAction } from "$lib/credential-actions";
+	import { canConnect, credentialStatusText, GOOGLE_ACCOUNT, runCredentialAction, type CredentialAction } from "$lib/credential-actions";
 	import { onPairingChange, pairedSession } from "$lib/local-transport";
 	import { fetchMachines, machineName, servedByMachineId, type MachineRow } from "$lib/serving";
 	import { fieldStr, type ObjectJSON } from "$lib/types";
@@ -36,6 +36,7 @@
 	const servedBy = $derived(servedByMachineId(object.fields, machines));
 	const computer = $derived(servedBy ? machineName(machines, servedBy) : "");
 	const canAct = $derived(paired && !!thisMachine && thisMachine === servedBy);
+	const isGoogle = $derived(fieldStr(object.fields, "service") === GOOGLE_ACCOUNT);
 
 	async function loadPairing() {
 		paired = pairedSession() !== null;
@@ -73,7 +74,7 @@
 	{:else if ready}
 		{#if canAct}
 			<div class="actions">
-				{#if hasBrowserSignIn(object.fields)}
+				{#if canConnect(object.fields)}
 					<button class="act" disabled={!!busy} data-testid="credential-connect" onclick={() => void run("connect")}>{status === "active" || status === "needs_auth" ? "Reconnect" : "Connect"}</button>
 				{/if}
 				<button class="act" disabled={!!busy} data-testid="credential-check" onclick={() => void run("check")}>Check now</button>
@@ -83,7 +84,15 @@
 			<p class="muted">{servedBy ? `Open Roostr on ${computer} to connect or check this credential.` : "Set Served by to a computer first."}</p>
 			{#if !paired}<PairGate compact onready={() => void loadPairing()} />{/if}
 		{/if}
-		{#if status === "connecting"}<p class="muted" role="status">Sign in in the Chrome window that just opened on {computer || "its computer"}.</p>{/if}
+		{#if status === "connecting"}
+			<p class="muted" role="status">
+				{#if isGoogle}
+					Sign in to {fieldStr(object.fields, "account") || "the Google account"} in the browser window gws opens on {computer || "its computer"}.
+				{:else}
+					Sign in in the Chrome window that just opened on {computer || "its computer"}.
+				{/if}
+			</p>
+		{/if}
 	{/if}
 	{#if actionError || pollError}<p class="error" role="alert" data-testid="credential-error">{actionError || pollError}</p>{/if}
 </div>

@@ -14,9 +14,11 @@
 	import { layoutOf, store } from "$lib/data.svelte";
 	import { RESERVED_KEYS } from "$lib/relations";
 	import { AGENTLESS_TYPES } from "$lib/agent-field";
-	import { machineName, resolveServing, servingCopy, type MachineRow, type Serving } from "$lib/serving";
+	import { machineName, resolveServing, servedByMachineId, servingCopy, type MachineRow, type Serving } from "$lib/serving";
 	import { credentialStatusBadge, credentialStatusText, pollWhileConnecting } from "$lib/credential-actions";
+	import { capabilityStatusBadge, capabilityStatusText } from "$lib/capability-actions";
 	import CredentialStatus from "./CredentialStatus.svelte";
+	import CapabilityStatus from "./CapabilityStatus.svelte";
 	import PropertyValue from "./PropertyValue.svelte";
 	import PropertySuggest from "./PropertySuggest.svelte";
 	import Repeat from "./Repeat.svelte";
@@ -51,9 +53,10 @@
 		return store.types.find((t) => t.id === target)?.key ?? object.typeKey;
 	});
 
-	/** A credential's own properties, always shown in this order, then each
-	    `key_*` field it carries (one pasted key each). The harness seeds their
-	    defs in every space; these names and emoji stand in until it has. */
+	/** A credential's / capability's own properties, always shown in this
+	    order (a credential's then each `key_*` field it carries, one pasted
+	    key each). The harness seeds their defs in every space; these names
+	    and emoji stand in until it has. */
 	const CREDENTIAL_PROPS: Array<[key: string, name: string, format: string, emoji: string]> = [
 		["status", "Status", "status", ""],
 		["error", "Error", "longtext", ""],
@@ -65,13 +68,27 @@
 		["session_host", "Signed-in host", "shorttext", "🌐"],
 		["session_cookie", "Signed-in cookie", "shorttext", "🍪"],
 	];
+	const CAPABILITY_PROPS: Array<[key: string, name: string, format: string, emoji: string]> = [
+		["status", "Status", "status", ""],
+		["error", "Error", "longtext", ""],
+		["served_by", "Served by", "object", ""],
+		["key", "Key", "shorttext", "🧩"],
+		["checked_at", "Checked", "date", ""],
+		["description", "Description", "longtext", ""],
+	];
 	const KEY_PREFIX = "key_";
 	const isCredential = $derived(typeKey === "credential");
-	const credentialRows = $derived.by((): RelationDefJSON[] => {
-		if (!isCredential) return [];
-		const def = (key: string, name: string, format: string, emoji: string): RelationDefJSON =>
-			relations.find((r) => r.key === key)
-			?? { id: `credential-${key}`, key, format, name, iconEmoji: emoji || undefined, hidden: false, readOnly: false, maxCount: format === "status" ? 1 : 0, options: [] };
+	const isCapability = $derived(typeKey === "capability");
+	/** The serving computer's harness writes these: they show, never edit. */
+	const OWN_READONLY = ["served_by", "key", "checked_at"];
+	const ownRows = $derived.by((): RelationDefJSON[] => {
+		if (!isCredential && !isCapability) return [];
+		const def = (key: string, name: string, format: string, emoji: string): RelationDefJSON => {
+			const rel = relations.find((r) => r.key === key)
+				?? { id: `${typeKey}-${key}`, key, format, name, iconEmoji: emoji || undefined, hidden: false, readOnly: false, maxCount: format === "status" ? 1 : 0, options: [] };
+			return isCapability && OWN_READONLY.includes(key) ? { ...rel, readOnly: true } : rel;
+		};
+		if (isCapability) return CAPABILITY_PROPS.map(([key, name, format, emoji]) => def(key, name, format, emoji));
 		// `key_fields` is the pre-property recipe list the harness converts, not a pasted key.
 		const keyFields = Object.keys(object.fields).filter((k) => k.startsWith(KEY_PREFIX) && k !== "key_fields");
 		return [
@@ -82,18 +99,20 @@
 			}),
 		];
 	});
-	const credentialRowKeys = $derived(new Set(credentialRows.map((r) => r.key)));
+	const ownRowKeys = $derived(new Set(ownRows.map((r) => r.key)));
+
+	const capabilityStatus = $derived(fieldStr(object.fields, "status") || "missing");
 
 	/** Featured order first, then the rest. */
 	const shown = $derived.by(() => {
-		const MACHINE_BOUND = ["agent", "capability", "install", "credential"].includes(typeKey);
+		const MACHINE_BOUND = ["agent", "capability", "credential"].includes(typeKey);
 		const AGENT_CONFIG = typeKey === "agent" ? ["prompt", "model", "skills", "tools", "credentials", "served_by", "repo_path"] : [];
 		// A Tool's own: what the model is told, its inputs, whether it ships with Roostr, and which version of its code runs.
 		const TOOL_CONFIG = typeKey === "tool" ? ["description", "tool_inputs", "tool_builtin", "tool_version"] : [];
 		const repeating = !!repeatOf(object.fields);
 		const present = relations.filter((r) => {
 			// Legacy credential shapes (`key_fields` list, `secret` JSON) stay for old harnesses; never rows.
-			if (credentialRowKeys.has(r.key) || (isCredential && (r.key === "key_fields" || r.key === "secret"))) return false;
+			if (ownRowKeys.has(r.key) || (isCredential && (r.key === "key_fields" || r.key === "secret"))) return false;
 			if (RESERVED_KEYS[r.key]) return false;
 			if (AGENT_CONFIG.includes(r.key) || TOOL_CONFIG.includes(r.key)) return true;
 			// The error badge is how problems surface on any object (a failed
@@ -143,16 +162,14 @@
 	$effect(() => {
 		void (async () => {
 			try {
-				const [skills, rows, caps] = await Promise.all([fetchAllQuery({ type: "skill" }), fetchAllQuery({ type: "install" }), fetchAllQuery({ type: "capability" })]);
-				const installStatus = new Map(rows.map((r) => [r.id, r.fields["status"]?.stringValue ?? ""]));
+				const [skills, caps] = await Promise.all([fetchAllQuery({ type: "skill" }), fetchAllQuery({ type: "capability" })]);
 				// key -> names of the machines that have it working
 				const working = new Map<string, string[]>();
 				for (const c of caps) {
-					const m = c.fields["served_by"]?.linkValue?.targetId ?? c.fields["served_by"]?.stringValue ?? "";
-					const instId = c.fields["install"]?.linkValue?.targetId ?? c.fields["install"]?.stringValue ?? "";
+					const m = servedByMachineId(c.fields, servingState?.machines ?? []);
 					const key = c.fields["key"]?.stringValue ?? "";
-					if (!m || !key || installStatus.get(instId) !== "active") continue;
-					const name = servingState?.machines.find((x) => x.machineId === m)?.name ?? `${m.slice(0, 8)}…`;
+					if (!m || !key || c.fields["status"]?.stringValue !== "active") continue;
+					const name = machineName(servingState?.machines ?? [], m);
 					working.set(key, [...new Set([...(working.get(key) ?? []), name])]);
 				}
 				skillsById = new Map(skills.map((sk) => {
@@ -338,8 +355,8 @@
 
 	/** Whether the row itself carries a hover × (single-value rows; multi rows put the × on each value). */
 	function rowRemovable(rel: RelationDefJSON): boolean {
-		// A credential's status is its computer's to write.
-		if (isCredential && rel.key === "status") return false;
+		// A credential's or capability's status is its computer's to write.
+		if ((isCredential || isCapability) && rel.key === "status") return false;
 		if (rel.format === "tag" || rel.format === "object") {
 			return rel.key === "served_by" && (plain(object.fields[rel.key], "object") as string[]).length > 0;
 		}
@@ -398,13 +415,13 @@
 	const AGENT_KEYS = new Set(["served_by", "repo_path", "agent", "model", "prompt", "skills", "tools", "credentials", "capability"]);
 	const SYSTEM_KEYS = new Set(["done", "due_date", "status", "tag", "description", "url", "email", "phone", "error", "created_date", "modified_date", "createdDate", "modifiedDate", "check_first"]);
 	const TOOL_KEYS = new Set(["tool_inputs", "tool_builtin", "tool_version"]);
-	type Group = "credential" | "system" | "tool" | "agent" | "custom";
+	type Group = "own" | "system" | "tool" | "agent" | "custom";
 	const groupOf = (key: string): Group => (AGENT_KEYS.has(key) ? "agent" : SYSTEM_KEYS.has(key) ? "system" : TOOL_KEYS.has(key) ? "tool" : "custom");
 	const groups = $derived.by(() => {
 		const out: Array<{ id: Group; label: string; rows: typeof shown }> = [];
 		// System first, and Repeat first within it: the one row every object shares sits at the very top.
-		for (const [id, label] of [["system", "System"], ["credential", "Credential"], ["tool", "Tool"], ["agent", "Agent"], ["custom", "Custom"]] as Array<[Group, string]>) {
-			const rows = id === "credential" ? credentialRows : shown.filter((r) => groupOf(r.key) === id);
+		for (const [id, label] of [["system", "System"], ["own", isCapability ? "Capability" : "Credential"], ["tool", "Tool"], ["agent", "Agent"], ["custom", "Custom"]] as Array<[Group, string]>) {
+			const rows = id === "own" ? ownRows : shown.filter((r) => groupOf(r.key) === id);
 			if (id === "system" && canRepeat) {
 				// Check first rides right under Repeat: it runs before each occurrence.
 				const at = rows.findIndex((r) => r.key === "check_first");
@@ -442,7 +459,11 @@
 				<span class="row-name">{rel.name || rel.key}</span>
 			</span>
 			<span class="row-value">
-				{#if isCredential && rel.key === "status"}
+				{#if isCapability && rel.key === "status"}
+					<span class="status-val" style={badgeStyle(capabilityStatusBadge(capabilityStatus).color)} data-testid="capability-status-value">
+						<PropIcon icon={capabilityStatusBadge(capabilityStatus).icon} size={14} />{capabilityStatusText(capabilityStatus)}
+					</span>
+				{:else if isCredential && rel.key === "status"}
 					<span class="status-val" style={badgeStyle(credentialStatusBadge(credentialStatus).color)} data-testid="credential-status-value">
 						<PropIcon icon={credentialStatusBadge(credentialStatus).icon} size={14} />{credentialStatusText(credentialStatus)}
 					</span>
@@ -567,11 +588,13 @@
 			<div class="pop">
 				<div class="pop-head">
 					<span class="pop-name">{rel.name || rel.key}</span>
-					{#if rel.key !== "done" && !(isCredential && rel.key === "status")}
+					{#if rel.key !== "done" && !((isCredential || isCapability) && rel.key === "status")}
 						<button class="pop-rm" title="Remove property" onclick={() => void removeProp(rel.key)}>Remove</button>
 					{/if}
 				</div>
-				{#if isCredential && rel.key === "status"}
+				{#if isCapability && rel.key === "status"}
+					<CapabilityStatus {object} {onchanged} />
+				{:else if isCredential && rel.key === "status"}
 					<CredentialStatus {object} {onchanged} pollError={connectPollError} />
 				{:else}
 					<PropertyValue {rel} value={v} spaceId={object.fields["channel"]?.stringValue ?? ""} onsave={(nv) => void saveValue(rel.key, nv)} />

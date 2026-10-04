@@ -24,20 +24,17 @@ export interface MachineRow {
 	id: string;
 	machineId: string;
 	name: string;
-	capabilities: string[];
 }
-
-// Capability names come from descriptor cards in the vault (`$lib/cards`),
-// published by the harness from its catalogs. The list that used to live here
-// was a hand-copy of two files in another package, and it drifted.
-import { capabilityLabel } from "$lib/cards";
-export { capabilityLabel };
 
 /** Type keys whose objects are never served by a machine on their own row. */
 export const UNSERVED_TYPES: Record<string, true> = { channel: true, machine: true, agent: true, relation: true, type: true, skill: true };
 
-function strings(fields: ObjectJSON["fields"], key: string): string[] {
-	return (fields[key]?.valuesValue?.items ?? []).map((v) => v.stringValue ?? "").filter(Boolean);
+/** Catalog key -> Skill object name, refreshed by every resolve (see `skillStates`). */
+let skillNames = new Map<string, string>();
+
+/** A catalog key's display name: its Skill object's name, else the key itself. */
+export function skillLabel(key: string): string {
+	return skillNames.get(key) || key;
 }
 
 export function machineRowOf(row: QueryResultRow): MachineRow {
@@ -45,7 +42,6 @@ export function machineRowOf(row: QueryResultRow): MachineRow {
 		id: row.id,
 		machineId: row.fields["machine_id"]?.stringValue ?? "",
 		name: row.fields["name"]?.stringValue ?? "",
-		capabilities: strings(row.fields, "capabilities"),
 	};
 }
 
@@ -66,12 +62,17 @@ async function guestAgentRows(objects: Array<Pick<ObjectJSON, "fields">>): Promi
 /**
  * What the resolver needs beyond machines and agents: the skill objects
  * (their `key` says which are machine software), and the capability objects
- * with their installs (a machine has a skill once its capability's install
- * is active). Without these every object with Skills resolves wrongly.
+ * (a machine has a skill once its capability for that key is active).
+ * Without these every object with Skills resolves wrongly.
  */
 async function skillStates(): Promise<{ skills: QueryResultRow[]; capabilities: QueryResultRow[] }> {
-	const [skills, caps, installs] = await Promise.all([fetchAllQuery({ type: "skill" }), fetchAllQuery({ type: "capability" }), fetchAllQuery({ type: "install" })]);
-	return { skills, capabilities: [...caps, ...installs] };
+	const [skills, capabilities] = await Promise.all([fetchAllQuery({ type: "skill" }), fetchAllQuery({ type: "capability" })]);
+	skillNames = new Map(skills.flatMap((s) => {
+		const key = s.fields["key"]?.stringValue ?? "";
+		const name = s.fields["name"]?.stringValue ?? "";
+		return key && name ? [[key, name] as const] : [];
+	}));
+	return { skills, capabilities };
 }
 
 /** Resolve one object against the live machine roster and its agents. */
@@ -132,5 +133,5 @@ export function servingCopy(serving: Serving, machines: MachineRow[]): { text: s
 }
 
 function keys(serving: Serving): string {
-	return serving.skills.map(capabilityLabel).join(", ");
+	return serving.skills.map(skillLabel).join(", ");
 }

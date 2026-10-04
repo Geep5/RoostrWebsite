@@ -1218,7 +1218,7 @@
 		<!-- Your identity opens Settings - the avatar when the profile has
 		     one, a person glyph otherwise (the gear lives inside). This
 		     machine has no button: its Computer object is pinnable like
-		     anything else, and its installs carry the actions. -->
+		     anything else, and its capabilities carry the actions. -->
 		<button class="space settings" title="Settings" onclick={() => (showSettings = true)}>
 			<span class="space-ico round">{#if profilePic}<img class="rail-avatar" src={profilePic} alt="" />{:else}<svg style="width:18px;height:18px" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" xmlns="http://www.w3.org/2000/svg"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>{/if}</span>
 			{#if railWide}<span class="space-label">{profileName ? `@${profileName.replace(/^@/, "")}` : "Settings"}</span>{/if}

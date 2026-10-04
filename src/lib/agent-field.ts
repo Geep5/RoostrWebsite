@@ -15,8 +15,6 @@ export const AGENTLESS_TYPES: Record<string, true> = {
 	type: true,
 	skill: true,
 	tool: true,
-	descriptor: true,
-	install: true,
 	credential: true,
 	program: true,
 	typescript: true,

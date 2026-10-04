@@ -46,8 +46,16 @@ export function credentialStatusBadge(status: string): { icon: BadgeIcon; color:
 	}
 }
 
-/** Sign-in through a browser window needs the login page and the cookie (host + name) that proves it worked. */
-export function hasBrowserSignIn(fields: Record<string, ValueJSON>): boolean {
+/** The Google-account service: its sign-in is `gws auth login` on the serving computer. */
+export const GOOGLE_ACCOUNT = "google-account";
+
+/**
+ * Whether Connect can sign this credential in: a Google account (gws opens
+ * the browser), or a browser sign-in with its login page and the cookie
+ * (host + name) that proves it worked.
+ */
+export function canConnect(fields: Record<string, ValueJSON>): boolean {
+	if (fieldStr(fields, "service") === GOOGLE_ACCOUNT) return true;
 	return ["login_url", "session_host", "session_cookie"].every((k) => fieldStr(fields, k).trim() !== "");
 }
 

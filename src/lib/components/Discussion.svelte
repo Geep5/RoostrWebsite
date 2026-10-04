@@ -580,7 +580,7 @@
 							{:else if localWork && entry.processing.status === "held"}
 								<div class="status failed"><span>On hold{entry.processing.error ? ` · ${entry.processing.error}` : ""}</span></div>
 							{:else if localWork && entry.processing.status === "awaiting_approval"}
-								<div class="status"><span>Waiting for approval on the installation's machine</span></div>
+								<div class="status"><span>Waiting for approval on the serving computer</span></div>
 							{:else if pendingDelivery}
 								<div class="status"><span>Sending…</span></div>
 							{:else if localWork && (entry.processing.status === "pending" || entry.processing.status === "processing")}
