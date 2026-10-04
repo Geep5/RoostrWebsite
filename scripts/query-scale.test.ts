@@ -10,8 +10,10 @@
  */
 import { beforeAll, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
-import { initCore } from "../src/lib/engine/core";
+import { coreCall, coreCallWithBlob, initCore, resetCore } from "../src/lib/engine/core";
+import { changeId, encodeChange } from "../src/lib/engine/proto";
 import { runQuery } from "../src/lib/engine/query";
+import type { ChangeJSON } from "../src/lib/engine/contracts";
 import type { ObjectJSON } from "../src/lib/types";
 
 beforeAll(async () => {
@@ -47,9 +49,8 @@ const body = {
 
 test("a cold start larger than the core reservation still queries", () => {
 	// 16.6 MB of state: past the 16 MiB request reservation that used to
-	// reject the push outright. The core's 128 MB cache arena is a separate,
-	// measured ceiling - it gives out around 20 MB of object JSON, because
-	// each parsed allocation carries its own header.
+	// reject the push outright. The core's 128 MB cache is a separate ceiling;
+	// a cached object holds only its compact typed state (see below).
 	const objects = vault(20_000, 700, "cold");
 	const payload = objects.reduce((s, o) => s + JSON.stringify(o).length, 0);
 	expect(payload).toBeGreaterThan(16 * 1024 * 1024);
@@ -88,4 +89,51 @@ test("an undeclared in-place edit is invisible until it is declared", () => {
 	byId.get("trust-2")!.fields["typeKey"] = { stringValue: "note" };
 	const blind = runQuery(byId.values(), body as never, { upserted: [], removed: [] });
 	expect(blind.total).toBe(25);
+});
+
+/** cacheBytes as the core reports it: a one-change corpus push that adds a probe object. */
+function cacheBytes(): number {
+	const change: ChangeJSON = {
+		id: "", objectId: "cache-probe", parentIds: [], timestamp: 1, author: "probe",
+		ops: [{ objectCreate: { typeKey: "note" } }],
+	};
+	change.id = changeId(change);
+	const bytes = encodeChange(change);
+	const blob = new Uint8Array(4 + bytes.byteLength);
+	new DataView(blob.buffer).setUint32(0, bytes.byteLength, true);
+	blob.set(bytes, 4);
+	return coreCallWithBlob<{ cacheBytes: number }>("corpus", { action: "push", reset: false }, blob).cacheBytes;
+}
+
+test("a block-heavy vault caches compact state, and a reset never holds two snapshots", () => {
+	// The phone that could not open its vault: 1,548 objects / 8.19 MB of
+	// state JSON, mostly small block JSON objects, became 112 MB of cache
+	// (each kept its parsed JSON tree) - and a retry reset parsed a second
+	// copy before freeing the first. This vault is ~12 MB of such JSON.
+	const objects: ObjectJSON[] = [];
+	for (let i = 0; i < 1_500; i++) {
+		objects.push({
+			id: `doc-${i}`, typeKey: "note", fields: { name: { stringValue: `Doc ${i}` } },
+			blocks: Array.from({ length: 90 }, (_, b) => ({ id: `doc-${i}-${b}`, content: { text: { text: `line ${b} of doc ${i}` } }, childrenIds: [] })),
+			deleted: false, createdAt: 1, updatedAt: 1 + i,
+		} as unknown as ObjectJSON);
+	}
+	const payload = objects.reduce((s, o) => s + JSON.stringify(o).length, 0);
+	expect(payload).toBeGreaterThan(10 * 1024 * 1024);
+	resetCore();
+	const first = runQuery(objects.values(), { filters: [], limit: 1, textQuery: "line 89 of doc 1499" } as never);
+	expect(first.total).toBe(1);
+	const cached = cacheBytes();
+	// The typed model is the floor (~300 bytes per block against ~85 of this
+	// JSON); the parsed JSON tree put it near 14x, past the 128 MB ceiling.
+	expect(cached).toBeLessThan(5 * payload);
+	// A second cold load over the live cache (the "Retry opening vault" path),
+	// in host-sized batches (pushAndQuery: 6 MiB of JSON per request).
+	let retried = { total: 0 };
+	for (let start = 0; start < objects.length; start += 500) {
+		retried = coreCall<{ total: number }>("query", { reset: start === 0, upserts: objects.slice(start, start + 500), removed: [], body: { limit: 1 }, nowMs: 1 });
+	}
+	expect(retried.total).toBe(1_500);
+	expect(cacheBytes()).toBeLessThan(cached * 1.1);
+	resetCore();
 });
