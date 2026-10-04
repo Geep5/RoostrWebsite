@@ -272,6 +272,8 @@ const MIN_PAGE_SPACING_MS = 40;
 export const PAGE_LIMIT = 128;
 /** Ids per REQ {ids} fetch after a reconcile: checkpoint parts run ~40k chars, so stay well inside the 8 MiB budget. */
 export const FETCH_BATCH = 100;
+/** Ids per fetch for a checkpoint stream: each event can be ~40k chars. */
+export const CHECKPOINT_FETCH_BATCH = 8;
 /** Negentropy frame cap in bytes; hex doubles it, keeping each NEG-MSG under the relay's 1 MiB message cap. */
 const NEG_FRAME_LIMIT = 250_000;
 /** No NEG-MSG within this window: before the first answer the relay is taken not to speak NIP-77. */
@@ -1090,9 +1092,12 @@ export class RelaySync implements RelaySyncApi {
 			return "incomplete";
 		}
 		let missing = 0;
-		for (let i = 0; i < need.length; i += FETCH_BATCH) {
+		// Checkpoint events run to ~40k chars: 100 per REQ is a multi-MB burst a
+		// slow phone link cannot drain before the relay's send deadline.
+		const batchSize = filter.kinds?.includes(CHECKPOINT_KIND) ? CHECKPOINT_FETCH_BATCH : FETCH_BATCH;
+		for (let i = 0; i < need.length; i += batchSize) {
 			if (this.stopped) return "incomplete";
-			const ids = need.slice(i, i + FETCH_BATCH);
+			const ids = need.slice(i, i + batchSize);
 			const started = Date.now();
 			let page: Event[];
 			try {
@@ -1107,7 +1112,7 @@ export class RelaySync implements RelaySyncApi {
 			missing += wanted.size;
 			await importPage(page);
 			this.emitLiveStatus();
-			if (i + FETCH_BATCH < need.length) await sleep(Math.min(PAGE_SPACING_MS, Math.max(MIN_PAGE_SPACING_MS, Date.now() - started)));
+			if (i + batchSize < need.length) await sleep(Math.min(PAGE_SPACING_MS, Math.max(MIN_PAGE_SPACING_MS, Date.now() - started)));
 		}
 		if (missing > 0) {
 			this.events.onStatus({ phase: "backfill", detail: `${relay}: ${missing} reconciled events not returned` });
