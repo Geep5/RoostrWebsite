@@ -8,6 +8,7 @@
 	import { applyTemplate, createTyped } from "$lib/create";
 	import { store } from "$lib/data.svelte";
 	import { tagStyle } from "$lib/options";
+	import { keepInView } from "$lib/popover";
 
 	/**
 	 * View configuration for a query object — source types, filter rules,
@@ -546,7 +547,7 @@
      other candidates, then "＋ New … property". `side` = beside the
      settings row; otherwise it drops under the toolbar chip. -->
 {#snippet propList(side: boolean)}
-	<div class="plist" class:side role="menu" aria-label={propTitle}>
+	<div class="plist" class:side role="menu" aria-label={propTitle} use:keepInView={{ placement: side ? "beside" : "below", align: "left" }}>
 		<span class="ptitle">{propTitle}</span>
 		<div class="pscroll">
 			{#each choices.used as p (p.key)}
@@ -617,7 +618,7 @@
 		{#if settingsOpen}
 			<!-- Anytype dataviewViewLayout: layout tiles, then the layout's
 			     setting row (Group by / Date) whose list opens beside it. -->
-			<div class="vmenu" role="menu">
+			<div class="vmenu" role="menu" use:keepInView={{ placement: "below", align: "right" }}>
 				<div class="vlayouts">
 					{#each LAYOUTS as [v, label] (v)}
 						<button class="vlayout" class:active={viewType === v} aria-pressed={viewType === v} onclick={() => void pickLayout(v)}>
@@ -892,6 +893,7 @@
 		flex-direction: column;
 		gap: 2px;
 		min-width: 300px;
+		overflow-y: auto;
 		background: var(--panel, #1a1d23);
 		border: 1px solid var(--border);
 		border-radius: 10px;
@@ -978,12 +980,6 @@
 		padding: 6px;
 		box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5);
 	}
-	/* Beside the settings row; the menu hugs the right edge, so it opens leftward. */
-	.plist.side {
-		left: auto;
-		right: calc(100% + 12px);
-		top: -6px;
-	}
 	.ptitle {
 		color: var(--muted);
 		font-size: 11px;
@@ -996,6 +992,8 @@
 		flex-direction: column;
 		gap: 2px;
 		max-height: 320px;
+		min-height: 0;
+		flex: 1 1 auto;
 		overflow-y: auto;
 	}
 	/* A scrolling flex column squeezes content-less children: keep the divider. */
@@ -1056,13 +1054,6 @@
 		margin-left: 4px;
 	}
 	@media (max-width: 720px) {
-		/* No room beside the menu on a phone: the list unfolds under its row. */
-		.plist.side {
-			position: static;
-			width: auto;
-			margin-top: 4px;
-			box-shadow: none;
-		}
 		.pchip-title {
 			display: none;
 		}
