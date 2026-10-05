@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { showDate } from "$lib/dates";
 	import type { ObjectJSON, SpaceJSON } from "$lib/types";
 	import { space as spaceApi, note, fetchAllQuery } from "$lib/api";
 	import CheckboxIcon from "./CheckboxIcon.svelte";
@@ -281,7 +282,7 @@
 					<span class="req-name">{r.name || r.requesterNpub.slice(0, 20) + "…"}</span>
 					{#if r.name}<span class="npub req-npub" title={r.requesterNpub}>{r.requesterNpub.slice(0, 20)}…</span>{/if}
 				</span>
-				<span class="role">{new Date(r.at).toLocaleDateString()}</span>
+				<span class="role">{showDate(r.at)}</span>
 				<button onclick={() => void approveRequest(r)}>Approve</button>
 				<button class="danger" onclick={() => void denyRequest(r)}>Deny</button>
 			</div>

@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { showDate } from "$lib/dates";
 	/**
 	 * Recurring objects. The engine owns the rule (`object.fields.repeat`)
 	 * and the occurrence math; this component renders when it next runs and
@@ -74,7 +75,7 @@
 	});
 
 	// ── Dates ─────────────────────────────────────────────────────
-	const fmtDay = (ms: number) => new Date(ms).toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" });
+	const fmtDay = (ms: number) => showDate(ms, { weekday: "short", month: "short", day: "numeric" });
 	const fmtLong = (ms: number) => new Date(ms).toLocaleString(undefined, { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
 	const hhmm = (minutes: number) => `${String(Math.floor(minutes / 60)).padStart(2, "0")}:${String(minutes % 60).padStart(2, "0")}`;
 	const addMonths = (ms: number, n: number, day: number) => {

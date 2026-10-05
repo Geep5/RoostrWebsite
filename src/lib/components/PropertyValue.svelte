@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { showDate } from "$lib/dates";
 	/**
 	 * The one per-format value editor, covering Anytype's relation formats
 	 * (interface/object.ts RelationType): shorttext, longtext, number,
@@ -55,7 +56,7 @@
 
 	// ── Date ──────────────────────────────────────────────────────
 	let dateOpen = $state(false);
-	const dateLabel = $derived(num ? new Date(num).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" }) : "");
+	const dateLabel = $derived(num ? showDate(num, { year: "numeric", month: "short", day: "numeric" }) : "");
 
 	// Status values: list with maxCount 1 (legacy objects used stringValue).
 	const statusSelected = $derived(items.length ? items : text ? [text] : []);

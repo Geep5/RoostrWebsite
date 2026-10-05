@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { showDate } from "$lib/dates";
 	/**
 	 * The right pane's properties section: the object's properties
 	 * laid out as vertical rows - a small
@@ -252,7 +253,7 @@
 		if (rel.format === "checkbox") return p === true ? "✓" : "✗";
 		if (rel.format === "date") {
 			const ms = v?.intValue ?? v?.floatValue;
-			return ms ? new Date(ms).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" }) : "";
+			return ms ? showDate(ms, { year: "numeric", month: "short", day: "numeric" }) : "";
 		}
 		if (rel.format === "object") {
 			const ids = (Array.isArray(p) ? p : p ? [String(p)] : []).filter(Boolean);

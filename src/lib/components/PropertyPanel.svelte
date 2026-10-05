@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { showDate } from "$lib/dates";
 	/**
 	 * Property (relation) object page body — Anytype's property view:
 	 * every object currently holding a value for this property, with
@@ -79,7 +80,7 @@
 		if (!v || format === "repeat") return "";
 		if (v.boolValue !== undefined) return v.boolValue ? "☑" : "☐";
 		if (v.stringValue !== undefined) return v.stringValue;
-		if (v.intValue !== undefined) return format === "date" ? new Date(v.intValue).toLocaleDateString() : String(v.intValue);
+		if (v.intValue !== undefined) return format === "date" ? showDate(v.intValue) : String(v.intValue);
 		if (v.floatValue !== undefined) return String(v.floatValue);
 		if (v.valuesValue) return v.valuesValue.items.map((i) => i.stringValue ?? i.linkValue?.targetId.slice(0, 8) ?? "").filter(Boolean).join(", ");
 		if (v.linkValue) return v.linkValue.targetId.slice(0, 8);

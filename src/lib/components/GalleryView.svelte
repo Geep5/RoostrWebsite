@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { showDate } from "$lib/dates";
 	/**
 	 * Gallery view — port of Anytype's dataview gallery (view/gallery.tsx +
 	 * gallery/card.tsx): a responsive grid of cards, each with icon + name
@@ -62,7 +63,7 @@
 		if (v.stringValue !== undefined) return v.stringValue;
 		if (v.boolValue !== undefined) return v.boolValue ? "✓" : "";
 		if (v.intValue !== undefined) {
-			return rel.format === "date" && v.intValue > 0 ? new Date(v.intValue).toLocaleDateString(undefined, { month: "short", day: "numeric" }) : String(v.intValue);
+			return rel.format === "date" && v.intValue > 0 ? showDate(v.intValue, { month: "short", day: "numeric" }) : String(v.intValue);
 		}
 		if (v.floatValue !== undefined) return String(v.floatValue);
 		if (v.valuesValue) return v.valuesValue.items.map((i) => i.stringValue ?? "").filter(Boolean).join(", ");

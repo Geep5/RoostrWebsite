@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { showDate } from "$lib/dates";
 	/**
 	 * Anytype dataview grid: a view carries an ordered relation list
 	 * (model/view.ts getVisibleRelations) and each visible relation is a
@@ -514,8 +515,8 @@
 			const t = store.types.find((x) => x.key === r.typeKey);
 			return t?.name || (r.typeKey.charAt(0).toUpperCase() + r.typeKey.slice(1)).replaceAll("_", " ");
 		}
-		if (key === "createdAt") return r.createdAt ? new Date(r.createdAt).toLocaleDateString() : "";
-		if (key === "updatedAt") return r.updatedAt ? new Date(r.updatedAt).toLocaleDateString() : "";
+		if (key === "createdAt") return r.createdAt ? showDate(r.createdAt) : "";
+		if (key === "updatedAt") return r.updatedAt ? showDate(r.updatedAt) : "";
 		const v: ValueJSON | undefined = r.fields[key];
 		const format = formatOf(key);
 		if (!v) return "";
@@ -531,7 +532,7 @@
 		}
 		if (v.stringValue !== undefined) return v.stringValue;
 		if (v.boolValue !== undefined) return v.boolValue ? "✓" : "";
-		if (v.intValue !== undefined) return format === "date" ? new Date(v.intValue).toLocaleDateString() : String(v.intValue);
+		if (v.intValue !== undefined) return format === "date" ? showDate(v.intValue) : String(v.intValue);
 		if (v.floatValue !== undefined) return String(v.floatValue);
 		if (v.valuesValue) return v.valuesValue.items.map((i) => i.stringValue ?? "").join(", ");
 		if (v.listValue) return v.listValue.values.join(", ");
