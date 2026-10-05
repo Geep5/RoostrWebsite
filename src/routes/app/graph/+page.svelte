@@ -112,10 +112,8 @@
 			let scale = 1;
 			let offsetX = 0;
 			let offsetY = 0;
-			// Opening is static: whatever settling is left would show as connected
-			// nodes untangling on screen. The layout only moves again when a node
-			// is dragged (that reheats it, as before).
-			let alpha = 0;
+			// The layout never moves on its own after opening: it settled
+			// off-screen above, and dragging places only the held node.
 			let hovered = -1;
 			const focused = focusId ? graph.nodes.findIndex((node) => node.id === focusId) : -1;
 			let dragNode = -1;
@@ -123,7 +121,6 @@
 			let moved = 0;
 			let lastX = 0;
 			let lastY = 0;
-			let autoFit = true;
 
 			// Label pool.
 			const labels: HTMLDivElement[] = [];
@@ -268,12 +265,12 @@
 				lastY = e.offsetY;
 				const hit = pick(e.offsetX, e.offsetY);
 				if (hit >= 0) {
+					// Dragging places one node: the rest of the layout stays put (no
+					// reheat - waking the simulation re-settled every node).
 					dragNode = hit;
-					alpha = Math.max(alpha, 0.3); // reheat, d3-drag style
 				} else {
 					panning = true;
 				}
-				autoFit = false;
 			});
 			el.addEventListener("pointermove", (e) => {
 				const dx = e.offsetX - lastX;
@@ -283,7 +280,6 @@
 					const p = toWorld(e.offsetX, e.offsetY);
 					graph.nodes[dragNode].x = p.x;
 					graph.nodes[dragNode].y = p.y;
-					alpha = Math.max(alpha, 0.3);
 					lastX = e.offsetX;
 					lastY = e.offsetY;
 				} else if (panning) {
@@ -307,7 +303,6 @@
 			});
 			el.addEventListener("wheel", (e) => {
 				e.preventDefault();
-				autoFit = false;
 				const { w, h } = cssSize();
 				const before = toWorld(e.offsetX, e.offsetY);
 				scale = Math.min(8, Math.max(0.05, scale * Math.exp(-e.deltaY * 0.0015)));
@@ -318,13 +313,6 @@
 
 			// ── Frame loop ──────────────────────────────────────────
 			const stop = renderer.loop(() => {
-				if (alpha > 0.003) {
-					simStep(graph, alpha, dragNode);
-					simStep(graph, alpha, dragNode);
-					alpha *= 0.98;
-					if (autoFit) fit();
-				}
-
 				const { w, h } = cssSize();
 				for (const [i, node] of graph.nodes.entries()) {
 					centers[i * 2] = node.x;
