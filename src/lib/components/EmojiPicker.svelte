@@ -64,7 +64,7 @@
 	const matches = $derived.by(() => {
 		const q = query.trim().toLowerCase();
 		if (q === "" || isEmojiQuery) return null;
-		return EMOJI.filter(([e, name]) => name.includes(q) || (ALIASES[e] ?? "").includes(q));
+		return EMOJI.filter(([e, name, , keywords]) => name.includes(q) || keywords.includes(q) || (ALIASES[e] ?? "").includes(q));
 	});
 
 	const grouped = $derived.by(() => EMOJI_GROUPS.map((label, i) => ({ label, items: EMOJI.filter((x) => x[2] === i) })));

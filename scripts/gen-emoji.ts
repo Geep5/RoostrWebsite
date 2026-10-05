@@ -19,10 +19,13 @@ import { writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 const SOURCE = "https://unicode.org/Public/emoji/latest/emoji-test.txt";
+// CLDR's English keywords per emoji ("pumpkin" for 🎃, whose name is "jack-o-lantern").
+const KEYWORDS = "https://raw.githubusercontent.com/unicode-org/cldr-json/main/cldr-json/cldr-annotations-full/annotations/en/annotations.json";
 const outPath = resolve(import.meta.dir, "..", "src/lib/emoji-data.ts");
 
 const txt = await (await fetch(SOURCE)).text();
 const version = txt.match(/#\s*Version:\s*(\S+)/)?.[1] ?? "unknown";
+const annotations = ((await (await fetch(KEYWORDS)).json()) as { annotations: { annotations: Record<string, { default?: string[] }> } }).annotations.annotations;
 
 const groups: string[] = [];
 const rows: Array<{ emoji: string; name: string; group: number }> = [];
@@ -48,17 +51,25 @@ for (const line of txt.split("\n")) {
 
 if (rows.length < 1000) throw new Error(`only parsed ${rows.length} emoji — source format changed?`);
 
+/** Search words beyond the name; CLDR keys drop the VS16 selector (U+FE0F). */
+const keywordsOf = (emoji: string, name: string): string =>
+	(annotations[emoji]?.default ?? annotations[emoji.replaceAll("\uFE0F", "")]?.default ?? [])
+		.map((k) => k.toLowerCase())
+		.filter((k) => !name.includes(k))
+		.join(" ");
+
 const out = `/**
  * GENERATED FILE — do not edit. Source: ${SOURCE}
  * Unicode emoji ${version} · ${rows.length} base emoji in ${groups.length} groups.
  * Regenerate with: bun run scripts/gen-emoji.ts
  *
- * Tuple form keeps the payload small: [emoji, CLDR name, group index].
+ * Tuple form keeps the payload small: [emoji, CLDR name, group index, CLDR keywords not already in the name].
+ * Keywords: ${KEYWORDS}
  */
 export const EMOJI_GROUPS: readonly string[] = ${JSON.stringify(groups)};
 
-export const EMOJI: ReadonlyArray<readonly [string, string, number]> = ${JSON.stringify(
-	rows.map((r) => [r.emoji, r.name, r.group]),
+export const EMOJI: ReadonlyArray<readonly [string, string, number, string]> = ${JSON.stringify(
+	rows.map((r) => [r.emoji, r.name, r.group, keywordsOf(r.emoji, r.name)]),
 )};
 `;
 
