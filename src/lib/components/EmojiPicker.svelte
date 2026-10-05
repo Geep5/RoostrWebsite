@@ -34,7 +34,7 @@
 	 * search that used to work stops working now that the set is complete.
 	 */
 	const ALIASES: Record<string, string> = {
-		"📝": "note memo", "📄": "page", "📋": "clipboard list", "📌": "pin", "📎": "clip attach",
+		"📝": "note memo", "📄": "page", "📋": "clipboard list", "📌": "pin", "📎": "clip attach", "🍾": "champagne",
 		"✏️": "edit", "🗂️": "files organize", "🗃️": "archive", "🗄️": "cabinet", "✅": "done task",
 		"☑️": "todo", "🎯": "goal", "🚀": "launch ship", "🔥": "hot", "⭐": "favorite",
 		"💡": "idea", "⚡": "zap fast", "🧠": "mind think", "💭": "thought", "🗒️": "notepad",
