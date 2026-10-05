@@ -6,9 +6,7 @@
 	import { formatGlyph, spaceRelations } from "$lib/relations";
 	import { activeSpace } from "$lib/space.svelte";
 	import { store, refreshAll } from "$lib/data.svelte";
-	import { createRenderer, createProgram } from "brometal";
-	import nodeShader from "$lib/shaders/graph-node.shader.gen";
-	import edgeShader from "$lib/shaders/graph-edge.shader.gen";
+	import { createGraphRenderer } from "$lib/graph-renderer";
 
 	let canvasEl = $state<HTMLCanvasElement>();
 	let labelHost = $state<HTMLDivElement>();
@@ -72,27 +70,6 @@
 			status = "";
 			if (!canvasEl || cancelled) return;
 
-			// iOS Safari sizes the WebGPU swapchain when the context is
-			// configured and does NOT track later canvas resizes (Chrome
-			// does, per spec) - so the one configure() call must see the
-			// real dimensions, not the default 300x150 attribute size.
-			// Symptom without this: the graph paints a letterboxed sub-rect.
-			const dpr = window.devicePixelRatio || 1;
-			canvasEl.width = Math.max(1, Math.floor(canvasEl.clientWidth * dpr));
-			canvasEl.height = Math.max(1, Math.floor(canvasEl.clientHeight * dpr));
-			const renderer = await createRenderer(canvasEl, { clearColor: [0.047, 0.055, 0.066, 1] });
-			if (cancelled) {
-				renderer.destroy();
-				return;
-			}
-
-			const nodes = createProgram(renderer, nodeShader, { blend: "alpha" });
-			const edges = createProgram(renderer, edgeShader, { blend: "alpha" });
-
-			// Unit quad, two triangles.
-			nodes.attributes.aCorner.set(new Float32Array([-1, -1, 1, -1, -1, 1, -1, 1, 1, -1, 1, 1]));
-			edges.attributes.aQuad.set(new Float32Array([-1, 0, 1, 0, -1, 1, -1, 1, 1, 0, 1, 1]));
-
 			const n = graph.nodes.length;
 			const centers = new Float32Array(n * 2);
 			const radii = new Float32Array(n);
@@ -107,6 +84,8 @@
 			const ends = new Float32Array(m * 2);
 			const ecolors = new Float32Array(m * 4);
 			for (const [i, e] of graph.edges.entries()) ecolors.set(e.color, i * 4);
+			// three.js (lib/graph-renderer.ts) draws straight from these arrays.
+			const renderer = createGraphRenderer(canvasEl, { centers, radii, tints, flags, starts, ends, colors: ecolors }, [0.047, 0.055, 0.066]);
 
 			// View state (world → screen: (p - offset) * scale + viewport/2).
 			let scale = 1;
@@ -325,26 +304,7 @@
 					ends[i * 2] = graph.nodes[e.b].x;
 					ends[i * 2 + 1] = graph.nodes[e.b].y;
 				}
-
-				if (m > 0) {
-					edges.instanceAttributes.iStart.set(starts);
-					edges.instanceAttributes.iEnd.set(ends);
-					edges.instanceAttributes.iColor.set(ecolors);
-					edges.uniforms.uScale.set(scale);
-					edges.uniforms.uOffset.set([offsetX, offsetY]);
-					edges.uniforms.uViewport.set([w, h]);
-					edges.uniforms.uWidth.set(1.5);
-					edges.draw();
-				}
-
-				nodes.instanceAttributes.iCenter.set(centers);
-				nodes.instanceAttributes.iRadius.set(radii);
-				nodes.instanceAttributes.iTint.set(tints);
-				nodes.instanceAttributes.iFlags.set(flags);
-				nodes.uniforms.uScale.set(scale);
-				nodes.uniforms.uOffset.set([offsetX, offsetY]);
-				nodes.uniforms.uViewport.set([w, h]);
-				nodes.draw();
+				renderer.render({ scale, offsetX, offsetY, width: w, height: h });
 
 				// Labels: on-screen nodes first, then biggest - a zoomed-in view
 				// must label what you can SEE, not the vault's heavyweights.
@@ -401,8 +361,6 @@
 
 			cleanup = () => {
 				stop();
-				nodes.dispose();
-				edges.dispose();
 				renderer.destroy();
 			};
 		})().catch((e) => (status = `Graph failed: ${e}`));

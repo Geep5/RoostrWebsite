@@ -19,6 +19,7 @@
 		"@sveltejs/adapter-static": "^3.0.10",
 		"@sveltejs/kit": "^2.63.0",
 		"@sveltejs/vite-plugin-svelte": "^7.1.2",
+		"@types/three": "^0.186.0",
 		"fake-indexeddb": "^6.2.5",
 		"svelte": "^5.56.1",
 		"svelte-check": "^4.6.0",
@@ -26,8 +27,8 @@
 	},
 	"dependencies": {
 		"@noble/hashes": "^2.4.0",
-		"brometal": "^0.18.0",
 		"nostr-tools": "^2.25.0",
+		"three": "^0.186.1",
 		"typescript": "^6.0.3"
 	}
 }
