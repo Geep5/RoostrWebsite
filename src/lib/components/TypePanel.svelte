@@ -59,10 +59,15 @@
 		void loadTemplates();
 	});
 
+	/** A template lives in its type's space - its pickers (agents, prompts) offer that space's objects. Without it the engine files it under the oldest space. */
+	const typeSpace = $derived(fieldStr(object.fields, "channel"));
+	const templateFields = (): Record<string, { stringValue: string }> => ({
+		target_type: { stringValue: object.id },
+		...(typeSpace ? { channel: { stringValue: typeSpace } } : {}),
+	});
+
 	async function addTemplate() {
-		const { id } = await note.create("New template", "template", {
-			target_type: { stringValue: object.id },
-		});
+		const { id } = await note.create("New template", "template", templateFields());
 		await goto(`/app/object/${id}`);
 	}
 
@@ -111,9 +116,7 @@
 
 	/** Copy: fresh template object, same target, blocks cloned. */
 	async function duplicateTemplate(t: { id: string; name: string }) {
-		const { id } = await note.create(`${t.name || "Untitled"} copy`, "template", {
-			target_type: { stringValue: object.id },
-		});
+		const { id } = await note.create(`${t.name || "Untitled"} copy`, "template", templateFields());
 		await applyTemplate(id, t.id);
 		await loadTemplates();
 		void loadPreview(id);
