@@ -148,6 +148,11 @@
 	/** A Jev Skill's settings (harness jev.ts): its Answer, and the property it writes. */
 	const JEV_KEYS = ["jev_answer", "jev_writes"];
 
+	/** A "+ New agent" made from this object starts with its tags (Customer: Team...): the groupings its views filter on. */
+	const tagSeeds = $derived(
+		Object.fromEntries(relations.filter((r) => r.format === "tag" && object.fields[r.key] !== undefined).map((r) => [r.key, object.fields[r.key]])),
+	);
+
 	/** "Edit question →": the Jev Skill whose page is the question. */
 	async function openQuestion(skillId: string) {
 		await goto(`/app/object/${skillId}`);
@@ -655,7 +660,7 @@
 				{:else if isCredential && rel.key === "status"}
 					<CredentialStatus {object} {onchanged} pollError={connectPollError} />
 				{:else}
-					<PropertyValue {rel} value={v} spaceId={object.fields["channel"]?.stringValue ?? ""} onsave={(nv) => void saveValue(rel.key, nv)} />
+					<PropertyValue {rel} value={v} spaceId={object.fields["channel"]?.stringValue ?? ""} seeds={tagSeeds} onsave={(nv) => void saveValue(rel.key, nv)} />
 				{/if}
 			</div>
 		{/if}

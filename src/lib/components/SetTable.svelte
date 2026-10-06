@@ -22,6 +22,7 @@
 	import { fieldStr, isLockedTool, repeatOf } from "$lib/types";
 	import { describeRepeat } from "$lib/repeat";
 	import { objectIcon, typeIcon } from "$lib/icons";
+	import { seedsFromView } from "$lib/view-seeds";
 
 	let {
 		body,
@@ -392,6 +393,8 @@
 	let servingById = $state<Map<string, ServingInfo>>(new Map());
 	/** The computers the Served by column names, for turning a picked Computer into its machine_id. */
 	let machinesNow = $state<MachineRow[]>([]);
+	/** What this view's filters give an agent made from one of its cells ("+ New agent" in Team Tasks → Customer: Team). */
+	const viewSeeds = $derived(seedsFromView(object.fields, relations));
 
 	/** Needs a person: the resolution cannot be honoured, or nothing serves the object at all. */
 	function servingAttention(info: ServingInfo | undefined): boolean {
@@ -718,7 +721,7 @@
 		{@const row = rows.find((x) => x.id === cellEdit!.recordId)}
 		{#if rel && row}
 			<div class="cell-pop" style="left:{Math.min(cellEdit.x, (document.querySelector('.main-col')?.getBoundingClientRect().right ?? window.innerWidth) - 320)}px; top:{cellEdit.y}px" role="dialog">
-				<PropertyValue {rel} value={row.fields[rel.key]} onsave={(v) => void cellSave(v)} />
+				<PropertyValue {rel} value={row.fields[rel.key]} spaceId={row.fields["channel"]?.stringValue ?? ""} seeds={viewSeeds} onsave={(v) => void cellSave(v)} />
 			</div>
 		{/if}
 	{/if}

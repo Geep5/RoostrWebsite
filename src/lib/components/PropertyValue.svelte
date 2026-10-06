@@ -25,12 +25,15 @@
 		value,
 		onsave,
 		spaceId = "",
+		seeds = {},
 	}: {
 		rel: RelationDefJSON;
 		value: ValueJSON | undefined;
 		onsave: (v: ValueJSON) => void | Promise<void>;
 		/** Owning space of the object being edited; agent pickers offer only its agents. */
 		spaceId?: string;
+		/** Fields a "+ New agent" made here starts with: a view's filter values (view-seeds.ts). */
+		seeds?: Record<string, ValueJSON>;
 	} = $props();
 
 	const text = $derived(value?.stringValue ?? "");
@@ -131,7 +134,7 @@
 		creatingAgent = true;
 		try {
 			const channel = spaceId || store.channels[0]?.id || "";
-			const id = newKind === "agent" ? await newAgent(channel, name) : (await note.create(name, "system_prompt", channel ? { channel: { stringValue: channel } } : {})).id;
+			const id = newKind === "agent" ? await newAgent(channel, name, $state.snapshot(seeds)) : (await note.create(name, "system_prompt", channel ? { channel: { stringValue: channel } } : {})).id;
 			objectOpen = false;
 			agentName = null;
 			await toggleObject(id);

@@ -129,8 +129,10 @@ const DEFAULT_TOOLS = ["shell_exec", "web_fetch"];
  * A new agent in the space, from the agent type's default template there
  * (its model, prompt, skills, tools, credentials, computer), else pointed at the
  * space's "Assistant" prompt. Stays where you are - for pickers that link it.
+ * `seeds` are fields it starts with (a view's filter values, view-seeds.ts);
+ * the template fills in only what they leave empty.
  */
-export async function newAgent(channelId: string, name = ""): Promise<string> {
+export async function newAgent(channelId: string, name = "", seeds: Record<string, ValueJSON> = {}): Promise<string> {
 	const tplId = defaultTemplateOf("agent", channelId);
 	const tpl = tplId ? await fetchObject(tplId).catch(() => null) : null;
 	const assistant = tpl?.fields["prompt"]
@@ -145,6 +147,8 @@ export async function newAgent(channelId: string, name = ""): Promise<string> {
 		: (await fetchAllQuery({ type: "tool", filters: [{ key: "channel", condition: "equal", value: channelId }] }))
 			.filter((r) => isBuiltinTool(r.fields) && DEFAULT_TOOLS.includes(r.fields["name"]?.stringValue ?? ""));
 	const { id: agentId } = await note.create(name.trim() || "New agent", "agent", {
+		// A view's Agent filter seeds its records' guest list; an agent has none of its own.
+		...Object.fromEntries(Object.entries(seeds).filter(([key]) => key !== "agent")),
 		...channelField(channelId),
 		...(assistant ? { prompt: { linkValue: { targetId: assistant.id, relationKey: "prompt" } } } : {}),
 		...(tools.length ? { tools: { valuesValue: { items: tools.map((t) => ({ linkValue: { targetId: t.id, relationKey: "tools" } })) } } } : {}),

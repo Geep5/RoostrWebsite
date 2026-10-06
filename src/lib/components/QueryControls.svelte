@@ -6,6 +6,7 @@
 	import type { ObjectJSON, RelationDefJSON, ValueJSON } from "$lib/types";
 	import { fetchQuery, note } from "$lib/api";
 	import { applyTemplate, createTyped, newAgent } from "$lib/create";
+	import { seedsFromView } from "$lib/view-seeds";
 	import { store } from "$lib/data.svelte";
 	import { tagStyle } from "$lib/options";
 	import { keepInView } from "$lib/popover";
@@ -391,7 +392,7 @@
 			// An agent named in the table's entry row is a row like any other:
 			// it appears in the list, and you stay. Unnamed, it opens to be named.
 			if (typeKey === "agent" && name.trim()) {
-				await newAgent(channelId, name);
+				await newAgent(channelId, name, seedsFromView(object.fields, relations));
 				await onchanged();
 				return;
 			}
@@ -399,32 +400,9 @@
 				await createTyped(typeKey, channelId, name);
 				return;
 			}
-			const fields: Record<string, ValueJSON> = {};
+			// The view's filter values: a record born in a filtered view satisfies it.
+			const fields: Record<string, ValueJSON> = seedsFromView(object.fields, relations);
 			if (channelId) fields["channel"] = { stringValue: channelId };
-			// Every equal/in filter seeds the matching field with a value of
-			// the relation's OWN shape - a record born in a filtered view
-			// must satisfy the view (Anytype getDetails).
-			for (const f of filters) {
-				if (!["equal", "in", "allIn"].includes(f.condition)) continue;
-				const rel = relations.find((r) => r.key === f.key);
-				if (!rel) continue;
-				if (rel.format === "checkbox") {
-					// Checkbox equal-filters carry no value list: equal means
-					// "checked" (an explicit first value overrides).
-					fields[f.key] = { boolValue: f.value[0] === undefined ? true : f.value[0] !== "false" };
-					continue;
-				}
-				if (f.value.length === 0) continue;
-				if (rel.format === "tag" || rel.format === "status") {
-					fields[f.key] = { valuesValue: { items: f.value.map((v) => ({ stringValue: v })) } };
-				} else if (rel.format === "number") {
-					fields[f.key] = { floatValue: Number(f.value[0]) || 0 };
-				} else if (rel.format === "date") {
-					fields[f.key] = { intValue: Number(f.value[0]) || Date.now() };
-				} else {
-					fields[f.key] = { stringValue: f.value[0] };
-				}
-			}
 			if (viewType === "calendar" && dateKey) {
 				fields[dateKey] = { intValue: Date.now() };
 			}
