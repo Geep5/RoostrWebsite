@@ -18,6 +18,7 @@
 	import { store } from "$lib/data.svelte";
 	import { isIOSBackend } from "$lib/client-backend";
 	import { machineName, resolveServing, servingCopy } from "$lib/serving";
+	import { harnessFetch } from "$lib/local-transport";
 
 	let {
 		object,
@@ -310,6 +311,21 @@
 		open = false;
 		await run(() => repeat.clear(object.id));
 	}
+	/** Run now: an extra run on the computer that serves this object; the schedule is untouched. */
+	let started = $state(false);
+	async function runNow() {
+		open = false;
+		error = "";
+		try {
+			const res = await harnessFetch("/schedule/run", { method: "POST", body: JSON.stringify({ id: object.id }) });
+			const body = (await res.json().catch(() => ({}))) as { error?: string };
+			if (!res.ok) throw new Error(body.error ?? `HTTP ${res.status}`);
+			started = true;
+			setTimeout(() => (started = false), 4000);
+		} catch (e) {
+			error = e instanceof Error ? e.message : String(e);
+		}
+	}
 </script>
 
 <div class="repeat" class:active={!!rule}>
@@ -351,6 +367,7 @@
 		{/if}
 	{/if}
 	{#if error}<p class="err">{error}</p>{/if}
+	{#if started}<p class="started">Running now - the result lands in the chat and under “last run”.</p>{/if}
 
 	{#if open}
 		<div class="pop">
@@ -472,6 +489,7 @@
 
 			<div class="pop-foot">
 				{#if rule}<button class="pop-rm" disabled={busy} onclick={() => void clear()}>Turn off repeating</button>{/if}
+				{#if rule}<button class="act" disabled={busy} title="Start an extra run now, exactly like a scheduled one; the next occurrence stays where it is" onclick={() => void runNow()}>Run now</button>{/if}
 				<span class="spacer"></span>
 				<button class="act" onclick={() => (open = false)}>Cancel</button>
 				<button class="act primary" disabled={busy || !hasGuests || !!invalid} onclick={() => void save()}>{rule ? "Update" : "Repeat"}</button>
@@ -559,6 +577,11 @@
 		flex-wrap: wrap;
 		gap: 2px 6px;
 		font-size: 11.5px;
+		color: var(--muted);
+	}
+	.started {
+		margin: 2px 0 0 26px;
+		font-size: 12px;
 		color: var(--muted);
 	}
 	.act {
