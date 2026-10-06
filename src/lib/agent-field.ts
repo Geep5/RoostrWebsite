@@ -23,8 +23,6 @@ export const AGENTLESS_TYPES: Record<string, true> = {
 	pinned_fact: true,
 	milestone: true,
 	machine: true,
-	// A Judge asks Jev on its Repeat; no agent runs it.
-	judge: true,
 };
 
 

@@ -115,7 +115,7 @@
 	 * what was typed), make the object here and link it - creating an
 	 * unnamed one meant opening it to rename it. An agent comes from the
 	 * space's default Agent template; a prompt is an empty System prompt
-	 * (a Judge's question, an agent's instructions) to open and write.
+	 * (an agent's instructions) to open and write.
 	 */
 	const newKind = $derived(wantsAgents ? "agent" : allowedTypeKeys.has("system_prompt") ? "prompt" : "");
 	let creatingAgent = $state(false);

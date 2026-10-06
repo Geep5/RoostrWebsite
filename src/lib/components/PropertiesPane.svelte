@@ -21,7 +21,6 @@
 	import { capabilityStatusBadge, capabilityStatusText } from "$lib/capability-actions";
 	import CredentialStatus from "./CredentialStatus.svelte";
 	import CapabilityStatus from "./CapabilityStatus.svelte";
-	import JudgePanel from "./JudgePanel.svelte";
 	import { harnessFetch } from "$lib/local-transport";
 	import PropertyValue from "./PropertyValue.svelte";
 	import PropertySuggest from "./PropertySuggest.svelte";
@@ -113,15 +112,15 @@
 		const AGENT_CONFIG = typeKey === "agent" ? ["prompt", "model", "skills", "tools", "credentials", "served_by", "repo_path"] : [];
 		// A Tool's own: what the model is told, its inputs, whether it ships with Roostr, and which version of its code runs.
 		const TOOL_CONFIG = typeKey === "tool" ? ["description", "tool_inputs", "tool_builtin", "tool_version"] : [];
-		// A Judge's settings: what kind of answer, and the key it asks Jev with.
-		// Served by stays optional (the credential's computer asks otherwise): a row only once set.
-		const JUDGE_CONFIG = typeKey === "judge" ? JUDGE_KEYS.filter((k) => k !== "served_by") : [];
+		// A Skill's Jev settings: an Answer makes it a Jev Skill, Writes to names its property.
+		// Not on catalog skills (software a computer installs), which never score.
+		const SKILL_CONFIG = typeKey === "skill" && !fieldStr(object.fields, "key") ? JEV_KEYS : [];
 		const repeating = !!repeatOf(object.fields);
 		const present = relations.filter((r) => {
 			// Legacy credential shapes (`key_fields` list, `secret` JSON) stay for old harnesses; never rows.
 			if (ownRowKeys.has(r.key) || (isCredential && (r.key === "key_fields" || r.key === "secret"))) return false;
 			if (RESERVED_KEYS[r.key]) return false;
-			if (AGENT_CONFIG.includes(r.key) || TOOL_CONFIG.includes(r.key) || JUDGE_CONFIG.includes(r.key)) return true;
+			if (AGENT_CONFIG.includes(r.key) || TOOL_CONFIG.includes(r.key) || SKILL_CONFIG.includes(r.key)) return true;
 			// The error badge is how problems surface on any object (a failed
 			// run, a check that failed, a tool that didn't load, a holdup):
 			// shown everywhere even before one is written, so its absence reads as "ok".
@@ -135,8 +134,7 @@
 			// Credentials, Skills and Tools are an agent's own (AGENT_CONFIG); elsewhere only when set.
 			if (r.key === "credentials" || r.key === "skills" || r.key === "tools") return r.key in object.fields;
 			// Check first belongs to the repeat: the tool run before each occurrence.
-			// A Judge's occurrence is its own Jev pass: nothing runs a check first.
-			if (r.key === "check_first") return typeKey !== "judge" && (repeating || r.key in object.fields);
+			if (r.key === "check_first") return repeating || r.key in object.fields;
 			if (r.key === "agent") return !AGENTLESS_TYPES[typeKey] || r.key in object.fields;
 			if (r.key === "model") return typeKey === "agent" || r.key in object.fields;
 			return !r.hidden && r.key in object.fields;
@@ -147,39 +145,37 @@
 			|| (agentRank.get(a.key) ?? 999) - (agentRank.get(b.key) ?? 999));
 	});
 
-	/** A Judge's own settings; its name is the property it fills in. */
-	const JUDGE_KEYS = ["prompt", "judge_answer", "credentials", "served_by"];
+	/** A Jev Skill's settings (harness jev.ts): its Answer, and the property it writes. */
+	const JEV_KEYS = ["jev_answer", "jev_writes"];
 
-	/** "Edit question →": the Judge's Prompt (its question), else the Judge itself. */
-	async function openQuestion(judgeId: string) {
-		const judge = await fetchObject(judgeId).catch(() => null);
-		const v = judge?.fields["prompt"];
-		const promptId = v?.valuesValue?.items?.[0]?.linkValue?.targetId ?? v?.linkValue?.targetId ?? "";
-		await goto(`/app/object/${promptId || judgeId}`);
+	/** "Edit question →": the Jev Skill whose page is the question. */
+	async function openQuestion(skillId: string) {
+		await goto(`/app/object/${skillId}`);
 	}
 
-	/** A Judge's note on a value it wrote: "94% sure" (Score, Choice) or "87% yes" (Yes/No), and which Judge when. */
-	function judgedNote(key: string): { text: string; title: string; judgeId: string } | null {
+	/** A Jev note on a value: "94% sure" (Score, Choice) or "87% yes" (Yes/No), and which Skill and agent set it when. */
+	function judgedNote(key: string): { text: string; title: string; skillId: string } | null {
 		const e = object.fields["judged"]?.mapValue?.entries?.[key]?.mapValue?.entries;
 		if (!e) return null;
 		const p = e["probability"]?.floatValue;
 		const c = e["confidence"]?.floatValue;
 		const text = p !== undefined ? `${Math.round(p * 100)}% yes` : c !== undefined ? `${Math.round(c * 100)}% sure` : "";
 		if (!text) return null;
-		const judgeId = e["judge"]?.stringValue ?? "";
-		const judge = store.summaries.find((s) => s.id === judgeId)?.name || "a Judge";
+		const skillId = e["skill"]?.stringValue ?? "";
+		const skill = store.summaries.find((s) => s.id === skillId)?.name || "a Jev Skill";
+		const agent = store.agents.find((a) => a.id === e["agent"]?.stringValue)?.name;
 		const at = e["at"]?.intValue;
-		return { text, judgeId, title: `Set by ${judge}${at ? ` · ${new Date(at).toLocaleString()}` : ""}` };
+		return { text, skillId, title: `Set by ${skill}${agent ? ` (${agent})` : ""}${at ? ` · ${new Date(at).toLocaleString()}` : ""}` };
 	}
 
-	/** "Ask again": the Judge that wrote this value scores the object now, changed or not. */
+	/** "Ask again": the Skill and agent that set this value run it on this object once more. */
 	let asking = $state("");
 	let askError = $state("");
-	async function askAgain(key: string, judgeId: string) {
+	async function askAgain(key: string) {
 		asking = key;
 		askError = "";
 		try {
-			const res = await harnessFetch("/judges/again", { method: "POST", body: JSON.stringify({ judge: judgeId, object: object.id }) });
+			const res = await harnessFetch("/jev/again", { method: "POST", body: JSON.stringify({ object: object.id, key }) });
 			const body = (await res.json().catch(() => ({}))) as { error?: string };
 			if (!res.ok) throw new Error(body.error ?? `HTTP ${res.status}`);
 			await onchanged();
@@ -460,26 +456,24 @@
 
 	/** Repeat is a property of the object too: it rows first, only for the
 	    plain objects that can recur. A Tool runs when called, never on a schedule. */
-	const canRepeat = $derived(!["channel", "chat", "type", "relation", "template", "query", "set", "collection", "agent", "tool", "judge"].includes(object.typeKey));
+	const canRepeat = $derived(!["channel", "chat", "type", "relation", "template", "query", "set", "collection", "agent", "tool"].includes(object.typeKey));
 
 	// ── Grouped display: System / Tool / Agent / Custom, each a labeled section ──
-	const AGENT_KEYS = new Set(["served_by", "repo_path", "agent", "judges", "model", "prompt", "skills", "tools", "credentials", "capability"]);
+	const AGENT_KEYS = new Set(["served_by", "repo_path", "agent", "model", "prompt", "skills", "tools", "credentials", "capability"]);
 	const SYSTEM_KEYS = new Set(["done", "due_date", "status", "tag", "description", "url", "email", "phone", "error", "created_date", "modified_date", "createdDate", "modifiedDate", "check_first"]);
 	const TOOL_KEYS = new Set(["tool_inputs", "tool_builtin", "tool_version"]);
-	type Group = "own" | "system" | "tool" | "judge" | "agent" | "custom";
-	const groupOf = (key: string): Group => (typeKey === "judge" && JUDGE_KEYS.includes(key) ? "judge" : AGENT_KEYS.has(key) ? "agent" : SYSTEM_KEYS.has(key) ? "system" : TOOL_KEYS.has(key) ? "tool" : "custom");
+	type Group = "own" | "system" | "tool" | "jev" | "agent" | "custom";
+	const groupOf = (key: string): Group => (JEV_KEYS.includes(key) ? "jev" : AGENT_KEYS.has(key) ? "agent" : SYSTEM_KEYS.has(key) ? "system" : TOOL_KEYS.has(key) ? "tool" : "custom");
 	const groups = $derived.by(() => {
 		const out: Array<{ id: Group; label: string; rows: typeof shown }> = [];
 		// System first, and Repeat first within it: the one row every object shares sits at the very top.
-		for (const [id, label] of [["system", "System"], ["own", isCapability ? "Capability" : "Credential"], ["tool", "Tool"], ["judge", "Judge"], ["agent", "Agent"], ["custom", "Custom"]] as Array<[Group, string]>) {
+		for (const [id, label] of [["system", "System"], ["own", isCapability ? "Capability" : "Credential"], ["tool", "Tool"], ["jev", "Jev"], ["agent", "Agent"], ["custom", "Custom"]] as Array<[Group, string]>) {
 			const rows = id === "own" ? ownRows : shown.filter((r) => groupOf(r.key) === id);
 			if (id === "system" && canRepeat) {
 				// Check first rides right under Repeat: it runs before each occurrence.
 				const at = rows.findIndex((r) => r.key === "check_first");
 				rows.unshift({ key: "__repeat__", name: "Repeat" } as unknown as (typeof shown)[number], ...(at >= 0 ? rows.splice(at, 1) : []));
 			}
-			// A Judge's settings read in the order they're set up.
-			if (id === "judge") rows.sort((a, b) => JUDGE_KEYS.indexOf(a.key) - JUDGE_KEYS.indexOf(b.key));
 			if (rows.length) out.push({ id, label, rows });
 		}
 		return out;
@@ -611,7 +605,7 @@
 						{@const o = store.summaries.find((x) => x.id === id)}
 						{@const a = o ? undefined : store.agents.find((x) => x.id === id)}
 						<span class="chip-wrap">
-							<!-- A linked object opens from its chip (a Judge, a Prompt, a project...); the row itself still edits. -->
+							<!-- A linked object opens from its chip (a Prompt, a project...); the row itself still edits. -->
 							<a class="chip" href="/app/object/{id}" onclick={(e) => e.stopPropagation()}>
 								{#if o && layoutOf(o.typeKey) === "task"}
 									<span class="li-check" class:on={o.done === true}><CheckboxIcon checked={o.done === true} size={13} /></span>
@@ -648,8 +642,8 @@
 					<span class="pop-name">{rel.name || rel.key}</span>
 					{#if judgedNote(rel.key)}
 						{@const jn = judgedNote(rel.key)!}
-						<button class="pop-rm ask" title={jn.title} disabled={asking === rel.key} onclick={() => void askAgain(rel.key, jn.judgeId)}>{asking === rel.key ? "Asking…" : "Ask again"}</button>
-						<button class="pop-rm ask" title="Open the question this Judge asks" onclick={() => void openQuestion(jn.judgeId)}>Edit question →</button>
+						<button class="pop-rm ask" title={jn.title} disabled={asking === rel.key} onclick={() => void askAgain(rel.key)}>{asking === rel.key ? "Asking…" : "Ask again"}</button>
+						<button class="pop-rm ask" title="Open the Jev Skill whose page is the question" onclick={() => void openQuestion(jn.skillId)}>Edit question →</button>
 					{/if}
 					{#if rel.key !== "done" && !((isCredential || isCapability) && rel.key === "status")}
 						<button class="pop-rm" title="Remove property" onclick={() => void removeProp(rel.key)}>Remove</button>
@@ -677,8 +671,10 @@
 		{/each}
 	</div>
 {/each}
-{#if typeKey === "judge" && object.typeKey === "judge"}
-	<JudgePanel {object} />
+{#if object.typeKey === "skill" && !fieldStr(object.fields, "key")}
+	<p class="jev-how">
+		Give this Skill an <b>Answer</b> to make it a Jev Skill: its page becomes the question (a numbered list of levels for a Score, bullets for a Choice, <code>Yes:</code> / <code>No:</code> lines for Yes or no), and agents that have it in their Skills run it with <code>jev_score</code>, filling <b>Writes to</b> (default: this Skill's name). They need a TypeSafe credential.
+	</p>
 {/if}
 {#if editing}
 	<button class="backdrop" aria-label="Close" onclick={() => (editing = null)}></button>
@@ -708,7 +704,13 @@
 		flex-direction: column;
 		padding: 4px 0 6px;
 	}
-	/* A Judge's "94% sure" beside the value it wrote. */
+	.jev-how {
+		margin: 6px 4px 0;
+		font-size: 12px;
+		line-height: 1.45;
+		color: var(--muted);
+	}
+	/* Jev's "94% sure" beside the value it wrote. */
 	.judged {
 		margin-left: 6px;
 		font-size: 11.5px;

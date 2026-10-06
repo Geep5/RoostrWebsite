@@ -20,7 +20,7 @@
 		<a href="#computers">Computers</a>
 		<a href="#agents">Agents</a>
 		<a href="#repeat">Repeating work</a>
-		<a href="#judges">Judges</a>
+		<a href="#jev">Jev Skills</a>
 		<a href="#credentials">Logins</a>
 		<a href="#practices">Best practices</a>
 		<a href="#recipes">Recipes</a>
@@ -96,13 +96,13 @@
 		<li>Every run is recorded; a failed run shows in the Error property until the next good one.</li>
 	</ul>
 
-	<h2 id="judges">Judges: scores filled in for you</h2>
+	<h2 id="jev">Jev Skills: scores your agents fill in</h2>
 	<ul>
-		<li>A <b>Judge</b> asks one question about an object and writes the answer as a property - for example a “Spam meter” from 1 to 10 on every email. It uses TypeSafe's Jev, which is very fast and cheap and always says how sure it is.</li>
+		<li>A <b>Jev Skill</b> is a Skill with an <b>Answer</b> (Score, Choice or Yes or no). It is one question - for example a “Spam meter” from 1 to 10 - that your agent asks TypeSafe's Jev about objects. Jev is very fast and cheap and always says how sure it is.</li>
 		<li><b>Its page is the question.</b> Write it as a sentence, then a numbered list of levels (for a score, lowest first), or a bulleted list of options (for a choice), or <code>Yes: …</code> / <code>No: …</code> lines (for yes/no).</li>
-		<li>Set its <b>Answer</b> type and give it a TypeSafe credential. Its name becomes the property it fills.</li>
-		<li>Add it to any object's <b>Judges</b> property: the object is scored within seconds, and again whenever it changes. Click a score for “Ask again”.</li>
-		<li>Scores are normal properties, so you can sort, filter and build queries on them (“Spam meter 8 or more”).</li>
+		<li>The answer goes into a property named after the Skill (or its <b>Writes to</b>).</li>
+		<li>Give the Skill to an agent through its <b>Skills</b>, add a TypeSafe credential to its Credentials, and tell it when to use it - for example on a repeating task's page: “First, score every new email with your Spam meter skill.”</li>
+		<li>Scores are normal properties, so you can sort, filter and build queries on them (“Spam meter 8 or more”). Click a score to see how sure Jev was, “Ask again”, or “Edit question →”.</li>
 	</ul>
 
 	<h2 id="credentials">Logins (credentials)</h2>
@@ -126,7 +126,7 @@
 	<h3>Keeping it cheap and calm</h3>
 	<ul>
 		<li><b>Check first</b> so agents only wake when there is something to do.</li>
-		<li><b>Judges before agents:</b> score and sort with a Judge, let the agent act on the score.</li>
+		<li><b>Score with Jev, decide with the agent:</b> a Jev Skill scores many things at once; the agent acts on the scores.</li>
 		<li><b>The slowest repeat that is fast enough</b> - hourly is usually plenty.</li>
 		<li><b>Give only what is needed:</b> computer access and logins only to the agents that use them.</li>
 	</ul>
@@ -153,15 +153,15 @@
 		<li>Add the mailbox as a Google account credential and press Connect.</li>
 		<li>A Task “Check inbox” with a short Repeat and an import tool as Check first, so each new email becomes an Email object.</li>
 		<li>Put a triage agent on the task, and write on the task's page how to triage (close spam, hand real questions to your support agent).</li>
-		<li>Have new emails arrive with Judges (Spam meter, Abuse) already scored.</li>
+		<li>Give the triage agent Jev Skills (Spam meter, Abuse) and start the task's page with “First, score the new emails”.</li>
 		<li>Save a query “Emails not done” to see what's open.</li>
 	</ol>
-	<h3>Score things with a Judge</h3>
+	<h3>Score things with a Jev Skill</h3>
 	<ol>
-		<li>Make a TypeSafe credential and paste your API key.</li>
-		<li>New object → Judge. Name it after what it measures (“Urgency”), set Answer to Score, add the credential.</li>
+		<li>Make a TypeSafe credential, paste your API key, and add it to the agent's Credentials.</li>
+		<li>New object → Skill. Name it after what it measures (“Urgency”) and set Answer to Score.</li>
 		<li>Write the question and a numbered list of levels on its page.</li>
-		<li>Add it to the Judges of the objects to score (or to a template, so every new one gets it).</li>
+		<li>Add the Skill to the agent's Skills, and say on its task's page when to run it.</li>
 		<li>Build a query on the new property.</li>
 	</ol>
 	<h3>Give an agent a login</h3>
