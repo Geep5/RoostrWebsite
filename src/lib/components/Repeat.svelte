@@ -314,17 +314,26 @@
 	}
 	/**
 	 * Run now, from any device: a `run_now` request on the object; the
-	 * computer that serves it claims it and starts an extra run (the schedule
-	 * is untouched). While a run is in progress that computer keeps
+	 * computer that serves it claims it and starts the run. While an
+	 * occurrence is open (fired, never finished) that run is a Retry of it -
+	 * finishing it moves the schedule on; otherwise it is an extra run and the
+	 * schedule is untouched. While a run is in progress that computer keeps
 	 * `run_active` on the object, and no second run can be asked for.
 	 */
 	const requested = $derived(!!object.fields["run_now"]);
 	const activeRun = $derived(object.fields["run_active"]?.mapValue?.entries);
 	// The run is on the computer that serves this object.
 	const runningOn = $derived(activeRun ? servingName : "");
+	/** The current occurrence fired and never finished (minute/hour repeats finish their own). */
+	const openRun = $derived(!!rule && rule.fired_for === rule.next && !isSubDaily(rule.freq));
 	async function runNow() {
 		open = false;
 		await run(() => note.setField(object.id, "run_now", { mapValue: { entries: { at: { intValue: Date.now() } } } }));
+	}
+	/** Skip this run: finish the open occurrence without doing it (what ticking Done does) - the next one follows. */
+	async function skipRun() {
+		open = false;
+		await run(() => note.setField(object.id, "done", { boolValue: true }));
 	}
 </script>
 
@@ -490,7 +499,8 @@
 
 			<div class="pop-foot">
 				{#if rule}<button class="pop-rm" disabled={busy} onclick={() => void clear()}>Turn off repeating</button>{/if}
-				{#if rule}<button class="act" disabled={busy || requested || !!activeRun} title={activeRun ? "A run is in progress" : "Start an extra run now, exactly like a scheduled one; the next occurrence stays where it is"} onclick={() => void runNow()}>{activeRun ? "Running…" : requested ? "Starting…" : "Run now"}</button>{/if}
+				{#if rule && openRun && !activeRun}<button class="pop-rm" disabled={busy} title="Finish the open run without doing it; the next run follows on schedule" onclick={() => void skipRun()}>Skip this run</button>{/if}
+				{#if rule}<button class="act" disabled={busy || requested || !!activeRun} title={activeRun ? "A run is in progress" : openRun ? "Run the open occurrence again from the start; when it finishes, the schedule moves on" : "Start an extra run now, exactly like a scheduled one; the next occurrence stays where it is"} onclick={() => void runNow()}>{activeRun ? "Running…" : requested ? "Starting…" : openRun ? "Retry run" : "Run now"}</button>{/if}
 				<span class="spacer"></span>
 				<button class="act" onclick={() => (open = false)}>Cancel</button>
 				<button class="act primary" disabled={busy || !hasGuests || !!invalid} onclick={() => void save()}>{rule ? "Update" : "Repeat"}</button>
