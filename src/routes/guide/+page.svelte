@@ -57,11 +57,17 @@
 	<h2 id="computers">Computers</h2>
 	<p>
 		Roostr stores and syncs your objects in any browser. To make things <i>happen</i> - agents answering,
-		work repeating, scores filling in - Roostr needs a <b>computer</b>: a machine of yours running the Roostr
-		engine and harness. Once installed it appears as a Computer object. A computer can also have extra
-		software installed (for example a headless browser for reading web pages, or Google Workspace for
-		email); its page shows what works there.
+		work repeating, scores filling in - Roostr needs a <b>computer</b>: a machine of yours running Roostr.
+		Once installed it appears as a Computer object. A computer can also have extra software installed (for
+		example a headless browser for reading web pages, or Google Workspace for email); its page shows what
+		works there.
 	</p>
+	<ul>
+		<li><b>Keep it running as a service:</b> in the Roostr repo's <code>harness</code> folder, run <code>bun run service install</code>. Roostr then starts on its own when the computer starts, comes back if a part of it crashes, and the Computer's <b>Starts automatically</b> box is ticked.</li>
+		<li><b>After updating Roostr</b> (a <code>git pull</code> or a rebuild), run <code>bun run service restart</code> - until then it keeps running the old version. <code>bun run service logs</code> shows what it's doing.</li>
+		<li>If a part of Roostr keeps crashing, the Computer object's <b>Error</b> says which and why.</li>
+		<li>An agent whose computer is off or asleep doesn't answer - and neither does anything waiting on it.</li>
+	</ul>
 
 	<h2 id="agents">Agents</h2>
 	<h3>What an agent is made of</h3>
@@ -93,6 +99,8 @@
 		<li>Each time, the object's agent gets the object's page as instructions. Write the steps there.</li>
 		<li>A daily (or longer) repeat waits until that run is done - the agent marks it, or you tick Done. Minute and hour repeats finish by themselves.</li>
 		<li><b>Check first</b> runs a small tool before each run, without AI. If it finds nothing new, the agent isn't woken at all - no cost, no noise. If it finds something, the agent gets that list along with its instructions.</li>
+		<li><b>Run now</b> (open the Repeat row) starts a run right away, from any device - the computer that runs the task does it. Only one run happens at a time; while one is going, the Repeat row says <i>Running now</i>.</li>
+		<li><b>Stuck runs:</b> if a run never finishes - say it's waiting for an agent whose computer is off - the Repeat row says <i>Stuck since …</i> and the Error says what it's waiting for. Fix that, then press <b>Retry run</b> (redoes the stuck run, then the schedule carries on) or <b>Skip this run</b>.</li>
 		<li>Every run is recorded; a failed run shows in the Error property until the next good one.</li>
 	</ul>
 
@@ -132,8 +140,8 @@
 	</ul>
 	<h3>When something doesn't work</h3>
 	<ul>
-		<li><b>Read the Error property</b> - missing computers, failed runs, signed-out logins and broken tools all show there.</li>
-		<li><b>Agent not answering?</b> Check its Served by, its model key in Credentials, that it is on the object's Agent list, and that you @-mentioned it.</li>
+		<li><b>Read the Error property</b> - on the task, its agent and its Computer. Missing or stopped computers, failed or stuck runs, signed-out logins and broken tools all show there.</li>
+		<li><b>Agent not answering?</b> Check its Served by, that its computer is on, its model key in Credentials, that it is on the object's Agent list, and that you @-mentioned it.</li>
 		<li><b>Try it on a throwaway object</b> before pointing a setup at real data.</li>
 		<li><b>Look before you make</b> - search and check your saved views so you don't create a second copy of something.</li>
 		<li><b>Name things for people.</b> Clear names on agents, properties and views are most of the documentation.</li>
@@ -176,6 +184,12 @@
 		<li>“+ New agent” in any agent picker, and name it.</li>
 		<li>Set Served by, and check its System prompt, Model and Credentials (it needs a model key).</li>
 		<li>Add it to the objects it should work on, then @-mention it once to say hello.</li>
+	</ol>
+	<h3>Keep a computer running Roostr</h3>
+	<ol>
+		<li>Install Roostr on the computer (see the README), then in its <code>harness</code> folder run <code>bun run service install</code>.</li>
+		<li>Check its Computer object: <b>Starts automatically</b> is ticked.</li>
+		<li>After every update: <code>bun run service restart</code>.</li>
 	</ol>
 
 	<p class="foot">Agents in Roostr read the same guide, as the “Roostr Guide” skill.</p>
