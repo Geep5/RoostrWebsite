@@ -11,7 +11,8 @@
 	 * Tool (the harness writes it) and read-only properties show, never edit.
 	 */
 	import { fieldStr, isBuiltinTool, isLockedTool, repeatOf, type ObjectJSON, type RelationDefJSON, type ValueJSON } from "$lib/types";
-	import { note, fetchAllQuery, type QueryResultRow } from "$lib/api";
+	import { note, fetchAllQuery, fetchObject, type QueryResultRow } from "$lib/api";
+	import { goto } from "$app/navigation";
 	import { layoutOf, store } from "$lib/data.svelte";
 	import { RESERVED_KEYS } from "$lib/relations";
 	import { AGENTLESS_TYPES } from "$lib/agent-field";
@@ -147,7 +148,15 @@
 	});
 
 	/** A Judge's own settings; its name is the property it fills in. */
-	const JUDGE_KEYS = ["judge_answer", "credentials", "served_by"];
+	const JUDGE_KEYS = ["prompt", "judge_answer", "credentials", "served_by"];
+
+	/** "Edit question →": the Judge's Prompt (its question), else the Judge itself. */
+	async function openQuestion(judgeId: string) {
+		const judge = await fetchObject(judgeId).catch(() => null);
+		const v = judge?.fields["prompt"];
+		const promptId = v?.valuesValue?.items?.[0]?.linkValue?.targetId ?? v?.linkValue?.targetId ?? "";
+		await goto(`/app/object/${promptId || judgeId}`);
+	}
 
 	/** A Judge's note on a value it wrote: "94% sure" (Score, Choice) or "87% yes" (Yes/No), and which Judge when. */
 	function judgedNote(key: string): { text: string; title: string; judgeId: string } | null {
@@ -602,13 +611,14 @@
 						{@const o = store.summaries.find((x) => x.id === id)}
 						{@const a = o ? undefined : store.agents.find((x) => x.id === id)}
 						<span class="chip-wrap">
-							<span class="chip">
+							<!-- A linked object opens from its chip (a Judge, a Prompt, a project...); the row itself still edits. -->
+							<a class="chip" href="/app/object/{id}" onclick={(e) => e.stopPropagation()}>
 								{#if o && layoutOf(o.typeKey) === "task"}
 									<span class="li-check" class:on={o.done === true}><CheckboxIcon checked={o.done === true} size={13} /></span>
 								{:else}
 									<span class="emoji">{a ? (a.icon || "🤖") : objectIcon(o?.icon, o?.typeKey ?? "")}</span>
 								{/if}{o?.name || a?.name || "Untitled"}
-							</span>
+							</a>
 							<button class="rm" aria-label={`Remove ${o?.name || a?.name || "link"}`} title="Remove" onclick={(e) => { e.stopPropagation(); void removeValue(rel.key, id); }}>×</button>
 						</span>
 					{:else}
@@ -639,6 +649,7 @@
 					{#if judgedNote(rel.key)}
 						{@const jn = judgedNote(rel.key)!}
 						<button class="pop-rm ask" title={jn.title} disabled={asking === rel.key} onclick={() => void askAgain(rel.key, jn.judgeId)}>{asking === rel.key ? "Asking…" : "Ask again"}</button>
+						<button class="pop-rm ask" title="Open the question this Judge asks" onclick={() => void openQuestion(jn.judgeId)}>Edit question →</button>
 					{/if}
 					{#if rel.key !== "done" && !((isCredential || isCapability) && rel.key === "status")}
 						<button class="pop-rm" title="Remove property" onclick={() => void removeProp(rel.key)}>Remove</button>

@@ -12,15 +12,16 @@
 
 	const answer = $derived(fieldStr(object.fields, "judge_answer"));
 	const propertyKey = $derived(fieldStr(object.fields, "judge_property"));
-
-	const HOW: Record<string, string> = {
-		Score: "Write the question, then a numbered list of 2–10 levels, lowest first. The answer is a number on that list (1 = the first level).",
-		Choice: "Write the question, then a bulleted list of options - “Name: what it means”, or just the name.",
-		"Yes or no": "Write a yes/no question. Optional lines “Yes: …” and “No: …” say what each means.",
-	};
-
 	const linkIds = (v: ValueJSON | undefined): string[] =>
 		(v?.valuesValue?.items ?? (v ? [v] : [])).map((i) => i.linkValue?.targetId ?? i.stringValue ?? "").filter(Boolean);
+	const hasPrompt = $derived(linkIds(object.fields["prompt"]).length > 0);
+
+	const HOW: Record<string, string> = {
+		Score: "On the Prompt's page: the question, then a numbered list of 2–10 levels, lowest first. The answer is a number on that list (1 = the first level).",
+		Choice: "On the Prompt's page: the question, then a bulleted list of options - “Name: what it means”, or just the name.",
+		"Yes or no": "On the Prompt's page: a yes/no question. Optional lines “Yes: …” and “No: …” say what each means.",
+	};
+
 
 	let scored = $state<QueryResultRow[] | null>(null);
 	let computer = $state("");
@@ -66,8 +67,11 @@
 </script>
 
 <div class="judge">
-	<p class="how">{HOW[answer] ?? "Pick an Answer: Score, Choice, or Yes or no. The page is the question Jev answers."}</p>
-	<p class="how">Its name is the property it fills in. Add it to any object's <b>Judges</b> to score that object; it scores again whenever the object changes.</p>
+	{#if !hasPrompt}
+		<p class="warn">Pick a <b>Prompt</b> (or “+ New prompt” in its picker): that System prompt's page is the question this Judge asks.</p>
+	{/if}
+	<p class="how">{HOW[answer] ?? "Pick an Answer: Score, Choice, or Yes or no."}</p>
+	<p class="how">Edit the Prompt's page to change the question - everything this Judge scores is scored again. Its name is the property it fills in; add it to any object's <b>Judges</b> to score that object.</p>
 	{#if computer}
 		<p class="hint">Asks Jev from {computer}.</p>
 	{:else}
