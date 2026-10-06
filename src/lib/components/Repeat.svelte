@@ -167,6 +167,8 @@
 
 	const view = $derived(rule ? toDraft(rule) : null);
 	const overdue = $derived(!!rule && rule.next < Date.now());
+	/** The harness flagged the open occurrence as never finished (schedule.ts flagStuckRuns): the Error says why. */
+	const stuck = $derived((object.fields["error"]?.stringValue ?? "").startsWith("run never finished: "));
 
 	// ── Editing ───────────────────────────────────────────────────
 	const FREQS: RepeatFreq[] = ["minute", "hour", "day", "week", "month", "year"];
@@ -346,7 +348,7 @@
 	{#if rule}
 		<!-- One quiet line under the rule: when next, and who runs it where. -->
 		<p class="meta">
-			<span class:overdue>{overdue ? `Overdue since ${fmtLong(rule.next)}` : `Next ${manyADay(rule) ? fmtLong(rule.next) : fmtDay(rule.next)}`}</span>
+			<span class:overdue>{stuck ? `Stuck since ${fmtLong(rule.next)} - see Error` : overdue ? `Overdue since ${fmtLong(rule.next)}` : `Next ${manyADay(rule) ? fmtLong(rule.next) : fmtDay(rule.next)}`}</span>
 			{#if agentOwned}
 				<span>{#if assigneeName}{assigneeName} on {servingName || "its machine"}{:else}on {servingName || "its agent's machine"}{/if}{isIOSBackend ? " · not on this device" : ""}{#if servingWarning}<span class="overdue"> · {servingWarning}</span>{/if}</span>
 			{/if}
