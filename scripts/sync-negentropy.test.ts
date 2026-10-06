@@ -247,4 +247,37 @@ describe("NIP-77 history sync", () => {
 			expect(log.negOpens.length).toBe(1);
 		});
 	}
+
+	test("resume reconnects and reconciles an event at or before the cursor that live never carries", async () => {
+		const store = await storeFixture();
+		const events = [0, 1].map((i) => personal(note(`doc${i}`), 1000 + i));
+		const { relay } = fakeRelay(events);
+		const statuses: Array<{ phase: string; detail?: string }> = [];
+		const sync = new RelaySync(ownerSk, ["wss://fake.test"], store, { onObjects() {}, onStatus: (s) => statuses.push(s) });
+		const internals = sync as unknown as SyncInternals & { subscribeLive(): void; cursor: number };
+		const live: Filter[] = [];
+		let closes = 0;
+		internals.pool = {
+			ensureRelay: async () => relay,
+			close() { closes++; },
+			subscribeMany: (_relays: string[], filter: Filter) => { live.push(filter); return { close() {} }; },
+			querySync: async () => [],
+		};
+		cleanup.push(async () => { sync.stop(); await internals.backfillChain; });
+		expect(await internals.backfill(1)).toBe(true);
+		await store.setBootstrapped();
+		internals.subscribeLive();
+		// Another device comes back online and publishes an edit it made earlier.
+		const late = personal(note("late"), 999);
+		expect(late.created_at).toBeLessThan(internals.cursor + 1);
+		events.push(late);
+		expect(live.some((f) => matchFilter(f, late))).toBe(false);
+
+		statuses.length = 0;
+		await Promise.all([sync.resume(), sync.resume()]);
+		expect(closes).toBe(1); // concurrent calls share one pass
+		expect((await store.changesFor("late")).length).toBe(1);
+		expect(statuses[0]).toMatchObject({ phase: "backfill", detail: "catching up" });
+		expect(statuses.at(-1)?.phase).toBe("live");
+	});
 });

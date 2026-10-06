@@ -26,8 +26,10 @@
  * imported; checkpoints first, then changes. A relay that refuses or ignores
  * NEG-OPEN gets the paged walk instead: querySync backwards via `until`
  * (since cursor+1), paced between pages so public relays don't rate-limit
- * us. Live is a subscribeMany since cursor+1. Sends are paced one event per
- * PUBLISH_SPACING_MS.
+ * us. Live is a subscribeMany since cursor+1, which never carries an event a
+ * relay accepted at or before the cursor: a tab back from the background or
+ * a network that returns reconnects and reconciles (`resume`). Sends are
+ * paced one event per PUBLISH_SPACING_MS.
  */
 
 import { SimplePool, finalizeEvent, getPublicKey, nip19, nip44, verifyEvent, type Event, type Filter } from "nostr-tools";
@@ -279,6 +281,8 @@ const NEG_FRAME_LIMIT = 250_000;
 /** No NEG-MSG within this window: before the first answer the relay is taken not to speak NIP-77. */
 const NEG_TIMEOUT_MS = 15_000;
 const NOTIFY_DEBOUNCE_MS = 100;
+/** A tab hidden at least this long may hold dead sockets: showing it again resumes sync. */
+const RESUME_AFTER_HIDDEN_MS = 30_000;
 
 function sleep(ms: number): Promise<void> {
 	const { promise, resolve } = Promise.withResolvers<void>();
@@ -370,6 +374,21 @@ export class RelaySync implements RelaySyncApi {
 	private sub: { close(): void } | null = null;
 	private watchdogTimer: ReturnType<typeof setInterval> | null = null;
 	private watchdogBusy = false;
+	/** The resume pass in flight; concurrent calls share it. */
+	private resuming: Promise<void> | null = null;
+	/** Resume passes running: the dot says catching up, not live, until they finish. */
+	private catchingUp = 0;
+	/** When the tab was last hidden (ms); 0 while visible. */
+	private hiddenAt = 0;
+	private readonly onVisibility = (): void => {
+		if (document.visibilityState === "hidden") {
+			this.hiddenAt = Date.now();
+			return;
+		}
+		if (this.hiddenAt && Date.now() - this.hiddenAt >= RESUME_AFTER_HIDDEN_MS) void this.resume();
+		this.hiddenAt = 0;
+	};
+	private readonly onOnline = (): void => void this.resume();
 
 	/** Host mirror of the core session's replay obligations: chunk key → earliest created_at. */
 	private replayGroups = new Map<string, number>();
@@ -510,10 +529,11 @@ export class RelaySync implements RelaySyncApi {
 	}
 
 	private emitLiveStatus(): void {
+		const live = this.liveUp && this.catchingUp === 0;
 		this.events.onStatus({
-			phase: this.liveUp ? "live" : "backfill",
+			phase: live ? "live" : "backfill",
 			imported: this.stats.imported,
-			detail: this.liveUp ? this.statusDetail() : undefined,
+			detail: !this.liveUp ? undefined : live ? this.statusDetail() : "catching up",
 			pending: this.pendingCount,
 		});
 	}
@@ -713,7 +733,49 @@ export class RelaySync implements RelaySyncApi {
 		}
 		this.subscribeLive();
 		this.watchdogTimer = setInterval(() => void this.watchdog(), 60_000);
+		if (typeof document !== "undefined") document.addEventListener("visibilitychange", this.onVisibility);
+		if (typeof window !== "undefined") window.addEventListener("online", this.onOnline);
 		this.emitLiveStatus();
+	}
+
+	/**
+	 * The tab came back from the background or the network returned:
+	 * sockets that outlived a suspension can be half-open, and the live
+	 * subscription (since cursor+1) never carries an event a relay accepted
+	 * at or before the cursor - another device publishing late or with a
+	 * skewed clock, the same second, or one a dead socket dropped while
+	 * another relay moved the cursor on. Drop the sockets, resubscribe, then
+	 * run a history pass under start's rules: it reconciles every stream's
+	 * whole set (NIP-77) and imports whatever this device lacks. Concurrent
+	 * calls share one pass; a no-op until start() has the live subscriptions up.
+	 */
+	resume(): Promise<void> {
+		if (this.stopped || !this.liveUp) return Promise.resolve();
+		return (this.resuming ??= this.reconnect().finally(() => {
+			this.resuming = null;
+		}));
+	}
+
+	private async reconnect(): Promise<void> {
+		this.catchingUp++;
+		this.emitLiveStatus();
+		try {
+			try {
+				this.pool.close(this.relays);
+			} catch {
+				/* closed */
+			}
+			this.subscribeLive();
+			const bootstrapped = await this.store.getBootstrapped();
+			const complete = await this.catchup(bootstrapped ? this.cursor + 1 : 1, bootstrapped ? undefined : await this.store.getBootstrapFloor());
+			if (complete && !bootstrapped && !this.stopped) await this.store.setBootstrapped();
+		} catch (err) {
+			if (!this.stopped) this.events.onStatus({ phase: "error", detail: err instanceof Error ? err.message : String(err) });
+			return;
+		} finally {
+			this.catchingUp--;
+		}
+		if (!this.stopped) this.emitLiveStatus();
 	}
 
 	private subscribeLive(): void {
@@ -765,7 +827,7 @@ export class RelaySync implements RelaySyncApi {
 	 * "catching up" status, recover, and go live again.
 	 */
 	private async watchdog(): Promise<void> {
-		if (this.stopped || this.watchdogBusy || this.bootstrapping) return;
+		if (this.stopped || this.watchdogBusy || this.bootstrapping || this.resuming) return;
 		this.watchdogBusy = true;
 		try {
 			const groups = this.sessionOpen ? coreCall<SyncSessionState>("sync", { action: "state" }).groups : 0;
@@ -796,7 +858,7 @@ export class RelaySync implements RelaySyncApi {
 					/* closed */
 				}
 				this.pool = new SimplePool();
-				await this.catchupSince(this.cursor + 1);
+				await this.catchup(this.cursor + 1);
 				this.subscribeLive();
 				this.emitLiveStatus();
 				return;
@@ -804,7 +866,7 @@ export class RelaySync implements RelaySyncApi {
 			const head = [...res[0], ...res[1]].reduce((max, e) => Math.max(max, e.created_at), 0);
 			if (head > this.cursor) {
 				this.events.onStatus({ phase: "backfill", imported: this.stats.imported, detail: "catching up" });
-				await this.catchupSince(this.cursor + 1);
+				await this.catchup(this.cursor + 1);
 				this.subscribeLive();
 				this.emitLiveStatus();
 			}
@@ -816,8 +878,9 @@ export class RelaySync implements RelaySyncApi {
 		}
 	}
 
-	private async catchupSince(since: number): Promise<void> {
-		await this.backfill(since);
+	/** One history pass, then every gift wrap again; resolves with the pass's completeness. */
+	private async catchup(since: number, resumeUntil?: number): Promise<boolean> {
+		const complete = await this.backfill(since, resumeUntil);
 		// Gift wraps have randomized created_at: re-query on every catchup;
 		// the seen-set dedupes. Recovers knocks lost to dropped sockets.
 		try {
@@ -827,6 +890,7 @@ export class RelaySync implements RelaySyncApi {
 		} catch {
 			/* next watchdog tick */
 		}
+		return complete;
 	}
 
 	stop(): void {
@@ -837,6 +901,8 @@ export class RelaySync implements RelaySyncApi {
 			clearInterval(this.watchdogTimer);
 			this.watchdogTimer = null;
 		}
+		if (typeof document !== "undefined") document.removeEventListener("visibilitychange", this.onVisibility);
+		if (typeof window !== "undefined") window.removeEventListener("online", this.onOnline);
 		// nostr-tools can race an in-flight REQ against connection teardown;
 		// swallow so a stop() never throws into the caller.
 		try {

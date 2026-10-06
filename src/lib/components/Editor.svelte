@@ -1646,6 +1646,11 @@
 	const DRAG_EDGE = 20; // scrollOnMove BORDER
 	const DRAG_STEP = 10; // scrollOnMove MAX_STEP
 	const DRAG_SPEED = 100; // scrollOnMove SPEED_DIV
+	// A finger covers ~40px and can't reach the last 20px under a phone's
+	// bezel, so a touch drag gets a wider, faster edge band.
+	const TOUCH_EDGE = 64;
+	const TOUCH_STEP = 16;
+	const TOUCH_SPEED = 4;
 	/** canDropMiddle = block.canHaveChildren() (block/index.tsx:975). */
 	const DROP_INNER: number[] = [Style.PARAGRAPH, Style.BULLET, Style.NUMBERED, Style.CHECKBOX, Style.TOGGLE, Style.CALLOUT, Style.QUOTE];
 
@@ -1664,6 +1669,21 @@
 			el = el.parentElement;
 		}
 		return window;
+	}
+
+	/** Mouse dragstart and the touch lift both start here. */
+	function beginDrag(id: string) {
+		draggingId = id;
+		buildDragRects();
+	}
+
+	/** provider.tsx onDragMove: retarget for the pointer, keep the edge crawl alive. */
+	function dragMoveTo(cx: number, cy: number) {
+		dragPoint = { x: cx, y: cy };
+		const hit = resolveDrop(cx, cy);
+		dropHint = hit;
+		if (hit) lastValidDrop = { id: hit.id, position: hit.position };
+		if (!dragScrollTimer) dragScrollTimer = setTimeout(dragScrollTick, 50);
 	}
 
 	/** provider.tsx initData/getNodeRect: snapshot every target once. */
@@ -1769,11 +1789,7 @@
 		}
 		if (!draggingId) return;
 		e.preventDefault();
-		dragPoint = { x: e.clientX, y: e.clientY };
-		const hit = resolveDrop(e.clientX, e.clientY);
-		dropHint = hit;
-		if (hit) lastValidDrop = { id: hit.id, position: hit.position };
-		if (!dragScrollTimer) dragScrollTimer = setTimeout(dragScrollTick, 50);
+		dragMoveTo(e.clientX, e.clientY);
 	}
 
 	/** Files dragged out of the page again: drop the hint. */
@@ -1808,11 +1824,15 @@
 	function dragScrollTick() {
 		dragScrollTimer = null;
 		if (!draggingId) return;
-		const h = window.innerHeight;
+		const touch = touchDrag !== null;
+		const h = touch ? (window.visualViewport?.height ?? window.innerHeight) : window.innerHeight;
+		const edge = touch ? TOUCH_EDGE : DRAG_EDGE;
+		const step = touch ? TOUCH_STEP : DRAG_STEP;
+		const speed = touch ? TOUCH_SPEED : DRAG_SPEED;
 		const y = dragPoint.y;
 		let dy = 0;
-		if (y < DRAG_EDGE) dy = -Math.min(DRAG_STEP, Math.ceil((DRAG_EDGE - y) / DRAG_SPEED));
-		else if (y > h - DRAG_EDGE) dy = Math.min(DRAG_STEP, Math.ceil((y - (h - DRAG_EDGE)) / DRAG_SPEED));
+		if (y < edge) dy = -Math.min(step, Math.ceil((edge - y) / speed));
+		else if (y > h - edge) dy = Math.min(step, Math.ceil((y - (h - edge)) / speed));
 		if (dy) {
 			dragScroller().scrollBy(0, dy);
 			// provider.tsx onScroll: the snapshot is refreshed, never rebuilt.
@@ -1822,13 +1842,16 @@
 		dragScrollTimer = setTimeout(dragScrollTick, 50);
 	}
 
-	function endDrag() {
+	/** Shared release for mouse and touch drags: clear the targeting state,
+	 *  then commit through onDrop - or cancel when there is no target. */
+	async function finishDrag(hint: { id: string; position: number } | null) {
 		if (dragScrollTimer) clearTimeout(dragScrollTimer);
 		dragScrollTimer = null;
 		dragRects = [];
 		dropHint = null;
 		lastValidDrop = null;
-		draggingId = "";
+		if (hint) await onDrop(hint.id, hint.position);
+		else draggingId = "";
 	}
 
 	async function onEditorDrop(e: DragEvent) {
@@ -1850,17 +1873,165 @@
 		// The pointer can be between targets on the frame the drop lands, so
 		// fall back to the last target we lit (provider.tsx lastValidTarget).
 		const hint = dropHint ?? (lastValidDrop && !dropForbidden(lastValidDrop.id) ? lastValidDrop : null);
-		dropHint = null;
-		if (dragScrollTimer) clearTimeout(dragScrollTimer);
-		dragScrollTimer = null;
-		dragRects = [];
-		lastValidDrop = null;
-		if (!hint) {
-			draggingId = "";
+		await finishDrag(hint);
+	}
+
+	// ── Touch drag (long-press lift) ───────────────────────────────
+	// iOS WebKit never turns a touch into an HTML5 drag, so a row is HELD to
+	// lift it, like the sidebar space cards: stay within TOUCH_SLOP for
+	// TOUCH_LIFT_MS, then the finger drives the same targeting as the mouse
+	// (buildDragRects/resolveDrop/dropHint) and release commits via onDrop.
+	// Rule: a row whose text is being edited (caret or selection inside it)
+	// keeps the native long-press - loupe, word selection - on its text, and
+	// lifts only from outside the text (gutter, marker, row padding). Any
+	// other row lifts from anywhere. Readonly pages never lift.
+	const TOUCH_LIFT_MS = 400;
+	const TOUCH_SLOP = 8;
+	let touchPress: { id: string; row: HTMLElement; finger: number; x0: number; y0: number; x: number; y: number; timer: ReturnType<typeof setTimeout> } | null = null;
+	/** The lifted row's floating copy, the finger holding it, the x it was
+	 *  picked up at and the copy's height. */
+	let touchDrag: { ghost: HTMLElement; finger: number; x0: number; h: number } | null = null;
+
+	/** A caret or selection inside the row: its text is being edited. */
+	function editingInside(row: HTMLElement): boolean {
+		const ae = document.activeElement;
+		if (ae instanceof HTMLElement && ae.isContentEditable && row.contains(ae)) return true;
+		const sel = window.getSelection();
+		return !!sel && !sel.isCollapsed && !!sel.anchorNode && row.contains(sel.anchorNode);
+	}
+
+	function onTouchPress(e: TouchEvent) {
+		cancelTouchPress();
+		// A fresh one-finger gesture while lifted means the old release never
+		// reached the editor (its row left the DOM mid-drag): drop that lift.
+		if (touchDrag && e.touches.length === 1) endTouchDrag(null);
+		if (readonly || touchDrag || draggingId || e.touches.length !== 1) return;
+		const t = e.target as HTMLElement;
+		const row = t.closest<HTMLElement>("[data-block]");
+		if (!row || !editorEl?.contains(row)) return;
+		const id = row.getAttribute("data-block") ?? "";
+		// Only rows with a drag rail move (the desktop handle lives there).
+		if (!id || id === "__discussion__" || !row.querySelector(":scope > .gutter")) return;
+		// Links, fields and embeds own their long-press.
+		if (t.closest("a, input, textarea, select, iframe, video, audio")) return;
+		if (t.closest("[contenteditable]") && editingInside(row)) return;
+		const p = e.touches[0];
+		touchPress = { id, row, finger: p.identifier, x0: p.clientX, y0: p.clientY, x: p.clientX, y: p.clientY, timer: setTimeout(liftTouch, TOUCH_LIFT_MS) };
+	}
+
+	function cancelTouchPress() {
+		if (!touchPress) return;
+		clearTimeout(touchPress.timer);
+		touchPress = null;
+	}
+
+	function liftTouch() {
+		const press = touchPress;
+		touchPress = null;
+		if (!press) return;
+		clearTimeout(press.timer);
+		if (!press.row.isConnected || readonly) return;
+		// The hold is ours now: no word selection, loupe or callout under it.
+		document.documentElement.classList.add("touch-dragging");
+		const sel = window.getSelection();
+		if (sel?.anchorNode && press.row.contains(sel.anchorNode)) sel.removeAllRanges();
+		const r = press.row.getBoundingClientRect();
+		const cs = getComputedStyle(press.row);
+		const ghost = press.row.cloneNode(true) as HTMLElement;
+		for (const el of [ghost, ...ghost.querySelectorAll<HTMLElement>("*")]) {
+			el.removeAttribute("contenteditable");
+			el.removeAttribute("data-block");
+			el.removeAttribute("data-drop-bot");
+			el.removeAttribute("id");
+		}
+		ghost.classList.add("touch-ghost");
+		ghost.setAttribute("aria-hidden", "true");
+		ghost.inert = true;
+		// top: 0 - moveTouchGhost parks it just ABOVE the fingertip, so neither
+		// the thumb nor the copy hides the drop line under the finger.
+		Object.assign(ghost.style, { position: "fixed", zIndex: "1000", left: `${r.left}px`, top: "0", width: `${r.width}px`, font: cs.font, color: cs.color });
+		document.body.append(ghost);
+		touchDrag = { ghost, finger: press.finger, x0: press.x0, h: r.height };
+		moveTouchGhost(press.x, press.y);
+		beginDrag(press.id);
+		dragMoveTo(press.x, press.y);
+		// A lift is a mode change; tell the hand it happened.
+		navigator.vibrate?.(12);
+	}
+
+	function moveTouchGhost(x: number, y: number) {
+		if (touchDrag) touchDrag.ghost.style.transform = `translate(${x - touchDrag.x0}px, ${y - touchDrag.h - 12}px) scale(1.03)`;
+	}
+
+	// Registered by hand, non-passive: Svelte attaches touch handlers
+	// passively, where preventDefault cannot stop the page scrolling.
+	function onTouchMove(e: TouchEvent) {
+		// While lifted the page holds still, whichever finger moved.
+		if (touchDrag && e.cancelable) e.preventDefault();
+		const finger = touchPress?.finger ?? touchDrag?.finger;
+		const p = [...e.touches].find((t) => t.identifier === finger);
+		if (!p) return;
+		if (touchPress) {
+			// Moving before the hold completes is a scroll, not a lift.
+			if (Math.hypot(p.clientX - touchPress.x0, p.clientY - touchPress.y0) > TOUCH_SLOP) cancelTouchPress();
+			else {
+				touchPress.x = p.clientX;
+				touchPress.y = p.clientY;
+			}
 			return;
 		}
-		await onDrop(hint.id, hint.position);
+		if (!touchDrag) return;
+		moveTouchGhost(p.clientX, p.clientY);
+		dragMoveTo(p.clientX, p.clientY);
 	}
+
+	/** Release over a target commits; anywhere else (or touchcancel) drops nothing. */
+	function dropTouch(e: TouchEvent, commit: boolean) {
+		cancelTouchPress();
+		if (!touchDrag) return;
+		const p = [...e.changedTouches].find((t) => t.identifier === touchDrag?.finger);
+		if (!p) return; // another finger lifted; the held one still drives
+		// No synthesized click: it would focus the row the finger left.
+		if (e.cancelable) e.preventDefault();
+		endTouchDrag(commit ? resolveDrop(p.clientX, p.clientY) : null);
+	}
+
+	function endTouchDrag(hint: { id: string; position: number } | null) {
+		if (!touchDrag) return;
+		touchDrag.ghost.remove();
+		touchDrag = null;
+		document.documentElement.classList.remove("touch-dragging");
+		void finishDrag(hint);
+	}
+
+	/** Android/Chrome raise contextmenu on a long-press: the hold is a lift there too. */
+	function onTouchContextMenu(e: Event) {
+		if (!touchPress && !touchDrag) return;
+		e.preventDefault();
+		e.stopPropagation();
+		if (touchPress) liftTouch();
+	}
+
+	$effect(() => {
+		const el = editorEl;
+		if (!el) return;
+		const end = (e: TouchEvent) => dropTouch(e, true);
+		const cancel = (e: TouchEvent) => dropTouch(e, false);
+		el.addEventListener("touchstart", onTouchPress, { passive: true });
+		el.addEventListener("touchmove", onTouchMove, { passive: false });
+		el.addEventListener("touchend", end, { passive: false });
+		el.addEventListener("touchcancel", cancel);
+		window.addEventListener("contextmenu", onTouchContextMenu, { capture: true });
+		return () => {
+			el.removeEventListener("touchstart", onTouchPress);
+			el.removeEventListener("touchmove", onTouchMove);
+			el.removeEventListener("touchend", end);
+			el.removeEventListener("touchcancel", cancel);
+			window.removeEventListener("contextmenu", onTouchContextMenu, { capture: true });
+			cancelTouchPress();
+			endTouchDrag(null);
+		};
+	});
 
 	/** Empty-toggle placeholder click: create + focus the first child. */
 	async function onEmptyToggle(id: string) {
@@ -2116,7 +2287,7 @@
 
 <svelte:window
 	onpagehide={flushAll}
-	ondragend={endDrag}
+	ondragend={() => void finishDrag(null)}
 	onkeydown={(e) => void onWindowKeydown(e)}
 	oncopy={(e) => onWindowCopy(e, false)}
 	oncut={(e) => onWindowCopy(e, true)}
@@ -2160,10 +2331,7 @@
 			oninput={onInput}
 			onblur={flushSave}
 			onselect={onSelect}
-			ondragbegin={(bid) => {
-				draggingId = bid;
-				buildDragRects();
-			}}
+			ondragbegin={beginDrag}
 			ondrop={onDrop}
 			ontogglecheck={toggleChecked}
 			onemptytoggle={onEmptyToggle}
@@ -2272,6 +2440,27 @@
 	}
 	.editor.readonly :global(.handle) {
 		display: none;
+	}
+	/* Touch lift: the held row's copy rides the finger above the page while
+	   the original stays dimmed in place (.dragging), like the desktop drag
+	   image. */
+	:global(.touch-ghost) {
+		/* position/z-index ride inline: .block's scoped position: relative outranks this. */
+		margin: 0;
+		pointer-events: none;
+		background: var(--panel);
+		border-radius: 6px;
+		box-shadow: 0 10px 28px rgb(0 0 0 / 0.45);
+		opacity: 0.95;
+		transform-origin: center;
+	}
+	/* While a row is lifted, the hold must not turn into word selection,
+	   the iOS loupe or a callout. */
+	:global(html.touch-dragging),
+	:global(html.touch-dragging *) {
+		-webkit-user-select: none;
+		user-select: none;
+		-webkit-touch-callout: none;
 	}
 	.empty-hint {
 		margin-left: 48px;

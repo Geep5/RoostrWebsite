@@ -107,17 +107,26 @@
 	 * A sync event for this object. While the editor has unsaved typing or
 	 * writes in flight, an echo of an earlier write would briefly roll the
 	 * page back, so the refresh waits until the editor has settled - it is
-	 * deferred, never dropped, and bursts collapse into one.
+	 * deferred, never dropped, and bursts collapse into one. An event that
+	 * lands while a refresh runs gets one more pass: the fetch in flight may
+	 * have read the object before that event's changes were stored.
 	 */
 	let refreshPending = false;
+	let refreshAgain = false;
 	function refreshWhenSettled() {
-		if (refreshPending) return;
+		if (refreshPending) {
+			refreshAgain = true;
+			return;
+		}
 		refreshPending = true;
 		void (async () => {
 			try {
-				await editor?.settled();
-				await refresh();
-				void table?.reload();
+				do {
+					refreshAgain = false;
+					await editor?.settled();
+					await refresh();
+					void table?.reload();
+				} while (refreshAgain);
 			} finally {
 				refreshPending = false;
 			}
