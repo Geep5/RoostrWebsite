@@ -20,6 +20,7 @@
 	import { capabilityStatusBadge, capabilityStatusText } from "$lib/capability-actions";
 	import CredentialStatus from "./CredentialStatus.svelte";
 	import CapabilityStatus from "./CapabilityStatus.svelte";
+	import JudgeTry from "./JudgeTry.svelte";
 	import PropertyValue from "./PropertyValue.svelte";
 	import PropertySuggest from "./PropertySuggest.svelte";
 	import Repeat from "./Repeat.svelte";
@@ -110,12 +111,14 @@
 		const AGENT_CONFIG = typeKey === "agent" ? ["prompt", "model", "skills", "tools", "credentials", "served_by", "repo_path"] : [];
 		// A Tool's own: what the model is told, its inputs, whether it ships with Roostr, and which version of its code runs.
 		const TOOL_CONFIG = typeKey === "tool" ? ["description", "tool_inputs", "tool_builtin", "tool_version"] : [];
+		// A Judge's settings: what it answers, on what, into which property, with which key, on which computer.
+		const JUDGE_CONFIG = typeKey === "judge" ? JUDGE_KEYS : [];
 		const repeating = !!repeatOf(object.fields);
 		const present = relations.filter((r) => {
 			// Legacy credential shapes (`key_fields` list, `secret` JSON) stay for old harnesses; never rows.
 			if (ownRowKeys.has(r.key) || (isCredential && (r.key === "key_fields" || r.key === "secret"))) return false;
 			if (RESERVED_KEYS[r.key]) return false;
-			if (AGENT_CONFIG.includes(r.key) || TOOL_CONFIG.includes(r.key)) return true;
+			if (AGENT_CONFIG.includes(r.key) || TOOL_CONFIG.includes(r.key) || JUDGE_CONFIG.includes(r.key)) return true;
 			// The error badge is how problems surface on any object (a failed
 			// run, a check that failed, a tool that didn't load, a holdup):
 			// shown everywhere even before one is written, so its absence reads as "ok".
@@ -129,7 +132,8 @@
 			// Credentials, Skills and Tools are an agent's own (AGENT_CONFIG); elsewhere only when set.
 			if (r.key === "credentials" || r.key === "skills" || r.key === "tools") return r.key in object.fields;
 			// Check first belongs to the repeat: the tool run before each occurrence.
-			if (r.key === "check_first") return repeating || r.key in object.fields;
+			// A Judge's occurrence is its own Jev pass: nothing runs a check first.
+			if (r.key === "check_first") return typeKey !== "judge" && (repeating || r.key in object.fields);
 			if (r.key === "agent") return !AGENTLESS_TYPES[typeKey] || r.key in object.fields;
 			if (r.key === "model") return typeKey === "agent" || r.key in object.fields;
 			return !r.hidden && r.key in object.fields;
@@ -139,6 +143,22 @@
 			(rank.get(a.key) ?? 999) - (rank.get(b.key) ?? 999)
 			|| (agentRank.get(a.key) ?? 999) - (agentRank.get(b.key) ?? 999));
 	});
+
+	const JUDGE_KEYS = ["judge_answer", "judge_runs_on", "judge_writes", "credentials", "served_by"];
+
+	/** A Judge's note on a value it wrote: "94% sure" (Score, Choice) or "87% yes" (Yes/No), and which Judge when. */
+	function judgedNote(key: string): { text: string; title: string } | null {
+		const e = object.fields["judged"]?.mapValue?.entries?.[key]?.mapValue?.entries;
+		if (!e) return null;
+		const p = e["probability"]?.floatValue;
+		const c = e["confidence"]?.floatValue;
+		const text = p !== undefined ? `${Math.round(p * 100)}% yes` : c !== undefined ? `${Math.round(c * 100)}% sure` : "";
+		if (!text) return null;
+		const judgeId = e["judge"]?.stringValue ?? "";
+		const judge = store.summaries.find((s) => s.id === judgeId)?.name || "a Judge";
+		const at = e["at"]?.intValue;
+		return { text, title: `Set by ${judge}${at ? ` · ${new Date(at).toLocaleString()}` : ""}` };
+	}
 
 	// ── Serving: served_by names the machine and carries the warning ──
 	let servingState = $state<{ serving: Serving; machines: MachineRow[] } | null>(null);
@@ -416,18 +436,20 @@
 	const AGENT_KEYS = new Set(["served_by", "repo_path", "agent", "model", "prompt", "skills", "tools", "credentials", "capability"]);
 	const SYSTEM_KEYS = new Set(["done", "due_date", "status", "tag", "description", "url", "email", "phone", "error", "created_date", "modified_date", "createdDate", "modifiedDate", "check_first"]);
 	const TOOL_KEYS = new Set(["tool_inputs", "tool_builtin", "tool_version"]);
-	type Group = "own" | "system" | "tool" | "agent" | "custom";
-	const groupOf = (key: string): Group => (AGENT_KEYS.has(key) ? "agent" : SYSTEM_KEYS.has(key) ? "system" : TOOL_KEYS.has(key) ? "tool" : "custom");
+	type Group = "own" | "system" | "tool" | "judge" | "agent" | "custom";
+	const groupOf = (key: string): Group => (typeKey === "judge" && JUDGE_KEYS.includes(key) ? "judge" : AGENT_KEYS.has(key) ? "agent" : SYSTEM_KEYS.has(key) ? "system" : TOOL_KEYS.has(key) ? "tool" : "custom");
 	const groups = $derived.by(() => {
 		const out: Array<{ id: Group; label: string; rows: typeof shown }> = [];
 		// System first, and Repeat first within it: the one row every object shares sits at the very top.
-		for (const [id, label] of [["system", "System"], ["own", isCapability ? "Capability" : "Credential"], ["tool", "Tool"], ["agent", "Agent"], ["custom", "Custom"]] as Array<[Group, string]>) {
+		for (const [id, label] of [["system", "System"], ["own", isCapability ? "Capability" : "Credential"], ["tool", "Tool"], ["judge", "Judge"], ["agent", "Agent"], ["custom", "Custom"]] as Array<[Group, string]>) {
 			const rows = id === "own" ? ownRows : shown.filter((r) => groupOf(r.key) === id);
 			if (id === "system" && canRepeat) {
 				// Check first rides right under Repeat: it runs before each occurrence.
 				const at = rows.findIndex((r) => r.key === "check_first");
 				rows.unshift({ key: "__repeat__", name: "Repeat" } as unknown as (typeof shown)[number], ...(at >= 0 ? rows.splice(at, 1) : []));
 			}
+			// A Judge's settings read in the order they're set up.
+			if (id === "judge") rows.sort((a, b) => JUDGE_KEYS.indexOf(a.key) - JUDGE_KEYS.indexOf(b.key));
 			if (rows.length) out.push({ id, label, rows });
 		}
 		return out;
@@ -580,6 +602,10 @@
 						<span class="placeholder">{placeholderFor(rel)}</span>
 					{/if}
 				{/if}
+				{#if judgedNote(rel.key)}
+					{@const jn = judgedNote(rel.key)!}
+					<span class="judged" title={jn.title}>{jn.text}</span>
+				{/if}
 			</span>
 		</div>
 		{#if rowRemovable(rel) && editable(rel)}
@@ -614,6 +640,9 @@
 		{/each}
 	</div>
 {/each}
+{#if typeKey === "judge" && object.typeKey === "judge"}
+	<JudgeTry {object} />
+{/if}
 {#if editing}
 	<button class="backdrop" aria-label="Close" onclick={() => (editing = null)}></button>
 {/if}
@@ -641,6 +670,13 @@
 		display: flex;
 		flex-direction: column;
 		padding: 4px 0 6px;
+	}
+	/* A Judge's "94% sure" beside the value it wrote. */
+	.judged {
+		margin-left: 6px;
+		font-size: 11.5px;
+		color: var(--muted);
+		white-space: nowrap;
 	}
 	.group-label {
 		font-size: 11px;
