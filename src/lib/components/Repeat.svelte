@@ -18,7 +18,6 @@
 	import { store } from "$lib/data.svelte";
 	import { isIOSBackend } from "$lib/client-backend";
 	import { machineName, resolveServing, servingCopy } from "$lib/serving";
-	import { harnessFetch } from "$lib/local-transport";
 
 	let {
 		object,
@@ -311,20 +310,19 @@
 		open = false;
 		await run(() => repeat.clear(object.id));
 	}
-	/** Run now: an extra run on the computer that serves this object; the schedule is untouched. */
-	let started = $state(false);
+	/**
+	 * Run now, from any device: a `run_now` request on the object; the
+	 * computer that serves it claims it and starts an extra run (the schedule
+	 * is untouched). While a run is in progress that computer keeps
+	 * `run_active` on the object, and no second run can be asked for.
+	 */
+	const requested = $derived(!!object.fields["run_now"]);
+	const activeRun = $derived(object.fields["run_active"]?.mapValue?.entries);
+	// The run is on the computer that serves this object.
+	const runningOn = $derived(activeRun ? servingName : "");
 	async function runNow() {
 		open = false;
-		error = "";
-		try {
-			const res = await harnessFetch("/schedule/run", { method: "POST", body: JSON.stringify({ id: object.id }) });
-			const body = (await res.json().catch(() => ({}))) as { error?: string };
-			if (!res.ok) throw new Error(body.error ?? `HTTP ${res.status}`);
-			started = true;
-			setTimeout(() => (started = false), 4000);
-		} catch (e) {
-			error = e instanceof Error ? e.message : String(e);
-		}
+		await run(() => note.setField(object.id, "run_now", { mapValue: { entries: { at: { intValue: Date.now() } } } }));
 	}
 </script>
 
@@ -367,7 +365,8 @@
 		{/if}
 	{/if}
 	{#if error}<p class="err">{error}</p>{/if}
-	{#if started}<p class="started">Running now - the result lands in the chat and under “last run”.</p>{/if}
+	{#if activeRun}<p class="started">Running now{runningOn ? ` on ${runningOn}` : ""} - the result lands in the agent's chat and under “last run”.</p>
+	{:else if requested}<p class="started">Run now asked for - waiting for its computer to start it.</p>{/if}
 
 	{#if open}
 		<div class="pop">
@@ -489,7 +488,7 @@
 
 			<div class="pop-foot">
 				{#if rule}<button class="pop-rm" disabled={busy} onclick={() => void clear()}>Turn off repeating</button>{/if}
-				{#if rule}<button class="act" disabled={busy} title="Start an extra run now, exactly like a scheduled one; the next occurrence stays where it is" onclick={() => void runNow()}>Run now</button>{/if}
+				{#if rule}<button class="act" disabled={busy || requested || !!activeRun} title={activeRun ? "A run is in progress" : "Start an extra run now, exactly like a scheduled one; the next occurrence stays where it is"} onclick={() => void runNow()}>{activeRun ? "Running…" : requested ? "Starting…" : "Run now"}</button>{/if}
 				<span class="spacer"></span>
 				<button class="act" onclick={() => (open = false)}>Cancel</button>
 				<button class="act primary" disabled={busy || !hasGuests || !!invalid} onclick={() => void save()}>{rule ? "Update" : "Repeat"}</button>
