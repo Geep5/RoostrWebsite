@@ -1657,7 +1657,7 @@
 		box-shadow: 0 16px 48px rgb(0 0 0 / 0.5);
 		/* A vault with many types outgrows the window: the menu scrolls
 		   inside the viewport instead of running off the bottom. */
-		max-height: calc(100vh - 110px);
+		max-height: calc(100dvh - 110px);
 		overflow-y: auto;
 		overscroll-behavior: contain;
 	}
@@ -3097,6 +3097,12 @@
 		z-index: 70;
 		display: flex;
 		flex-direction: column;
+		/* Many types outgrow a phone screen: the menu stops below the status bar
+		   and scrolls inside itself (dvh tracks Safari's moving toolbars). */
+		max-height: calc(100dvh - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px) - 96px);
+		overflow-y: auto;
+		overscroll-behavior: contain;
+		-webkit-overflow-scrolling: touch;
 	}
 	.m-create-menu button {
 		display: flex;
