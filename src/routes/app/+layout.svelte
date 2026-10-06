@@ -1679,6 +1679,8 @@
 	}
 	.create-sep {
 		height: 1px;
+		/* A scrolling (max-height) flex menu shrinks contentless children to 0. */
+		flex-shrink: 0;
 		background: var(--border);
 		margin: 4px 2px;
 	}
