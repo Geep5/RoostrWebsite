@@ -50,6 +50,8 @@
 	// ── Header toolbar (Anytype header/main/object.tsx) ───────────
 	const objectId = $derived(page.url.pathname.startsWith("/app/object/") ? page.url.pathname.slice("/app/object/".length) : "");
 	const objectSummary = $derived(store.summaries.find((s) => s.id === objectId));
+	/** Queries and collections are tables and boards: they use the window's width; documents keep a reading width. */
+	const wideView = $derived(["query", "set", "collection"].includes(objectSummary?.typeKey ?? ""));
 	const objectRelation = $derived(objectId ? store.relations.find((r) => r.id === objectId) : undefined);
 	/** The open object is a space: not a summary row, but still an object with an id. */
 	const objectSpace = $derived(objectId && !objectSummary ? channels.find((c) => c.id === objectId) : undefined);
@@ -1382,7 +1384,7 @@
 	</aside>
 
 	<div class="main-col">
-		<header>
+		<header class:wide={wideView}>
 			<div class="header-side left">
 				<button class="hbtn" data-tip="Back" aria-label="Back" onclick={() => history.back()}><svg style="width:16px;height:16px" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M14.5 6L9 12l5.5 6" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
 				<button class="hbtn" data-tip="Forward" aria-label="Forward" onclick={() => history.forward()}><svg style="width:16px;height:16px" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M9.5 6L15 12l-5.5 6" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
@@ -1463,7 +1465,7 @@
 {#if showMore || showCreate}
 	<button class="menu-backdrop" aria-label="Close menu" onclick={() => { showMore = false; showCollections = false; showTypePick = false; showCreate = false; }}></button>
 {/if}
-		<main>{@render children()}</main>
+		<main class:wide={wideView}>{@render children()}</main>
 	</div>
 </div>
 </div>
@@ -2593,6 +2595,16 @@
 		padding: 24px 0 80px;
 		max-width: 920px;
 		margin: 0 auto;
+	}
+	/* Queries and collections: the table takes whatever width the window gives
+	   (collapse the sidebar or the right pane and it grows), with side gutters. */
+	main.wide {
+		max-width: none;
+		padding-left: 32px;
+		padding-right: 32px;
+	}
+	header.wide {
+		max-width: none;
 	}
 	.sync-dot {
 		width: 8px;
