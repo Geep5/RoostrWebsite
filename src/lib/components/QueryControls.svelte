@@ -5,7 +5,7 @@
 	import { spaceFilterOf } from "$lib/filters";
 	import type { ObjectJSON, RelationDefJSON, ValueJSON } from "$lib/types";
 	import { fetchQuery, note } from "$lib/api";
-	import { applyTemplate, createTyped } from "$lib/create";
+	import { applyTemplate, createTyped, newAgent } from "$lib/create";
 	import { store } from "$lib/data.svelte";
 	import { tagStyle } from "$lib/options";
 	import { keepInView } from "$lib/popover";
@@ -388,8 +388,14 @@
 			// Infra types are never bare records: a computer is adopted or set
 			// up, an agent is born with a kind and a server, a file starts
 			// from its bytes (create.ts).
+			// An agent named in the table's entry row is a row like any other:
+			// it appears in the list, and you stay. Unnamed, it opens to be named.
+			if (typeKey === "agent" && name.trim()) {
+				await newAgent(channelId, name);
+				await onchanged();
+				return;
+			}
 			if (typeKey === "machine" || typeKey === "agent" || typeKey === "file") {
-				// The name typed in the table's entry row names it.
 				await createTyped(typeKey, channelId, name);
 				return;
 			}

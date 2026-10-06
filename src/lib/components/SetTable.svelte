@@ -16,7 +16,7 @@
 	import PropIcon from "./PropIcon.svelte";
 	import CheckboxIcon from "./CheckboxIcon.svelte";
 	import { fetchQuery, note, type QueryResultRow } from "$lib/api";
-	import { fetchMachines, machineName, resolveMany, servingCopy } from "$lib/serving";
+	import { fetchMachines, machineName, resolveMany, servingCopy, type MachineRow } from "$lib/serving";
 	import { store, layoutOf } from "$lib/data.svelte";
 	import type { ObjectJSON, RelationDefJSON, ValueJSON } from "$lib/types";
 	import { fieldStr, isLockedTool, repeatOf } from "$lib/types";
@@ -190,13 +190,27 @@
 		cellEdit = cellEdit?.recordId === recordId && cellEdit.key === key ? null : { recordId, key, x: rect.left, y: rect.bottom + 4 };
 	}
 
+	/** The Served by column shows where a row runs; editing it pins the row to a computer (its `served_by`). */
+	const SERVING_KEY = "served_by";
+	/** The relation a cell's editor edits: the virtual Served by column edits `served_by`. */
+	const editKey = (key: string): string => (key === "serving" ? SERVING_KEY : key);
+
 	async function cellSave(v: ValueJSON) {
 		if (!cellEdit) return;
 		const { recordId, key } = cellEdit;
 		const f = formatOf(key);
 		// Single-value editors close on save; tag/object stay open for more picks.
 		if (f !== "tag" && f !== "object") cellEdit = null;
-		await note.setField(recordId, key, v);
+		if (key === "serving") {
+			// The picker links a Computer object; served_by holds its machine_id
+			// (what the engine resolves and harnesses compare), never the link.
+			const target = v.linkValue?.targetId ?? v.valuesValue?.items?.[0]?.linkValue?.targetId ?? "";
+			const machineId = machinesNow.find((m) => m.id === target)?.machineId ?? "";
+			if (machineId) await note.setField(recordId, SERVING_KEY, { stringValue: machineId });
+			else await note.deleteField(recordId, SERVING_KEY);
+		} else {
+			await note.setField(recordId, key, v);
+		}
 		await reload();
 	}
 
@@ -376,6 +390,8 @@
 		icon: string;
 	}
 	let servingById = $state<Map<string, ServingInfo>>(new Map());
+	/** The computers the Served by column names, for turning a picked Computer into its machine_id. */
+	let machinesNow = $state<MachineRow[]>([]);
 
 	/** Needs a person: the resolution cannot be honoured, or nothing serves the object at all. */
 	function servingAttention(info: ServingInfo | undefined): boolean {
@@ -423,6 +439,7 @@
 		}
 		if (columns.includes("serving") || rules.length > 0 || servingSort) {
 			const { rows: machineRows, machines } = await fetchMachines();
+			machinesNow = machines;
 			const resolved = await resolveMany(rows, machineRows);
 			const map = new Map<string, ServingInfo>();
 			rows.forEach((r, i) => {
@@ -653,7 +670,7 @@
 								{/if}
 							</td>
 						{:else}
-							<td class:muted={c === "type" || c === "createdAt" || c === "updatedAt"} class:cell-warn={c === "serving" && (servingById.get(r.id)?.warning ?? false)} title={c === "serving" ? servingById.get(r.id)?.text : undefined}>{#if c === "type" && typeIcon(r.typeKey)}<span class="type-icon">{typeIcon(r.typeKey)}</span>{:else if c === "serving" && servingById.get(r.id)?.icon}<span class="type-icon">{servingById.get(r.id)?.icon}</span>{/if}{cell(r, c)}</td>
+							<td class:editable={c === "serving"} class:muted={c === "type" || c === "createdAt" || c === "updatedAt"} class:cell-warn={c === "serving" && (servingById.get(r.id)?.warning ?? false)} title={c === "serving" ? servingById.get(r.id)?.text : undefined} onclick={c === "serving" && !isLockedTool(r.fields) ? (e) => onCellClick(e, r.id, c) : undefined}>{#if c === "type" && typeIcon(r.typeKey)}<span class="type-icon">{typeIcon(r.typeKey)}</span>{:else if c === "serving" && servingById.get(r.id)?.icon}<span class="type-icon">{servingById.get(r.id)?.icon}</span>{/if}{cell(r, c)}</td>
 						{/if}
 					{/each}
 					<td></td>
@@ -697,7 +714,7 @@
 	</tbody>
 	</table>
 	{#if cellEdit}
-		{@const rel = relations.find((x) => x.key === cellEdit!.key)}
+		{@const rel = relations.find((x) => x.key === editKey(cellEdit!.key))}
 		{@const row = rows.find((x) => x.id === cellEdit!.recordId)}
 		{#if rel && row}
 			<div class="cell-pop" style="left:{Math.min(cellEdit.x, (document.querySelector('.main-col')?.getBoundingClientRect().right ?? window.innerWidth) - 320)}px; top:{cellEdit.y}px" role="dialog">
