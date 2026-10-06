@@ -3,7 +3,7 @@
  * the page back exactly - the property undo and write-behind rely on.
  */
 import { expect, test } from "bun:test";
-import { applyAll, applyOp, History, placeOf, rootOrder, type Op } from "../src/lib/editor/doc";
+import { applyAll, applyOp, copySlice, History, pasteOps, placeOf, rootOrder, sliceText, type Op } from "../src/lib/editor/doc";
 import { Pos, type BlockJSON } from "../src/lib/types";
 
 const t = (id: string, text: string, childrenIds: string[] = []): BlockJSON => ({ id, childrenIds, content: { text: { text, style: 0 } } });
@@ -86,4 +86,42 @@ test("history: undo then redo replays, and a new action clears redo", () => {
 	h.pushRedo(applyAll(blocks, h.takeUndo()!));
 	h.record(applyAll(blocks, [{ kind: "remove", id: "e" }]));
 	expect(h.takeRedo()).toBeUndefined();
+});
+
+// ── Copy and paste of selected blocks ──
+
+const check = (id: string, text: string, checked: boolean, childrenIds: string[] = []): BlockJSON => ({ id, childrenIds, content: { text: { text, style: 8, checked } } });
+
+test("copied blocks paste elsewhere as new blocks: order, nesting and ticks kept, ids fresh", () => {
+	const source = [check("x", "Buy milk", true, ["y"]), check("y", "2%", false), check("z", "Call Sam", false), t("w", "not copied")];
+	const slice = copySlice(source, ["x", "z"]);
+	expect(slice.map((b) => b.id)).toEqual(["x", "y", "z"]);
+	const target = page();
+	let n = 0;
+	applyAll(target, pasteOps(slice, { target: "a", position: Pos.BOTTOM }, () => `n${++n}`));
+	expect(shape(target)).toBe("A Buy milk(2%) Call Sam B(C,D) E");
+	const byText = new Map(target.map((b) => [b.content.text?.text, b]));
+	expect(byText.get("Buy milk")?.content.text?.checked).toBe(true);
+	expect(byText.get("2%")?.content.text?.checked).toBe(false);
+	expect(target.some((b) => ["x", "y", "z"].includes(b.id))).toBe(false);
+});
+
+test("one undo removes a whole paste", () => {
+	const blocks = page();
+	const before = shape(blocks);
+	const inverse = applyAll(blocks, pasteOps(copySlice([check("x", "One", false, ["y"]), check("y", "Two", true)], ["x"]), { target: "e", position: Pos.BOTTOM }));
+	expect(shape(blocks)).toBe("A B(C,D) E One(Two)");
+	applyAll(blocks, inverse);
+	expect(shape(blocks)).toBe(before);
+});
+
+test("copied blocks as plain text: checkboxes as - [ ] / - [x], numbers counted, children indented", () => {
+	const slice: BlockJSON[] = [
+		check("x", "Buy milk", true, ["y"]),
+		check("y", "2%", false),
+		{ id: "h", childrenIds: [], content: { text: { text: "Steps", style: 2 } } },
+		{ id: "n1", childrenIds: [], content: { text: { text: "First", style: 7 } } },
+		{ id: "n2", childrenIds: [], content: { text: { text: "Second", style: 7 } } },
+	];
+	expect(sliceText(slice)).toBe("- [x] Buy milk\n  - [ ] 2%\n## Steps\n1. First\n2. Second");
 });

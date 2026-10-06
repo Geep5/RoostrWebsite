@@ -206,3 +206,68 @@ export function applyAll(blocks: BlockJSON[], ops: Op[]): Op[] {
 	for (const op of ops) inverses.push(applyOp(blocks, op));
 	return inverses.reverse().flat();
 }
+
+// ── Copy and paste of selected blocks ───────────────────────────────
+
+/** The clipboard type that carries copied blocks between Roostr pages, exactly. */
+export const BLOCKS_MIME = "application/x-roostr-blocks";
+
+/** The selected blocks' subtrees (selection's topmost ids, in page order), as a self-contained copy. */
+export function copySlice(blocks: BlockJSON[], topIds: string[]): BlockJSON[] {
+	const out: BlockJSON[] = [];
+	const seen = new Set<string>();
+	for (const id of topIds) for (const b of subtree(blocks, id)) if (!seen.has(b.id)) { seen.add(b.id); out.push(clone(b)); }
+	return out;
+}
+
+/** The slice's roots: blocks no other block in it lists. */
+function sliceRoots(slice: BlockJSON[]): BlockJSON[] {
+	const listed = new Set(slice.flatMap((b) => b.childrenIds));
+	return slice.filter((b) => !listed.has(b.id));
+}
+
+const TEXT_PREFIX: Record<number, string> = { 1: "# ", 2: "## ", 3: "### ", 4: "> ", 6: "- ", 10: "> " };
+
+/** The slice as plain text for other apps: one line per block, children indented, checkboxes as `- [ ]` / `- [x]`, numbered lists counted. */
+export function sliceText(slice: BlockJSON[]): string {
+	const byId = new Map(slice.map((b) => [b.id, b]));
+	const lines: string[] = [];
+	const walk = (ids: string[], depth: number) => {
+		let n = 0;
+		for (const id of ids) {
+			const b = byId.get(id);
+			if (!b) continue;
+			const t = b.content.text;
+			const style = t?.style ?? 0;
+			n = style === 7 ? n + 1 : 0;
+			const prefix = style === 8 ? (t?.checked ? "- [x] " : "- [ ] ") : style === 7 ? `${n}. ` : (TEXT_PREFIX[style] ?? "");
+			const body = t ? t.text : (b.content.custom?.meta?.["url"] ?? b.content.custom?.meta?.["name"] ?? "");
+			if (t || body) lines.push(`${"  ".repeat(depth)}${prefix}${body}`);
+			walk(b.childrenIds, depth + 1);
+		}
+	};
+	walk(sliceRoots(slice).map((b) => b.id), 0);
+	return lines.join("\n");
+}
+
+/**
+ * The inserts that paste `slice` at `at`: fresh ids, roots one after
+ * another from `at`, each child under its parent in order. One transaction,
+ * so one undo removes the whole paste.
+ */
+export function pasteOps(slice: BlockJSON[], at: Place, newId: () => string = () => crypto.randomUUID()): Op[] {
+	const byId = new Map(slice.map((b) => [b.id, b]));
+	const ops: Op[] = [];
+	const add = (b: BlockJSON, place: Place): string => {
+		const id = newId();
+		ops.push({ kind: "insert", block: { ...clone(b), id, childrenIds: [] }, at: place });
+		for (const c of b.childrenIds) {
+			const child = byId.get(c);
+			if (child) add(child, { target: id, position: Pos.INNER });
+		}
+		return id;
+	};
+	let place = at;
+	for (const root of sliceRoots(slice)) place = { target: add(root, place), position: Pos.BOTTOM };
+	return ops;
+}

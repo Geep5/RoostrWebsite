@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { flushSync } from "svelte";
 	import { createWriteQueue, queued } from "$lib/editor/write-queue";
-	import { applyAll, History, opWrite, type Op } from "$lib/editor/doc";
+	import { applyAll, BLOCKS_MIME, copySlice, History, opWrite, pasteOps, sliceText, type Op } from "$lib/editor/doc";
 	import type { ObjectJSON, BlockJSON, MarkJSON } from "$lib/types";
 	import { Pos, Style, MarkT, Layout } from "$lib/types";
 	import { note, table, fetchObject } from "$lib/api";
@@ -531,6 +531,71 @@
 			for (const id of tops) cancelPending(id);
 			commit(tops.map((id) => ({ kind: "remove", id })));
 		}
+	}
+
+	// ── Copy, cut and paste of a block selection ──
+	// Selecting blurs the text, so the browser has nothing to copy: the
+	// selection writes itself - plain text for other apps, the exact blocks
+	// (BLOCKS_MIME) for another Roostr page, which pastes them as blocks.
+
+	/** Typing in some field: the browser's own copy/paste applies. */
+	function typingSomewhere(): boolean {
+		const ae = document.activeElement as HTMLElement | null;
+		return !!ae && (ae.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(ae.tagName));
+	}
+
+	/** Copy (and for cut, remove) the selected blocks. */
+	function onWindowCopy(e: ClipboardEvent, cut: boolean) {
+		if (!selectedIds.length || !e.clipboardData || typingSomewhere()) return;
+		const tops = topmostSelected();
+		const slice = copySlice(object.blocks, tops);
+		if (slice.length === 0) return;
+		e.preventDefault();
+		e.clipboardData.setData("text/plain", sliceText(slice));
+		e.clipboardData.setData(BLOCKS_MIME, JSON.stringify(slice));
+		if (!cut || readonly) return;
+		selectedIds = [];
+		for (const id of tops) cancelPending(id);
+		commit(tops.map((id) => ({ kind: "remove", id })));
+	}
+
+	/** Copied blocks on the clipboard, or null when it holds something else. */
+	function clipboardBlocks(e: ClipboardEvent): BlockJSON[] | null {
+		const raw = e.clipboardData?.getData(BLOCKS_MIME);
+		if (!raw) return null;
+		try {
+			const slice = JSON.parse(raw) as unknown;
+			return Array.isArray(slice) && slice.length > 0 ? (slice as BlockJSON[]) : null;
+		} catch {
+			return null;
+		}
+	}
+
+	/**
+	 * Paste copied blocks after `id` - in its place when it is an empty
+	 * line. One undo step; the pasted blocks come out selected.
+	 */
+	function pasteBlocks(slice: BlockJSON[], id: string) {
+		const b = byId.get(id);
+		const el = blockEl(id);
+		const empty = !!b?.content.text && b.childrenIds.length === 0 && (el ? fromDom(el).text : b.content.text.text) === "";
+		if (empty) cancelPending(id);
+		else void flushSave(id);
+		const ops = pasteOps(slice, { target: id, position: Pos.BOTTOM });
+		commit(empty ? [...ops, { kind: "remove", id }] : ops);
+		(document.activeElement as HTMLElement | null)?.blur();
+		selectedIds = ops.flatMap((op) => (op.kind === "insert" && op.at.position !== Pos.INNER ? [op.block.id] : []));
+	}
+
+	/** Paste with blocks selected and no caret: the copy lands after the selection. */
+	function onWindowPaste(e: ClipboardEvent) {
+		// A block's own paste handler ran first (and left the pasted blocks selected): not again.
+		if (e.defaultPrevented || readonly || !selectedIds.length || typingSomewhere()) return;
+		const slice = clipboardBlocks(e);
+		if (!slice) return;
+		e.preventDefault();
+		const tops = topmostSelected();
+		pasteBlocks(slice, tops[tops.length - 1]);
 	}
 
 	// Selecting clears text focus (Anytype's selection provider clears the
@@ -1363,6 +1428,13 @@
 
 	function onPasteText(e: ClipboardEvent, id: string) {
 		if (readonly) return;
+		// Blocks copied from a Roostr page paste as blocks, not as their text.
+		const slice = clipboardBlocks(e);
+		if (slice) {
+			e.preventDefault();
+			pasteBlocks(slice, id);
+			return;
+		}
 		const images = [...(e.clipboardData?.files ?? [])].filter((f) => f.type.startsWith("image/"));
 		if (images.length > 0) {
 			e.preventDefault();
@@ -2046,6 +2118,9 @@
 	onpagehide={flushAll}
 	ondragend={endDrag}
 	onkeydown={(e) => void onWindowKeydown(e)}
+	oncopy={(e) => onWindowCopy(e, false)}
+	oncut={(e) => onWindowCopy(e, true)}
+	onpaste={onWindowPaste}
 	onmousedown={(e) => {
 		if (spellMenu && !(e.target as HTMLElement).closest(".spell-menu")) spellMenu = null;
 		marginMouseDown(e);
