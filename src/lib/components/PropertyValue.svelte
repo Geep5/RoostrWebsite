@@ -109,14 +109,25 @@
 		const oid = shownId(id);
 		return store.summaries.find((s) => s.id === oid)?.name || store.agents.find((a) => a.id === oid)?.name || id.slice(0, 8);
 	}
-	/** "+ New agent": made from the space's default Agent template, named by what was typed, linked here. */
+	/**
+	 * "+ New agent" asks for a name first (pre-filled with what was typed),
+	 * then makes it from the space's default Agent template and links it
+	 * here - creating an unnamed "New agent" meant opening it to rename it.
+	 */
 	let creatingAgent = $state(false);
+	let agentName = $state<string | null>(null);
+	function focusOnMount(el: HTMLInputElement) {
+		el.focus();
+		el.select();
+	}
 	async function addNewAgent() {
-		if (creatingAgent) return;
+		const name = (agentName ?? "").trim();
+		if (creatingAgent || !name) return;
 		creatingAgent = true;
 		try {
-			const id = await newAgent(spaceId || store.channels[0]?.id || "", objectQuery);
+			const id = await newAgent(spaceId || store.channels[0]?.id || "", name);
 			objectOpen = false;
+			agentName = null;
 			await toggleObject(id);
 		} finally {
 			creatingAgent = false;
@@ -190,7 +201,7 @@
 			</span>
 		{/each}
 		<span class="anchor">
-			<button class="pill" onclick={() => (objectOpen = !objectOpen)}>+ link object</button>
+			<button class="pill" onclick={() => { objectOpen = !objectOpen; agentName = null; }}>+ link object</button>
 			{#if objectOpen}
 				<div class="obj-menu">
 									<input class="search" bind:value={objectQuery} placeholder="Search objects…" />
@@ -205,9 +216,23 @@
 					{/each}
 					{#if candidates.length === 0}<span class="tk pad">No matches</span>{/if}
 					{#if wantsAgents}
-						<button class="obj-item new-agent" disabled={creatingAgent} onclick={() => void addNewAgent()}>
-							<span class="obj-name">＋ New agent{objectQuery.trim() ? ` “${objectQuery.trim()}”` : ""}</span>
-						</button>
+						{#if agentName === null}
+							<button class="obj-item new-agent" onclick={() => (agentName = objectQuery.trim())}>
+								<span class="obj-name">＋ New agent</span>
+							</button>
+						{:else}
+							<form class="new-agent name-agent" onsubmit={(e) => { e.preventDefault(); void addNewAgent(); }}>
+								<input
+									class="search"
+									bind:value={agentName}
+									placeholder="Name the new agent"
+									disabled={creatingAgent}
+									use:focusOnMount
+									onkeydown={(e) => { if (e.key === "Escape") { e.stopPropagation(); agentName = null; } }}
+								/>
+								<button class="pill" type="submit" disabled={creatingAgent || !agentName.trim()}>{creatingAgent ? "Creating…" : "Create"}</button>
+							</form>
+						{/if}
 					{/if}
 				</div>
 			{/if}
@@ -223,6 +248,17 @@
 	.new-agent {
 		border-top: 1px solid var(--border);
 		margin-top: 2px;
+	}
+	.name-agent {
+		display: flex;
+		gap: 6px;
+		align-items: center;
+		padding-top: 6px;
+	}
+	.name-agent .search {
+		flex: 1;
+		min-width: 0;
+		margin-bottom: 0;
 	}
 	input[type="text"],
 	input[type="number"],
