@@ -20,7 +20,8 @@
 	import { capabilityStatusBadge, capabilityStatusText } from "$lib/capability-actions";
 	import CredentialStatus from "./CredentialStatus.svelte";
 	import CapabilityStatus from "./CapabilityStatus.svelte";
-	import JudgeTry from "./JudgeTry.svelte";
+	import JudgePanel from "./JudgePanel.svelte";
+	import { harnessFetch } from "$lib/local-transport";
 	import PropertyValue from "./PropertyValue.svelte";
 	import PropertySuggest from "./PropertySuggest.svelte";
 	import Repeat from "./Repeat.svelte";
@@ -111,8 +112,9 @@
 		const AGENT_CONFIG = typeKey === "agent" ? ["prompt", "model", "skills", "tools", "credentials", "served_by", "repo_path"] : [];
 		// A Tool's own: what the model is told, its inputs, whether it ships with Roostr, and which version of its code runs.
 		const TOOL_CONFIG = typeKey === "tool" ? ["description", "tool_inputs", "tool_builtin", "tool_version"] : [];
-		// A Judge's settings: what it answers, on what, into which property, with which key, on which computer.
-		const JUDGE_CONFIG = typeKey === "judge" ? JUDGE_KEYS : [];
+		// A Judge's settings: what kind of answer, and the key it asks Jev with.
+		// Served by stays optional (the credential's computer asks otherwise): a row only once set.
+		const JUDGE_CONFIG = typeKey === "judge" ? JUDGE_KEYS.filter((k) => k !== "served_by") : [];
 		const repeating = !!repeatOf(object.fields);
 		const present = relations.filter((r) => {
 			// Legacy credential shapes (`key_fields` list, `secret` JSON) stay for old harnesses; never rows.
@@ -144,10 +146,11 @@
 			|| (agentRank.get(a.key) ?? 999) - (agentRank.get(b.key) ?? 999));
 	});
 
-	const JUDGE_KEYS = ["judge_answer", "judge_runs_on", "judge_writes", "credentials", "served_by"];
+	/** A Judge's own settings; its name is the property it fills in. */
+	const JUDGE_KEYS = ["judge_answer", "credentials", "served_by"];
 
 	/** A Judge's note on a value it wrote: "94% sure" (Score, Choice) or "87% yes" (Yes/No), and which Judge when. */
-	function judgedNote(key: string): { text: string; title: string } | null {
+	function judgedNote(key: string): { text: string; title: string; judgeId: string } | null {
 		const e = object.fields["judged"]?.mapValue?.entries?.[key]?.mapValue?.entries;
 		if (!e) return null;
 		const p = e["probability"]?.floatValue;
@@ -157,7 +160,25 @@
 		const judgeId = e["judge"]?.stringValue ?? "";
 		const judge = store.summaries.find((s) => s.id === judgeId)?.name || "a Judge";
 		const at = e["at"]?.intValue;
-		return { text, title: `Set by ${judge}${at ? ` · ${new Date(at).toLocaleString()}` : ""}` };
+		return { text, judgeId, title: `Set by ${judge}${at ? ` · ${new Date(at).toLocaleString()}` : ""}` };
+	}
+
+	/** "Ask again": the Judge that wrote this value scores the object now, changed or not. */
+	let asking = $state("");
+	let askError = $state("");
+	async function askAgain(key: string, judgeId: string) {
+		asking = key;
+		askError = "";
+		try {
+			const res = await harnessFetch("/judges/again", { method: "POST", body: JSON.stringify({ judge: judgeId, object: object.id }) });
+			const body = (await res.json().catch(() => ({}))) as { error?: string };
+			if (!res.ok) throw new Error(body.error ?? `HTTP ${res.status}`);
+			await onchanged();
+		} catch (err) {
+			askError = err instanceof Error ? err.message : String(err);
+		} finally {
+			asking = "";
+		}
 	}
 
 	// ── Serving: served_by names the machine and carries the warning ──
@@ -430,10 +451,10 @@
 
 	/** Repeat is a property of the object too: it rows first, only for the
 	    plain objects that can recur. A Tool runs when called, never on a schedule. */
-	const canRepeat = $derived(!["channel", "chat", "type", "relation", "template", "query", "set", "collection", "agent", "tool"].includes(object.typeKey));
+	const canRepeat = $derived(!["channel", "chat", "type", "relation", "template", "query", "set", "collection", "agent", "tool", "judge"].includes(object.typeKey));
 
 	// ── Grouped display: System / Tool / Agent / Custom, each a labeled section ──
-	const AGENT_KEYS = new Set(["served_by", "repo_path", "agent", "model", "prompt", "skills", "tools", "credentials", "capability"]);
+	const AGENT_KEYS = new Set(["served_by", "repo_path", "agent", "judges", "model", "prompt", "skills", "tools", "credentials", "capability"]);
 	const SYSTEM_KEYS = new Set(["done", "due_date", "status", "tag", "description", "url", "email", "phone", "error", "created_date", "modified_date", "createdDate", "modifiedDate", "check_first"]);
 	const TOOL_KEYS = new Set(["tool_inputs", "tool_builtin", "tool_version"]);
 	type Group = "own" | "system" | "tool" | "judge" | "agent" | "custom";
@@ -615,10 +636,15 @@
 			<div class="pop">
 				<div class="pop-head">
 					<span class="pop-name">{rel.name || rel.key}</span>
+					{#if judgedNote(rel.key)}
+						{@const jn = judgedNote(rel.key)!}
+						<button class="pop-rm ask" title={jn.title} disabled={asking === rel.key} onclick={() => void askAgain(rel.key, jn.judgeId)}>{asking === rel.key ? "Asking…" : "Ask again"}</button>
+					{/if}
 					{#if rel.key !== "done" && !((isCredential || isCapability) && rel.key === "status")}
 						<button class="pop-rm" title="Remove property" onclick={() => void removeProp(rel.key)}>Remove</button>
 					{/if}
 				</div>
+				{#if askError && judgedNote(rel.key)}<p class="ask-error" role="alert">{askError}</p>{/if}
 				{#if isCapability && rel.key === "status"}
 					<CapabilityStatus {object} {onchanged} />
 				{:else if isCredential && rel.key === "status"}
@@ -641,7 +667,7 @@
 	</div>
 {/each}
 {#if typeKey === "judge" && object.typeKey === "judge"}
-	<JudgeTry {object} />
+	<JudgePanel {object} />
 {/if}
 {#if editing}
 	<button class="backdrop" aria-label="Close" onclick={() => (editing = null)}></button>
@@ -938,6 +964,14 @@
 		cursor: pointer;
 	}
 	.pop-rm:hover {
+		color: var(--red);
+	}
+	.pop-rm.ask:hover {
+		color: var(--fg);
+	}
+	.ask-error {
+		margin: 0 0 6px;
+		font-size: 12px;
 		color: var(--red);
 	}
 	.pop :global(.opts) {
