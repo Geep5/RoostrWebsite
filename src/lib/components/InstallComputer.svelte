@@ -54,8 +54,8 @@
 
 		<ol class="ic-steps">
 			<li>
-				On the computer you want to use, install Roostr and start it:
-				<code>./glon-odin serve</code> and <code>bun run src/index.ts serve</code> in <code>harness/</code>.
+				On the computer you want to use, install Roostr and start it as a service, so it runs at boot
+				and comes back if it crashes: <code>bun run service install</code> in <code>harness/</code>.
 			</li>
 			<li>Sign that computer in with <strong>your own key</strong> — same identity, so it joins this space instead of making a new one.</li>
 			<li>It registers itself here within seconds. Then pick it in each agent's <strong>Served by</strong> property.</li>

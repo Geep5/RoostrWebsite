@@ -24,23 +24,21 @@ computer whose identity is that key accepts (see glonOdin README, API). Without
 a reachable Roostr the file block says so in place; the iOS app has no Roostr
 under it, so files stay unavailable there.
 
-For local mode, start the daemon and independent sync service from the sibling
-`glonOdin` repository:
+For local mode, start the daemon, independent sync service and agent harness
+from the sibling `glonOdin` repository - once, as a service that starts at
+boot and restarts crashed programs (`--web` runs this app's `npm run
+dev:local` too):
 
 ```sh
 # glonOdin repository
 odin build src -o:speed -out:glon-odin
-./glon-odin serve
-# separate terminal, glonOdin/harness
-bun install
-bun run sync
-# optional separate agent service
-bun run serve
+cd harness && bun install
+bun run service install --web ../../RoostrWebsite
 ```
 
-Enter the daemon terminal's one-use pairing code in the UI. Sessions are bound
-to the requesting Origin and expire after24 hours or a daemon restart. Run
-`bun run pair` from `glonOdin/harness` to print a fresh code without restarting.
+Pair with the one-use code `bun run pair` (in `glonOdin/harness`) prints to
+`bun run service logs`. Sessions are bound to the requesting Origin and expire
+after 24 hours or a daemon restart.
 Bearer tokens travel in request headers, including streamed SSE; they are not
 placed in URLs. Browser sessions cannot export the native private key. The
 operator-only `glon-odin key-export` command is for explicit private recovery.
