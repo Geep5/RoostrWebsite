@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { goto } from "$app/navigation";
 	import LayoutIcon from "./LayoutIcon.svelte";
+	import KeyPicker from "./KeyPicker.svelte";
 	import { createRelation, currentSpaceId, formatGlyph, objectSpaceId } from "$lib/relations";
 	import { spaceFilterOf } from "$lib/filters";
 	import type { ObjectJSON, RelationDefJSON, ValueJSON } from "$lib/types";
@@ -645,11 +646,7 @@
 	<div class="panel">
 		{#each filters as f, i (i)}
 			<div class="rule">
-				<select value={f.key} onchange={(e) => updateFilter(i, { key: e.currentTarget.value })}>
-					{#each filterKeys as k (k)}
-						<option value={k}>{optionLabel(k)}</option>
-					{/each}
-				</select>
+				<KeyPicker value={f.key} keys={filterKeys} label={optionLabel} onpick={(key) => updateFilter(i, { key })} />
 				<select value={f.condition} onchange={(e) => updateFilter(i, { condition: e.currentTarget.value })}>
 					{#each conditionsFor(f.key) as c (c.id)}
 						<option value={c.id}>{c.label}</option>
@@ -711,11 +708,7 @@
 			>
 				<span class="dnd">⋮⋮</span>
 				<span class="chip relation">
-					<select value={s.key} onchange={(e) => void saveSorts(sorts.map((x, j) => (j === i ? { ...x, key: e.currentTarget.value } : x)))}>
-						{#each filterKeys as k (k)}
-							<option value={k}>{optionLabel(k)}</option>
-						{/each}
-					</select>
+					<KeyPicker value={s.key} keys={filterKeys} label={optionLabel} onpick={(key) => void saveSorts(sorts.map((x, j) => (j === i ? { ...x, key } : x)))} />
 				</span>
 				<button
 					class="chip type"
@@ -1092,13 +1085,6 @@
 	}
 	.sort-item .chip.type:hover {
 		background: var(--hl-med);
-	}
-	.sort-item .chip select {
-		background: none;
-		border: none;
-		color: var(--fg);
-		font-size: 13px;
-		outline: none;
 	}
 	.sort-arrow {
 		transition: transform 0.15s;
