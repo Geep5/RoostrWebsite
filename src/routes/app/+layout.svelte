@@ -20,8 +20,9 @@
 	import PinnedWidget from "$lib/components/PinnedWidget.svelte";
 	import Icon from "$lib/components/Icon.svelte";
 	import { creatableTypes, typeGlyph, createTyped, createCollection, createQuery, seedSpaceDefaults } from "$lib/create";
-	import { CREATABLE_FORMATS, RESERVED_KEYS, createRelation, formatGlyph, spaceRelations } from "$lib/relations";
-	import type { SpaceJSON } from "$lib/types";
+	import { RESERVED_KEYS, formatGlyph, spaceRelations } from "$lib/relations";
+	import type { RelationDefJSON, SpaceJSON } from "$lib/types";
+	import PropertySuggest from "$lib/components/PropertySuggest.svelte";
 
 	let { children }: { children: import("svelte").Snippet } = $props();
 
@@ -481,16 +482,16 @@
 	/** Spaces are fully self-contained: only this space's types. */
 	const sidebarTypes = $derived(store.types.filter((t) => t.space === (activeSpace.id || defaultChannelId)));
 
-	async function newProperty() {
-		const name = prompt("Property name:");
-		if (!name?.trim()) return;
-		const fmt = prompt(`Format (${CREATABLE_FORMATS.join(", ")}):`, "shorttext")?.trim() ?? "";
-		if (!(CREATABLE_FORMATS as readonly string[]).includes(fmt)) {
-			if (fmt) alert(`Unknown format "${fmt}".`);
-			return;
-		}
-		const rel = await createRelation(name.trim(), fmt);
-		if (rel) await goto(`/app/object/${rel.id}`);
+	/** "+" next to Properties: the same find-or-create menu as the object's
+	 * property pane (name, then a format picker); the chosen property opens. */
+	let newPropAt = $state<{ x: number; y: number } | null>(null);
+	function openNewProperty(e: MouseEvent) {
+		const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+		newPropAt = { x: r.left, y: r.bottom + 4 };
+	}
+	async function openProperty(rel: RelationDefJSON) {
+		newPropAt = null;
+		await goto(`/app/object/${rel.id}`);
 	}
 
 	async function newType() {
@@ -1044,7 +1045,10 @@
 					<div class="m-section-head">
 						<button class="m-section-label" onclick={() => (mCollapsed["__props"] = !mCollapsed["__props"])}>Properties</button>
 						{#if !mCollapsed["__props"]}
-							<button class="m-section-add" aria-label="New property" onclick={() => void newProperty()}>＋</button>
+							<button class="m-section-add" aria-label="New property" onclick={openNewProperty}>＋</button>
+							{#if newPropAt}
+								<PropertySuggest x={newPropAt.x} y={newPropAt.y} onpick={(rel) => void openProperty(rel)} onclose={() => (newPropAt = null)} />
+							{/if}
 						{/if}
 						<button class="m-chev-btn" aria-label={mCollapsed["__props"] ? "Expand" : "Collapse"} onclick={() => (mCollapsed["__props"] = !mCollapsed["__props"])}>
 							<span class="m-chev" class:open={!mCollapsed["__props"]}>⌄</span>
@@ -1363,7 +1367,10 @@
 					<button class="section-name" onclick={() => flipSection("props")}>
 						<span class="section-arrow" class:open={!sectionCollapsed["props"]}>▶</span>Properties
 					</button>
-					<button class="section-add" title="New property" onclick={() => void newProperty()}>＋</button>
+					<button class="section-add" title="New property" onclick={openNewProperty}>＋</button>
+					{#if newPropAt}
+						<PropertySuggest x={newPropAt.x} y={newPropAt.y} onpick={(rel) => void openProperty(rel)} onclose={() => (newPropAt = null)} />
+					{/if}
 				</div>
 				{#if !sectionCollapsed["props"]}
 					<div class="section-body">
