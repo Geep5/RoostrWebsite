@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { goto } from "$app/navigation";
 	import Icon from "./Icon.svelte";
 	/**
 	 * Right-click menu for a record in a set/collection view: open it,
@@ -241,7 +242,7 @@
 			// One object opens in place; a multi-selection opens Anytype-style:
 			// each object becomes an in-app tab in the strip.
 			if (targets.length === 1) {
-				location.href = `/app/object/${targets[0]}`;
+				void goto(`/app/object/${targets[0]}`);
 				return;
 			}
 			for (const id of targets) tabs.open(`/app/object/${id}`);

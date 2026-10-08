@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { goto } from "$app/navigation";
 	import { showDate } from "$lib/dates";
 	/**
 	 * Anytype dataview grid: a view carries an ordered relation list
@@ -148,7 +149,8 @@
 			selectedRows = [];
 			return;
 		}
-		location.href = `/app/object/${id}`;
+		// In-app navigation: a full page load re-opened the whole vault (engine boot) on every row click.
+		void goto(`/app/object/${id}`);
 	}
 
 	// ── Inline cell editing (Anytype dataview.tsx onCellClick + cell/*:
