@@ -15,6 +15,39 @@
 	import { objectIcon } from "$lib/icons";
 	import { page } from "$app/state";
 
+	/**
+	 * Two columns only while every card's name fits in half the width:
+	 * otherwise the grid becomes one column instead of truncating. Measured
+	 * from each name's full text width (scrollWidth ignores the ellipsis),
+	 * so the result does not depend on the layout currently applied.
+	 */
+	function fitColumns(grid: HTMLElement) {
+		const check = () => {
+			const style = getComputedStyle(grid);
+			const gap = parseFloat(style.columnGap) || 0;
+			const inner = grid.clientWidth - (parseFloat(style.paddingLeft) || 0) - (parseFloat(style.paddingRight) || 0);
+			const half = (inner - gap) / 2;
+			let fits = true;
+			for (const card of grid.querySelectorAll<HTMLElement>(".w-card")) {
+				const name = card.querySelector<HTMLElement>(".w-name");
+				const needed = name ? card.offsetWidth - name.clientWidth + name.scrollWidth : card.scrollWidth;
+				if (needed > half + 0.5) { fits = false; break; }
+			}
+			grid.classList.toggle("one-col", !fits);
+		};
+		const resize = new ResizeObserver(check);
+		resize.observe(grid);
+		const mutations = new MutationObserver(check);
+		mutations.observe(grid, { childList: true, subtree: true, characterData: true });
+		check();
+		return {
+			destroy() {
+				resize.disconnect();
+				mutations.disconnect();
+			},
+		};
+	}
+
 	let { id }: { id: string } = $props();
 	/** The object open in the main pane: its row or card here reads as the current one, like the widget head does. */
 	const currentId = $derived(page.params.id ?? "");
@@ -191,7 +224,7 @@
 				</a>
 			</div>
 		{:else if viewType === "gallery"}
-			<div class="w-cards">
+			<div class="w-cards" use:fitColumns>
 				{#each rows.slice(0, GALLERY_LIMIT) as r (r.id)}
 					<a class="w-card" class:current={r.id === currentId} aria-current={r.id === currentId ? "page" : undefined} href="/app/object/{r.id}">
 						<span class="w-icon">{objectIcon(r.fields["iconEmoji"]?.stringValue, r.typeKey)}</span>
@@ -274,6 +307,12 @@
 	.w-cards {
 		display: grid;
 		grid-template-columns: 1fr 1fr;
+	}
+	/* A name that would be cut off in half the width gets the whole row (class set by fitColumns). */
+	.w-cards:global(.one-col) {
+		grid-template-columns: 1fr;
+	}
+	.w-cards {
 		gap: 8px;
 		padding: 4px 8px 6px 0;
 	}
