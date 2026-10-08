@@ -17,11 +17,13 @@
 
 	/**
 	 * Two columns only while every card's name fits in half the width:
-	 * otherwise the grid becomes one column instead of truncating. Measured
-	 * from each name's full text width (scrollWidth ignores the ellipsis),
-	 * so the result does not depend on the layout currently applied.
+	 * otherwise the grid becomes one column instead of truncating. The name
+	 * is measured by its text (a Range over its contents), not its box: the
+	 * box stretches to the card (flex: 1), so in one column it would always
+	 * read as too wide and the grid could never return to two.
 	 */
 	function fitColumns(grid: HTMLElement) {
+		const range = document.createRange();
 		const check = () => {
 			const style = getComputedStyle(grid);
 			const gap = parseFloat(style.columnGap) || 0;
@@ -30,7 +32,9 @@
 			let fits = true;
 			for (const card of grid.querySelectorAll<HTMLElement>(".w-card")) {
 				const name = card.querySelector<HTMLElement>(".w-name");
-				const needed = name ? card.offsetWidth - name.clientWidth + name.scrollWidth : card.scrollWidth;
+				if (!name) continue;
+				range.selectNodeContents(name);
+				const needed = card.offsetWidth - name.clientWidth + range.getBoundingClientRect().width;
 				if (needed > half + 0.5) { fits = false; break; }
 			}
 			grid.classList.toggle("one-col", !fits);
