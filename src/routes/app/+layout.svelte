@@ -1733,15 +1733,16 @@
 		position: absolute;
 		top: 50%;
 		z-index: 45;
-		width: 14px;
-		height: 48px;
+		/* Big enough to hit without aiming: a 22×80 target (was 14×48). */
+		width: 22px;
+		height: 80px;
 		transform: translate(-50%, -50%);
 		padding: 0;
 		border: 1px solid var(--border);
-		border-radius: 7px;
+		border-radius: 11px;
 		background: var(--bg);
 		color: var(--muted);
-		font-size: 13px;
+		font-size: 18px;
 		line-height: 1;
 		cursor: pointer;
 		opacity: 0.55;
@@ -1769,7 +1770,7 @@
 	.nav-drawer.closed {
 		transform: translate(0, -50%);
 		border-left: none;
-		border-radius: 0 7px 7px 0;
+		border-radius: 0 11px 11px 0;
 	}
 	.nav-drawer:hover {
 		opacity: 1;
@@ -1790,7 +1791,7 @@
 		transform: translate(0, -50%);
 		border-left: 1px solid var(--border);
 		border-right: none;
-		border-radius: 7px 0 0 7px;
+		border-radius: 11px 0 0 11px;
 	}
 	/* The space rail is a lighter rounded card on the dark gutter. */
 	.vault {
