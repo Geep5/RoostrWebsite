@@ -16,25 +16,30 @@
 	import { page } from "$app/state";
 
 	/**
-	 * Two columns only while every card's name fits in half the width:
-	 * otherwise the grid becomes one column instead of truncating. The name
-	 * is measured by its text (a Range over its contents), not its box: the
-	 * box stretches to the card (flex: 1), so in one column it would always
-	 * read as too wide and the grid could never return to two.
+	 * Two columns only while every card's content fits in half the width:
+	 * otherwise the grid becomes one column instead of truncating. A card's
+	 * need is built from its parts - border, padding, the icon, the gap and
+	 * the name's text (a Range, so the ellipsis doesn't hide its length) -
+	 * never from the card's box, which stretches to whatever column it is
+	 * in; measuring the box made one column self-perpetuating.
 	 */
 	function fitColumns(grid: HTMLElement) {
 		const range = document.createRange();
+		const px = (v: string) => parseFloat(v) || 0;
 		const check = () => {
 			const style = getComputedStyle(grid);
-			const gap = parseFloat(style.columnGap) || 0;
-			const inner = grid.clientWidth - (parseFloat(style.paddingLeft) || 0) - (parseFloat(style.paddingRight) || 0);
-			const half = (inner - gap) / 2;
+			const inner = grid.clientWidth - px(style.paddingLeft) - px(style.paddingRight);
+			const half = (inner - px(style.columnGap)) / 2;
 			let fits = true;
 			for (const card of grid.querySelectorAll<HTMLElement>(".w-card")) {
-				const name = card.querySelector<HTMLElement>(".w-name");
-				if (!name) continue;
-				range.selectNodeContents(name);
-				const needed = card.offsetWidth - name.clientWidth + range.getBoundingClientRect().width;
+				const cs = getComputedStyle(card);
+				let needed = card.offsetWidth - card.clientWidth + px(cs.paddingLeft) + px(cs.paddingRight);
+				const parts = [...card.children] as HTMLElement[];
+				for (const part of parts) {
+					range.selectNodeContents(part);
+					needed += part.classList.contains("w-name") ? range.getBoundingClientRect().width : part.offsetWidth;
+				}
+				needed += px(cs.columnGap) * Math.max(0, parts.length - 1);
 				if (needed > half + 0.5) { fits = false; break; }
 			}
 			grid.classList.toggle("one-col", !fits);
