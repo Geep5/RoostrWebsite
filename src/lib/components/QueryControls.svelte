@@ -154,6 +154,8 @@
 		{ id: "notLike", label: "doesn't contain", needsValue: true },
 		{ id: "equal", label: "is", needsValue: true },
 		{ id: "notEqual", label: "is not", needsValue: true },
+		{ id: "in", label: "is any of", needsValue: true },
+		{ id: "notIn", label: "is none of", needsValue: true },
 		{ id: "empty", label: "is empty", needsValue: false },
 		{ id: "notEmpty", label: "is not empty", needsValue: false },
 	];
@@ -167,6 +169,8 @@
 		{ id: "empty", label: "is empty", needsValue: false },
 		{ id: "notEmpty", label: "is not empty", needsValue: false },
 	];
+	/** Conditions that take a list of values. */
+	const MULTI_VALUE = new Set(["in", "notIn", "allIn", "exactIn"]);
 	const SELECT_CONDITIONS: ConditionDef[] = [
 		{ id: "in", label: "has any of", needsValue: true },
 		{ id: "allIn", label: "has all of", needsValue: true },
@@ -512,6 +516,8 @@
 			next[idx].condition = conditionsFor(patch.key)[0].id;
 			next[idx].value = [];
 		}
+		// A one-value condition keeps one value: nothing may hide behind the single box.
+		if (patch.condition !== undefined && !MULTI_VALUE.has(patch.condition) && next[idx].value.length > 1) next[idx].value = next[idx].value.slice(0, 1);
 		void saveFilters(next);
 	}
 
@@ -664,6 +670,30 @@
 								>{opt}</button>
 							{/each}
 						</div>
+					{:else if MULTI_VALUE.has(f.condition)}
+						<!-- Several values: every one is shown and removable, so the filter never holds more than it shows. -->
+						<div class="multi-values">
+							{#each f.value as v, j (j)}
+								<span class="value-chip">{v}<button aria-label="Remove {v}" onclick={() => updateFilter(i, { value: f.value.filter((_, k) => k !== j) })}>×</button></span>
+							{/each}
+							<input
+								placeholder={f.value.length ? "add another" : "value"}
+								onkeydown={(e) => {
+									const el = e.currentTarget;
+									if ((e.key === "Enter" || e.key === ",") && el.value.trim()) {
+										e.preventDefault();
+										const add = el.value.trim();
+										el.value = "";
+										if (!f.value.includes(add)) updateFilter(i, { value: [...f.value, add] });
+									}
+								}}
+								onblur={(e) => {
+									const add = e.currentTarget.value.trim();
+									e.currentTarget.value = "";
+									if (add && !f.value.includes(add)) updateFilter(i, { value: [...f.value, add] });
+								}}
+							/>
+						</div>
 					{:else}
 						<input
 							value={f.value[0] ?? ""}
@@ -804,6 +834,33 @@
 		border-radius: 6px;
 		padding: 4px 10px;
 		font-size: 13px;
+	}
+	.multi-values {
+		display: flex;
+		flex-wrap: wrap;
+		align-items: center;
+		gap: 6px;
+	}
+	.value-chip {
+		display: inline-flex;
+		align-items: center;
+		gap: 4px;
+		background: var(--border);
+		border-radius: 999px;
+		padding: 2px 4px 2px 10px;
+		font-size: 12px;
+	}
+	.value-chip button {
+		border: none;
+		background: none;
+		color: var(--muted);
+		cursor: pointer;
+		font-size: 13px;
+		line-height: 1;
+		padding: 0 4px;
+	}
+	.value-chip button:hover {
+		color: var(--fg);
 	}
 	.tags {
 		display: flex;
