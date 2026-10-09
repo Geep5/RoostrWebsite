@@ -420,7 +420,23 @@
 		if (author === object.id) return object.fields["name"]?.stringValue || "Agent";
 		if (author && guestAgents(object.fields).includes(author))
 			return store.agents.find((a) => a.id === author)?.name || "Agent";
+		// A person (or any object) speaking in a recreated meeting or email thread.
+		const subject = store.summaries.find((s) => s.id === author);
+		if (subject) return subject.name || "Untitled";
 		return author.slice(0, 6);
+	}
+
+	/** Authors that are objects (agents, people) link to themselves. */
+	function authorHref(author: string): string | undefined {
+		return store.agents.some((a) => a.id === author) || store.summaries.some((s) => s.id === author) ? `/app/object/${author}` : undefined;
+	}
+
+	/** Avatar letters: a named author's initials, else the id's first two characters. */
+	function initials(author: string): string {
+		const name = who(author);
+		if (name === author.slice(0, 6)) return author.slice(0, 2);
+		const words = name.replace(/\(.*?\)/g, "").trim().split(/\s+/).filter(Boolean);
+		return ((words[0]?.[0] ?? "") + (words.length > 1 ? words[words.length - 1][0] : "")).toUpperCase();
 	}
 
 	function memberName(endpoint: AgentEndpoint): string {
@@ -515,7 +531,8 @@
 	function when(ts: number): string {
 		const d = new Date(ts);
 		const today = new Date().toDateString() === d.toDateString();
-		return today ? d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : d.toLocaleDateString();
+		const time = d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+		return today ? time : `${d.toLocaleDateString([], { month: "short", day: "numeric" })}, ${time}`;
 	}
 
 	async function send() {
@@ -646,11 +663,11 @@
 			{#each messages as m (m.id)}
 				<div class="msg" class:own={m.author === me} id="msg-{m.id}">
 					{#if m.author !== me}
-						{@const agentHref = store.agents.some((a) => a.id === m.author) ? `/app/object/${m.author}` : undefined}
+						{@const agentHref = authorHref(m.author)}
 						{#if avatarEmoji(m.author)}
 							<svelte:element this={agentHref ? "a" : "span"} class="avatar emoji" href={agentHref} title={agentHref ? `Open ${who(m.author)}` : undefined}>{avatarEmoji(m.author)}</svelte:element>
 						{:else}
-							<svelte:element this={agentHref ? "a" : "span"} class="avatar" href={agentHref} title={agentHref ? `Open ${who(m.author)}` : undefined} style="background: hsl({hue(m.author)}, 45%, 35%)">{m.author.slice(0, 2)}</svelte:element>
+							<svelte:element this={agentHref ? "a" : "span"} class="avatar" href={agentHref} title={agentHref ? `Open ${who(m.author)}` : undefined} style="background: hsl({hue(m.author)}, 45%, 35%)">{initials(m.author)}</svelte:element>
 						{/if}
 					{/if}
 					<div class="body">
@@ -663,7 +680,7 @@
 						{/if}
 						<div class="meta-row">
 							{#if m.author !== me}
-								{#if store.agents.some((a) => a.id === m.author)}
+								{#if authorHref(m.author)}
 									<a class="author agent-link" href="/app/object/{m.author}">{who(m.author)}</a>
 								{:else}
 									<span class="author">{who(m.author)}</span>
