@@ -28,13 +28,22 @@
 		inputEl?.focus();
 	});
 
+	/**
+	 * Queries and collections are built-in kinds, not type objects, but a
+	 * query can list them ("every query that bins") - so they're offered too.
+	 */
+	const VIEW_KINDS = [
+		{ id: "", key: "query", name: "Query", icon: typeGlyph("query"), layout: "page", defaultTemplateId: "", space: "" },
+		{ id: "", key: "collection", name: "Collection", icon: typeGlyph("collection"), layout: "page", defaultTemplateId: "", space: "" },
+	];
+
 	const matches = $derived.by(() => {
 		const q = query.trim().toLowerCase();
 		// Spaces are self-contained: only this space's types (each space
 		// owns its own copies of the defaults, so the vault-wide list
 		// repeats every key once per space).
 		const sid = activeSpace.id || store.channels[0]?.id || "";
-		const pool = store.types.filter((t) => t.space === sid && !exclude.includes(t.key));
+		const pool = [...store.types.filter((t) => t.space === sid), ...VIEW_KINDS].filter((t) => !exclude.includes(t.key));
 		if (!q) return pool;
 		const starts = pool.filter((t) => t.name.toLowerCase().startsWith(q) || t.key.startsWith(q));
 		const contains = pool.filter(
@@ -73,7 +82,7 @@
 <div class="suggest">
 	<input bind:this={inputEl} bind:value={query} {placeholder} onkeydown={onKeydown} />
 	<div class="options">
-		{#each matches as t, i (t.id)}
+		{#each matches as t, i (t.id || t.key)}
 			<button class="option" class:selected={i === selected} onmouseenter={() => (selected = i)} onclick={() => pick(t.key)}>
 				<span class="t-icon">{t.icon || typeGlyph(t.key)}</span>
 				<span class="t-name">{t.name || t.key}</span>

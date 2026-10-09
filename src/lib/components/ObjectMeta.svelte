@@ -37,7 +37,8 @@
 		return sourceKeys.map((key) => {
 			const matches = store.types.filter((t) => t.key === key);
 			const t = matches.find((x) => x.space === space) ?? matches[0];
-			return { key, id: t?.id ?? "", name: t?.name || key, icon: t?.icon || typeGlyph(key) };
+			const builtIn = key === "query" ? "Query" : key === "collection" ? "Collection" : "";
+			return { key, id: t?.id ?? "", name: t?.name || builtIn || key, icon: t?.icon || typeGlyph(key) };
 		});
 	});
 	const isQuery = $derived(object.typeKey === "query");
