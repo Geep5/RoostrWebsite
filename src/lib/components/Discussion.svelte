@@ -222,14 +222,18 @@
 	}
 
 	/** An object with an agent opens its composer already addressed: `@Name `
-	 *  per guest agent, tagged, caret after - you just type. Only ever fills
-	 *  an empty draft, so a message in progress is never touched. */
+	 *  per agent its Agent property names (an agent's own page: itself), tagged,
+	 *  caret after - you just type. A space still offers all its agents in the
+	 *  @ menu, but only the ones set on it are pre-tagged. Only ever fills an
+	 *  empty draft, so a message in progress is never touched. */
 	async function seedMentions(): Promise<void> {
 		if (draft !== "" || readOnly) return;
 		await ensureTagOptions();
-		if (draft !== "" || !tagOptions?.length) return;
-		tagged = tagOptions;
-		draft = tagOptions.map((option) => `@${option.agentName} `).join("");
+		const assigned = new Set(object.typeKey === "agent" ? [object.id, ...guestAgents(object.fields)] : guestAgents(object.fields));
+		const seeds = (tagOptions ?? []).filter((option) => assigned.has(option.endpoint.agentId));
+		if (draft !== "" || !seeds.length) return;
+		tagged = seeds;
+		draft = seeds.map((option) => `@${option.agentName} `).join("");
 		requestAnimationFrame(() => {
 			const el = composerEl;
 			if (!el) return;
