@@ -72,6 +72,7 @@
 		if (left + FLY_W > window.innerWidth - 10) left = menu.left - FLY_W;
 		left = Math.max(8, Math.min(left, window.innerWidth - FLY_W - 10));
 		const top = Math.max(8, Math.min(item.top + item.height / 2 - estH / 2, window.innerHeight - estH - 10));
+		if (kind === "types") typeFilter = "";
 		if (fly?.kind === kind) fly = null;
 		else fly = { kind, left, top };
 	}
@@ -93,6 +94,15 @@
 
 	/** Space types plus bundled ones — the same set every type picker offers. */
 	const types = $derived(store.types.filter((t) => !t.space || t.space === spaceId));
+	let typeFilter = $state("");
+	const filteredTypes = $derived.by(() => {
+		const q = typeFilter.trim().toLowerCase();
+		return q ? types.filter((t) => (t.name || t.key).toLowerCase().includes(q)) : types;
+	});
+	/** Focus lands in the search box as the flyout opens. */
+	function focusOnMount(el: HTMLInputElement) {
+		requestAnimationFrame(() => el.focus());
+	}
 	const collections = $derived(
 		store.summaries.filter((s) => s.typeKey === "collection" && s.channelId === spaceId && !ids.includes(s.id)),
 	);
@@ -271,9 +281,22 @@
 {#if fly}
 	<div class="ctx-menu ctx-fly" style="left: {fly.left}px; top: {fly.top}px" role="menu">
 		{#if fly.kind === "types"}
-			{#each types as t (t.id)}
+			<input
+				class="ctx-filter"
+				placeholder="Search types..."
+				bind:value={typeFilter}
+				use:focusOnMount
+				onkeydown={(e) => {
+					if (e.key === "Enter" && filteredTypes[0]) { e.preventDefault(); void retype(filteredTypes[0].key); }
+					if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); if (typeFilter) typeFilter = ""; else fly = null; }
+				}}
+			/>
+			{#each filteredTypes as t (t.id)}
 				<button role="menuitem" onclick={() => void retype(t.key)}>{t.icon || typeGlyph(t.key)} {t.name || t.key}</button>
 			{/each}
+			{#if filteredTypes.length === 0}
+				<span class="ctx-none">No type matches “{typeFilter.trim()}”</span>
+			{/if}
 		{:else if fly.kind === "cols"}
 			{#each collections as c (c.id)}
 				<button role="menuitem" onclick={() => void addTo(c.id)}>{objectIcon(c.icon, c.typeKey)} {c.name || "Untitled"}</button>

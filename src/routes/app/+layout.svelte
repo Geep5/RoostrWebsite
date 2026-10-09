@@ -226,6 +226,15 @@
 	}
 
 	let showTypePick = $state(false);
+	let typePickFilter = $state("");
+	const typePickChoices = $derived.by(() => {
+		const q = typePickFilter.trim().toLowerCase();
+		return sidebarTypes.filter((t) => t.key !== objectSummary?.typeKey && (!q || (t.name || t.key).toLowerCase().includes(q)));
+	});
+	/** Focus lands in the type search as the submenu opens. */
+	function focusOnMount(el: HTMLInputElement) {
+		requestAnimationFrame(() => el.focus());
+	}
 	/** Queries and collections are views, not records: retyping one would strand its view settings behind a page. */
 	const canRetype = $derived(!!objectSummary && !["query", "collection", "set"].includes(objectSummary.typeKey));
 
@@ -855,12 +864,14 @@
 									{/if}
 								</div>
 							{/if}
-							{#if canRetype}<button onclick={() => (showTypePick = !showTypePick)}><Icon name="arrow-left-right" />Change type<span class="chev"><Icon name="chevron-right" size={14} /></span></button>{/if}
+							{#if canRetype}<button onclick={() => { typePickFilter = ""; showTypePick = !showTypePick; }}><Icon name="arrow-left-right" />Change type<span class="chev"><Icon name="chevron-right" size={14} /></span></button>{/if}
 							{#if showTypePick}
 								<div class="submenu">
-									{#each sidebarTypes.filter((t) => t.key !== objectSummary?.typeKey) as t (t.id)}
+									<input class="type-search" placeholder="Search types..." bind:value={typePickFilter} use:focusOnMount onkeydown={(e) => { if (e.key === "Enter" && typePickChoices[0]) { e.preventDefault(); showMore = false; showTypePick = false; void changeType(typePickChoices[0].key); } }} />
+									{#each typePickChoices as t (t.id)}
 										<button onclick={() => { showMore = false; showTypePick = false; void changeType(t.key); }}>{t.icon || typeGlyph(t.key)} {t.name || t.key}</button>
 									{/each}
+									{#if typePickChoices.length === 0}<span class="menu-none">No type matches “{typePickFilter.trim()}”</span>{/if}
 								</div>
 							{/if}
 							<button onclick={() => { showMore = false; void duplicateObject(); }}><Icon name="copy" />Duplicate</button>
@@ -1436,12 +1447,14 @@
 										{/if}
 									</div>
 								{/if}
-								{#if canRetype}<button onclick={() => (showTypePick = !showTypePick)}><Icon name="arrow-left-right" />Change type<span class="chev"><Icon name="chevron-right" size={14} /></span></button>{/if}
+								{#if canRetype}<button onclick={() => { typePickFilter = ""; showTypePick = !showTypePick; }}><Icon name="arrow-left-right" />Change type<span class="chev"><Icon name="chevron-right" size={14} /></span></button>{/if}
 								{#if showTypePick}
 									<div class="submenu">
-										{#each sidebarTypes.filter((t) => t.key !== objectSummary?.typeKey) as t (t.id)}
+										<input class="type-search" placeholder="Search types..." bind:value={typePickFilter} use:focusOnMount onkeydown={(e) => { if (e.key === "Enter" && typePickChoices[0]) { e.preventDefault(); showMore = false; showTypePick = false; void changeType(typePickChoices[0].key); } }} />
+										{#each typePickChoices as t (t.id)}
 											<button onclick={() => { showMore = false; showTypePick = false; void changeType(t.key); }}>{t.icon || typeGlyph(t.key)} {t.name || t.key}</button>
 										{/each}
+										{#if typePickChoices.length === 0}<span class="menu-none">No type matches “{typePickFilter.trim()}”</span>{/if}
 									</div>
 								{/if}
 								<button onclick={() => { showMore = false; void duplicateObject(); }}><Icon name="copy" />Duplicate</button>
@@ -2527,6 +2540,17 @@
 		flex-direction: column;
 		border-left: 2px solid var(--border);
 		margin-left: 12px;
+	}
+	.type-search {
+		margin: 4px 6px;
+		padding: 5px 8px;
+		font: inherit;
+		font-size: 13px;
+		color: var(--fg);
+		background: var(--bg);
+		border: 1px solid var(--border);
+		border-radius: 6px;
+		outline: none;
 	}
 	.menu-sep {
 		height: 1px;
