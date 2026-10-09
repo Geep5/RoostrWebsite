@@ -55,8 +55,9 @@ function inline(s: string): string {
 		.replace(/(?<!\w)\*([^*\n]+)\*(?!\w)/g, "<i>$1</i>")
 		.replace(/(?<!\w)_([^_\n]+)_(?!\w)/g, "<i>$1</i>")
 		.replace(/~~([^~]+)~~/g, "<s>$1</s>")
-		// [text](url)
+		// [text](url); an in-app object link (`!` tag in chat) opens here, not in a new tab
 		.replace(/\[([^\]\n]+)\]\(([^)\s]+)\)/g, (_, t, u) => {
+			if (/^\/app\/object\/[\w-]+$/.test(u)) return `<a class="obj-link" href="${u}">${t}</a>`;
 			const href = safeHref(u.replace(/&amp;/g, "&"));
 			return href ? `<a href="${escapeHtml(href)}" target="_blank" rel="noopener">${t}</a>` : t;
 		})

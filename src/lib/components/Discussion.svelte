@@ -13,6 +13,8 @@
 	import { renderMarkdown } from "$lib/markdown";
 	import { onMount, untrack } from "svelte";
 	import { harnessFetch, pairedSession, onPairingChange } from "$lib/local-transport";
+	import { objectSpaceId } from "$lib/relations";
+	import { openedRanks } from "$lib/recent-opened";
 
 	let {
 		object,
@@ -163,15 +165,25 @@
 			.slice(0, 8);
 	});
 
-	/** Open/refresh/close the menu from the caret: a `@…` token ends at the caret. */
+	/** Open/refresh/close a menu from the caret: whichever `@…` or `!…` token
+	 *  ends at the caret and started last wins. */
 	function updateMention() {
 		const el = composerEl;
 		if (!el) return;
 		// A tag deleted from the text untags immediately, so the menu offers
 		// that agent again (the seeded @Name must not pin it out of the list).
 		tagged = tagged.filter((option) => draft.includes(`@${option.agentName}`));
+		taggedObjects = taggedObjects.filter((t) => draft.includes(`!${t.name}`));
 		const caret = el.selectionStart ?? 0;
-		const hit = /(?:^|\s)@([^@\n]*)$/.exec(draft.slice(0, caret));
+		const before = draft.slice(0, caret);
+		const hit = /(?:^|\s)@([^@\n]*)$/.exec(before);
+		const objHit = /(?:^|\s)!([^!@\n]*)$/.exec(before);
+		if (objHit && (!hit || caret - objHit[1].length > caret - hit[1].length)) {
+			mention = null;
+			updateObjectTag(caret, objHit[1]);
+			return;
+		}
+		objectTag = null;
 		if (!hit) {
 			mention = null;
 			return;
@@ -230,6 +242,92 @@
 	/** Tags whose @Name survived editing and are present in this text. */
 	function liveTags(text: string): ObjectAgentOption[] {
 		return tagged.filter((option) => text.includes(`@${option.agentName}`));
+	}
+
+	// ── !-tags: link an object into the message ─────────────────────
+	// `!` opens a search over this space's objects, most recently opened on
+	// this device first. The draft holds `!Name`; send turns each live tag
+	// into a markdown link to the object, which the chat renders as a pill.
+	interface ObjectTag {
+		id: string;
+		name: string;
+		icon: string;
+		typeKey: string;
+	}
+	let objectTag = $state<{ start: number; query: string } | null>(null);
+	let objectTagIndex = $state(0);
+	/** Objects tagged for the next send; a deleted !Name untags at send time. */
+	let taggedObjects = $state<ObjectTag[]>([]);
+	/** Opened-recency snapshot, taken when the menu opens. */
+	let openedRank = $state(new Map<string, number>());
+	let objectMenuEl = $state<HTMLDivElement>();
+
+	const objectMatches = $derived.by((): ObjectTag[] => {
+		if (!objectTag) return [];
+		const q = objectTag.query.trim().toLowerCase();
+		const fallback = store.channels[0]?.id ?? "";
+		const space = objectSpaceId(object);
+		const unranked = Number.MAX_SAFE_INTEGER;
+		return store.summaries
+			.filter((s) => s.name.trim() && (s.channelId || fallback) === space)
+			.filter((s) => !taggedObjects.some((t) => t.id === s.id))
+			.filter((s) => !q || s.name.toLowerCase().includes(q))
+			.sort((a, b) => (openedRank.get(a.id) ?? unranked) - (openedRank.get(b.id) ?? unranked) || b.updatedAt - a.updatedAt)
+			.slice(0, 50)
+			.map((s) => ({ id: s.id, name: s.name.trim(), icon: s.icon, typeKey: s.typeKey }));
+	});
+
+	function updateObjectTag(caret: number, query: string) {
+		// A completed `!Name ` closes the menu once the caret moves on.
+		if (taggedObjects.some((t) => query.startsWith(`${t.name} `))) {
+			objectTag = null;
+			return;
+		}
+		if (!objectTag) openedRank = openedRanks();
+		if (!objectTag || objectTag.query !== query) objectTagIndex = 0;
+		objectTag = { start: caret - query.length - 1, query };
+	}
+
+	function moveObjectTag(delta: number) {
+		const n = objectMatches.length;
+		objectTagIndex = (objectTagIndex + delta + n) % n;
+		requestAnimationFrame(() => objectMenuEl?.querySelector(".active")?.scrollIntoView({ block: "nearest" }));
+	}
+
+	function pickObject(option: ObjectTag) {
+		const el = composerEl;
+		const at = objectTag;
+		if (!el || !at) return;
+		const caret = el.selectionStart ?? at.start;
+		const label = `!${option.name}`;
+		const after = draft.slice(caret).startsWith(" ") ? draft.slice(caret) : ` ${draft.slice(caret)}`;
+		draft = `${draft.slice(0, at.start)}${label}${after}`;
+		if (!taggedObjects.some((t) => t.id === option.id)) taggedObjects = [...taggedObjects, option];
+		objectTag = null;
+		requestAnimationFrame(() => {
+			el.focus();
+			const pos = at.start + label.length + 1;
+			el.setSelectionRange(pos, pos);
+			el.style.height = "auto";
+			el.style.height = `${el.scrollHeight}px`;
+		});
+	}
+
+	const escapeRegExp = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+	/** Tagged objects longest name first, so "!Q3 plan" wins over a "!Q3" object. */
+	const objectTagPattern = $derived.by(() => {
+		const names = [...new Set(taggedObjects.map((t) => t.name))].sort((a, b) => b.length - a.length);
+		return names.length ? new RegExp(`(^|\\s)!(${names.map(escapeRegExp).join("|")})(?![\\w])`, "g") : null;
+	});
+
+	/** The message as sent: every live `!Name` becomes a link to its object. */
+	function linkObjectTags(text: string): string {
+		if (!objectTagPattern) return text;
+		const byName = new Map(taggedObjects.map((t) => [t.name, t]));
+		return text.replace(objectTagPattern, (_, pre: string, name: string) => {
+			const t = byName.get(name)!;
+			return `${pre}[${t.name.replace(/[[\]]/g, "")}](/app/object/${t.id})`;
+		});
 	}
 	const replyMessage = $derived((replyTo ? messageById.get(replyTo) : messages.findLast((m) => m.mailbox))?.mailbox?.message);
 	const replyAll = $derived(replyMessage ? replyRecipients(replyMessage, { objectId: object.id, agentId: "" }) : []);
@@ -345,14 +443,23 @@
 		if (names.length === 0) return null;
 		return new RegExp(`@(${names.map((n) => n.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|")})(?![\\w])`, "g");
 	});
+	/** An icon as pill HTML: its image or its emoji. */
+	function iconGlyph(icon: string): string {
+		return /^https?:\/\//.test(icon) ? `<img class="mention-ico" src="${escapeHtml(icon).replace(/"/g, "&quot;")}" alt="">` : `<span class="mention-ico">${escapeHtml(icon)}</span>`;
+	}
 	/** The agent's icon as pill HTML: its image, its emoji, or the 🤖 default. */
 	function mentionGlyph(name: string): string {
-		const icon = mentionIcons.get(name) || objectIcon("", "agent");
-		return /^https?:\/\//.test(icon) ? `<img class="mention-ico" src="${escapeHtml(icon).replace(/"/g, "&quot;")}" alt="">` : `<span class="mention-ico">${escapeHtml(icon)}</span>`;
+		return iconGlyph(mentionIcons.get(name) || objectIcon("", "agent"));
+	}
+	/** An object's icon: its own, else its type's glyph. */
+	function objectGlyph(id: string): string {
+		const s = store.summaries.find((x) => x.id === id);
+		return iconGlyph(s?.icon || objectIcon("", s?.typeKey ?? "page"));
 	}
 	/** Sent messages: the pill leads with the agent's icon, like Discord's avatar-less role chip. */
 	function mentionPills(html: string): string {
-		return mentionPattern ? html.replace(mentionPattern, (_, name: string) => `<span class="mention">${mentionGlyph(name)}@${name}</span>`) : html;
+		const linked = html.replace(/<a class="obj-link" href="\/app\/object\/([\w-]+)">/g, (open: string, id: string) => `${open}${objectGlyph(id)}`);
+		return mentionPattern ? linked.replace(mentionPattern, (_, name: string) => `<span class="mention">${mentionGlyph(name)}@${name}</span>`) : linked;
 	}
 
 	let mirrorEl = $state<HTMLDivElement>();
@@ -361,7 +468,13 @@
 	 *  its ink), so the mirror's text never drifts from the textarea's caret.
 	 *  A trailing space keeps a final newline's line height in step. */
 	function composerMirror(text: string): string {
-		const escaped = escapeHtml(text);
+		let escaped = escapeHtml(text);
+		if (taggedObjects.length) {
+			const byName = new Map(taggedObjects.map((t) => [escapeHtml(t.name), t]));
+			const names = [...byName.keys()].sort((a, b) => b.length - a.length);
+			const pattern = new RegExp(`(^|\\s)!(${names.map(escapeRegExp).join("|")})(?![\\w])`, "g");
+			escaped = escaped.replace(pattern, (_, pre: string, name: string) => `${pre}<span class="mention obj"><span class="mention-at">!${objectGlyph(byName.get(name)!.id)}</span>${name}</span>`);
+		}
 		const pilled = mentionPattern
 			? escaped.replace(mentionPattern, (_, name: string) => `<span class="mention"><span class="mention-at">@${mentionGlyph(name)}</span>${name}</span>`)
 			: escaped;
@@ -406,8 +519,9 @@
 	}
 
 	async function send() {
-		const text = draft.trim();
-		const mentions = liveTags(text);
+		const raw = draft.trim();
+		const mentions = liveTags(raw);
+		const text = linkObjectTags(raw);
 		if (sending || readOnly || !text || (isExchange && !audience.length && !mentions.length)) return;
 		const reply = replyTo;
 		sending = true;
@@ -439,6 +553,7 @@
 				replyTo = "";
 				privateRecipient = "";
 				tagged = [];
+				taggedObjects = [];
 				await onchanged();
 				void seedMentions();
 				if (sent.threadId !== threadId) onexchange?.(sent.threadId);
@@ -451,6 +566,7 @@
 			draft = "";
 			replyTo = "";
 			tagged = [];
+			taggedObjects = [];
 			await onchanged();
 			void seedMentions();
 		} catch (err) {
@@ -692,6 +808,33 @@
 				</div>
 			{:else if mention && tagOptions && !mentionMatches.length}
 				<div class="mention-menu empty">No agent matches “{mention.query}”.</div>
+			{:else if objectTag}
+				<div class="mention-menu obj-menu" aria-label="Link an object">
+					<div class="obj-search" class:placeholder={!objectTag.query.trim()}>
+						<svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="7" cy="7" r="4.5" fill="none" stroke="currentColor" stroke-width="1.5" /><path d="M10.5 10.5 14 14" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" /></svg>
+						<span>{objectTag.query.trim() || "Search objects - recently opened first"}</span>
+					</div>
+					{#if objectMatches.length}
+						<div class="obj-list" role="listbox" bind:this={objectMenuEl}>
+							{#each objectMatches as option, i (option.id)}
+								<button
+									type="button"
+									role="option"
+									aria-selected={i === objectTagIndex}
+									class:active={i === objectTagIndex}
+									onmouseenter={() => (objectTagIndex = i)}
+									onmousedown={(e) => { e.preventDefault(); pickObject(option); }}
+								>
+									<span class="m-icon">{@html iconGlyph(option.icon || objectIcon("", option.typeKey))}</span>
+									<span class="m-name">{option.name}</span>
+									{#if openedRank.has(option.id)}<span class="m-where">opened</span>{/if}
+								</button>
+							{/each}
+						</div>
+					{:else}
+						<div class="obj-empty">No object matches “{objectTag.query.trim()}”.</div>
+					{/if}
+				</div>
 			{/if}
 			<!-- A textarea cannot style part of its text, so a mirror behind it
 			     draws the draft with mention pills; the textarea's own glyphs
@@ -700,7 +843,7 @@
 			<div class="mirror" aria-hidden="true" bind:this={mirrorEl}>{@html composerMirror(draft)}</div>
 			<textarea
 				bind:this={composerEl}
-				placeholder={isExchange ? "Write a message… (@ to tag an agent)" : "Write a comment… (@ to tag an agent)"}
+				placeholder={isExchange ? "Write a message… (@ agent, ! object)" : "Write a comment… (@ agent, ! object)"}
 				bind:value={draft}
 				rows={1}
 				disabled={sending}
@@ -712,9 +855,16 @@
 					updateMention();
 				}}
 				onclick={updateMention}
-				onkeyup={(e) => { if (e.key.startsWith("Arrow") && !mention) updateMention(); }}
-				onblur={() => { mention = null; }}
+				onkeyup={(e) => { if (e.key.startsWith("Arrow") && !mention && !objectTag) updateMention(); }}
+				onblur={() => { mention = null; objectTag = null; }}
 				onkeydown={(e) => {
+					if (objectTag && objectMatches.length) {
+						if (e.key === "ArrowDown") { e.preventDefault(); moveObjectTag(1); return; }
+						if (e.key === "ArrowUp") { e.preventDefault(); moveObjectTag(-1); return; }
+						if (e.key === "Enter" || e.key === "Tab") { e.preventDefault(); pickObject(objectMatches[Math.min(objectTagIndex, objectMatches.length - 1)]); return; }
+					}
+					if (objectTag && e.key === "Escape") { e.preventDefault(); objectTag = null; return; }
+					if (objectTag && e.key === "Enter" && !e.shiftKey) { e.preventDefault(); objectTag = null; return; }
 					if (mention && mentionMatches.length) {
 						if (e.key === "ArrowDown") { e.preventDefault(); mentionIndex = (mentionIndex + 1) % mentionMatches.length; return; }
 						if (e.key === "ArrowUp") { e.preventDefault(); mentionIndex = (mentionIndex + mentionMatches.length - 1) % mentionMatches.length; return; }
@@ -1201,6 +1351,38 @@
 		color: var(--muted);
 	}
 	.mention-menu.empty { padding: 10px 12px; }
+	.mention-menu.obj-menu { overflow: hidden; padding: 0; }
+	.obj-search {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		padding: 8px 12px;
+		border-bottom: 1px solid var(--border);
+		color: var(--fg);
+		flex: none;
+	}
+	.obj-search.placeholder { color: var(--muted); }
+	.obj-search svg { width: 14px; height: 14px; flex: none; color: var(--muted); }
+	.obj-search span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+	.obj-list { overflow-y: auto; padding: 4px; min-height: 0; }
+	.obj-empty { padding: 10px 12px; }
+	.obj-menu .m-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0; }
+	.obj-menu .m-where { margin-left: auto; flex: none; }
+	.obj-menu :global(img.mention-ico) { width: 18px; height: 18px; border-radius: 3px; object-fit: cover; }
+	/* A linked object in a sent message: the same pill as a mention, green-tinted so it reads as a thing, not a person. */
+	.text.md :global(a.obj-link) {
+		background: rgba(46, 160, 67, 0.22);
+		color: #b8e6c1;
+		border-radius: 3px;
+		padding: 0 2px;
+		text-decoration: none;
+	}
+	.text.md :global(a.obj-link:hover) { background: rgba(46, 160, 67, 0.36); }
+	.msg.own .text.md :global(a.obj-link) { background: rgba(46, 160, 67, 0.4); color: #eafbee; }
+	.mirror :global(.mention.obj) {
+		background: rgba(46, 160, 67, 0.22);
+		box-shadow: 0 2px 0 0 rgba(46, 160, 67, 0.22), 0 -2px 0 0 rgba(46, 160, 67, 0.22);
+	}
 	.mention-menu button {
 		display: flex;
 		align-items: center;

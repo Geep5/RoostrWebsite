@@ -28,6 +28,7 @@
 	import { objectIcon } from "$lib/icons";
 	import { UNSERVED_TYPES } from "$lib/serving";
 	import { StorageUnavailableError } from "$lib/engine/store";
+	import { markOpened } from "$lib/recent-opened";
 
 	let object = $state<ObjectJSON>();
 	let editor = $state<Editor>();
@@ -82,6 +83,7 @@
 				return;
 			}
 			object = o;
+			markOpened(o.id);
 		}
 	}
 
