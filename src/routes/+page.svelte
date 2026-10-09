@@ -245,10 +245,12 @@
 		flex: 1;
 		min-height: 0;
 		display: grid;
-		grid-template-columns: 1.1fr 1fr;
+		/* The copy column never narrower than Open Roostr and its line side by side. */
+		grid-template-columns: minmax(540px, 1.1fr) 1fr;
 		align-items: center;
 		gap: 40px;
-		padding: clamp(6px, 1.6vh, 24px) 0;
+		/* The bottom is the least room between Open Roostr and the features rule. */
+		padding: clamp(6px, 1.6vh, 24px) 0 clamp(22px, 4.5vh, 48px);
 	}
 	.eyebrow {
 		display: inline-block;
@@ -261,7 +263,9 @@
 	}
 	h1 {
 		font-family: "Archivo Black", sans-serif;
-		font-size: clamp(36px, min(6.8vw, 9vh), 96px);
+		/* 21.6vh - 96px: below ~760px tall the hero loses room faster than 9vh
+		   shrinks, so the headline gives way before Open Roostr meets the features. */
+		font-size: clamp(36px, min(6.8vw, 9vh, 21.6vh - 96px), 96px);
 		line-height: 0.98;
 		letter-spacing: -1.5px;
 		text-transform: uppercase;
