@@ -95,12 +95,23 @@
 		if (!object && id && (store.loaded || store.summaries.some((x) => x.id === id))) void loadObject(id);
 	});
 
-	async function refresh() {
-		if (!object) return;
+	async function refresh(): Promise<void> {
+		await refreshUnlessRaced();
+	}
+
+	/** Re-read the object; false when the read raced a newer local edit and was dropped. */
+	async function refreshUnlessRaced(): Promise<boolean> {
+		if (!object) return true;
+		const mark = editor?.writeMark();
 		const fresh = await fetchObject(object.id);
+		// Typed or structurally edited while the read was in flight (Enter, a
+		// move): the read predates that edit, and applying it would roll the
+		// block back - and take the caret with it.
+		if (editor && editor.writeMark() !== mark) return false;
 		// Same object: patch in place so unchanged blocks keep their identity
 		// (and the focused one its caret). A navigation raced it: leave it be.
 		if (object && fresh.id === object.id) reconcileObject(object, fresh);
+		return true;
 	}
 
 	/**
@@ -124,7 +135,7 @@
 				do {
 					refreshAgain = false;
 					await editor?.settled();
-					await refresh();
+					if (!(await refreshUnlessRaced())) refreshAgain = true;
 					void table?.reload();
 				} while (refreshAgain);
 			} finally {

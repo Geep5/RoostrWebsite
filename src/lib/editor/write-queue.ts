@@ -12,17 +12,22 @@ export interface WriteQueue {
 	run<T>(work: () => Promise<T>): Promise<T>;
 	/** Resolves once every write issued so far has settled. */
 	idle(): Promise<void>;
+	/** How many writes have been issued: a read started before a later write may be stale. */
+	issued(): number;
 }
 
 export function createWriteQueue(): WriteQueue {
 	let tail: Promise<unknown> = Promise.resolve();
+	let count = 0;
 	return {
 		run<T>(work: () => Promise<T>): Promise<T> {
+			count++;
 			const next = tail.then(work);
 			tail = next.catch(() => {});
 			return next;
 		},
 		idle: () => tail.then(() => {}),
+		issued: () => count,
 	};
 }
 

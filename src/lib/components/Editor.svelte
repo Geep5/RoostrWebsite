@@ -628,6 +628,11 @@
 		}
 	}
 
+	/** Writes this editor has issued so far (with unsaved typing counting as one more): a server read taken before this changes is stale. */
+	export function writeMark(): number {
+		return writeQueue.issued() + (dirty.size > 0 ? 1 : 0);
+	}
+
 	/**
 	 * Enter in the title: the caret goes to the top of the body - into the
 	 * first line when it is an empty text line, else into a fresh empty line
