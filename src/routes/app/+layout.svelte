@@ -676,6 +676,20 @@
 	// ── Roostr Web: key gate + relay replica lifecycle ──────────────
 	let authed = $state(false);
 	let sync = $state<SyncStatus>({ phase: "idle", imported: 0, bootstrapped: false });
+	/**
+	 * The sync dot's words. Unsent changes come with what sync is saying
+	 * right now - an error, "Reconnecting… <relay>: <why>" - so a stuck
+	 * queue explains itself instead of only counting.
+	 */
+	function syncTip(s: SyncStatus): string {
+		const pending = s.pending ? `${s.pending} change(s) not yet published` : "";
+		const state =
+			s.phase === "error" ? `Error: ${s.detail ?? "sync stopped"}`
+			: s.phase === "live" ? (s.detail ?? (pending ? "" : `Synced · ${s.imported} changes`))
+			: s.phase === "backfill" ? (s.detail ?? "Syncing…")
+			: "Not syncing";
+		return [pending, state].filter(Boolean).join(" · ");
+	}
 	let disconnect: (() => void) | undefined;
 	let bootError = $state("");
 	let booting = $state(false);
@@ -804,13 +818,7 @@
 					disabled={!isIOSBackend}
 					aria-label="Sync now"
 					onclick={() => { if (backend instanceof IOSBackend) void backend.syncNow(); }}
-					data-tip={sync.pending
-						? `${sync.pending} change(s) not yet published`
-						: sync.phase === "live"
-							? sync.detail ?? `Synced · ${sync.imported} changes`
-							: sync.phase === "backfill"
-								? sync.detail ?? "Syncing…"
-								: "Not syncing"}
+					data-tip={syncTip(sync)}
 				><span class="m-sync-dot"></span></button>
 				<div class="more-wrap">
 					<button class="m-btn" data-tip="More" onclick={() => { showMore = !showMore; showCollections = false; }}>⋯</button>
@@ -835,13 +843,7 @@
 					disabled={!isIOSBackend}
 					aria-label="Sync now"
 					onclick={() => { if (backend instanceof IOSBackend) void backend.syncNow(); }}
-					data-tip={sync.pending
-						? `${sync.pending} change(s) not yet published`
-						: sync.phase === "live"
-							? sync.detail ?? `Synced · ${sync.imported} changes`
-							: sync.phase === "backfill"
-								? sync.detail ?? "Syncing…"
-								: "Not syncing"}
+					data-tip={syncTip(sync)}
 				><span class="m-sync-dot"></span></button>
 				<div class="more-wrap">
 					<button class="m-btn" data-tip="More" onclick={() => { showMore = !showMore; showCollections = false; }}>⋯</button>
