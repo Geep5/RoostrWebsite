@@ -171,7 +171,7 @@
 		const el = composerEl;
 		if (!el) return;
 		// A tag deleted from the text untags immediately, so the menu offers
-		// that agent again (the seeded @Name must not pin it out of the list).
+		// that agent again.
 		tagged = tagged.filter((option) => draft.includes(`@${option.agentName}`));
 		taggedObjects = taggedObjects.filter((t) => draft.includes(`!${t.name}`));
 		const caret = el.selectionStart ?? 0;
@@ -216,28 +216,6 @@
 			el.focus();
 			const pos = at.start + label.length + 1;
 			el.setSelectionRange(pos, pos);
-			el.style.height = "auto";
-			el.style.height = `${el.scrollHeight}px`;
-		});
-	}
-
-	/** An object with an agent opens its composer already addressed: `@Name `
-	 *  per agent its Agent property names (an agent's own page: itself), tagged,
-	 *  caret after - you just type. A space still offers all its agents in the
-	 *  @ menu, but only the ones set on it are pre-tagged. Only ever fills an
-	 *  empty draft, so a message in progress is never touched. */
-	async function seedMentions(): Promise<void> {
-		if (draft !== "" || readOnly) return;
-		await ensureTagOptions();
-		const assigned = new Set(object.typeKey === "agent" ? [object.id, ...guestAgents(object.fields)] : guestAgents(object.fields));
-		const seeds = (tagOptions ?? []).filter((option) => assigned.has(option.endpoint.agentId));
-		if (draft !== "" || !seeds.length) return;
-		tagged = seeds;
-		draft = seeds.map((option) => `@${option.agentName} `).join("");
-		requestAnimationFrame(() => {
-			const el = composerEl;
-			if (!el) return;
-			el.setSelectionRange(draft.length, draft.length);
 			el.style.height = "auto";
 			el.style.height = `${el.scrollHeight}px`;
 		});
@@ -364,7 +342,6 @@
 	}
 	onMount(() => {
 		refreshPairing();
-		void seedMentions();
 		return onPairingChange(refreshPairing);
 	});
 	interface AgentPresence {
@@ -576,7 +553,6 @@
 				tagged = [];
 				taggedObjects = [];
 				await onchanged();
-				void seedMentions();
 				if (sent.threadId !== threadId) onexchange?.(sent.threadId);
 				return;
 			}
@@ -589,7 +565,6 @@
 			tagged = [];
 			taggedObjects = [];
 			await onchanged();
-			void seedMentions();
 		} catch (err) {
 			sendError = err instanceof Error ? err.message : String(err);
 		} finally {
