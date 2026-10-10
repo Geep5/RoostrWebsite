@@ -7,7 +7,7 @@
 	import { goto } from "$app/navigation";
 	import { chat, mailbox, settings } from "$lib/api";
 	import { store } from "$lib/data.svelte";
-	import { objectIcon } from "$lib/icons";
+	import { isImageIcon, objectIcon } from "$lib/icons";
 	import { loadDraft, saveDraft } from "$lib/drafts";
 	import EmojiPicker from "./EmojiPicker.svelte";
 	import { renderMarkdown } from "$lib/markdown";
@@ -465,7 +465,7 @@
 	});
 	/** An icon as pill HTML: its image or its emoji. */
 	function iconGlyph(icon: string): string {
-		return /^https?:\/\//.test(icon) ? `<img class="mention-ico" src="${escapeHtml(icon).replace(/"/g, "&quot;")}" alt="">` : `<span class="mention-ico">${escapeHtml(icon)}</span>`;
+		return isImageIcon(icon) ? `<img class="mention-ico" src="${escapeHtml(icon).replace(/"/g, "&quot;")}" alt="">` : `<span class="mention-ico">${escapeHtml(icon)}</span>`;
 	}
 	/** The agent's icon as pill HTML: its image, its emoji, or the 🤖 default. */
 	function mentionGlyph(name: string): string {

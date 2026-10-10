@@ -15,7 +15,7 @@
 	}: {
 		onpick: (emoji: string) => void;
 		onclose: () => void;
-		/** Anytype's Upload tab analog: accept an image URL as the icon. */
+		/** Anytype's Upload tab analog: accept an image - a pasted URL or an uploaded file - as the icon. */
 		withImage?: boolean;
 	} = $props();
 
@@ -60,6 +60,65 @@
 	/** A pasted URL becomes an image icon when the caller allows it. */
 	const isUrlQuery = $derived(withImage && /^https?:\/\/\S+$/.test(query.trim()));
 
+	// ── Upload ─────────────────────────────────────────────────────
+	// The icon is stored as a data URL in the object itself, so it syncs and
+	// shows on every device at once (a File object would need its holder
+	// online). Raster images are scaled to fit 256 px; an SVG is kept as
+	// drawn. Both are capped so an icon can't bloat every sync of the object.
+	const ICON_PX = 256;
+	const MAX_ICON_BYTES = 200_000;
+	let fileEl = $state<HTMLInputElement>();
+	let uploadError = $state("");
+	let uploading = $state(false);
+
+	function readAs(file: File, how: "text" | "url"): Promise<string> {
+		return new Promise((resolve, reject) => {
+			const r = new FileReader();
+			r.onload = () => resolve(String(r.result));
+			r.onerror = () => reject(r.error ?? new Error("could not read the file"));
+			if (how === "text") r.readAsText(file);
+			else r.readAsDataURL(file);
+		});
+	}
+
+	async function iconFromFile(file: File): Promise<string> {
+		if (file.type === "image/svg+xml" || file.name.toLowerCase().endsWith(".svg")) {
+			const svg = await readAs(file, "text");
+			if (!/<svg[\s>]/i.test(svg)) throw new Error("that file isn't an SVG image");
+			return `data:image/svg+xml;base64,${btoa(unescape(encodeURIComponent(svg)))}`;
+		}
+		if (!file.type.startsWith("image/")) throw new Error("choose an image file (PNG, JPG, WebP, GIF or SVG)");
+		const img = new Image();
+		img.src = await readAs(file, "url");
+		await img.decode();
+		const scale = Math.min(1, ICON_PX / Math.max(img.naturalWidth, img.naturalHeight));
+		const canvas = document.createElement("canvas");
+		canvas.width = Math.max(1, Math.round(img.naturalWidth * scale));
+		canvas.height = Math.max(1, Math.round(img.naturalHeight * scale));
+		canvas.getContext("2d")!.drawImage(img, 0, 0, canvas.width, canvas.height);
+		// WebP where the browser encodes it (smaller), PNG otherwise; both keep transparency.
+		const webp = canvas.toDataURL("image/webp", 0.9);
+		return webp.startsWith("data:image/webp") ? webp : canvas.toDataURL("image/png");
+	}
+
+	async function onFile(e: Event) {
+		const input = e.currentTarget as HTMLInputElement;
+		const file = input.files?.[0];
+		input.value = "";
+		if (!file) return;
+		uploadError = "";
+		uploading = true;
+		try {
+			const icon = await iconFromFile(file);
+			if (icon.length > MAX_ICON_BYTES) throw new Error(`that image is too big for an icon (${Math.round(icon.length / 1000)} KB after resizing; up to ${MAX_ICON_BYTES / 1000} KB) - try a simpler image`);
+			onpick(icon);
+		} catch (err) {
+			uploadError = err instanceof Error ? err.message : String(err);
+		} finally {
+			uploading = false;
+		}
+	}
+
 	/** Flat matches while searching; null means "show the standard groups". */
 	const matches = $derived.by(() => {
 		const q = query.trim().toLowerCase();
@@ -89,8 +148,13 @@
 	<div class="top">
 		<input bind:this={inputEl} bind:value={query} placeholder={withImage ? "Search, paste an emoji or an image URL…" : "Search or paste an emoji…"} />
 		<button title="Random" onclick={random}>🎲</button>
+		{#if withImage}
+			<button title="Upload an image (PNG, JPG, WebP, GIF or SVG)" disabled={uploading} onclick={() => fileEl?.click()}>⬆️</button>
+			<input bind:this={fileEl} type="file" accept="image/*,.svg" hidden onchange={onFile} />
+		{/if}
 		<button title="Remove icon" onclick={() => onpick("")}>×</button>
 	</div>
+	{#if uploadError}<div class="upload-error" role="alert">{uploadError}</div>{/if}
 	<div class="grid">
 		{#if isUrlQuery}
 			<button class="cell img-cell" title="Use image" onclick={() => onpick(query.trim())}>
@@ -129,6 +193,12 @@
 		border-radius: 12px;
 		box-shadow: 0 16px 48px rgb(0 0 0 / 0.5);
 		overflow: hidden;
+	}
+	.upload-error {
+		padding: 6px 10px;
+		font-size: 12px;
+		color: var(--error, #f87171);
+		border-bottom: 1px solid var(--border);
 	}
 	.top {
 		display: flex;

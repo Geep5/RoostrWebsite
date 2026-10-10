@@ -25,7 +25,7 @@
 	import TypePanel from "$lib/components/TypePanel.svelte";
 	import PropertyPanel from "$lib/components/PropertyPanel.svelte";
 	import EmojiPicker from "$lib/components/EmojiPicker.svelte";
-	import { objectIcon } from "$lib/icons";
+	import { isImageIcon, objectIcon } from "$lib/icons";
 	import { UNSERVED_TYPES } from "$lib/serving";
 	import { StorageUnavailableError } from "$lib/engine/store";
 	import { markOpened } from "$lib/recent-opened";
@@ -183,7 +183,7 @@
 	/** Anytype setIcon semantics: emoji and image are mutually exclusive. */
 	async function setEmoji(value: string) {
 		if (!object) return;
-		const isImage = /^https?:\/\//.test(value);
+		const isImage = isImageIcon(value);
 		await note.setField(object.id, isImage ? "iconImage" : "iconEmoji", { stringValue: value });
 		await note.deleteField(object.id, isImage ? "iconEmoji" : "iconImage").catch(() => {});
 		await refresh();

@@ -32,3 +32,8 @@ export function typeIcon(typeKey: string): string {
 export function objectIcon(emoji: string | undefined, typeKey: string): string {
 	return emoji || typeIcon(typeKey) || "•";
 }
+
+/** An icon that is an image - a web address or an uploaded image (a data URL) - rather than an emoji. */
+export function isImageIcon(icon: string | undefined | null): icon is string {
+	return !!icon && /^(https?:\/\/|data:image\/)/.test(icon);
+}

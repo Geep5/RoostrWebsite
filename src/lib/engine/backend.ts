@@ -440,7 +440,8 @@ class WebBackend {
 			out.push({
 				id: o.id,
 				name: fstr(o.fields, "name"),
-				icon: fstr(o.fields, "iconEmoji"),
+				// An image icon (link or upload) wins over an emoji, as the daemon does.
+				icon: fstr(o.fields, "iconImage") || fstr(o.fields, "iconEmoji"),
 				pinnedIds: (o.fields["pinnedIds"]?.valuesValue?.items ?? []).map((i) => i.stringValue ?? "").filter(Boolean),
 				members,
 				keyId: o.fields["keyId"]?.intValue ?? 1,

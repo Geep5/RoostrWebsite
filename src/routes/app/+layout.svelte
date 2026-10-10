@@ -4,7 +4,7 @@
 	import { page } from "$app/state";
 	import { activeSpace } from "$lib/space.svelte";
 	import { space as spaceApi, note, fetchObject, fetchQuery, fetchAllQuery } from "$lib/api";
-	import { objectIcon } from "$lib/icons";
+	import { isImageIcon, objectIcon } from "$lib/icons";
 	import { layoutOf, discussionUI, store, refreshAll, connectEvents } from "$lib/data.svelte";
 	import { tabs, HOME_PATH } from "$lib/tabs.svelte";
 	import CheckboxIcon from "$lib/components/CheckboxIcon.svelte";
@@ -786,7 +786,7 @@
 			<span class="m-obj">
 				{#if headerPath.icon === "graph"}
 					<span class="path-icon"><GraphIcon /></span>
-				{:else if headerPath.icon.startsWith("http")}
+				{:else if isImageIcon(headerPath.icon)}
 					<img class="path-img" src={headerPath.icon} alt="" />
 				{:else}
 					<span class="path-icon">{headerPath.icon}</span>
@@ -950,7 +950,7 @@
 						}}
 					>
 						<span class="m-card-icon">
-							{#if c.icon?.startsWith("http")}
+							{#if isImageIcon(c.icon)}
 								<img class="m-card-img" src={c.icon} alt="" />
 							{:else}
 								{c.icon || c.name.slice(0, 1).toUpperCase() || "?"}
@@ -978,7 +978,7 @@
 			</div>
 			<div class="m-ch-head">
 				<span class="m-ch-icon">
-					{#if current.icon?.startsWith("http")}
+					{#if isImageIcon(current.icon)}
 						<img class="m-ch-img" src={current.icon} alt="" />
 					{:else}
 						{current.icon || current.name.slice(0, 1).toUpperCase() || "?"}
@@ -1210,7 +1210,7 @@
 				onclick={() => selectSpace(c.id)}
 			>
 				<span class="space-ico">
-					{#if c.icon?.startsWith("http")}
+					{#if isImageIcon(c.icon)}
 						<img class="rail-img" src={c.icon} alt={c.name} />
 					{:else}
 						{c.icon || c.name.slice(0, 1).toUpperCase() || "?"}
@@ -1247,7 +1247,7 @@
 		{#if current}
 			<div class="space-head-row" class:menu-open={showCreate}>
 				<a class="space-head" href="/app/object/{current.id}" title="Space settings">
-					<span class="space-head-ico">{#if current.icon?.startsWith("http")}<img class="rail-img" src={current.icon} alt="" />{:else}{current.icon || "◍"}{/if}</span>
+					<span class="space-head-ico">{#if isImageIcon(current.icon)}<img class="rail-img" src={current.icon} alt="" />{:else}{current.icon || "◍"}{/if}</span>
 					<span class="space-name">{current.name}</span>
 				</a>
 				<button class="head-search" data-tip="Search (⌘K)" aria-label="Search" onclick={() => (showSearch = true)}>
@@ -1410,7 +1410,7 @@
 			<button class="path" data-tip="Search (⌘K)" onclick={() => (showSearch = true)}>
 				{#if headerPath.icon === "graph"}
 					<span class="path-icon"><GraphIcon /></span>
-				{:else if headerPath.icon.startsWith("http")}
+				{:else if isImageIcon(headerPath.icon)}
 					<img class="path-img" src={headerPath.icon} alt="" />
 				{:else}
 					<span class="path-icon">{headerPath.icon}</span>
