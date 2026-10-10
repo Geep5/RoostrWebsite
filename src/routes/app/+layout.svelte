@@ -2485,6 +2485,20 @@
 			opacity: 1;
 		}
 	}
+	/* The sync dot sits near the right edge and its words can be long (a
+	   count plus an error): anchor its tip to the dot's right edge and let it
+	   wrap, so it grows leftwards and never runs off the screen. */
+	.m-sync[data-tip]:hover::after {
+		left: auto;
+		right: 0;
+		transform: none;
+		white-space: normal;
+		overflow-wrap: anywhere;
+		width: max-content;
+		max-width: min(300px, calc(100vw - 140px));
+		text-align: left;
+		line-height: 1.35;
+	}
 	.hbtn:hover {
 		background: var(--hover);
 		color: var(--fg);
