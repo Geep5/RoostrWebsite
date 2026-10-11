@@ -1,6 +1,7 @@
 import type { ObjectJSON } from "$lib/types";
 import type { ObjectHistory, QueryBody, QueryResultRowJSON } from "./contracts";
 import { coreCall, coreCallWithBlob, coreGeneration } from "./core";
+import { packCoreValueMaps } from "./core-values";
 
 export type QueryRow = QueryResultRowJSON & { name: string; snippet?: string };
 
@@ -39,7 +40,7 @@ function pushAndQuery(
 	upserts: ObjectJSON[],
 	removed: string[],
 	reset: boolean,
-	body: QueryBody,
+	body: QueryBody | undefined,
 ): { total: number; records: QueryRow[] } {
 	// One call when it fits - the common case, a handful of changed objects.
 	const batches: ObjectJSON[][] = [];
@@ -59,7 +60,9 @@ function pushAndQuery(
 	let result: { total: number; records: QueryRow[] } = { total: 0, records: [] };
 	for (const [index, part] of batches.entries()) {
 		result = coreCall<{ total: number; records: QueryRow[] }>("query", {
-			upserts: part,
+			// Maps as ordered pairs, as the corpus replays them: the mutation
+			// planner reads these states, and its plans keep their map order.
+			upserts: part.map(packCoreValueMaps),
 			// Removals and the reset belong to the first call only, or a later
 			// batch would wipe the objects the earlier ones just loaded.
 			removed: index === 0 ? removed : [],
@@ -74,6 +77,24 @@ function pushAndQuery(
 export function runQuery(
 	states: Iterable<ObjectJSON>,
 	body: QueryBody,
+	delta?: QueryDelta,
+): { total: number; records: QueryRow[] } {
+	return pushStates(states, body, delta);
+}
+
+/**
+ * Bring the core's cache up to date without running a query: the mutation
+ * planner reads states from it (core mutate.odin mutation_states), so a
+ * mutation flushes the host's delta first, and a request without a body
+ * costs the core no scan of the vault.
+ */
+export function syncQueryCache(states: Iterable<ObjectJSON>, delta?: QueryDelta): void {
+	pushStates(states, undefined, delta);
+}
+
+function pushStates(
+	states: Iterable<ObjectJSON>,
+	body: QueryBody | undefined,
 	delta?: QueryDelta,
 ): { total: number; records: QueryRow[] } {
 	const currentGeneration = coreGeneration();

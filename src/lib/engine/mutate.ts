@@ -1,9 +1,10 @@
 /** Platform orchestration for the shared Odin mutation planner. */
 import type { ChangeJSON } from "./contracts";
-import type { ValueJSON, BlockJSON, ObjectJSON } from "$lib/types";
+import type { ObjectJSON } from "$lib/types";
 import { spaceKeyAll, spaceKeyGet, spaceKeyRotate, spaceKeyEnsure, spaceKeyRemove, spaceOwner } from "./spacekeys";
 import { coreCall, initCore } from "./core";
 import { packCoreValueMaps, unpackCoreValueMaps } from "./core-values";
+import { needsColdLoad } from "./query";
 import { objectHeads, type StateInputs } from "./replay";
 
 export interface MutateCtx {
@@ -17,16 +18,25 @@ export interface MutateCtx {
 	ownerSignal: boolean;
 	/** Everything the DAG holds for one object: stored changes, its bases, its legacy checkpoint, and this device's unpublished ids. */
 	dagFor(objectId: string): Promise<StateInputs>;
-	getObject(objectId: string): Promise<{ blocks: BlockJSON[]; fields?: Record<string, ValueJSON>; typeKey?: string } | null>;
-	instancesOf(typeKey: string, channel: string): Promise<string[]>;
-	objectsWithField(key: string, channel: string): Promise<string[]>;
-	/** Complete current state, including tombstones, for cascades and defaults. */
-	allObjects(): Promise<ObjectJSON[]>;
+	/** Bring the core's query cache up to date with every committed and
+	 * imported change: the planner reads states from it, not the request. */
+	syncCache(): Promise<void>;
+	/** This replica's current states of `ids`; ids it does not hold are left out. */
+	statesOf(ids: string[]): Promise<ObjectJSON[]>;
 	/** Encode, address, durably persist, and publish. */
 	commit(change: ChangeJSON): Promise<string>;
 }
 
-interface MutationPlan {
+export interface MutationRequest {
+	action: string;
+	params: Record<string, unknown>;
+	timestamp: number;
+	author: string;
+	id_seed: string;
+	key_id: number;
+}
+
+export interface MutationPlan {
 	changes: ChangeJSON[];
 	result: Record<string, unknown>;
 	vanish_ids: string[];
@@ -34,27 +44,31 @@ interface MutationPlan {
 }
 
 /**
- * The states a mutation plans over. The planner reads blocks only of the
- * objects its params name (targets, senders, recipients); every other state
- * goes without its blocks, which are most of a vault's bytes and would
- * overrun the core's per-request arena on a large one. Image icons
- * (`iconImage` data URLs, up to 16 KB each) go too: the planner never reads
- * them, and thousands of them crashed the core on an imported vault.
+ * Plan over the core's query cache. The request carries no states: an object
+ * its params name that the cache lacks comes back `missing`, and the retry
+ * carries this replica's states of those ids as overlay and names the rest
+ * `absent`, so nothing is ever planned as if a held object did not exist.
+ *
+ * `syncCache` runs right before each planner call, with no await between:
+ * a core trap in another caller's request in the gap empties the cache
+ * (core.ts generation), and a plan over an empty cache would scan nothing.
  */
-export function mutationObjects(objects: ObjectJSON[], params: Record<string, unknown>): ObjectJSON[] {
-	const named = new Set<string>();
-	const collect = (value: unknown): void => {
-		if (typeof value === "string") named.add(value);
-		else if (Array.isArray(value)) value.forEach(collect);
-		else if (value && typeof value === "object") Object.values(value).forEach(collect);
-	};
-	collect(params);
-	return objects.map((object) => {
-		if (named.has(object.id)) return object;
-		if (!object.blocks?.length && !("iconImage" in object.fields)) return object;
-		const { iconImage: _icon, ...fields } = object.fields;
-		return { ...object, fields, blocks: [] };
-	});
+export async function planMutation(
+	request: MutationRequest,
+	syncCache: () => Promise<void>,
+	statesOf: (ids: string[]) => Promise<ObjectJSON[]>,
+): Promise<MutationPlan> {
+	const call = (payload: Record<string, unknown>) =>
+		unpackCoreValueMaps(coreCall<MutationPlan | { missing: string[] }>("mutation", packCoreValueMaps(payload))) as MutationPlan | { missing: string[] };
+	do await syncCache(); while (needsColdLoad());
+	const first = call({ ...request });
+	if (!("missing" in first)) return first;
+	const overlay = await statesOf(first.missing);
+	const held = new Set(overlay.map((state) => state.id));
+	do await syncCache(); while (needsColdLoad());
+	const retried = call({ ...request, overlay, absent: first.missing.filter((id) => !held.has(id)) });
+	if ("missing" in retried) throw new Error(`Mutation needs objects this replica cannot supply: ${retried.missing.join(", ")}`);
+	return retried;
 }
 
 export async function runMutation(
@@ -76,18 +90,16 @@ export async function runMutation(
 			throw new Error("Only the space's owner can delete it for everyone: leave it instead.");
 		}
 	}
-	const objects = mutationObjects(await ctx.allObjects(), params);
 	const rotating = action === "channel_member_remove" || action === "channel_key_rotate";
 	const keyId = rotating ? (spaceKeyGet(channelId)?.keyId ?? 0) + 1 : 0;
-	const plan = unpackCoreValueMaps(coreCall<MutationPlan>("mutation", packCoreValueMaps({
+	const plan = await planMutation({
 		action,
 		params,
-		objects,
 		timestamp: Date.now(),
 		author: ctx.author,
 		id_seed: crypto.randomUUID(),
 		key_id: keyId,
-	}))) as MutationPlan;
+	}, ctx.syncCache, ctx.statesOf);
 
 	// Key material stays in the host; invalid domain requests never rotate keys.
 	if (rotating) spaceKeyRotate(channelId);

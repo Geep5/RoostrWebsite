@@ -17,7 +17,7 @@ const toHex = (b: Uint8Array): string => {
 	return out;
 };
 import { replayObject } from "./replay";
-import { loadCorpus, needsColdLoad, runQuery } from "./query";
+import { loadCorpus, needsColdLoad, runQuery, syncQueryCache } from "./query";
 import { ChangeStore, destroyDatabase, StorageUnavailableError } from "./store";
 import { RelaySync, DEFAULT_RELAYS, VANISH_LOG_ID, npubToHex, type SharedSpaceInfo } from "./sync";
 import { spaceKeyAll, spaceOwner } from "./spacekeys";
@@ -517,7 +517,12 @@ class WebBackend {
 		return out.filter((r) => r.key);
 	}
 
-	async fetchQuery(body: QueryBody): Promise<{ total: number; records: never[] }> {
+	/**
+	 * Make the core's query cache this replica's vault: the cold corpus load
+	 * once per core generation, then only `queryUpserted`/`queryRemoved`.
+	 * Queries read the cache, and so does the mutation planner.
+	 */
+	private async primeQueryCache(): Promise<void> {
 		await this.ensure();
 		if (needsColdLoad()) {
 			// Boot fires five queries at once (refreshAll's Promise.all):
@@ -558,6 +563,10 @@ class WebBackend {
 			});
 			await this.coldLoad;
 		}
+	}
+
+	async fetchQuery(body: QueryBody): Promise<{ total: number; records: never[] }> {
+		await this.primeQueryCache();
 		const delta = { upserted: [...this.queryUpserted], removed: [...this.queryRemoved] };
 		const result = runQuery(this.states.values(), body, delta) as { total: number; records: never[] };
 		// Cleared only after the push succeeds: a thrown core call must leave
@@ -565,6 +574,14 @@ class WebBackend {
 		this.queryUpserted.clear();
 		this.queryRemoved.clear();
 		return result;
+	}
+
+	/** Every committed and imported change in the cache before a plan reads it. */
+	private async flushQueryCache(): Promise<void> {
+		await this.primeQueryCache();
+		syncQueryCache(this.states.values(), { upserted: [...this.queryUpserted], removed: [...this.queryRemoved] });
+		this.queryUpserted.clear();
+		this.queryRemoved.clear();
 	}
 
 	/** `ownerSignal`: applying a space owner's kind-5 deletion, the one path
@@ -580,37 +597,14 @@ class WebBackend {
 		try {
 		const out = await runMutation(
 			{
-				allObjects: async () => {
-					await this.ensure();
-					return [...this.states.values()];
-				},
 				author: this.author,
 				pk: this.pk,
 				ownerSignal,
 				dagFor: async (id) => ({ ...(await this.store.objectInputs(id)), pending: await this.store.pendingChangeIds() }),
-				getObject: async (id) => {
+				syncCache: () => this.flushQueryCache(),
+				statesOf: async (ids) => {
 					await this.ensure();
-					return this.states.get(id) ?? null;
-				},
-				instancesOf: async (typeKey, channel) => {
-					await this.ensure();
-					const out: string[] = [];
-					for (const [id, state] of this.states) {
-						if (state.deleted || state.typeKey !== typeKey) continue;
-						if ((state.fields["channel"]?.stringValue ?? "") !== channel) continue;
-						out.push(id);
-					}
-					return out;
-				},
-				objectsWithField: async (key, channel) => {
-					await this.ensure();
-					const out: string[] = [];
-					for (const [id, state] of this.states) {
-						if (state.deleted || !(key in state.fields)) continue;
-						if ((state.fields["channel"]?.stringValue ?? "") !== channel) continue;
-						out.push(id);
-					}
-					return out;
+					return ids.flatMap((id) => this.states.get(id) ?? []);
 				},
 				commit: async (change: ChangeJSON) => {
 					change.id = changeId(change);
