@@ -72,3 +72,21 @@ test("a huge unrelated object neither changes nor breaks a mutation's plan", () 
 	expect(withScope.changes.length).toBeGreaterThan(0);
 	expect(withScope).toEqual(reference);
 });
+
+test("thousands of image icons on unrelated objects neither change nor break a mutation's plan", () => {
+	const target = note("Target", "icon-target");
+	const other = note("Other", "icon-other");
+	// ~2,000 imported bookmarks with inline icons: what crashed the core after the Anytype import.
+	const icon = { stringValue: `data:image/png;base64,${"A".repeat(16_000)}` };
+	const many: ObjectJSON[] = Array.from({ length: 2_000 }, (_, i) => ({ ...other, id: `icon-${i}`, fields: { ...other.fields, iconImage: icon } }));
+	const named: ObjectJSON = { ...target, fields: { ...target.fields, iconImage: icon } };
+
+	const textBlock = target.blocks.find((block) => block.content && "text" in block.content)!;
+	const params = { object_id: target.id, block: { content: { text: { text: "second" } } }, target_id: textBlock.id, position: 2 };
+	const scoped = mutationObjects([named, ...many], params);
+	expect(JSON.stringify(scoped).length).toBeLessThan(2_000_000);
+	expect(scoped[0]).toBe(named);
+	expect(scoped.slice(1).every((o) => !("iconImage" in o.fields))).toBe(true);
+
+	expect(plan("block_add", params, scoped, "seed")).toEqual(plan("block_add", params, [named], "seed"));
+});

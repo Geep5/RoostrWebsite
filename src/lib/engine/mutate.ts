@@ -37,7 +37,9 @@ interface MutationPlan {
  * The states a mutation plans over. The planner reads blocks only of the
  * objects its params name (targets, senders, recipients); every other state
  * goes without its blocks, which are most of a vault's bytes and would
- * overrun the core's per-request arena on a large one.
+ * overrun the core's per-request arena on a large one. Image icons
+ * (`iconImage` data URLs, up to 16 KB each) go too: the planner never reads
+ * them, and thousands of them crashed the core on an imported vault.
  */
 export function mutationObjects(objects: ObjectJSON[], params: Record<string, unknown>): ObjectJSON[] {
 	const named = new Set<string>();
@@ -47,7 +49,12 @@ export function mutationObjects(objects: ObjectJSON[], params: Record<string, un
 		else if (value && typeof value === "object") Object.values(value).forEach(collect);
 	};
 	collect(params);
-	return objects.map((object) => (named.has(object.id) || !object.blocks ? object : { ...object, blocks: [] }));
+	return objects.map((object) => {
+		if (named.has(object.id)) return object;
+		if (!object.blocks?.length && !("iconImage" in object.fields)) return object;
+		const { iconImage: _icon, ...fields } = object.fields;
+		return { ...object, fields, blocks: [] };
+	});
 }
 
 export async function runMutation(
