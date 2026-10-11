@@ -31,6 +31,8 @@ export interface TypeDef {
 	defaultTemplateId: string;
 	/** Owning space id; "" = bundled/system type, present in every space. */
 	space: string;
+	/** Built into Roostr (`bundled`) or a Roostr default (`system`). */
+	builtin?: boolean;
 }
 
 export const store = $state({
@@ -38,14 +40,19 @@ export const store = $state({
 	summaries: [] as ObjectSummary[],
 	relations: [] as RelationDefJSON[],
 	types: [] as TypeDef[],
+	/** Ids of types and properties that are built in or Roostr defaults - marked in the sidebar, never deletable from the UI. */
+	builtinIds: new Set<string>(),
 	agents: [] as AgentRef[],
 	loaded: false,
 });
 
-async function fetchTypes(): Promise<TypeDef[]> {
-	const records = await fetchAllQuery({ type: "type" });
+/** Type and property definition records, read once for both the type list and the built-in marks. */
+async function fetchDefs(): Promise<{ types: TypeDef[]; builtinIds: Set<string> }> {
+	const records = await fetchAllQuery({ filters: [{ key: "typeKey", condition: "in", value: ["type", "relation"] }] });
 	const s = (f: Record<string, { stringValue?: string }>, k: string) => f[k]?.stringValue ?? "";
-	return records
+	const builtinIds = new Set(records.filter((r) => r.fields["bundled"]?.boolValue || r.fields["system"]?.boolValue).map((r) => r.id));
+	const types = records
+		.filter((r) => r.typeKey === "type")
 		.map((r) => ({
 			id: r.id,
 			key: s(r.fields, "key"),
@@ -54,9 +61,11 @@ async function fetchTypes(): Promise<TypeDef[]> {
 			layout: s(r.fields, "layout") || "page",
 			defaultTemplateId: s(r.fields, "default_template_id"),
 			space: s(r.fields, "channel"),
+			builtin: builtinIds.has(r.id),
 		}))
 		.filter((t) => t.key)
 		.sort((a, b) => a.name.localeCompare(b.name));
+	return { types, builtinIds };
 }
 
 async function fetchAgents(): Promise<AgentRef[]> {
@@ -70,17 +79,18 @@ async function fetchAgents(): Promise<AgentRef[]> {
 }
 
 export async function refreshAll(): Promise<void> {
-	const [channels, summaries, relations, types, agents] = await Promise.all([
+	const [channels, summaries, relations, defs, agents] = await Promise.all([
 		fetchChannels(),
 		fetchObjects(),
 		fetchRelations(),
-		fetchTypes(),
+		fetchDefs(),
 		fetchAgents(),
 	]);
 	store.channels = channels;
 	store.summaries = summaries;
 	store.relations = relations;
-	store.types = types;
+	store.types = defs.types;
+	store.builtinIds = defs.builtinIds;
 	store.agents = agents;
 	store.loaded = true;
 }

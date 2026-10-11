@@ -1070,7 +1070,7 @@
 						<div class="m-section-body">
 							{#each sidebarTypes as t (t.id)}
 								<a class="m-row" href="/app/object/{t.id}">
-									<span class="obj-icon">{t.icon || typeGlyph(t.key)}</span>{t.name || t.key}
+									<span class="obj-icon">{t.icon || typeGlyph(t.key)}</span>{t.name || t.key}{#if t.builtin}<span class="builtin-mark" title="Roostr default - can't be deleted"><Icon name="lock" size={11} /></span>{/if}
 								</a>
 							{/each}
 						</div>
@@ -1093,7 +1093,7 @@
 						<div class="m-section-body">
 							{#each sidebarProps as r (r.id)}
 								<a class="m-row" href="/app/object/{r.id}">
-									<span class="obj-icon">{r.iconEmoji || formatGlyph(r.format)}</span>{r.name || r.key}
+									<span class="obj-icon">{r.iconEmoji || formatGlyph(r.format)}</span>{r.name || r.key}{#if store.builtinIds.has(r.id)}<span class="builtin-mark" title="Roostr default - can't be deleted"><Icon name="lock" size={11} /></span>{/if}
 								</a>
 							{/each}
 						</div>
@@ -1389,7 +1389,7 @@
 							     THERE (the type page's set view), not in the nav. -->
 							<div class="type-row" class:current={page.url.pathname === `/app/object/${t.id}`}>
 								<a class="item type-link" href="/app/object/{t.id}">
-									<span class="obj-icon">{t.icon || typeGlyph(t.key)}</span>{t.name || t.key}
+									<span class="obj-icon">{t.icon || typeGlyph(t.key)}</span>{t.name || t.key}{#if t.builtin}<span class="builtin-mark" title="Roostr default - can't be deleted"><Icon name="lock" size={11} /></span>{/if}
 								</a>
 							</div>
 						{/each}
@@ -1411,7 +1411,7 @@
 					<div class="section-body">
 						{#each sidebarProps as r (r.id)}
 							<a class="item" class:current={page.url.pathname === `/app/object/${r.id}`} href="/app/object/{r.id}">
-								<span class="obj-icon">{r.iconEmoji || formatGlyph(r.format)}</span>{r.name || r.key}
+								<span class="obj-icon">{r.iconEmoji || formatGlyph(r.format)}</span>{r.name || r.key}{#if store.builtinIds.has(r.id)}<span class="builtin-mark" title="Roostr default - can't be deleted"><Icon name="lock" size={11} /></span>{/if}
 							</a>
 						{/each}
 						{#if sidebarProps.length === 0}
@@ -2602,6 +2602,13 @@
 		height: 1px;
 		background: var(--border);
 		margin: 4px 6px;
+	}
+	.builtin-mark {
+		margin-left: auto;
+		padding-left: 6px;
+		display: inline-flex;
+		color: var(--muted);
+		opacity: 0.55;
 	}
 	.menu-none {
 		display: flex;
