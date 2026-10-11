@@ -313,6 +313,8 @@ const PUBLISH_SPACING_MS = 120;
 const PAGE_SPACING_MS = 400;
 /** Floor for the adaptive page delay: enough to interleave, not enough to stall a cold load. */
 const MIN_PAGE_SPACING_MS = 40;
+/** Progress statuses during a history pass: at most two a second. */
+const PROGRESS_EMIT_MS = 500;
 // Keep full-sized 40k-character encrypted chunks inside the 8 MiB relay budget.
 export const PAGE_LIMIT = 128;
 /** Ids per REQ {ids} fetch after a reconcile: checkpoint parts run ~40k chars, so stay well inside the 8 MiB budget. */
@@ -467,6 +469,13 @@ export class RelaySync implements RelaySyncApi {
 	private queueRunning = false;
 	/** Relays that answered NEG-OPEN with NEG-ERR/NOTICE or silence: walked instead, for this session. */
 	private readonly negentropyUnsupported = new Set<string>();
+	/**
+	 * The history pass in flight: items imported by it (changes, bases,
+	 * checkpoints) and the ids its reconciles said are missing so far
+	 * (approximate - it grows as later streams reconcile; 0 for paged walks).
+	 */
+	private pass: { received: number; expected: number } | null = null;
+	private lastProgressEmit = 0;
 	/** Per relay: the reconcile negotiation in flight, so a pass opens one NEG session at a time. */
 	private readonly negotiations = new Map<string, Promise<unknown>>();
 	/** Ingested parts of chunk groups not yet imported, by `partKey`: recorded as held once the group imports. */
@@ -591,12 +600,20 @@ export class RelaySync implements RelaySyncApi {
 
 	private emitLiveStatus(): void {
 		const live = this.liveUp && this.catchingUp === 0;
+		this.lastProgressEmit = Date.now();
 		this.events.onStatus({
 			phase: live ? "live" : "backfill",
 			imported: this.stats.imported,
 			detail: !this.liveUp ? undefined : live ? this.statusDetail() : "catching up",
 			pending: this.pendingCount,
+			received: this.pass?.received,
+			expected: this.pass && this.pass.expected > 0 ? this.pass.expected : undefined,
 		});
+	}
+
+	/** Progress during a pass: at most one status per PROGRESS_EMIT_MS. */
+	private emitProgress(): void {
+		if (Date.now() - this.lastProgressEmit >= PROGRESS_EMIT_MS) this.emitLiveStatus();
 	}
 
 	/** Owner duty: publish the relay write-allowlist. */
@@ -1009,12 +1026,17 @@ export class RelaySync implements RelaySyncApi {
 	 */
 	private backfill(since: number, resumeUntil?: number): Promise<boolean> {
 		const run = this.backfillChain.then(async () => {
+			this.pass = { received: 0, expected: 0 };
 			try {
-				return await this.walkHistory(since, resumeUntil);
+				const complete = await this.walkHistory(since, resumeUntil);
+				if (!this.stopped) this.emitLiveStatus(); // the pass's final count, unthrottled
+				return complete;
 			} catch (err) {
 				this.recordReplayFault(1);
 				await this.persistCursor();
 				throw err;
+			} finally {
+				this.pass = null;
 			}
 		});
 		this.backfillChain = run.catch(() => false);
@@ -1101,7 +1123,7 @@ export class RelaySync implements RelaySyncApi {
 					return;
 				}
 				await importPage(page);
-				this.emitLiveStatus();
+				this.emitProgress();
 				if (page.length < PAGE_LIMIT) return;
 				const oldest = Math.min(...page.map((e) => e.created_at));
 				if (until !== undefined && oldest >= until) {
@@ -1288,6 +1310,7 @@ export class RelaySync implements RelaySyncApi {
 			const needed = await run;
 			need = needed.filter((id) => !claimed.has(id));
 			for (const id of need) claimed.add(id);
+			if (this.pass) this.pass.expected += need.length;
 		} catch (err) {
 			if (err instanceof NegentropyFallback) return "unsupported";
 			this.events.onStatus({ phase: "backfill", detail: `${relay}: ${String(err).slice(0, 100)}` });
@@ -1313,7 +1336,7 @@ export class RelaySync implements RelaySyncApi {
 			// A needed id the relay doesn't return (deleted meanwhile, or a response cut short) is incomplete: asked again next run.
 			missing += wanted.size;
 			await importPage(page);
-			this.emitLiveStatus();
+			this.emitProgress();
 			if (i + batchSize < need.length) await sleep(Math.min(PAGE_SPACING_MS, Math.max(MIN_PAGE_SPACING_MS, Date.now() - started)));
 		}
 		if (missing > 0) {
@@ -1601,6 +1624,7 @@ export class RelaySync implements RelaySyncApi {
 				held.push(...(item.held ?? []));
 				if (item.partKey) parts.push(item.partKey);
 				touched.push(item.objectId);
+				if (this.pass) this.pass.received++;
 			}
 			// Unauthorized payloads stay unheld: a later reconcile re-judges them against newer state.
 			await this.store.recordRelayEvents(held);

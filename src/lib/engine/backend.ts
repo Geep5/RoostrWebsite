@@ -42,6 +42,10 @@ export interface SyncStatus {
 	detail?: string;
 	/** Changes written locally but not yet published to a relay. */
 	pending?: number;
+	/** Items (changes, bases, checkpoints) imported by the history pass in flight; unset between passes. */
+	received?: number;
+	/** Ids the pass's reconciles said are missing so far (approximate, may grow); unset when unknown. */
+	expected?: number;
 	/** One full history walk has completed on this device. */
 	bootstrapped: boolean;
 }
@@ -96,7 +100,7 @@ class WebBackend {
 			},
 			onStatus: (s) => {
 				void this.store.getBootstrapped().then((b) => {
-					this.status = { phase: s.phase, imported: s.imported ?? this.status.imported, detail: s.detail, pending: s.pending ?? this.status.pending, bootstrapped: b };
+					this.status = { phase: s.phase, imported: s.imported ?? this.status.imported, detail: s.detail, pending: s.pending ?? this.status.pending, received: s.received, expected: s.expected, bootstrapped: b };
 					for (const fn of this.statusListeners) fn(this.status);
 				});
 			},

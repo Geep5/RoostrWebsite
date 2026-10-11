@@ -3,6 +3,7 @@
 	import { goto } from "$app/navigation";
 	import { page } from "$app/state";
 	import { activeSpace } from "$lib/space.svelte";
+	import { syncProgress, syncTip } from "$lib/sync-status";
 	import { space as spaceApi, note, fetchObject, fetchQuery, fetchAllQuery } from "$lib/api";
 	import { deletionBlocker } from "$lib/protected";
 	import { isImageIcon, objectIcon } from "$lib/icons";
@@ -690,20 +691,7 @@
 	// ── Roostr Web: key gate + relay replica lifecycle ──────────────
 	let authed = $state(false);
 	let sync = $state<SyncStatus>({ phase: "idle", imported: 0, bootstrapped: false });
-	/**
-	 * The sync dot's words. Unsent changes come with what sync is saying
-	 * right now - an error, "Reconnecting… <relay>: <why>" - so a stuck
-	 * queue explains itself instead of only counting.
-	 */
-	function syncTip(s: SyncStatus): string {
-		const pending = s.pending ? `${s.pending} change(s) not yet published` : "";
-		const state =
-			s.phase === "error" ? `Error: ${s.detail ?? "sync stopped"}`
-			: s.phase === "live" ? (s.detail ?? (pending ? "" : `Synced · ${s.imported} changes`))
-			: s.phase === "backfill" ? (s.detail ?? "Syncing…")
-			: "Not syncing";
-		return [pending, state].filter(Boolean).join(" · ");
-	}
+	const syncProg = $derived(syncProgress(sync));
 	let disconnect: (() => void) | undefined;
 	let bootError = $state("");
 	let booting = $state(false);
@@ -833,7 +821,10 @@
 					aria-label="Sync now"
 					onclick={() => { if (backend instanceof IOSBackend) void backend.syncNow(); }}
 					data-tip={syncTip(sync)}
-				><span class="m-sync-dot"></span></button>
+					style:--sync-pct={syncProg?.pct !== undefined ? `${syncProg.pct}%` : undefined}
+					class:progress={syncProg?.pct !== undefined}
+					class:indeterminate={!!syncProg && syncProg.pct === undefined}
+				><span class="m-sync-dot"></span>{#if syncProg}<span class="m-sync-label">{syncProg.pct !== undefined ? `${syncProg.pct}%` : syncProg.received.toLocaleString("en-US")}</span>{/if}</button>
 				<div class="more-wrap">
 					<button class="m-btn" data-tip="More" onclick={() => { showMore = !showMore; showCollections = false; }}>⋯</button>
 					{#if showMore}
@@ -862,7 +853,10 @@
 					aria-label="Sync now"
 					onclick={() => { if (backend instanceof IOSBackend) void backend.syncNow(); }}
 					data-tip={syncTip(sync)}
-				><span class="m-sync-dot"></span></button>
+					style:--sync-pct={syncProg?.pct !== undefined ? `${syncProg.pct}%` : undefined}
+					class:progress={syncProg?.pct !== undefined}
+					class:indeterminate={!!syncProg && syncProg.pct === undefined}
+				><span class="m-sync-dot"></span>{#if syncProg}<span class="m-sync-label">{syncProg.pct !== undefined ? `${syncProg.pct}%` : syncProg.received.toLocaleString("en-US")}</span>{/if}</button>
 				<div class="more-wrap">
 					<button class="m-btn" data-tip="More" onclick={() => { showMore = !showMore; showCollections = false; }}>⋯</button>
 					{#if showMore}
@@ -1245,15 +1239,13 @@
 		{/each}
 		<button class="space add" title="New space" onclick={() => void newSpace()}><span class="space-ico">+</span>{#if railWide}<span class="space-label">New space</span>{/if}</button>
 		<div class="rail-spacer"></div>
-		{#if sync.phase !== "live" || (sync.pending ?? 0) > 0}
+		{#if sync.phase !== "live" || (sync.pending ?? 0) > 0 || syncProg}
 			<span
 				class="sync-dot"
 				class:err={sync.phase === "error"}
-				title={sync.pending
-					? `${sync.pending} change(s) not yet published`
-					: sync.phase === "backfill"
-						? sync.detail ?? `Syncing — ${sync.imported} changes`
-						: (sync.detail ?? sync.phase)}
+				class:progress={syncProg?.pct !== undefined}
+				style:--sync-pct={syncProg?.pct !== undefined ? `${syncProg.pct}%` : undefined}
+				title={syncTip(sync)}
 			></span>
 		{/if}
 		<!-- Your identity opens Settings - the avatar when the profile has
@@ -2706,6 +2698,13 @@
 		background: var(--red);
 		animation: none;
 	}
+	/* Known total: a thin ring fills around the dot instead of pulsing. */
+	.sync-dot.progress {
+		animation: none;
+		background:
+			radial-gradient(circle, var(--accent) 0 2px, transparent 2.5px),
+			conic-gradient(var(--accent) var(--sync-pct, 0%), var(--border) 0);
+	}
 	@keyframes syncpulse {
 		50% {
 			opacity: 0.3;
@@ -2960,6 +2959,57 @@
 	.m-sync.busy .m-sync-dot {
 		background: var(--orange);
 		animation: sync-pulse 1.2s ease-in-out infinite;
+	}
+	/* Progress ring around the dot: filled to the pass's percentage when the
+	   total is known, a slow spinning arc when it is not. */
+	.m-sync {
+		position: relative;
+	}
+	.m-sync.progress::before,
+	.m-sync.indeterminate::before {
+		content: "";
+		position: absolute;
+		left: 50%;
+		top: 50%;
+		width: 20px;
+		height: 20px;
+		margin: -10px 0 0 -10px;
+		border-radius: 50%;
+		background: conic-gradient(var(--orange) var(--sync-pct, 25%), var(--border) 0);
+		-webkit-mask: radial-gradient(circle, transparent 8px, #000 8.5px);
+		mask: radial-gradient(circle, transparent 8px, #000 8.5px);
+		pointer-events: none;
+	}
+	.m-sync.progress .m-sync-dot {
+		animation: none;
+	}
+	.m-sync.indeterminate::before {
+		animation: sync-spin 1.6s linear infinite;
+	}
+	/* Visible without hover: phones have none. Gone once the pass ends. */
+	.m-sync-label {
+		position: absolute;
+		left: 0;
+		right: 0;
+		bottom: 1px;
+		font-size: 8px;
+		line-height: 1;
+		color: var(--muted);
+		font-variant-numeric: tabular-nums;
+		text-align: center;
+		pointer-events: none;
+	}
+	@keyframes sync-spin {
+		to {
+			transform: rotate(360deg);
+		}
+	}
+	@media (prefers-reduced-motion: reduce) {
+		.m-sync.indeterminate::before,
+		.m-sync.busy .m-sync-dot,
+		.sync-dot {
+			animation: none;
+		}
 	}
 	@keyframes sync-pulse {
 		50% {

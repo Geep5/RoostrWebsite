@@ -275,7 +275,7 @@ export interface ChangeStoreApi {
 export interface SyncEvents {
 	/** Object ids whose change sets grew (batched). */
 	onObjects(ids: string[]): void;
-	onStatus(status: { phase: "backfill" | "live" | "error"; detail?: string; imported?: number; pending?: number }): void;
+	onStatus(status: { phase: "backfill" | "live" | "error"; detail?: string; imported?: number; pending?: number; received?: number; expected?: number }): void;
 }
 
 export interface RelaySyncApi {

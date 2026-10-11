@@ -170,6 +170,29 @@ describe("NIP-77 history sync", () => {
 		expect(log.idFetches).toEqual([]);
 	});
 
+	test("a reconcile pass reports received and expected, and the next pass starts over", async () => {
+		const store = await storeFixture();
+		const events = [0, 1, 2, 3, 4].map((i) => personal(note(`doc${i}`), 1000 + i));
+		const { relay } = fakeRelay(events);
+		const seen: Array<{ received?: number; expected?: number }> = [];
+		const sync = new RelaySync(ownerSk, ["wss://fake.test"], store, { onObjects() {}, onStatus: (s) => seen.push({ received: s.received, expected: s.expected }) });
+		const internals = sync as unknown as SyncInternals & { emitLiveStatus(): void };
+		internals.pool = { ensureRelay: async () => relay, close() {} };
+		cleanup.push(async () => { sync.stop(); await internals.backfillChain; });
+
+		expect(await internals.backfill(1)).toBe(true);
+		const during = seen.filter((s) => s.received !== undefined);
+		expect(during.at(-1)).toEqual({ received: 5, expected: 5 });
+		expect(during.map((s) => s.received)).toEqual([...during.map((s) => s.received)].sort((a, b) => a! - b!)); // monotonic
+		internals.emitLiveStatus();
+		expect(seen.at(-1)).toEqual({ received: undefined, expected: undefined });
+
+		events.push(personal(note("doc5"), 2000));
+		seen.length = 0;
+		expect(await internals.backfill(1)).toBe(true);
+		expect(seen.filter((s) => s.received !== undefined).at(-1)).toEqual({ received: 1, expected: 1 });
+	});
+
 	test("a needed id the relay does not return keeps history incomplete until it is imported", async () => {
 		const store = await storeFixture();
 		const events = [0, 1, 2].map((i) => personal(note(`doc${i}`), 1000 + i));
