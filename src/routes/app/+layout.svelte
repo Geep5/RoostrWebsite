@@ -4,6 +4,7 @@
 	import { page } from "$app/state";
 	import { activeSpace } from "$lib/space.svelte";
 	import { space as spaceApi, note, fetchObject, fetchQuery, fetchAllQuery } from "$lib/api";
+	import { deletionBlocker } from "$lib/protected";
 	import { isImageIcon, objectIcon } from "$lib/icons";
 	import { layoutOf, discussionUI, store, refreshAll, connectEvents } from "$lib/data.svelte";
 	import { tabs, HOME_PATH } from "$lib/tabs.svelte";
@@ -56,6 +57,19 @@
 	const objectRelation = $derived(objectId ? store.relations.find((r) => r.id === objectId) : undefined);
 	/** The open object is a space: not a summary row, but still an object with an id. */
 	const objectSpace = $derived(objectId && !objectSummary ? channels.find((c) => c.id === objectId) : undefined);
+	/** Why the open type/property can't be deleted ("" = it can); fetched when one is open. */
+	let deleteBlocker = $state("");
+	$effect(() => {
+		const id = objectId;
+		const isDef = !!objectRelation || objectSummary?.typeKey === "type";
+		deleteBlocker = "";
+		if (!id || !isDef) return;
+		void fetchObject(id)
+			.then((o) => deletionBlocker(o))
+			.then((why) => {
+				if (objectId === id) deleteBlocker = why;
+			});
+	});
 
 	/** The channel whose pinnedIds owns this object (unassigned → default). */
 	const owningSpaceOf = (channelId: string) => channels.find((c) => c.id === channelId);
@@ -828,7 +842,11 @@
 								<span class="menu-graph-icon"><GraphIcon size={14} /></span> Graph
 							</button>
 							<div class="menu-sep"></div>
-							<button class="danger" onclick={() => void openDeleteProperty()}><Icon name="trash" />Delete property</button>
+							{#if deleteBlocker}
+								<span class="menu-none" title="Types and properties Roostr or your queries rely on can't be deleted"><Icon name="lock" />Can't delete: {deleteBlocker}</span>
+							{:else}
+								<button class="danger" onclick={() => void openDeleteProperty()}><Icon name="trash" />Delete property</button>
+							{/if}
 						</div>
 					{/if}
 				</div>
@@ -881,7 +899,11 @@
 								<button onclick={() => { showMore = false; void copyObjectId(); }}><Icon name="hash" />Copy ID</button>
 							{/if}
 							<div class="menu-sep"></div>
-							<button class="danger" onclick={() => { showMore = false; void moveToBin(); }}><Icon name="trash" />Move to bin</button>
+							{#if deleteBlocker}
+								<span class="menu-none" title="Types and properties Roostr or your queries rely on can't be deleted"><Icon name="lock" />Can't delete: {deleteBlocker}</span>
+							{:else}
+								<button class="danger" onclick={() => { showMore = false; void moveToBin(); }}><Icon name="trash" />Move to bin</button>
+							{/if}
 						</div>
 					{/if}
 				</div>
@@ -1426,7 +1448,11 @@
 						<button class="hbtn" data-tip="More" onclick={() => { showMore = !showMore; showCollections = false; }}>⋯</button>
 						{#if showMore}
 							<div class="more-menu">
-								<button class="danger" onclick={() => void openDeleteProperty()}><Icon name="trash" />Delete property</button>
+								{#if deleteBlocker}
+									<span class="menu-none" title="Types and properties Roostr or your queries rely on can't be deleted"><Icon name="lock" />Can't delete: {deleteBlocker}</span>
+								{:else}
+									<button class="danger" onclick={() => void openDeleteProperty()}><Icon name="trash" />Delete property</button>
+								{/if}
 							</div>
 						{/if}
 					</div>
@@ -1464,7 +1490,11 @@
 									<button onclick={() => { showMore = false; void copyObjectId(); }}><Icon name="hash" />Copy ID</button>
 								{/if}
 								<div class="menu-sep"></div>
-								<button class="danger" onclick={() => { showMore = false; void moveToBin(); }}><Icon name="trash" />Move to bin</button>
+								{#if deleteBlocker}
+									<span class="menu-none" title="Types and properties Roostr or your queries rely on can't be deleted"><Icon name="lock" />Can't delete: {deleteBlocker}</span>
+								{:else}
+									<button class="danger" onclick={() => { showMore = false; void moveToBin(); }}><Icon name="trash" />Move to bin</button>
+								{/if}
 							</div>
 						{/if}
 					</div>
@@ -2574,6 +2604,9 @@
 		margin: 4px 6px;
 	}
 	.menu-none {
+		display: flex;
+		align-items: center;
+		gap: 8px;
 		color: var(--muted);
 		font-size: 12px;
 		padding: 6px 10px;

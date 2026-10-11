@@ -14,6 +14,7 @@
 	 * no membership to sever.
 	 */
 	import { note, fetchObject } from "$lib/api";
+	import { blockersFor } from "$lib/protected";
 	import { tabs } from "$lib/tabs.svelte";
 	import { store } from "$lib/data.svelte";
 	import { objectIcon } from "$lib/icons";
@@ -115,8 +116,16 @@
 		await onremove?.(targets);
 	}
 
-	async function bin() {
+	/** Protected types/properties in the selection (id → why); they're never binned from here. */
+	let blocked = $state(new Map<string, string>());
+	$effect(() => {
 		const targets = [...ids];
+		void blockersFor(targets).then((m) => (blocked = m));
+	});
+	const deletable = $derived(ids.filter((id) => !blocked.has(id)));
+
+	async function bin() {
+		const targets = [...deletable];
 		onclose();
 		for (const id of targets) await note.del(id);
 		await onchanged();
@@ -275,7 +284,11 @@
 		<button role="menuitem" onclick={() => void remove()}><Icon name="folder-minus" />Remove from collection{suffix}</button>
 	{/if}
 	<div class="ctx-sep"></div>
-	<button role="menuitem" class="danger" onclick={() => void bin()}><Icon name="trash" />Move to bin{suffix}</button>
+	{#if deletable.length === 0}
+		<span class="ctx-locked" title="Types and properties Roostr or your queries rely on can't be deleted"><Icon name="lock" />Can't delete: {[...blocked.values()][0] ?? ""}</span>
+	{:else}
+		<button role="menuitem" class="danger" onclick={() => void bin()}><Icon name="trash" />Move to bin{deletable.length > 1 ? ` (${deletable.length})` : ""}{blocked.size > 0 ? ` - ${blocked.size} protected kept` : ""}</button>
+	{/if}
 </div>
 
 {#if fly}
@@ -365,6 +378,14 @@
 	}
 	.ctx-menu .danger {
 		color: var(--red);
+	}
+	.ctx-locked {
+		display: flex;
+		align-items: center;
+		gap: 9px;
+		color: var(--muted);
+		font-size: 12px;
+		padding: 7px 10px;
 	}
 	.ctx-menu .chev {
 		margin-left: auto;

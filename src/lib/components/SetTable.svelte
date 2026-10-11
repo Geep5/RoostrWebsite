@@ -17,6 +17,7 @@
 	import PropIcon from "./PropIcon.svelte";
 	import CheckboxIcon from "./CheckboxIcon.svelte";
 	import { fetchQuery, note, type QueryResultRow } from "$lib/api";
+	import { blockersFor } from "$lib/protected";
 	import { fetchMachines, machineName, resolveMany, servingCopy, type MachineRow } from "$lib/serving";
 	import { store, layoutOf } from "$lib/data.svelte";
 	import type { ObjectJSON, RelationDefJSON, ValueJSON } from "$lib/types";
@@ -217,8 +218,16 @@
 		await reload();
 	}
 
-	async function deleteSelected() {
+	/** Protected types/properties among the selected rows (id → why); bulk delete keeps them. */
+	let selBlocked = $state(new Map<string, string>());
+	$effect(() => {
 		const ids = [...selectedRows];
+		void blockersFor(ids).then((m) => (selBlocked = m));
+	});
+	const selDeletable = $derived(selectedRows.filter((id) => !selBlocked.has(id)));
+
+	async function deleteSelected() {
+		const ids = [...selDeletable];
 		selectedRows = [];
 		for (const id of ids) await note.del(id);
 		await reload();
@@ -730,7 +739,11 @@
 	{#if selectedRows.length}
 		<div class="sel-bar">
 			<span>{selectedRows.length} selected</span>
-			<button class="del" onclick={() => void deleteSelected()}>Delete</button>
+			{#if selDeletable.length > 0}
+				<button class="del" onclick={() => void deleteSelected()}>Delete{selBlocked.size > 0 ? ` ${selDeletable.length} (${selBlocked.size} protected kept)` : ""}</button>
+			{:else}
+				<span class="locked" title="Types and properties Roostr or your queries rely on can't be deleted">Can't delete: {[...selBlocked.values()][0] ?? ""}</span>
+			{/if}
 			<button class="clear" onclick={() => (selectedRows = [])}>✕</button>
 		</div>
 	{/if}
@@ -958,6 +971,10 @@
 		color: #e05555;
 		cursor: pointer;
 		font-size: 13px;
+	}
+	.sel-bar .locked {
+		color: var(--muted);
+		font-size: 12px;
 	}
 	.sel-bar .clear {
 		background: none;
