@@ -20,6 +20,7 @@
 	import { RESERVED_KEYS, emptyValueFor, objectSpaceId, spaceRelations } from "$lib/relations";
 	import { addFailureText, pickFile, uploadFile } from "$lib/files";
 	import type { RelationDefJSON } from "$lib/types";
+	import { blockLinkTarget } from "$lib/backlinks";
 	import { getProcessorByUrl, getEmbedUrl, isSingleUrl, type EmbedProcessor } from "$lib/embed";
 
 	let {
@@ -685,11 +686,12 @@
 	/**
 	 * Anytype derives the `links` relation from link blocks (anytype-heart),
 	 * which feeds backlinks and the graph. Our analog: mirror the object's
-	 * link blocks into a hidden `links` field of linkValue items. Runs on
-	 * every refresh; writes only when the target set actually changed.
+	 * link blocks and embedded files into a hidden `links` field of linkValue
+	 * items, so a File lists the pages it appears in. Runs on every refresh;
+	 * writes only when the target set actually changed.
 	 */
 	async function syncLinksField() {
-		const targets = [...new Set(object.blocks.filter((b) => b.content.custom?.contentType === "link").map((b) => b.content.custom!.meta?.target ?? "").filter(Boolean))];
+		const targets = [...new Set(object.blocks.map(blockLinkTarget).filter(Boolean))];
 		const current = (object.fields["links"]?.valuesValue?.items ?? []).map((i) => i.linkValue?.targetId ?? "").filter(Boolean);
 		if (targets.length === current.length && targets.every((t, i) => t === current[i])) return;
 		await writes.setField(object.id, "links", { valuesValue: { items: targets.map((t) => ({ linkValue: { targetId: t, relationKey: "links" } })) } });
