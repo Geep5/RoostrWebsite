@@ -12,7 +12,7 @@ import { agentLinksValue } from "$lib/agent-field";
 import { typeIcon } from "$lib/icons";
 import { store } from "$lib/data.svelte";
 import { activeSpace } from "$lib/space.svelte";
-import { FILES_NEED_LOCAL, addFailureText, filesSupported, pickFile, uploadFile } from "$lib/files";
+import { addFailureText, pickFile, uploadFile } from "$lib/files";
 
 const channelField = (channelId: string): Record<string, ValueJSON> =>
 	channelId ? { channel: { stringValue: channelId } } : {};
@@ -178,16 +178,11 @@ async function createCredential(channelId: string, name: string): Promise<string
 	return id;
 }
 /**
- * A file is its bytes: the picker comes first, and the harness on this
- * computer stores them and creates the File object. A cancelled pick
- * creates nothing. Without a Roostr computer (the iOS app) there is
- * nowhere to keep the bytes.
+ * A file is its bytes: the picker comes first, then they go to Blossom (or
+ * through the harness of a Roostr computer paired with this tab), which
+ * creates the File object. A cancelled pick creates nothing.
  */
 async function createFile(channelId: string): Promise<string> {
-	if (!filesSupported) {
-		alert(FILES_NEED_LOCAL);
-		return "";
-	}
 	const file = await pickFile();
 	if (!file) return "";
 	try {

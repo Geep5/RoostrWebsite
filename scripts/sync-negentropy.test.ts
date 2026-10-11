@@ -150,15 +150,15 @@ describe("NIP-77 history sync", () => {
 
 		expect(await internals.backfill(1)).toBe(true);
 		expect(internals.historyComplete).toBe(true);
-		// Checkpoints then changes: self + space each.
-		expect(log.negOpens.map((f) => `${f.kinds!.join()}${f["#h"] ? "#h" : ""}`)).toEqual(["1079", "1079,5#h", "1078", "1078#h"]);
+		// Bases, checkpoints, then changes: self + space each.
+		expect(log.negOpens.map((f) => `${f.kinds!.join()}${f["#h"] ? "#h" : ""}`)).toEqual(["31078", "31078#h", "1079", "1079,5#h", "1078", "1078#h"]);
 		expect(log.negOpens.every((f) => f.since === undefined && f.limit === undefined)).toBe(true);
 		expect(log.walks).toEqual([]);
 		const fetched = log.idFetches.flat();
 		expect(fetched.length).toBe(events.length); // each id once, though `shared` is in two streams
 		expect(new Set(fetched)).toEqual(new Set(events.map((e) => e.id)));
 		expect(log.idFetches.every((ids) => ids.length <= FETCH_BATCH)).toBe(true);
-		expect(log.negCloses).toBe(4);
+		expect(log.negCloses).toBe(6);
 		for (let i = 0; i < 230; i += 57) expect((await store.changesFor(`doc${i}`)).length).toBe(1);
 		expect((await store.changesFor("sdoc")).length).toBe(1);
 		// Held per stream: the shared event under both scopes.
@@ -238,7 +238,7 @@ describe("NIP-77 history sync", () => {
 			expect(await internals.backfill(1)).toBe(true);
 			expect(log.negOpens.length).toBe(1); // remembered after the first refusal
 			expect(log.idFetches).toEqual([]);
-			expect(log.walks.map((f) => `${f.kinds!.join()}${f["#h"] ? "#h" : ""}`)).toEqual(["1079", "1079,5#h", "1078", "1078#h"]);
+			expect(log.walks.map((f) => `${f.kinds!.join()}${f["#h"] ? "#h" : ""}`)).toEqual(["31078", "31078#h", "1079", "1079,5#h", "1078", "1078#h"]);
 			expect(log.walks.every((f) => f.since === 1 && f.limit === 128)).toBe(true);
 			expect((await store.changesFor("doc1")).length).toBe(1);
 			// Walked events are held too: a later NIP-77 relay would not resend them.

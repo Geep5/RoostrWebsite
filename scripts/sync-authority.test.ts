@@ -298,8 +298,8 @@ describe("history completion", () => {
 		expect(repair.mock.calls.every(([, filter]) => filter.since === 0)).toBe(true);
 		expect(await store.getCursor()).toBe(100);
 		expect(await store.getReplayGroups()).toEqual([]);
-		// One relay, two scopes, a checkpoint pass then a change pass each; the original walker never ran again.
-		expect(pages).toHaveBeenCalledTimes(4);
+		// One relay, two scopes, a base, a checkpoint and a change pass each; the original walker never ran again.
+		expect(pages).toHaveBeenCalledTimes(6);
 	});
 	test("import failure preserves recovery across reload and a later successful scan retires it", async () => {
 		const store = await storeFixture();
@@ -428,10 +428,10 @@ describe("history completion", () => {
 		const pages = spyOn(internals, "queryRelayPage").mockResolvedValue([]);
 		await sync.start();
 		await internals.backfillChain;
-		// Both scopes from event zero - not cursor+1 - checkpoints first, then changes;
+		// Both scopes from event zero - not cursor+1 - bases first, then checkpoints, then changes;
 		// the space's checkpoint pass also carries its owner's kind-5 h-deletion.
-		expect(pages.mock.calls.map(([, filter]) => filter.since)).toEqual([1, 1, 1, 1]);
-		expect(pages.mock.calls.map(([, filter]) => (filter.kinds as number[]).join())).toEqual(["1079", "1079,5", "1078", "1078"]);
+		expect(pages.mock.calls.map(([, filter]) => filter.since)).toEqual([1, 1, 1, 1, 1, 1]);
+		expect(pages.mock.calls.map(([, filter]) => (filter.kinds as number[]).join())).toEqual(["31078", "31078", "1079", "1079,5", "1078", "1078"]);
 		expect(live.find((filter) => Array.isArray(filter.authors))!.since).toBe(701);
 		expect(await store.getBootstrapped()).toBe(true); // the clean walk re-earned it
 		// Starting again is an ordinary incremental walk: the floor record is gone.
@@ -465,8 +465,8 @@ describe("history completion", () => {
 		sync.setSharedSpaces([space]);
 		await internals.backfillChain;
 		const spaceWalks = pages.mock.calls.filter(([, filter]) => filter["#h"]);
-		// One checkpoint pass and one change pass over the space stream, both from event zero.
-		expect(spaceWalks.map(([, filter]) => (filter.kinds as number[]).join())).toEqual(["1079,5", "1078"]);
+		// One base, one checkpoint and one change pass over the space stream, all from event zero.
+		expect(spaceWalks.map(([, filter]) => (filter.kinds as number[]).join())).toEqual(["31078", "1079,5", "1078"]);
 		expect(spaceWalks.every(([, filter]) => filter.since === 1)).toBe(true);
 	});
 	test("a suffix-first repair and later duplicate suffixes do not recreate partial groups", async () => {

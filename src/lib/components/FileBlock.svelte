@@ -2,19 +2,19 @@
 	/**
 	 * A File object shown inside a page: images inline, PDFs in the
 	 * browser's own viewer, anything else as a card. The block only names
-	 * the File (`fileId`, `hash`); the bytes come from this computer's
-	 * harness, which fetches them peer-to-peer when it lacks them. When it
-	 * cannot (Roostr not running here, or no holder online - the harness's
-	 * reason, also written as the File's `error`) the block says so in place,
-	 * with Retry.
+	 * the File (`fileId`, `hash`); the bytes come from Blossom when the File
+	 * names a blob, else from this computer's harness, which fetches them
+	 * peer-to-peer when it lacks them. When it cannot (Roostr not running
+	 * here, or no holder online - the harness's reason, also written as the
+	 * File's `error`) the block says so in place, with Retry.
 	 *
 	 * Images never grow past the page column, and can be resized by
 	 * dragging their bottom-right corner; the width (percent of the column)
 	 * is kept on the block as `width`.
 	 */
-	import { FILES_NEED_LOCAL, fetchFileBlob, filesSupported, viewFailureText } from "$lib/files";
+	import { fetchFileBlob, viewFailureText } from "$lib/files";
 	import { store } from "$lib/data.svelte";
-	import { note } from "$lib/api";
+	import { fetchObject, note } from "$lib/api";
 
 	let {
 		meta,
@@ -47,13 +47,16 @@
 
 	$effect(() => {
 		const hash = meta["hash"] ?? "";
+		const fileId = meta["fileId"] ?? "";
 		void attempt;
-		if (!filesSupported || !inline || !hash) return;
+		if (!inline || !hash) return;
 		let cancelled = false;
 		let made = "";
 		error = "";
 		url = "";
-		fetchFileBlob(hash)
+		// The File object holds the blob and its key; a block whose File is not here yet asks the harness by hash.
+		(fileId ? fetchObject(fileId).then((file) => file.fields, () => null) : Promise.resolve(null))
+			.then((fields) => fetchFileBlob(fields ?? { file_hash: { stringValue: hash } }))
 			.then((blob) => {
 				if (cancelled) return;
 				made = URL.createObjectURL(blob);
@@ -98,9 +101,7 @@
 </script>
 
 <div class="file-block">
-	{#if !filesSupported}
-		<p class="note">{FILES_NEED_LOCAL}</p>
-	{:else if inline && error}
+	{#if inline && error}
 		<p class="err">{error} <button onclick={() => attempt++}>Retry</button></p>
 	{:else if inline && !url}
 		<p class="note">Loading {name}…</p>

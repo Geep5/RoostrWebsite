@@ -33,6 +33,8 @@ export interface ChangeJSON {
 	timestamp: number;
 	author: string;
 	snapshot?: unknown;
+	/** Hex hash of the base its event named (["b", …]); absent = pre-migration or not on a base. */
+	b?: string;
 }
 
 /** One operation; exactly one member set (mirrors glon.Operation oneof). */
@@ -122,6 +124,8 @@ export interface PendingPublish {
 	keyId?: number;
 	/** Exact signed ciphertext retained across retries and reloads. */
 	events?: Event[];
+	/** Hex hash of the base the change was written on: its sealed parts carry ["b", base]. */
+	base?: string;
 }
 
 /** The one checkpoint held per object (docs/checkpoint-sync.md): a replay cache, never authority. */
@@ -133,6 +137,42 @@ export interface CheckpointRow {
 	hash: string;
 	/** Sorted hex head ids the checkpoint state sits at. */
 	heads: string[];
+}
+
+/** One base (kind 31078, docs/state-sync.md) held for an object: never deleted while current. */
+export interface BaseRow {
+	objectId: string;
+	/** sha256 hex of the base bytes (field 8 absent): its identity. */
+	hash: string;
+	epoch: number;
+	/** Unix ms; informational, part of the current-base tie-break. */
+	createdAt: number;
+	/** Hex hash of the previous base; "" at epoch 1. */
+	prevBase: string;
+	/** Raw Checkpoint protobuf, exactly as received. */
+	bytes: Uint8Array;
+}
+
+/** An object's current base, as the store keeps it per object. */
+export interface CurrentBase {
+	hash: string;
+	createdAt: number;
+}
+
+/** Everything held for one object that its state is replayed from (core `replay_from_base`). */
+export interface ObjectInputs {
+	/** Held changes, rebased orphans excluded; `b` set when their event carried one. */
+	changes: ChangeJSON[];
+	/** Every held base of the object (current and superseded). */
+	bases: Uint8Array[];
+	/** Legacy kind-1079 checkpoint; only used when there is no base. */
+	checkpoint?: Uint8Array;
+	/** Its hash; "" for none. */
+	checkpointHash: string;
+	/** Stored change rows, rebased ones included: the replay-cache counter. */
+	count: number;
+	/** Hash of the current base; "" for none. */
+	base: string;
 }
 
 /** One object's raw history for a corpus load. */
@@ -155,14 +195,20 @@ export interface RelayEventRow {
 	createdAt: number;
 	kind: number;
 	scope: string;
+	/** The delta's ["b", base] tag: the NIP-77 item set of a `#b` filter. */
+	b?: string;
 }
 
 export interface ChangeStoreApi {
 	open(): Promise<void>;
 	/** Add raw changes (idempotent by content address). Returns # new. */
 	addChanges(changes: Array<{ bytes: Uint8Array; change: ChangeJSON }>): Promise<number>;
-	/** Atomically save a local change and its personal publication obligation. */
-	addLocalChange(bytes: Uint8Array, change: ChangeJSON): Promise<void>;
+	/** Atomically save a local change and its personal publication obligation (`base`: the base it was written on). */
+	addLocalChange(bytes: Uint8Array, change: ChangeJSON, base?: string): Promise<void>;
+	/** Atomically store a rebased change and mark its orphan rebased (never replayed again). */
+	addRebased(orphanId: string, bytes: Uint8Array, change: ChangeJSON): Promise<void>;
+	/** Change ids this device wrote and has not yet published (any pending obligation). */
+	pendingChangeIds(): Promise<Set<string>>;
 	pendingPublishes(): Promise<PendingPublish[]>;
 	getPending(key: string): Promise<PendingPublish | undefined>;
 	savePending(item: PendingPublish): Promise<void>;
@@ -170,8 +216,19 @@ export interface ChangeStoreApi {
 	changesFor(objectId: string): Promise<ChangeJSON[]>;
 	/** Exact stored protobuf bytes with decoded metadata, without re-encoding. */
 	rawChangesFor(objectId: string): Promise<Array<{ bytes: Uint8Array; change: ChangeJSON }>>;
-	/** Every known object id, including checkpoint-only objects. */
+	/** Every known object id, including checkpoint-only and base-only objects. */
 	objectIds(): Promise<string[]>;
+	/** What one object's state replays from: bases, changes (rebased orphans excluded), legacy checkpoint. */
+	objectInputs(objectId: string): Promise<ObjectInputs>;
+	/**
+	 * Hold a base (idempotent by hash) and re-point the object's current base
+	 * to `pickCurrent(every held base of the object)`. Returns whether the
+	 * base was new. Bases are never deleted.
+	 */
+	putBase(row: BaseRow, pickCurrent: (rows: BaseRow[]) => string): Promise<boolean>;
+	/** objectId → its current base. */
+	currentBases(): Promise<Map<string, CurrentBase>>;
+	currentBase(objectId: string): Promise<CurrentBase | undefined>;
 	getCheckpoint(objectId: string): Promise<CheckpointRow | undefined>;
 	/** Store when it supersedes the held one (core.checkpoint_supersedes: covers a superset, then hash). Returns stored. */
 	putCheckpoint(row: CheckpointRow): Promise<boolean>;
@@ -205,8 +262,8 @@ export interface ChangeStoreApi {
 	markPublished(changeId: string): Promise<void>;
 	/** Record relay events this device holds (idempotent per scope + id). */
 	recordRelayEvents(rows: RelayEventRow[]): Promise<void>;
-	/** Held relay events of one stream scope, any of `kinds`. */
-	relayEvents(scope: string, kinds: number[]): Promise<Array<{ id: string; createdAt: number }>>;
+	/** Held relay events of one stream scope, any of `kinds`; `since` drops older rows, `b` keeps only deltas on those bases. */
+	relayEvents(scope: string, kinds: number[], only?: { since?: number; b?: string[] }): Promise<Array<{ id: string; createdAt: number }>>;
 }
 
 // ── sync.ts ───────────────────────────────────────────────────────
@@ -221,8 +278,8 @@ export interface RelaySyncApi {
 	/** Backfill since cursor then stay live. Resolves once live. */
 	start(): Promise<void>;
 	stop(): void;
-	/** Encrypt + publish one change (paced, retried). */
-	publish(bytes: Uint8Array, changeId: string, objectId: string): Promise<void>;
+	/** Encrypt + publish one change (paced, retried); `base` = the base it was written on (["b", base]). */
+	publish(bytes: Uint8Array, changeId: string, objectId: string, base?: string): Promise<void>;
 }
 
 // ── keys.ts ───────────────────────────────────────────────────────

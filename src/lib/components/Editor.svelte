@@ -18,7 +18,7 @@
 	import LinkPicker from "./LinkPicker.svelte";
 	import { store, refreshAll } from "$lib/data.svelte";
 	import { RESERVED_KEYS, emptyValueFor, objectSpaceId, spaceRelations } from "$lib/relations";
-	import { FILES_NEED_LOCAL, addFailureText, filesSupported, pickFile, uploadFile } from "$lib/files";
+	import { addFailureText, pickFile, uploadFile } from "$lib/files";
 	import type { RelationDefJSON } from "$lib/types";
 	import { getProcessorByUrl, getEmbedUrl, isSingleUrl, type EmbedProcessor } from "$lib/embed";
 
@@ -1343,8 +1343,7 @@
 				focusRequest = { blockId: id, offset: start };
 			}
 		} else if (pick.kind === "file") {
-			const file = filesSupported ? await pickFile() : null;
-			if (!filesSupported) fileNotice = FILES_NEED_LOCAL;
+			const file = await pickFile();
 			if (file) await insertFile(id, file, clean, marks);
 		} else if (pick.kind === "relation") {
 			await insertRelationBlock(id, clean, marks, pick.key);
@@ -1408,10 +1407,6 @@
 
 	/** Pasted image files (a screenshot, a copied image) become File blocks - the browser would otherwise drop a raw, unsaved <img> into the text. */
 	async function pasteFiles(id: string, files: File[]) {
-		if (!filesSupported) {
-			fileNotice = FILES_NEED_LOCAL;
-			return;
-		}
 		const el = blockEl(id);
 		const { text, marks } = el ? fromDom(el) : { text: "", marks: [] };
 		cancelPending(id);
@@ -1808,10 +1803,6 @@
 
 	/** Dropped files become File blocks at the drop line, in the order dropped. */
 	async function dropFiles(files: File[], targetId: string, position: number) {
-		if (!filesSupported) {
-			fileNotice = FILES_NEED_LOCAL;
-			return;
-		}
 		// A file never nests inside a text block: "inside" drops land below it.
 		const at = position === Pos.INNER_FIRST || position === Pos.INNER ? Pos.BOTTOM : position;
 		let prev = "";

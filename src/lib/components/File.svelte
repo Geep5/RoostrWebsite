@@ -1,16 +1,17 @@
 <script lang="ts">
 	/**
-	 * A file object's page. The object carries only facts (name, hash,
-	 * size, MIME, which computers hold the bytes); the bytes live in each
-	 * computer's harness and move between them peer-to-peer. This tab asks
-	 * the harness on its own computer for them (the hosted app pairs with it
-	 * by owner key on first use), which fetches from a peer first when this
-	 * computer lacks them - that can take a few seconds.
+	 * A file object's page. The object carries the facts (name, hash, size,
+	 * MIME, which computers hold the bytes) and, for files on Blossom, the
+	 * blob and its key: those bytes are fetched and decrypted right here, on
+	 * any host. Older files without a blob come from the harness on this
+	 * computer (the hosted app pairs with it by owner key on first use),
+	 * which fetches from a peer first when this computer lacks them - that
+	 * can take a few seconds.
 	 */
 	import { onMount, untrack } from "svelte";
 	import { thisMachineId } from "$lib/capability-actions";
 	import { isLocalBackend } from "$lib/client-backend";
-	import { FILES_NEED_LOCAL, fetchFileBlob, filesSupported, humanSize, viewFailureText } from "$lib/files";
+	import { fetchFileBlob, humanSize, viewFailureText } from "$lib/files";
 	import { objectIcon } from "$lib/icons";
 	import { onPairingChange, pairedSession } from "$lib/local-transport";
 	import { fetchMachines, machineName, type MachineRow } from "$lib/serving";
@@ -36,6 +37,8 @@
 
 	const name = $derived(fieldStr(object.fields, "name"));
 	const hash = $derived(fieldStr(object.fields, "file_hash").toLowerCase());
+	/** On Blossom: no Roostr computer is needed to show it. */
+	const onBlossom = $derived(fieldStr(object.fields, "blob_sha256") !== "");
 	const size = $derived(Number(object.fields["file_size"]?.intValue ?? 0));
 	const mime = $derived(fieldStr(object.fields, "file_mime"));
 	const objectError = $derived(fieldStr(object.fields, "error"));
@@ -67,13 +70,13 @@
 		const mine = ++generation;
 		release();
 		fetchError = "";
-		if (!filesSupported || (isLocalBackend && !paired) || !hash) {
+		if ((isLocalBackend && !paired && !onBlossom) || !hash) {
 			loading = false;
 			return;
 		}
 		loading = true;
 		try {
-			const fetched = await fetchFileBlob(hash);
+			const fetched = await fetchFileBlob(object.fields);
 			// The object's MIME wins over whatever the transfer labelled it,
 			// so the browser renders the preview (a PDF iframe needs it).
 			const blob = mime && fetched.type !== mime ? new Blob([fetched], { type: mime }) : fetched;
@@ -105,6 +108,7 @@
 	// on teardown. The hosted app pairs inside the fetch itself.
 	$effect(() => {
 		void hash;
+		void onBlossom;
 		if (isLocalBackend) void paired;
 		untrack(() => void load());
 		return () => {
@@ -114,7 +118,6 @@
 	});
 
 	onMount(() => {
-		if (!filesSupported) return;
 		void fetchMachines().then(({ machines: roster }) => (machines = roster)).catch(() => {});
 		void loadPairing();
 		return onPairingChange(() => void loadPairing());
@@ -130,9 +133,7 @@
 
 	{#if objectError}<p class="error" role="alert" data-testid="file-error">{objectError}</p>{/if}
 
-	{#if !filesSupported}
-		<p class="muted" data-testid="file-local-only">{FILES_NEED_LOCAL}</p>
-	{:else if isLocalBackend && !paired}
+	{#if isLocalBackend && !paired && !onBlossom}
 		<PairGate compact onready={() => void loadPairing()} />
 	{:else if !hash}
 		<p class="muted">This file has no bytes yet.</p>
@@ -171,7 +172,7 @@
 	<div class="sec">
 		<div class="sec-name">Stored on</div>
 		{#if holders.length === 0}
-			<p class="muted" data-testid="file-holders-empty">No computer holds this file yet</p>
+			<p class="muted" data-testid="file-holders-empty">{onBlossom ? "No computer keeps a copy yet - the file is on Blossom" : "No computer holds this file yet"}</p>
 		{:else}
 			<ul class="holders" data-testid="file-holders">
 				{#each holders as h (h.machineId)}

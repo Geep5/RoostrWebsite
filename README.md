@@ -16,13 +16,20 @@ Backend selection is explicit: `VITE_ROOSTR_BACKEND=local` selects the local
 adapter. Pairing a browser-mode page with a machine grants access to its harness
 controls; it does not replace the browser's identity or switch its vault.
 
-Files (pasted/dropped images, `/file`, File pages) need the Roostr running on
-the same computer: the bytes live in its harness. In browser mode the first file
-action pairs automatically by proof of ownership - the tab signs a one-use,
-origin-bound harness challenge with the vault key it already holds, and only the
-computer whose identity is that key accepts (see glonOdin README, API). Without
-a reachable Roostr the file block says so in place; the iOS app has no Roostr
-under it, so files stay unavailable there.
+Files (pasted/dropped images, `/file`, File pages) live on Blossom, served by
+RoostrRelay on its own origin (the first configured relay whose NIP-11 lists
+`blossom`, else `https://roostr-relay.fly.dev`): each file is encrypted under a
+fresh key (AES-256-GCM, 4 MiB frames, `src/lib/blossom.ts`), uploaded with a
+kind-24242 authorization, and its File object records `blob_sha256`,
+`blob_key` and `blob_url`, so every host opens it - this tab, the iOS app
+(which signs the upload authorization over its `signEvent` bridge) and the
+computers. With a Roostr computer paired to this tab (and always in local
+mode) the harness adds the file instead, keeping it in its peer-to-peer store
+too. Files from before Blossom carry only `file_hash`: their bytes come from
+the harness on this computer, which the hosted app pairs with by proof of
+ownership - the tab signs a one-use, origin-bound harness challenge with the
+vault key it already holds, and only the computer whose identity is that key
+accepts (see glonOdin README, API).
 
 For local mode, start the daemon, independent sync service and agent harness
 from the sibling `glonOdin` repository - once, as a service that starts at
@@ -52,12 +59,21 @@ daemon, compiled to WebAssembly. IndexedDB, network transport and DOM
 integration remain platform adapters.
 
 History sync uses NIP-77 (Negentropy V1, `src/lib/engine/negentropy.ts`): per
-relay and stream filter (self `authors:[pk]`, each space `#h`; checkpoints
-before changes) the relay events this device holds — the IndexedDB
-`relay-events` store — are reconciled against the relay's set, and only the
-missing ids are fetched with `REQ {ids}` and imported. History is complete once
-every needed id came back and imported cleanly. Relays that answer `NEG-OPEN`
-with `NEG-ERR`/`NOTICE` or silence get the older paged `until` walk.
+relay and stream filter (self `authors:[pk]`, each space `#h`) the relay events
+this device holds — the IndexedDB `relay-events` store — are reconciled against
+the relay's set, and only the missing ids are fetched with `REQ {ids}` and
+imported. History is complete once every needed id came back and imported
+cleanly. Relays that answer `NEG-OPEN` with `NEG-ERR`/`NOTICE` or silence get
+the older paged `until` walk.
+
+Sync follows glonOdin `docs/state-sync.md`: bases (kind 31078, split ones'
+kind-1080 parts by `#c`) first, then legacy 1079 checkpoints, then deltas. With
+no base on the relays the whole kind-1078 history is covered as before (dual
+read); once bases exist, only the live deltas of the held current bases (`#b`)
+plus a 1078 window from the newest base's created_at minus a day. An object's
+state is the core's `replay_from_base`; local deltas carry `["b", base]`, and
+orphans of this identity's writable objects are rebased by the core and
+published. The browser never compacts: computers do.
 
 ```sh
 npm run build:core   # requires Odin and sibling ../glonOdin

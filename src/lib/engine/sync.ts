@@ -23,25 +23,36 @@
  * History sync is NIP-77 (Negentropy) per relay and stream filter: the
  * events this device holds (store `relayEvents`) are reconciled against the
  * relay's set, every needed id is fetched with REQ {ids} in batches and
- * imported; checkpoints first, then changes. A relay that refuses or ignores
- * NEG-OPEN gets the paged walk instead: querySync backwards via `until`
- * (since cursor+1), paced between pages so public relays don't rate-limit
- * us. Live is a subscribeMany since cursor+1, which never carries an event a
- * relay accepted at or before the cursor: a tab back from the background or
- * a network that returns reconnects and reconciles (`resume`). Sends are
- * paced one event per PUBLISH_SPACING_MS.
+ * imported. A relay that refuses or ignores NEG-OPEN gets the paged walk
+ * instead: querySync backwards via `until` (since cursor+1), paced between
+ * pages so public relays don't rate-limit us. Live is a subscribeMany since
+ * cursor+1, which never carries an event a relay accepted at or before the
+ * cursor: a tab back from the background or a network that returns
+ * reconnects and reconciles (`resume`). Sends are paced one event per
+ * PUBLISH_SPACING_MS.
+ *
+ * State sync (glonOdin/docs/state-sync.md): every pass covers bases first
+ * (kind 31078 + their kind-1080 parts by `#c`), so each object renders from
+ * its base as soon as it lands; then legacy 1079 checkpoints; then deltas.
+ * With no base on the relays (a pre-migration vault) the kind-1078 history is
+ * covered whole, exactly as before (dual read). Once bases exist, deltas are
+ * the live deltas of the held current bases (`#b`) plus a 1078 cover bounded
+ * to the newest base's created_at minus one day - never history from zero.
+ * Local deltas carry the base they were written on (`b`); orphans of this
+ * identity's writable objects are rebased by the core and published. The
+ * web app never compacts.
  */
 
 import { SimplePool, finalizeEvent, getPublicKey, nip19, nip44, verifyEvent, type Event, type Filter } from "nostr-tools";
 import { unwrapEvent, wrapEvent } from "nostr-tools/nip59";
 import type { AbstractRelay } from "nostr-tools/abstract-relay";
 import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
-import type { ChangeJSON, ChangeStoreApi, CheckpointRow, PendingPublish, RelayEventRow, RelaySyncApi, SharedProvenance, SyncEvents } from "./contracts";
+import type { BaseRow, ChangeJSON, ChangeStoreApi, CheckpointRow, PendingPublish, RelayEventRow, RelaySyncApi, SharedProvenance, SyncEvents } from "./contracts";
 import type { ObjectJSON } from "$lib/types";
-import { computeObject } from "./replay";
+import { pickCurrentBase, rebaseObject, replayObject, type Rebased } from "./replay";
 import { CoreError, coreCall } from "./core";
 import { unpackCoreValueMaps } from "./core-values";
-import { base64ToBytes, bytesToBase64 } from "./proto";
+import { base64ToBytes, bytesToBase64, decodeChange } from "./proto";
 import { loadKey } from "./keys";
 import { Negentropy, NegentropyStorage } from "./negentropy";
 import { spaceKeyGet, spaceKeyImport } from "./spacekeys";
@@ -51,13 +62,22 @@ export const DEFAULT_RELAYS = ["wss://roostr-relay.fly.dev"];
 const CHANGE_KIND = 1078;
 /** Kind-1079 checkpoint: one sealed Checkpoint protobuf per object, a replay cache (docs/checkpoint-sync.md). */
 const CHECKPOINT_KIND = 1079;
-/** Every relay filter that pulls DAG events; the core session ingests both kinds. */
-const DAG_KINDS = [CHANGE_KIND, CHECKPOINT_KIND];
+/** Kind-31078 base (addressable) and its kind-1080 parts 1..n-1 (docs/state-sync.md). */
+const BASE_KIND = 31078;
+const BASE_PART_KIND = 1080;
+/** Every relay filter that pulls DAG events; the core session ingests all four kinds. */
+const DAG_KINDS = [CHANGE_KIND, CHECKPOINT_KIND, BASE_KIND, BASE_PART_KIND];
 /** NIP-09 deletion. On a space stream it is an h-deletion: from the space's
  * owner, the signal that the space was deleted for everyone. */
 const DELETION_KIND = 5;
 /** Every #h filter of a shared space: its DAG events plus h-deletions. */
 const SPACE_KINDS = [...DAG_KINDS, DELETION_KIND];
+/** Base hashes per `#b` delta filter. */
+export const BASE_HASH_BATCH = 200;
+/** Once bases exist, 1078 history reaches back to the newest base's created_at minus this. */
+const BASE_LOOKBACK_S = 86_400;
+/** A device with no cursor yet subscribes live from this long before now (history covers the rest). */
+const LIVE_COLD_START_LOOKBACK_S = 300;
 /** Spaces whose h-deletion a relay accepted: published once per space. */
 const SPACE_DELETIONS_STORAGE = "roostr-space-deletions-sent";
 const ALLOWLIST_KIND = 30100;
@@ -170,6 +190,12 @@ export function authorizeSharedCheckpoint(checkpoint: string, provenance: Shared
 	return authorizeShared({ action: "authorizeCheckpoint", checkpoint }, provenance, space, localPk, trustedSpace, existing);
 }
 
+/** Same gate for a base (core `authorizeBase`): owner only, epoch >= 1. `base` is the base64 protobuf. */
+export function authorizeSharedBase(base: string, provenance: SharedProvenance, space: SharedSpaceInfo,
+	localPk: string, trustedSpace: ObjectJSON | null, existing: ObjectJSON | null): boolean {
+	return authorizeShared({ action: "authorizeBase", base }, provenance, space, localPk, trustedSpace, existing);
+}
+
 function authorizeShared(candidate: Record<string, unknown>, provenance: SharedProvenance, space: SharedSpaceInfo,
 	localPk: string, trustedSpace: ObjectJSON | null, existing: ObjectJSON | null): boolean {
 	try {
@@ -193,14 +219,27 @@ interface CheckpointSummary {
 	hash: string;
 }
 
-/** One decrypted relay payload: a change (kind 1078) or a checkpoint (kind 1079). */
+/** What the core session reports about a completed base (kind 31078 + its 1080 parts). */
+interface BaseSummary {
+	objectId: string;
+	hash: string;
+	epoch: number;
+	prevBase: string;
+	/** Unix ms. */
+	createdAt: number;
+	headIds: string[];
+	covered: number;
+}
+
+/** One decrypted relay payload: a change (kind 1078), a checkpoint (kind 1079) or a base (kind 31078). */
 interface ImportItem {
 	objectId: string;
 	bytes: Uint8Array;
-	/** `bytes` as the core handed them over; the checkpoint gate takes them back verbatim. */
+	/** `bytes` as the core handed them over; the checkpoint/base gate takes them back verbatim. */
 	b64: string;
 	change?: ChangeJSON;
 	checkpoint?: CheckpointSummary;
+	base?: BaseSummary;
 	provenance?: SharedProvenance;
 	chunkKey?: string;
 	/** Relay events this payload came from (every part of a chunk group), recorded once it imports. */
@@ -223,7 +262,7 @@ interface SyncSessionState {
 
 interface IngestResult {
 	cursor: number;
-	item?: { bytes: string; change?: unknown; checkpoint?: CheckpointSummary; chunkKey?: string; provenance?: SharedProvenance };
+	item?: { bytes: string; change?: unknown; b?: string; checkpoint?: CheckpointSummary; base?: BaseSummary; chunkKey?: string; provenance?: SharedProvenance };
 	faultAt?: number;
 	replayGroups?: Array<[string, number]>;
 	decryptFailure?: boolean;
@@ -327,6 +366,10 @@ export interface SyncStats {
 	imported: number;
 	/** Checkpoints accepted into the store (superseding or first). */
 	checkpoints: number;
+	/** Bases newly held. */
+	bases: number;
+	/** Orphans rebased onto their object's current base. */
+	rebased: number;
 	blindedTags: Set<string>;
 }
 
@@ -353,7 +396,7 @@ interface OutboxNext {
 }
 
 export class RelaySync implements RelaySyncApi {
-	readonly stats: SyncStats = { events: 0, decryptFailures: 0, decodeFailures: 0, imported: 0, checkpoints: 0, blindedTags: new Set() };
+	readonly stats: SyncStats = { events: 0, decryptFailures: 0, decodeFailures: 0, imported: 0, checkpoints: 0, bases: 0, rebased: 0, blindedTags: new Set() };
 
 	private readonly pk: string;
 	private pool = new SimplePool();
@@ -418,6 +461,10 @@ export class RelaySync implements RelaySyncApi {
 	private readonly pendingParts = new Map<string, RelayEventRow[]>();
 	/** `partKey`s whose group imported here: a late duplicate part is held at once. */
 	private readonly importedParts = new Set<string>();
+	/** Chunk group ids of 31078 events whose 1080 parts have not all arrived: fetched by `#c`. */
+	private readonly openBaseGroups = new Set<string>();
+	/** Objects holding a base: only they can have orphans to rebase. */
+	private basedObjects = new Set<string>();
 
 	private readonly pendingObjects = new Set<string>();
 	private notifyTimer: number | null = null;
@@ -448,7 +495,8 @@ export class RelaySync implements RelaySyncApi {
 
 	/** (Re)open the core receive session from this instance's cursor and the persisted obligations. */
 	private async openSession(): Promise<void> {
-		const replayGroups = await this.store.getReplayGroups();
+		const [replayGroups, bases] = await Promise.all([this.store.getReplayGroups(), this.store.currentBases()]);
+		this.basedObjects = new Set(bases.keys());
 		const state = coreCall<SyncSessionState>("sync", {
 			action: "session",
 			pk: this.pk,
@@ -504,7 +552,7 @@ export class RelaySync implements RelaySyncApi {
 		}
 		this.spaceSub = null;
 		if (tags.length > 0) {
-			this.spaceSub = this.pool.subscribeMany(this.relays, { kinds: SPACE_KINDS, "#h": tags, since: this.cursor + 1 }, {
+			this.spaceSub = this.pool.subscribeMany(this.relays, { kinds: SPACE_KINDS, "#h": tags, since: this.liveSince() }, {
 				onevent: (event) => {
 					this.liveChain = this.liveChain.then(() => this.handleLiveEvent(event)).catch(() => {});
 				},
@@ -578,7 +626,7 @@ export class RelaySync implements RelaySyncApi {
 				{
 					kind: DELETION_KIND,
 					created_at: Math.floor(Date.now() / 1000),
-					tags: [["h", blindShared(keyHex, `space:${spaceId}`)], ["k", String(CHANGE_KIND)], ["k", String(CHECKPOINT_KIND)]],
+					tags: [["h", blindShared(keyHex, `space:${spaceId}`)], ...DAG_KINDS.map((kind) => ["k", String(kind)])],
 					content: "space deleted",
 				},
 				this.sk,
@@ -778,6 +826,16 @@ export class RelaySync implements RelaySyncApi {
 		if (!this.stopped) this.emitLiveStatus();
 	}
 
+	/**
+	 * Live subscriptions start after the cursor. A device that has imported
+	 * nothing yet (cursor 0) starts them shortly before now instead of at
+	 * event zero: the history pass covers everything older - bounded once
+	 * bases exist - and live must not walk the relay's whole 1078 history.
+	 */
+	private liveSince(): number {
+		return this.cursor > 0 ? this.cursor + 1 : Math.floor(Date.now() / 1000) - LIVE_COLD_START_LOOKBACK_S;
+	}
+
 	private subscribeLive(): void {
 		try {
 			this.sub?.close();
@@ -791,7 +849,7 @@ export class RelaySync implements RelaySyncApi {
 		}
 		this.sub = this.pool.subscribeMany(
 			this.relays,
-			{ kinds: DAG_KINDS, authors: [this.pk], since: this.cursor + 1 },
+			{ kinds: DAG_KINDS, authors: [this.pk], since: this.liveSince() },
 			{
 				onevent: (event) => {
 					this.liveChain = this.liveChain.then(() => this.handleLiveEvent(event)).catch(() => {});
@@ -800,7 +858,7 @@ export class RelaySync implements RelaySyncApi {
 		);
 		const spaceTags = [...this.sharedSpaces.values()].map((sp) => sp.spaceTag);
 		this.spaceSub = spaceTags.length > 0
-			? this.pool.subscribeMany(this.relays, { kinds: SPACE_KINDS, "#h": spaceTags, since: this.cursor + 1 }, {
+			? this.pool.subscribeMany(this.relays, { kinds: SPACE_KINDS, "#h": spaceTags, since: this.liveSince() }, {
 					onevent: (event) => {
 						this.liveChain = this.liveChain.then(() => this.handleLiveEvent(event)).catch(() => {});
 					},
@@ -993,15 +1051,20 @@ export class RelaySync implements RelaySyncApi {
 		// Some relay/filter fell back to the paged walk: coverage then only
 		// reaches back to `since`. A reconcile always covers the whole stream.
 		let walked = false;
-		// Checkpoints (1079) never shorten the sync: they are replay caches,
-		// and the kind-1078 history - including the vanish ledger - is what
-		// this device must hold in full (docs/checkpoint-sync.md). They are
-		// covered FIRST so every object renders early; that pass is short and
-		// re-walked whole on every resume, so it neither starts from nor moves
-		// the bootstrap floor.
+		// Bases (31078) come FIRST: every object renders from its base as soon
+		// as it lands; a split base's 1080 parts follow by `#c` right after.
+		// Checkpoints (1079, legacy) are replay caches covered next, so objects
+		// without a base render early too. Without any base, the kind-1078
+		// history - including the vanish ledger - is what this device must
+		// hold in full (docs/checkpoint-sync.md); once bases exist it is their
+		// live deltas plus a bounded window (docs/state-sync.md). The base and
+		// checkpoint passes are short and re-walked whole on every resume, so
+		// they neither start from nor move the bootstrap floor.
+		const baseFilters: StreamFilter[] = [{ scope: "", filter: { kinds: [BASE_KIND], authors: [this.pk] } }];
 		const checkpointFilters: StreamFilter[] = [{ scope: "", filter: { kinds: [CHECKPOINT_KIND], authors: [this.pk] } }];
 		const changeFilters: StreamFilter[] = [{ scope: "", filter: { kinds: [CHANGE_KIND], authors: [this.pk] } }];
 		for (const sp of this.sharedSpaces.values()) {
+			baseFilters.push({ scope: sp.spaceTag, filter: { kinds: [BASE_KIND], "#h": [sp.spaceTag] } });
 			checkpointFilters.push({ scope: sp.spaceTag, filter: { kinds: [CHECKPOINT_KIND, DELETION_KIND], "#h": [sp.spaceTag] } });
 			changeFilters.push({ scope: sp.spaceTag, filter: { kinds: [CHANGE_KIND], "#h": [sp.spaceTag] } });
 		}
@@ -1017,7 +1080,7 @@ export class RelaySync implements RelaySyncApi {
 				let page: Event[];
 				const pageStarted = Date.now();
 				try {
-					page = await this.queryRelayPage(relay, { ...filter, since, until, limit: PAGE_LIMIT });
+					page = await this.queryRelayPage(relay, { ...filter, since: Math.max(since, filter.since ?? 0), until, limit: PAGE_LIMIT });
 				} catch (err) {
 					complete = false;
 					this.events.onStatus({ phase: "backfill", detail: `${relay}: ${String(err).slice(0, 100)}` });
@@ -1058,13 +1121,56 @@ export class RelaySync implements RelaySyncApi {
 			walked = true;
 			await walk(relay, filter, resume, track);
 		})));
+		await cover(baseFilters, undefined, false);
+		// A split base's 31078 names its parts' group; fetch the parts it still
+		// lacks. One still open after this is re-asked when the next reconcile
+		// fetches its 31078 again (its events are only held once it imports).
+		const gids = [...this.openBaseGroups];
+		this.openBaseGroups.clear();
+		await Promise.all(this.relays.map(async (relay) => {
+			for (let i = 0; i < gids.length; i += CHECKPOINT_FETCH_BATCH) {
+				if (this.stopped) { complete = false; return; }
+				let page: Event[];
+				try {
+					page = await this.queryRelayPage(relay, { kinds: [BASE_PART_KIND], "#c": gids.slice(i, i + CHECKPOINT_FETCH_BATCH) });
+				} catch (err) {
+					complete = false;
+					this.events.onStatus({ phase: "backfill", detail: `${relay}: ${String(err).slice(0, 100)}` });
+					return;
+				}
+				await importPage(page);
+			}
+		}));
 		await cover(checkpointFilters, undefined, false);
 		this.checkpointsLoaded = true;
 		this.emitLiveStatus();
-		await cover(changeFilters, resumeUntil, trackFloor);
+		const bases = [...(await this.store.currentBases()).values()];
+		if (bases.length === 0) {
+			// Dual read: a pre-migration vault syncs exactly as before.
+			await cover(changeFilters, resumeUntil, trackFloor);
+		} else {
+			// Live deltas of every held current base, then the deltas of objects
+			// with no base (and any untagged write) in a window bounded by the
+			// newest base: never kind-1078 history from event zero.
+			const hashes = [...new Set(bases.map((base) => base.hash))].sort();
+			const deltaFilters: StreamFilter[] = [];
+			for (let i = 0; i < hashes.length; i += BASE_HASH_BATCH) {
+				for (const { scope, filter } of changeFilters) deltaFilters.push({ scope, filter: { ...filter, "#b": hashes.slice(i, i + BASE_HASH_BATCH) } });
+			}
+			await cover(deltaFilters, undefined, false);
+			const newest = bases.reduce((max, base) => Math.max(max, base.createdAt), 0);
+			const bound = Math.max(1, Math.floor(newest / 1000) - BASE_LOOKBACK_S);
+			await cover(changeFilters.map(({ scope, filter }) => ({ scope, filter: { ...filter, since: bound } })), resumeUntil, trackFloor);
+		}
+		// This device's unpublished writes whose object moved to a newer base
+		// meanwhile (another session, a crash before rebasing) rebase now.
+		const owed = (await this.store.pendingPublishes()).map((pending) => pending.objectId);
+		const rebasing = this.importChain.then(() => this.rebaseOrphans(owed));
+		this.importChain = rebasing.catch(() => {});
+		await rebasing;
 		const covered = walked ? since : 0;
-		// Live subscriptions replay the same backlog concurrently (cold start
-		// subscribes from cursor 0) and a page import may still be committing.
+		// Live subscriptions can deliver the same recent events concurrently
+		// and a page import may still be committing.
 		// An event mid-flight is not a fault: let it land, then judge the
 		// session it produced. Faulting here instead cost every cold start a
 		// full second walk 60s later.
@@ -1137,7 +1243,7 @@ export class RelaySync implements RelaySyncApi {
 	 */
 	private async reconcileStream(relay: string, scope: string, filter: Filter, claimed: Set<string>, importPage: (page: Event[]) => Promise<void>): Promise<"complete" | "incomplete" | "unsupported"> {
 		// A store failure propagates: the recovery obligation must outlive the scan.
-		const held = await this.store.relayEvents(scope, filter.kinds ?? []);
+		const held = await this.store.relayEvents(scope, filter.kinds ?? [], { since: filter.since, b: filter["#b"] });
 		let need: string[];
 		try {
 			// One negotiation at a time per relay (relays cap concurrent NEG sessions); fetching overlaps freely.
@@ -1160,7 +1266,7 @@ export class RelaySync implements RelaySyncApi {
 		let missing = 0;
 		// Checkpoint events run to ~40k chars: 100 per REQ is a multi-MB burst a
 		// slow phone link cannot drain before the relay's send deadline.
-		const batchSize = filter.kinds?.includes(CHECKPOINT_KIND) ? CHECKPOINT_FETCH_BATCH : FETCH_BATCH;
+		const batchSize = filter.kinds?.includes(CHECKPOINT_KIND) || filter.kinds?.includes(BASE_KIND) ? CHECKPOINT_FETCH_BATCH : FETCH_BATCH;
 		for (let i = 0; i < need.length; i += batchSize) {
 			if (this.stopped) return "incomplete";
 			const ids = need.slice(i, i + batchSize);
@@ -1261,23 +1367,25 @@ export class RelaySync implements RelaySyncApi {
 	/** This event's rows in the held-events table: the self stream when we signed it, and every installed space stream it is tagged into. */
 	private heldRows(event: Event): RelayEventRow[] {
 		const rows: RelayEventRow[] = [];
-		if (event.pubkey === this.pk) rows.push({ id: event.id, createdAt: event.created_at, kind: event.kind, scope: "" });
+		const b = event.kind === CHANGE_KIND ? event.tags.find((t) => t[0] === "b")?.[1] : undefined;
+		const row = (scope: string): RelayEventRow => (b ? { id: event.id, createdAt: event.created_at, kind: event.kind, scope, b } : { id: event.id, createdAt: event.created_at, kind: event.kind, scope });
+		if (event.pubkey === this.pk) rows.push(row(""));
 		for (const sp of this.sharedSpaces.values()) {
-			if (event.tags.some((t) => t[0] === "h" && t[1] === sp.spaceTag)) rows.push({ id: event.id, createdAt: event.created_at, kind: event.kind, scope: sp.spaceTag });
+			if (event.tags.some((t) => t[0] === "h" && t[1] === sp.spaceTag)) rows.push(row(sp.spaceTag));
 		}
 		return rows;
 	}
 
-	// ── Event → change / checkpoint ────────────────────────────────
+	// ── Event → change / checkpoint / base ─────────────────────────
 
 	/** Feed one signature-verified relay event to the core session; returns the
-	 * decoded payload when a full change or checkpoint (possibly reassembled
-	 * from chunks) is available. The core owns reassembly, the cursor and
-	 * replay bookkeeping. */
+	 * decoded payload when a full change, checkpoint or base (possibly
+	 * reassembled from chunks) is available. The core owns reassembly, the
+	 * cursor and replay bookkeeping. */
 	private async ingestEvent(event: Event): Promise<ImportItem | null> {
 		this.stats.events++;
 		this.onRawEvent?.(event);
-		if ((event.kind !== CHANGE_KIND && event.kind !== CHECKPOINT_KIND && event.kind !== DELETION_KIND) || !verifyEvent(event)) return null;
+		if (!SPACE_KINDS.includes(event.kind) || !verifyEvent(event)) return null;
 		await this.ensureSession();
 		if (!this.sessionOpen) return null; // stopped
 		const r = coreCall<IngestResult>("sync", {
@@ -1298,7 +1406,10 @@ export class RelaySync implements RelaySyncApi {
 		// a faulted event is never held, so the next reconcile asks again.
 		const rows = this.heldRows(event);
 		const chunk = event.tags.find((t) => t[0] === "c");
-		const partKey = chunk && `${event.pubkey}|${event.tags.filter((t) => t[0] === "h").map((t) => t[1]).join(",")}|${chunk[1]}|${event.kind}`;
+		// A base's 31078 event and its 1080 parts are one group (keyed as the base kind, as the core does).
+		const groupKind = event.kind === BASE_PART_KIND ? BASE_KIND : event.kind;
+		const partKey = chunk && `${event.pubkey}|${event.tags.filter((t) => t[0] === "h").map((t) => t[1]).join(",")}|${chunk[1]}|${groupKind}`;
+		if (event.kind === BASE_KIND && chunk && !r.item && r.faultAt === undefined && !r.decryptFailure && !this.importedParts.has(partKey!)) this.openBaseGroups.add(chunk[1]);
 		if (!r.item) {
 			if (r.faultAt !== undefined) {
 				if (partKey) this.pendingParts.delete(partKey);
@@ -1318,11 +1429,15 @@ export class RelaySync implements RelaySyncApi {
 			held,
 			partKey,
 		};
-		if (r.item.checkpoint) {
+		if (r.item.base) {
+			item.base = r.item.base;
+			item.objectId = r.item.base.objectId;
+		} else if (r.item.checkpoint) {
 			item.checkpoint = r.item.checkpoint;
 			item.objectId = r.item.checkpoint.objectId;
 		} else {
 			item.change = unpackCoreValueMaps<ChangeJSON>(r.item.change);
+			if (r.item.b) item.change.b = r.item.b;
 			item.objectId = item.change.objectId;
 		}
 		return item;
@@ -1330,8 +1445,7 @@ export class RelaySync implements RelaySyncApi {
 
 	/** Everything the store holds for one object, replayed the way the backend does it. */
 	private async existingState(objectId: string): Promise<ObjectJSON | null> {
-		const [changes, checkpoint] = await Promise.all([this.store.changesFor(objectId), this.store.getCheckpoint(objectId)]);
-		return computeObject(changes, checkpoint?.bytes);
+		return replayObject(await this.store.objectInputs(objectId));
 	}
 
 	/**
@@ -1342,6 +1456,7 @@ export class RelaySync implements RelaySyncApi {
 		const space = this.sharedSpaces.get(p.spaceId);
 		if (!space) return false;
 		const [trustedSpace, existing] = await Promise.all([this.existingState(p.spaceId), this.existingState(item.objectId)]);
+		if (item.base) return authorizeSharedBase(item.b64, p, space, this.pk, trustedSpace, existing);
 		return item.checkpoint
 			? authorizeSharedCheckpoint(item.b64, p, space, this.pk, trustedSpace, existing)
 			: authorizeSharedChange(item.change!, p, space, this.pk, trustedSpace, existing);
@@ -1366,6 +1481,61 @@ export class RelaySync implements RelaySyncApi {
 		this.pendingObjects.add(summary.objectId);
 	}
 
+	/**
+	 * Hold a base and re-point the object's current one (core `base_current`).
+	 * Bases are never deleted: a superseded one keeps more orphans decidable.
+	 * The signer was checked as for checkpoints (`authorized` for spaces).
+	 */
+	private async importBase(item: ImportItem, summary: BaseSummary): Promise<void> {
+		const row: BaseRow = { objectId: summary.objectId, hash: summary.hash, epoch: summary.epoch, createdAt: summary.createdAt, prevBase: summary.prevBase, bytes: item.bytes };
+		const fresh = await this.store.putBase(row, pickCurrentBase);
+		this.basedObjects.add(summary.objectId);
+		if (!fresh) return;
+		this.stats.bases++;
+		this.pendingObjects.add(summary.objectId);
+	}
+
+	/** A shared object is rebased only by an identity that may write its space; anything else is this vault's own. */
+	private mayRebase(objectId: string): boolean {
+		const space = this.sharedSpaces.get(this.spaceOf(objectId));
+		return !space || space.writerSet.has(this.pk) || (space.owner || this.pk) === this.pk;
+	}
+
+	/**
+	 * Rebase every orphan of these objects onto its current base (core
+	 * `rebase`; `pending` = this device's unpublished ids make its own writes
+	 * decidable), store each rebased change with its orphan marked, and
+	 * publish it carrying `b`. Deterministic: another device rebasing the same
+	 * orphan produces the same id, so the second publish dedupes. A core
+	 * refusal is reported, never a replay fault: the held data stands.
+	 */
+	private async rebaseOrphans(objectIds: Iterable<string>): Promise<void> {
+		let pending: Set<string> | undefined;
+		for (const objectId of new Set(objectIds)) {
+			if (this.stopped || !this.basedObjects.has(objectId) || !this.mayRebase(objectId)) continue;
+			pending ??= await this.store.pendingChangeIds();
+			const input = await this.store.objectInputs(objectId);
+			if (input.bases.length === 0) continue;
+			let rebased: Rebased;
+			try {
+				rebased = rebaseObject({ ...input, pending });
+			} catch (err) {
+				this.events.onStatus({ phase: "error", detail: `rebase of ${objectId} refused: ${String(err).slice(0, 120)}` });
+				continue;
+			}
+			for (const { orphan, change, bytes } of rebased.changes) {
+				const raw = base64ToBytes(bytes);
+				// Stored as relay imports are: the decoded protobuf, plus the base it was written on.
+				const stored: ChangeJSON = { ...(decodeChange(raw) ?? change), b: rebased.base };
+				await this.store.addRebased(orphan, raw, stored);
+				pending.add(stored.id);
+				this.stats.rebased++;
+				this.pendingObjects.add(objectId);
+				await this.publish(raw, stored.id, objectId, rebased.base);
+			}
+		}
+	}
+
 	/** Report a reassembled group's import outcome to the core session. */
 	private settle(chunkKey: string, imported: boolean): void {
 		if (!this.sessionOpen) return;
@@ -1379,9 +1549,12 @@ export class RelaySync implements RelaySyncApi {
 		const run = this.importChain.then(async () => {
 			const held: RelayEventRow[] = [];
 			const parts: string[] = [];
+			const touched: string[] = [];
 			for (const item of batch) {
 				if (item.provenance && !(await this.authorized(item, item.provenance))) continue;
-				if (item.checkpoint) {
+				if (item.base) {
+					await this.importBase(item, item.base);
+				} else if (item.checkpoint) {
 					await this.importCheckpoint(item, item.checkpoint);
 				} else {
 					const change = item.change!;
@@ -1396,10 +1569,13 @@ export class RelaySync implements RelaySyncApi {
 				}
 				held.push(...(item.held ?? []));
 				if (item.partKey) parts.push(item.partKey);
+				touched.push(item.objectId);
 			}
 			// Unauthorized payloads stay unheld: a later reconcile re-judges them against newer state.
 			await this.store.recordRelayEvents(held);
 			for (const key of parts) this.importedParts.add(key);
+			// A new base can orphan held deltas, and a delta can arrive orphaned.
+			await this.rebaseOrphans(touched);
 			if (immediateNotify) this.flushObjectNotify();
 			else this.scheduleObjectNotify();
 		}).catch(async (err) => {
@@ -1440,6 +1616,11 @@ export class RelaySync implements RelaySyncApi {
 		try {
 			const item = await this.ingestEvent(event);
 			if (item) await this.importBatch([item]);
+			else if (event.kind === BASE_KIND) {
+				// A live split base: its parts went out first, possibly before the cursor.
+				const gid = event.tags.find((t) => t[0] === "c")?.[1];
+				if (gid && this.openBaseGroups.delete(gid)) void this.fetchLiveBaseParts(gid);
+			}
 		} catch (err) {
 			this.recordReplayFault(1);
 			throw err;
@@ -1447,6 +1628,18 @@ export class RelaySync implements RelaySyncApi {
 			this.activeLiveEvents--;
 			await this.persistCursor();
 		}
+	}
+
+	private async fetchLiveBaseParts(gid: string): Promise<void> {
+		await Promise.all(this.relays.map(async (relay) => {
+			try {
+				for (const part of await this.queryRelayPage(relay, { kinds: [BASE_PART_KIND], "#c": [gid] })) {
+					this.liveChain = this.liveChain.then(() => this.handleLiveEvent(part)).catch(() => {});
+				}
+			} catch {
+				/* the next history pass fetches them */
+			}
+		}));
 	}
 
 	// ── Object-change notification batching ────────────────────────
@@ -1477,12 +1670,13 @@ export class RelaySync implements RelaySyncApi {
 	 * obligation is stored FIRST; only then do we try to open a session and
 	 * hand it to the outbox. A phone that suspended its relay session (iOS
 	 * Safari does this aggressively) therefore still commits, and `start()`
-	 * re-offers every stored obligation on the next load.
+	 * re-offers every stored obligation on the next load. `base`: the hash of
+	 * the base the change was written on; its sealed parts carry ["b", base].
 	 */
-	async publish(bytes: Uint8Array, changeId: string, objectId: string): Promise<void> {
-		const candidates: PendingPublish[] = [{ key: changeId, changeId, objectId, bytes }];
+	async publish(bytes: Uint8Array, changeId: string, objectId: string, base?: string): Promise<void> {
+		const candidates: PendingPublish[] = [{ key: changeId, changeId, objectId, bytes, ...(base ? { base } : {}) }];
 		const space = this.sharedSpaces.get(this.spaceOf(objectId));
-		if (space) candidates.push({ key: `${space.spaceId}/${space.keyId}/${changeId}`, changeId, objectId, bytes, spaceId: space.spaceId, keyId: space.keyId });
+		if (space) candidates.push({ key: `${space.spaceId}/${space.keyId}/${changeId}`, changeId, objectId, bytes, spaceId: space.spaceId, keyId: space.keyId, ...(base ? { base } : {}) });
 		const owed: PendingPublish[] = [];
 		for (const item of candidates) {
 			if (await this.store.isPublished(item.key)) continue;
@@ -1514,6 +1708,7 @@ export class RelaySync implements RelaySyncApi {
 				bytes: bytesToBase64(pending.bytes),
 				spaceId: pending.spaceId,
 				keyId: pending.keyId,
+				base: pending.base,
 				hasEvents: !!pending.events,
 			},
 		});

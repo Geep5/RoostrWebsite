@@ -1,3 +1,4 @@
+import { verifyEvent, type Event, type EventTemplate } from "nostr-tools";
 import { normalizeRelations } from "./local-backend";
 import type { ObjectJSON, ObjectSummary, SpaceJSON, RelationDefJSON } from "./types";
 import type { QueryBody } from "./engine/contracts";
@@ -161,5 +162,24 @@ export class IOSBackend {
 	}
 	async importSpaceInvite(inv: { space: string; owner: string; key: string; keyId: number }): Promise<boolean> {
 		return (await call<unknown>("importSpaceInvite", inv)) === true;
+	}
+	/**
+	 * Blossom upload authorization (kind 24242): the host signs it with the
+	 * vault key, which never enters the page, and refuses any other kind. A
+	 * host build without the method says so instead of failing obscurely.
+	 */
+	async signEvent(template: EventTemplate): Promise<Event> {
+		let signed: unknown;
+		try {
+			signed = await call<unknown>("signEvent", { kind: template.kind, created_at: template.created_at, tags: template.tags, content: template.content });
+		} catch (error) {
+			throw new Error(`This version of the Roostr app cannot sign file uploads (signEvent: ${error instanceof Error ? error.message : String(error)}); update the app to add files.`);
+		}
+		const event = signed as Event;
+		if (!signed || typeof signed !== "object" || event.kind !== template.kind || event.created_at !== template.created_at
+			|| event.content !== template.content || JSON.stringify(event.tags) !== JSON.stringify(template.tags) || !verifyEvent(event)) {
+			throw new Error("The Roostr app returned an invalid signature for the file upload");
+		}
+		return event;
 	}
 }

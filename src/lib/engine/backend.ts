@@ -16,7 +16,7 @@ const toHex = (b: Uint8Array): string => {
 	for (const x of b) out += HEX[x >> 4] + HEX[x & 15];
 	return out;
 };
-import { computeObject } from "./replay";
+import { replayObject } from "./replay";
 import { loadCorpus, needsColdLoad, runQuery } from "./query";
 import { ChangeStore, destroyDatabase, StorageUnavailableError } from "./store";
 import { RelaySync, DEFAULT_RELAYS, npubToHex, type SharedSpaceInfo } from "./sync";
@@ -209,7 +209,7 @@ class WebBackend {
 				for (const { bytes, change } of changes) {
 					if (await this.store.isPublished(`${info.spaceId}/${info.keyId}/${change.id}`)) continue;
 					// Existing IDs address original wire bytes, not a canonical re-encoding.
-					await this.sync.publish(bytes, change.id, objectId);
+					await this.sync.publish(bytes, change.id, objectId, change.b);
 					queued++;
 				}
 			}
@@ -273,8 +273,9 @@ class WebBackend {
 
 	/**
 	 * Recompute dirty object states. Boot path loads the persisted replay
-	 * cache and replays ONLY objects whose change count grew or whose
-	 * checkpoint moved since it was written - a warm boot does zero replay work.
+	 * cache and replays ONLY objects whose change count grew, whose
+	 * checkpoint moved or whose current base changed since it was written -
+	 * a warm boot does zero replay work.
 	 */
 	private ensure(): Promise<void> {
 		if (this.ensuring) return this.ensuring;
@@ -290,26 +291,28 @@ class WebBackend {
 			this.allDirty = false;
 			rebuilt = true;
 			this.states.clear();
-			const [counts, cached, checkpoints] = await Promise.all([this.store.changeCounts(), this.store.getStates<ObjectJSON>(), this.store.allCheckpoints()]);
-			// An object may exist only as a checkpoint (its covered changes were
-			// never stored here), so the scan covers both key sets.
-			for (const id of new Set([...counts.keys(), ...checkpoints.keys()])) {
+			const [counts, cached, checkpoints, bases] = await Promise.all([this.store.changeCounts(), this.store.getStates<ObjectJSON>(), this.store.allCheckpoints(), this.store.currentBases()]);
+			// An object may exist only as a checkpoint or a base (the changes it
+			// covers were never stored here), so the scan covers every key set.
+			for (const id of new Set([...counts.keys(), ...checkpoints.keys(), ...bases.keys()])) {
 				const hit = cached.get(id);
-				if (hit && hit.n === (counts.get(id) ?? 0) && hit.cp === (checkpoints.get(id)?.hash ?? "")) this.states.set(id, hit.state);
+				if (hit && hit.n === (counts.get(id) ?? 0) && hit.cp === (checkpoints.get(id)?.hash ?? "") && hit.base === (bases.get(id)?.hash ?? "")) this.states.set(id, hit.state);
 				else this.dirty.add(id);
 			}
 		}
 		const ids = [...this.dirty];
 		this.dirty.clear();
+		let pending: Set<string> | undefined;
 		for (const [index, id] of ids.entries()) {
 			try {
-				const [changes, checkpoint] = await Promise.all([this.store.changesFor(id), this.store.getCheckpoint(id)]);
-				if (changes.length === 0 && !checkpoint) continue;
-				const obj = computeObject(changes, checkpoint?.bytes);
+				pending ??= await this.store.pendingChangeIds();
+				const input = await this.store.objectInputs(id);
+				// Current base + live deltas (+ pre-migration replay when there is no base).
+				const obj = replayObject({ ...input, pending });
 				if (obj) {
 					this.states.set(id, obj);
 					this.queryUpserted.add(id);
-					void this.store.putState(id, changes.length, checkpoint?.hash ?? "", obj);
+					void this.store.putState(id, input.count, input.checkpointHash, input.base, obj);
 				}
 			} catch (err) {
 				// Two different failures used to share one silent `continue`:
@@ -511,16 +514,21 @@ class WebBackend {
 				// Measured on this machine: 3x faster at 10k objects, and the
 				// payload is 1.4 MB where the JSON was 2.1 MB.
 				// Vanished histories stay on disk (relays may redeliver them)
-				// but never enter the cache: their peak cost is real.
+				// but never enter the cache: their peak cost is real. An object
+				// held from a base is not a change history the corpus can
+				// replay (core/corpus.odin knows checkpoints, not bases): its
+				// replayed state goes in as JSON instead.
 				try {
-					const histories = (await this.store.allChangeHistories()).filter((h) => !h.objectId || !this.vanished.has(h.objectId));
+					const based = new Set((await this.store.currentBases()).keys());
+					const histories = (await this.store.allChangeHistories()).filter((h) => !h.objectId || (!this.vanished.has(h.objectId) && !based.has(h.objectId)));
 					// Every pending upsert is a replay of the bytes the corpus
 					// just loaded; re-pushing them as JSON doubles the peak
 					// (corpus regions and upsert regions coexist until commit).
 					// Single-threaded: nothing replays between the read and here.
-					const covered = new Set(this.queryUpserted);
+					const covered = new Set([...this.queryUpserted].filter((id) => !based.has(id)));
 					loadCorpus(histories);
 					for (const id of covered) this.queryUpserted.delete(id);
+					for (const id of based) if (this.states.has(id)) this.queryUpserted.add(id);
 					// Raw history includes relay copies the vanish ledger
 					// excludes. Reapply it, including after a core-only reset.
 					for (const id of this.vanished) this.queryRemoved.add(id);
@@ -563,10 +571,7 @@ class WebBackend {
 				author: this.author,
 				pk: this.pk,
 				ownerSignal,
-				dagFor: async (id) => {
-					const [changes, checkpoint] = await Promise.all([this.store.changesFor(id), this.store.getCheckpoint(id)]);
-					return { changes, checkpoint: checkpoint?.bytes };
-				},
+				dagFor: async (id) => ({ ...(await this.store.objectInputs(id)), pending: await this.store.pendingChangeIds() }),
 				getObject: async (id) => {
 					await this.ensure();
 					return this.states.get(id) ?? null;
@@ -595,9 +600,12 @@ class WebBackend {
 					change.id = changeId(change);
 					const bytes = encodeChange(change);
 					// Round-trip through decode so the stored JSON matches
-					// relay-imported changes byte-for-byte.
+					// relay-imported changes byte-for-byte. Written on the
+					// object's current base: its event carries ["b", base].
 					const decoded = decodeChange(bytes) ?? change;
-					await this.store.addLocalChange(bytes, decoded);
+					const base = (await this.store.currentBase(change.objectId))?.hash;
+					if (base) decoded.b = base;
+					await this.store.addLocalChange(bytes, decoded, base);
 					this.dirty.add(change.objectId);
 					await this.ensure();
 					// Publishing is an obligation, not part of the write: a
@@ -605,7 +613,7 @@ class WebBackend {
 					// change into a failed one (the message would vanish from
 					// the composer while living on in the DAG).
 					try {
-						await this.sync?.publish(bytes, change.id, change.objectId);
+						await this.sync?.publish(bytes, change.id, change.objectId, base);
 					} catch (err) {
 						console.error("[roostr] publish deferred:", err);
 					}

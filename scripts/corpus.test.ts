@@ -202,7 +202,7 @@ test("cold queries and core resets cannot resurrect vanished objects", async () 
 		}));
 		// Exercise a warm database: there are no replay upserts to mask an
 		// incorrectly seeded corpus.
-		for (const change of changes) await store.putState(change.objectId, 1, "", stateOf(change));
+		for (const change of changes) await store.putState(change.objectId, 1, "", "", stateOf(change));
 		Object.assign(internals, {
 			store, states: new Map(), dirty: new Set(), vanished: new Set(),
 			queryUpserted: new Set(), queryRemoved: new Set(), allDirty: true,
