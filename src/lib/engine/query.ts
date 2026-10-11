@@ -1,5 +1,5 @@
 import type { ObjectJSON } from "$lib/types";
-import type { ObjectHistory, QueryBody, QueryResultRowJSON } from "./contracts";
+import type { ChangeJSON, ObjectHistory, QueryBody, QueryResultRowJSON } from "./contracts";
 import { coreCall, coreCallWithBlob, coreGeneration } from "./core";
 import { packCoreValueMaps } from "./core-values";
 
@@ -90,6 +90,30 @@ export function runQuery(
  */
 export function syncQueryCache(states: Iterable<ObjectJSON>, delta?: QueryDelta): void {
 	pushStates(states, undefined, delta);
+}
+
+let applyRefusalLogged = false;
+
+/**
+ * Apply one locally committed, addressed change to the core's cache (core
+ * query.odin query_cache_apply) instead of re-sending its object's state.
+ * The core applies it only on exactly the heads it caches, so a cache that
+ * moved on (a remote change upserted in full) or never held the object
+ * refuses, untouched. False means the caller must upsert the replayed state
+ * as before; the first refusal is logged.
+ */
+export function applyCommitted(change: ChangeJSON): boolean {
+	// A cold or reset cache gets this change from the corpus load anyway.
+	if (needsColdLoad()) return false;
+	try {
+		const out = coreCall<{ applied: string[]; refused: string[] }>("mutation", packCoreValueMaps({ action: "apply", changes: [change] }));
+		if (out.applied.length === 1) return true;
+		if (!applyRefusalLogged) console.warn(`[query] cache refused committed change ${change.id} on ${change.objectId}; upserting its state instead`);
+	} catch (error) {
+		if (!applyRefusalLogged) console.warn("[query] cache apply failed; upserting the state instead:", error);
+	}
+	applyRefusalLogged = true;
+	return false;
 }
 
 function pushStates(

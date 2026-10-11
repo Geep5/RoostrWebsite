@@ -17,7 +17,7 @@ const toHex = (b: Uint8Array): string => {
 	return out;
 };
 import { replayObject } from "./replay";
-import { loadCorpus, needsColdLoad, runQuery, syncQueryCache } from "./query";
+import { applyCommitted, loadCorpus, needsColdLoad, runQuery, syncQueryCache } from "./query";
 import { ChangeStore, destroyDatabase, StorageUnavailableError } from "./store";
 import { RelaySync, DEFAULT_RELAYS, VANISH_LOG_ID, npubToHex, type SharedSpaceInfo } from "./sync";
 import { spaceKeyAll, spaceOwner } from "./spacekeys";
@@ -326,8 +326,12 @@ class WebBackend {
 				// Current base + live deltas (+ pre-migration replay when there is no base).
 				const obj = replayObject({ ...input, pending });
 				if (obj) {
+					const previous = this.states.get(id)?.heads;
 					this.states.set(id, obj);
-					this.queryUpserted.add(id);
+					// Same heads, same state: a relay echoing this device's own
+					// change, or a duplicate delivery, leaves the core's cache
+					// (and any upsert still owed for it) as it is.
+					if (!previous || !obj.heads || previous.length !== obj.heads.length || previous.some((head, i) => head !== obj.heads![i])) this.queryUpserted.add(id);
 					void this.store.putState(id, input.count, input.checkpointHash, input.base, obj);
 				}
 			} catch (err) {
@@ -616,8 +620,18 @@ class WebBackend {
 					const base = (await this.store.currentBase(change.objectId))?.hash;
 					if (base) decoded.b = base;
 					await this.store.addLocalChange(bytes, decoded, base);
+					// The core applies its own planned change to the cache it
+					// plans over (no await since the write: nothing interleaves).
+					const applied = applyCommitted(decoded);
 					this.dirty.add(change.objectId);
 					await this.ensure();
+					// The replica still replays (this.states, the IndexedDB
+					// cache). When that replay reached exactly this change, it
+					// is the state the core now caches, so it is not re-sent;
+					// a remote change replayed alongside moves the heads, and
+					// then the merged state is upserted as before.
+					const heads = this.states.get(change.objectId)?.heads;
+					if (applied && heads?.length === 1 && heads[0] === change.id) this.queryUpserted.delete(change.objectId);
 					// Publishing is an obligation, not part of the write: a
 					// relay that cannot be reached must never turn a committed
 					// change into a failed one (the message would vanish from

@@ -110,6 +110,9 @@ export interface ObjectJSON {
 	deleted: boolean;
 	createdAt: number;
 	updatedAt: number;
+	/** DAG heads this state was replayed to (core `replay_from_base`); the
+	 * query cache applies a local commit only on exactly these. */
+	heads?: string[];
 }
 
 export interface ObjectSummary {
