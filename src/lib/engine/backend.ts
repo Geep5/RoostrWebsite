@@ -73,6 +73,8 @@ class WebBackend {
 	private mutationTail: Promise<void> = Promise.resolve();
 	private ensuring: Promise<void> | null = null;
 	private sharedRefreshes = 0;
+	/** bootstrap_space_defaults ran (or is queued) for this session. */
+	private seeded = false;
 
 	async start(): Promise<void> {
 		if (this.started) return;
@@ -114,13 +116,22 @@ class WebBackend {
 				if (!o) return "";
 				return o.typeKey === "channel" ? o.id : (o.fields["channel"]?.stringValue ?? "");
 			},
+			// Seed only once this replica holds what the relays hold: a fresh
+			// device seeding before its first pass re-wrote and re-published
+			// the vault's whole bundled catalog on every load. Offline (no relay
+			// configured, or none reachable within the history timeouts) it
+			// seeds as before, so a first run without a network still works.
+			onHistoryPass: ({ complete, reachable }) => {
+				if (complete || !reachable) this.seedDefaults();
+			},
 		});
 		await this.refreshShared();
 		// Converge the bundled catalog (new relations/types the engine added
 		// since this space was seeded) - the native daemon does this at boot;
 		// a browser-only vault has no daemon, so the website does it here.
-		// Idempotent by fixture: a converged space commits nothing.
-		void this.mutate("bootstrap_space_defaults", {}).catch((err: unknown) => console.warn("bootstrap_space_defaults failed", err));
+		// A replica that already walked the vault seeds now; a fresh one when
+		// its first history pass ends (onHistoryPass above).
+		if (await this.store.getBootstrapped()) this.seedDefaults();
 		void this.sync.start().then(() => this.refreshShared());
 	}
 
@@ -241,6 +252,14 @@ class WebBackend {
 		this.sync?.stop();
 		this.sync = null;
 		this.started = false;
+		this.seeded = false;
+	}
+
+	/** Idempotent by fixture: a converged space commits nothing; once per session. */
+	private seedDefaults(): void {
+		if (this.seeded || !this.sync || this.loggingOut) return;
+		this.seeded = true;
+		void this.mutate("bootstrap_space_defaults", {}).catch((err: unknown) => console.warn("bootstrap_space_defaults failed", err));
 	}
 
 	relays(): string[] {

@@ -10,7 +10,7 @@ import { finalizeEvent, getPublicKey, matchFilter, nip44, type Event, type Filte
 import { bytesToHex } from "@noble/hashes/utils.js";
 import { coreCall, initCore, resetCore } from "../src/lib/engine/core";
 import { packCoreValueMaps } from "../src/lib/engine/core-values";
-import { RelaySync } from "../src/lib/engine/sync";
+import { blindShared, RelaySync, type SharedSpaceInfo } from "../src/lib/engine/sync";
 import { ChangeStore, destroyDatabase } from "../src/lib/engine/store";
 import { base64ToBytes, bytesToBase64, changeId, encodeChange } from "../src/lib/engine/proto";
 import { classifyObject, pickCurrentBase, replayObject } from "../src/lib/engine/replay";
@@ -27,8 +27,8 @@ const secret = bytesToHex(sk);
 const BASE_MS = 1_760_000_000_000;
 const BOUND_S = BASE_MS / 1000 - 86_400;
 
-function change(objectId: string, ops: ChangeJSON["ops"], parentIds: string[], timestamp: number): ChangeJSON {
-	const value: ChangeJSON = { id: "", objectId, ops, parentIds, timestamp, author: pk };
+function change(objectId: string, ops: ChangeJSON["ops"], parentIds: string[], timestamp: number, author = pk): ChangeJSON {
+	const value: ChangeJSON = { id: "", objectId, ops, parentIds, timestamp, author };
 	value.id = changeId(value);
 	return value;
 }
@@ -178,7 +178,7 @@ describe("backend replay from base", () => {
 		const store = await storeFixture();
 		resetCore();
 		try {
-			await store.putBase(baseRow(base1.base), pickCurrentBase);
+			await store.putBase(baseRow(base1.base), pickCurrentBase, [""]);
 			await store.addChanges([{ bytes: encodeChange(c4), change: { ...c4, b: base1.hash } }]);
 			Object.assign(internals, { store, sync: null, states: new Map(), dirty: new Set(), vanished: new Set(), queryUpserted: new Set(), queryRemoved: new Set(), allDirty: true, author: "tester" });
 			expect((await backend.fetchObject("doc")).fields["name"]?.stringValue).toBe("v4");
@@ -188,7 +188,7 @@ describe("backend replay from base", () => {
 			expect((await store.getStates()).get("doc")?.base).toBe(base1.hash);
 
 			// Same change count, same (absent) checkpoint: only the base moved.
-			await store.putBase(baseRow(base2.base), pickCurrentBase);
+			await store.putBase(baseRow(base2.base), pickCurrentBase, [""]);
 			Object.assign(internals, { states: new Map(), allDirty: true });
 			expect((await backend.fetchObject("doc")).fields["name"]?.stringValue).toBe("v5");
 
@@ -309,6 +309,71 @@ describe("bases-first history", () => {
 		expect((await store.changesFor("__vanished__")).map((c) => c.id)).toEqual([ledger.id]);
 		// Pre-migration history of a based object stays unfetched.
 		expect((await store.changesFor("doc")).length).toBe(0);
+	});
+
+	// Another identity's shared space: its events are in the space stream only, never in this key's personal one.
+	const otherSk = new Uint8Array(32).fill(2);
+	const otherPk = getPublicKey(otherSk);
+	const space: SharedSpaceInfo = { spaceId: "space", keyId: 1, keyHex: bytesToHex(new Uint8Array(32).fill(4)), owner: otherPk, writers: [otherPk] };
+	const sealSpace = { conversationKey: space.keyHex, space: { keyHex: space.keyHex, spaceId: space.spaceId, owner: otherPk } };
+	const spaceNote = (objectId: string, timestamp: number) => change(objectId, [{ objectCreate: { typeKey: "note" } }, setName(objectId), { fieldSet: { key: "channel", value: { stringValue: "space" } } }], [], timestamp, otherPk);
+	function spaceDelta(c: ChangeJSON, createdAt: number, base?: string): Event {
+		const sealed = coreCall<{ parts: Array<{ content: string; tags: string[][] }> }>("wire", { action: "seal", change: b64(c), objectId: c.objectId, base, ...sealSpace });
+		return finalizeEvent({ kind: 1078, created_at: createdAt, tags: sealed.parts[0].tags, content: sealed.parts[0].content }, otherSk);
+	}
+	function spaceBaseEvents(base: string, createdAt: number): Event[] {
+		const sealed = coreCall<{ event: { kind: number; content: string; tags: string[][] }; parts: Array<{ kind: number; content: string; tags: string[][] }> }>(
+			"sync", { action: "seal_base", base, ...sealSpace });
+		return [...sealed.parts, sealed.event].map((p) => finalizeEvent({ kind: p.kind, created_at: createdAt, tags: p.tags, content: p.content }, otherSk));
+	}
+	// Space filters always carry #h (the space tag); a personal one only for the vanish ledger.
+	const streamShape = (f: Filter) => `${f.authors ? "self" : "space"}:${f.kinds!.join()}${f["#b"] ? "#b" : ""}${f.authors && f["#h"] ? "#h" : ""}${f.since ? `>${f.since}` : ""}`;
+
+	test("the floor is per stream: a space holding no base is walked whole while the personal stream is bounded", async () => {
+		// Rollout/steady-state gap: the newest base of ANY stream used to bound every stream, so an unbased
+		// object whose events all predate that window was never fetched by a fresh device.
+		const store = await storeFixture();
+		const old = spaceNote("sold", 50);
+		const oldSpace = spaceDelta(old, 1_600_000_000);
+		const { relay, log } = fakeRelay([...baseEvents(base1.base, BASE_MS / 1000), deltaEvent(c1, 1_700_000_000), oldSpace]);
+		const { sync, internals } = syncFixture(store, { ensureRelay: async () => relay, close() {} });
+		sync.setSharedSpaces([space]);
+		expect(await internals.backfill(1)).toBe(true);
+		const changeOpens = log.negOpens.filter((f) => f.kinds!.includes(1078));
+		expect(changeOpens.map(streamShape).sort()).toEqual(["self:1078#b", "self:1078#h", `self:1078>${BOUND_S}`, "space:1078"].sort());
+		expect((await store.changesFor("sold")).map((c) => c.id)).toEqual([old.id]);
+		// The personal stream stays bounded: pre-migration history of its based object is not fetched.
+		expect((await store.changesFor("doc")).length).toBe(0);
+		expect(Object.fromEntries(await store.newestBaseByStream())).toEqual({ "": BASE_MS });
+	});
+
+	test("the floor is per stream: a personal stream holding no base is walked whole while a based space is bounded", async () => {
+		const store = await storeFixture();
+		const mine = change("mine", [{ objectCreate: { typeKey: "note" } }, setName("mine")], [], 40);
+		const based = spaceNote("sdoc", 60);
+		const spaceBase = compact([], [based]);
+		const unbased = spaceNote("sold", 70);
+		const recent = spaceNote("snew", 80);
+		const { relay, log } = fakeRelay([
+			deltaEvent(mine, 1_600_000_000),
+			...spaceBaseEvents(spaceBase.base, BASE_MS / 1000),
+			spaceDelta(based, 1_650_000_000),
+			spaceDelta(unbased, 1_650_000_100),
+			spaceDelta(recent, BASE_MS / 1000 + 100),
+		]);
+		const { sync, internals } = syncFixture(store, { ensureRelay: async () => relay, close() {} });
+		sync.setSharedSpaces([space]);
+		expect(await internals.backfill(1)).toBe(true);
+		// No ledger reconcile: the whole personal walk already covers it.
+		const changeOpens = log.negOpens.filter((f) => f.kinds!.includes(1078));
+		expect(changeOpens.map(streamShape).sort()).toEqual(["self:1078", "space:1078#b", `space:1078>${BOUND_S}`].sort());
+		expect((await store.currentBase("sdoc"))?.hash).toBe(spaceBase.hash);
+		expect((await store.changesFor("mine")).map((c) => c.id)).toEqual([mine.id]);
+		expect((await store.changesFor("snew")).map((c) => c.id)).toEqual([recent.id]);
+		// Older than the space's window and without a base: compaction's unbased fallback owns it (docs/state-sync.md).
+		expect((await store.changesFor("sold")).length).toBe(0);
+		const spaceTag = blindShared(space.keyHex, "space:space");
+		expect(Object.fromEntries(await store.newestBaseByStream())).toEqual({ [spaceTag]: BASE_MS });
 	});
 
 	test("live subscriptions carry bases and their parts", async () => {

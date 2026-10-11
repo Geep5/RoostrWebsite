@@ -34,10 +34,12 @@
  * State sync (glonOdin/docs/state-sync.md): every pass covers bases first
  * (kind 31078 + their kind-1080 parts by `#c`), so each object renders from
  * its base as soon as it lands; then legacy 1079 checkpoints; then deltas.
- * With no base on the relays (a pre-migration vault) the kind-1078 history is
- * covered whole, exactly as before (dual read). Once bases exist, deltas are
- * the live deltas of the held current bases (`#b`) plus a 1078 cover bounded
- * to the newest base's created_at minus one day - never history from zero.
+ * Per stream (personal, each space): one holding no base (a pre-migration
+ * vault, a space nobody compacts yet) has its kind-1078 history covered whole,
+ * exactly as before (dual read). One holding bases covers the live deltas of
+ * the held current bases (`#b`) plus a 1078 window bounded to ITS newest
+ * base's created_at minus one day - never history from zero, and never
+ * another stream's floor: that would skip unbased objects older than it.
  * Local deltas carry the base they were written on (`b`); orphans of this
  * identity's writable objects are rebased by the core and published. The
  * web app never compacts.
@@ -74,7 +76,7 @@ const DELETION_KIND = 5;
 const SPACE_KINDS = [...DAG_KINDS, DELETION_KIND];
 /** Base hashes per `#b` delta filter. */
 export const BASE_HASH_BATCH = 200;
-/** Once bases exist, 1078 history reaches back to the newest base's created_at minus this. */
+/** A stream holding bases reads 1078 history back to its newest base's created_at minus this. */
 const BASE_LOOKBACK_S = 86_400;
 /** The synced vanish ledger object (src/vanish.odin). It never gets a base, so its stream is always read whole. */
 export const VANISH_LOG_ID = "__vanished__";
@@ -359,6 +361,11 @@ export interface RelaySyncOptions {
 	onSpaceVanished?: (spaceId: string) => void;
 	/** The space is vanished or left here: its invite keys are ignored. */
 	spaceGone?: (spaceId: string) => boolean;
+	/**
+	 * A history pass ended: `complete` when every relay covered every stream,
+	 * `reachable` once any relay has answered a connection this session.
+	 */
+	onHistoryPass?: (pass: { complete: boolean; reachable: boolean }) => void;
 }
 
 export interface SyncStats {
@@ -411,6 +418,9 @@ export class RelaySync implements RelaySyncApi {
 	private readonly spaceOf: (objectId: string) => string;
 	private readonly onSpaceVanished?: (spaceId: string) => void;
 	private readonly spaceGone: (spaceId: string) => boolean;
+	private readonly onHistoryPass?: (pass: { complete: boolean; reachable: boolean }) => void;
+	/** Some relay accepted a history connection this session: an incomplete pass is not "offline". */
+	private relayReached = false;
 	private sharedSpaces = new Map<string, SharedSpace>();
 	private spaceSub: { close(): void } | null = null;
 
@@ -489,6 +499,7 @@ export class RelaySync implements RelaySyncApi {
 		this.spaceOf = options.spaceOf ?? (() => "");
 		this.onSpaceVanished = options.onSpaceVanished;
 		this.spaceGone = options.spaceGone ?? (() => false);
+		this.onHistoryPass = options.onHistoryPass;
 	}
 
 	private get sessionOpen(): boolean {
@@ -1056,12 +1067,13 @@ export class RelaySync implements RelaySyncApi {
 		// Bases (31078) come FIRST: every object renders from its base as soon
 		// as it lands; a split base's 1080 parts follow by `#c` right after.
 		// Checkpoints (1079, legacy) are replay caches covered next, so objects
-		// without a base render early too. Without any base, the kind-1078
-		// history - including the vanish ledger - is what this device must
-		// hold in full (docs/checkpoint-sync.md); once bases exist it is their
-		// live deltas plus a bounded window (docs/state-sync.md). The base and
-		// checkpoint passes are short and re-walked whole on every resume, so
-		// they neither start from nor move the bootstrap floor.
+		// without a base render early too. A stream (personal, or one space)
+		// holding no base reads its whole kind-1078 history - including the
+		// vanish ledger - as before (docs/checkpoint-sync.md); one holding bases
+		// reads their live deltas plus a window bounded by ITS newest base
+		// (docs/state-sync.md). The base and checkpoint passes are short and
+		// re-walked whole on every resume, so they neither start from nor move
+		// the bootstrap floor.
 		const baseFilters: StreamFilter[] = [{ scope: "", filter: { kinds: [BASE_KIND], authors: [this.pk] } }];
 		const checkpointFilters: StreamFilter[] = [{ scope: "", filter: { kinds: [CHECKPOINT_KIND], authors: [this.pk] } }];
 		const changeFilters: StreamFilter[] = [{ scope: "", filter: { kinds: [CHANGE_KIND], authors: [this.pk] } }];
@@ -1146,28 +1158,38 @@ export class RelaySync implements RelaySyncApi {
 		await cover(checkpointFilters, undefined, false);
 		this.checkpointsLoaded = true;
 		this.emitLiveStatus();
-		const bases = [...(await this.store.currentBases()).values()];
-		if (bases.length === 0) {
-			// Dual read: a pre-migration vault syncs exactly as before.
-			await cover(changeFilters, resumeUntil, trackFloor);
-		} else {
-			// Live deltas of every held current base, the vanish ledger's whole
-			// stream (it never gets a base, and without it nothing vanished is
-			// enforced here), then the deltas of objects with no base (and any
-			// untagged write) in a window bounded by the newest base: never
-			// kind-1078 history from event zero.
-			const hashes = [...new Set(bases.map((base) => base.hash))].sort();
+		// Per stream, never global: one stream's newest base says nothing about
+		// another's unbased objects (a space nobody compacts yet, a personal
+		// object whose computer was offline while another compacted).
+		const newest = await this.store.newestBaseByStream();
+		const floorOf = (scope: string): number | undefined => {
+			const at = newest.get(scope);
+			return at === undefined ? undefined : Math.max(1, Math.floor(at / 1000) - BASE_LOOKBACK_S);
+		};
+		const bounded = changeFilters.filter(({ scope }) => floorOf(scope) !== undefined);
+		if (bounded.length > 0) {
+			// A bounded stream's live deltas of every held current base, and
+			// the vanish ledger's whole stream when the personal one is
+			// bounded (it never gets a base, and without it nothing vanished
+			// is enforced here). A whole-stream walk below covers both anyway.
+			const hashes = [...new Set([...(await this.store.currentBases()).values()].map((base) => base.hash))].sort();
 			const deltaFilters: StreamFilter[] = [];
 			for (let i = 0; i < hashes.length; i += BASE_HASH_BATCH) {
-				for (const { scope, filter } of changeFilters) deltaFilters.push({ scope, filter: { ...filter, "#b": hashes.slice(i, i + BASE_HASH_BATCH) } });
+				for (const { scope, filter } of bounded) deltaFilters.push({ scope, filter: { ...filter, "#b": hashes.slice(i, i + BASE_HASH_BATCH) } });
 			}
-			const ledgerTag = coreCall<string>("wire", { action: "blind", secret: this.secretHex, id: VANISH_LOG_ID });
-			deltaFilters.push({ scope: "", filter: { kinds: [CHANGE_KIND], authors: [this.pk], "#h": [ledgerTag] } });
+			if (floorOf("") !== undefined) {
+				const ledgerTag = coreCall<string>("wire", { action: "blind", secret: this.secretHex, id: VANISH_LOG_ID });
+				deltaFilters.push({ scope: "", filter: { kinds: [CHANGE_KIND], authors: [this.pk], "#h": [ledgerTag] } });
+			}
 			await cover(deltaFilters, undefined, false);
-			const newest = bases.reduce((max, base) => Math.max(max, base.createdAt), 0);
-			const bound = Math.max(1, Math.floor(newest / 1000) - BASE_LOOKBACK_S);
-			await cover(changeFilters.map(({ scope, filter }) => ({ scope, filter: { ...filter, since: bound } })), resumeUntil, trackFloor);
 		}
+		// Then each stream's 1078s: since its floor when it holds bases (the
+		// deltas of its objects with no base, and any untagged write), else
+		// whole - a pre-migration vault syncs exactly as before (dual read).
+		await cover(changeFilters.map(({ scope, filter }) => {
+			const since = floorOf(scope);
+			return since === undefined ? { scope, filter } : { scope, filter: { ...filter, since } };
+		}), resumeUntil, trackFloor);
 		// This device's unpublished writes whose object moved to a newer base
 		// meanwhile (another session, a crash before rebasing) rebase now.
 		const owed = (await this.store.pendingPublishes()).map((pending) => pending.objectId);
@@ -1205,6 +1227,7 @@ export class RelaySync implements RelaySyncApi {
 			this.recordReplayFault(since);
 			await this.persistCursor();
 		}
+		if (!this.stopped) this.onHistoryPass?.({ complete: this.historyComplete, reachable: this.relayReached });
 		return this.historyComplete;
 	}
 
@@ -1219,6 +1242,7 @@ export class RelaySync implements RelaySyncApi {
 	/** querySync treats timeout/closed as empty success; only real EOSE proves exhaustion. */
 	private async queryRelayPage(url: string, filter: Parameters<SimplePool["querySync"]>[1]): Promise<Event[]> {
 		const relay = await this.pool.ensureRelay(url, { connectionTimeout: 15_000 });
+		this.relayReached = true;
 		const done = Promise.withResolvers<Event[]>();
 		const events: Event[] = [];
 		const sub = relay.prepareSubscription([filter], {
@@ -1308,6 +1332,7 @@ export class RelaySync implements RelaySyncApi {
 			storage.seal();
 			const neg = new Negentropy(storage, NEG_FRAME_LIMIT);
 			const relay = await this.pool.ensureRelay(url, { connectionTimeout: 15_000 });
+			this.relayReached = true;
 			const done = Promise.withResolvers<string[]>();
 			done.promise.catch(() => {}); // settled by sub.close() too, after an early throw nobody awaits it
 			const need: string[] = [];
@@ -1494,7 +1519,7 @@ export class RelaySync implements RelaySyncApi {
 	 */
 	private async importBase(item: ImportItem, summary: BaseSummary): Promise<void> {
 		const row: BaseRow = { objectId: summary.objectId, hash: summary.hash, epoch: summary.epoch, createdAt: summary.createdAt, prevBase: summary.prevBase, bytes: item.bytes };
-		const fresh = await this.store.putBase(row, pickCurrentBase);
+		const fresh = await this.store.putBase(row, pickCurrentBase, [...new Set((item.held ?? []).map((held) => held.scope))]);
 		this.basedObjects.add(summary.objectId);
 		if (!fresh) return;
 		this.stats.bases++;
@@ -1761,7 +1786,7 @@ export class RelaySync implements RelaySyncApi {
 			await sleep(PUBLISH_SPACING_MS);
 		}
 		this.queueRunning = false;
-		this.emitLiveStatus();
+		if (!this.stopped) this.emitLiveStatus(); // a stopped engine must not emit one last stale status
 	}
 
 	/** Sign the core's sealed parts on the first attempt, persist the exact

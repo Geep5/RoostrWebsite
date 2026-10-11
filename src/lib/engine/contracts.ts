@@ -223,12 +223,16 @@ export interface ChangeStoreApi {
 	/**
 	 * Hold a base (idempotent by hash) and re-point the object's current base
 	 * to `pickCurrent(every held base of the object)`. Returns whether the
-	 * base was new. Bases are never deleted.
+	 * base was new. Bases are never deleted. `streams` are the relay stream
+	 * scopes its event was held under ("" = personal, else a space tag): each
+	 * one's newest held base moves forward, also for a base already held.
 	 */
-	putBase(row: BaseRow, pickCurrent: (rows: BaseRow[]) => string): Promise<boolean>;
+	putBase(row: BaseRow, pickCurrent: (rows: BaseRow[]) => string, streams: string[]): Promise<boolean>;
 	/** objectId → its current base. */
 	currentBases(): Promise<Map<string, CurrentBase>>;
 	currentBase(objectId: string): Promise<CurrentBase | undefined>;
+	/** Stream scope → createdAt (Unix ms) of the newest base held from it; a stream with none is absent. */
+	newestBaseByStream(): Promise<Map<string, number>>;
 	getCheckpoint(objectId: string): Promise<CheckpointRow | undefined>;
 	/** Store when it supersedes the held one (core.checkpoint_supersedes: covers a superset, then hash). Returns stored. */
 	putCheckpoint(row: CheckpointRow): Promise<boolean>;

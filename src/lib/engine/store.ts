@@ -47,6 +47,8 @@ const PENDING_TO = "pending:\uffff";
 const CURSOR_KEY = "cursor";
 /** Pre-cache-contract manifest floors; see forgetCheckpointFloors. */
 const CHECKPOINT_FLOORS_KEY = "checkpoint-floors";
+/** In META: stream scope → createdAt (ms) of the newest base held from it; bounds that stream's history walk. */
+const BASE_STREAMS_KEY = "base-streams";
 
 /** Persisted replay memo; see getStates/putState. */
 export interface StateMemo<T> {
@@ -344,11 +346,24 @@ export class ChangeStore implements ChangeStoreApi {
 		};
 	}
 
-	async putBase(row: BaseRow, pickCurrent: (rows: BaseRow[]) => string): Promise<boolean> {
-		const tx = this.handle().transaction([BASES, BASE_CURRENT], "readwrite");
+	async putBase(row: BaseRow, pickCurrent: (rows: BaseRow[]) => string, streams: string[]): Promise<boolean> {
+		const tx = this.handle().transaction([BASES, BASE_CURRENT, META], "readwrite");
 		const bases = tx.objectStore(BASES);
-		const held = (await req(bases.getAll(bound([row.objectId, ""], [row.objectId, "\uffff"])))) as BaseRow[];
-		if (held.some((base) => base.hash === row.hash)) return false;
+		const meta = tx.objectStore(META);
+		const [held, newest] = (await Promise.all([
+			req(bases.getAll(bound([row.objectId, ""], [row.objectId, "\uffff"]))),
+			req(meta.get(BASE_STREAMS_KEY)),
+		])) as [BaseRow[], Record<string, number> | undefined];
+		// Moved for a base already held too: a space installed after its base
+		// arrived through the personal stream holds it from the space stream now.
+		const byStream = { ...newest };
+		const moved = streams.filter((scope) => !(byStream[scope] >= row.createdAt));
+		for (const scope of moved) byStream[scope] = row.createdAt;
+		if (moved.length > 0) meta.put(byStream, BASE_STREAMS_KEY);
+		if (held.some((base) => base.hash === row.hash)) {
+			await txDone(tx);
+			return false;
+		}
 		const all = [...held, row];
 		const hash = pickCurrent(all);
 		const current = all.find((base) => base.hash === hash);
@@ -357,6 +372,11 @@ export class ChangeStore implements ChangeStoreApi {
 		tx.objectStore(BASE_CURRENT).put({ hash: current.hash, createdAt: current.createdAt } satisfies CurrentBase, row.objectId);
 		await txDone(tx);
 		return true;
+	}
+
+	async newestBaseByStream(): Promise<Map<string, number>> {
+		const byStream = (await req(this.handle().transaction(META, "readonly").objectStore(META).get(BASE_STREAMS_KEY))) as Record<string, number> | undefined;
+		return new Map(Object.entries(byStream ?? {}));
 	}
 
 	async currentBases(): Promise<Map<string, CurrentBase>> {

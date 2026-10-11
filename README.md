@@ -69,8 +69,10 @@ the older paged `until` walk.
 Sync follows glonOdin `docs/state-sync.md`: bases (kind 31078, split ones'
 kind-1080 parts by `#c`) first, then legacy 1079 checkpoints, then deltas. With
 no base on the relays the whole kind-1078 history is covered as before (dual
-read); once bases exist, only the live deltas of the held current bases (`#b`)
-plus a 1078 window from the newest base's created_at minus a day. An object's
+read). The floor is per stream (personal, each space): a stream holding no base
+is still walked whole; one holding bases reads only the live deltas of the held
+current bases (`#b`) plus a 1078 window from ITS newest base's created_at minus
+a day - a global floor would skip another stream's unbased objects. An object's
 state is the core's `replay_from_base`; local deltas carry `["b", base]`, and
 orphans of this identity's writable objects are rebased by the core and
 published. The browser never compacts: computers do.
