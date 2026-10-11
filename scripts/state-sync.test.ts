@@ -273,8 +273,11 @@ describe("bases-first history", () => {
 
 		expect(await internals.backfill(1)).toBe(true);
 		expect(internals.historyComplete).toBe(true);
-		const shape = (f: Filter) => `${f.kinds!.join()}${f["#b"] ? `#b:${f["#b"].join()}` : ""}${f.since ? `>${f.since}` : ""}`;
-		expect(log.negOpens.map(shape)).toEqual(["31078", "1079", `1078#b:${[base1.hash, big.hash].sort().join()}`, `1078>${BOUND_S}`]);
+		const shape = (f: Filter) => `${f.kinds!.join()}${f["#b"] ? `#b:${f["#b"].join()}` : ""}${f["#h"] ? `#h:${f["#h"].join()}` : ""}${f.since ? `>${f.since}` : ""}`;
+		const ledgerTag = coreCall<string>("wire", { action: "blind", secret, id: "__vanished__" });
+		// Bases, then checkpoints, then the #b deltas with the ledger stream (one cover, either order), then the window.
+		const opens = log.negOpens.map(shape);
+		expect([...opens.slice(0, 2), ...opens.slice(2, 4).sort(), ...opens.slice(4)]).toEqual(["31078", "1079", ...[`1078#b:${[base1.hash, big.hash].sort().join()}`, `1078#h:${ledgerTag}`].sort(), `1078>${BOUND_S}`]);
 		expect(log.walks.map((f) => `${f.kinds!.join()}#c:${f["#c"]!.join()}`)).toEqual([`1080#c:${bigEvents.at(-1)!.tags.find((t) => t[0] === "c")![1]}`]);
 		// Pre-migration history older than the window is never fetched once bases exist; parts come by #c, not by id.
 		const parts = new Set(partEvents.map((e) => e.id));
@@ -292,6 +295,20 @@ describe("bases-first history", () => {
 		expect(await internals.backfill(1)).toBe(true);
 		expect(log.idFetches).toEqual([]);
 		expect(log.walks).toEqual([]);
+	});
+
+	test("the vanish ledger never gets a base: its whole stream is read even when it is older than the window", async () => {
+		// Rehearsal finding: a fresh replica of a compacted vault never loaded __vanished__ (its history predates
+		// the newest base by more than a day), so nothing vanished was enforced and the ledger was unknown here.
+		const store = await storeFixture();
+		const ledger = change("__vanished__", [{ objectCreate: { typeKey: "vanish_log" } }, setName("Vanished objects")], [], 50);
+		const ledgerEvent = deltaEvent(ledger, 1_600_000_000);
+		const { relay } = fakeRelay([...baseEvents(base1.base, BASE_MS / 1000), ledgerEvent, deltaEvent(c1, 1_700_000_000)]);
+		const { internals } = syncFixture(store, { ensureRelay: async () => relay, close() {} });
+		expect(await internals.backfill(1)).toBe(true);
+		expect((await store.changesFor("__vanished__")).map((c) => c.id)).toEqual([ledger.id]);
+		// Pre-migration history of a based object stays unfetched.
+		expect((await store.changesFor("doc")).length).toBe(0);
 	});
 
 	test("live subscriptions carry bases and their parts", async () => {

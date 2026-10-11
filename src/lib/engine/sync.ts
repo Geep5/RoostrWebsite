@@ -76,6 +76,8 @@ const SPACE_KINDS = [...DAG_KINDS, DELETION_KIND];
 export const BASE_HASH_BATCH = 200;
 /** Once bases exist, 1078 history reaches back to the newest base's created_at minus this. */
 const BASE_LOOKBACK_S = 86_400;
+/** The synced vanish ledger object (src/vanish.odin). It never gets a base, so its stream is always read whole. */
+export const VANISH_LOG_ID = "__vanished__";
 /** A device with no cursor yet subscribes live from this long before now (history covers the rest). */
 const LIVE_COLD_START_LOOKBACK_S = 300;
 /** Spaces whose h-deletion a relay accepted: published once per space. */
@@ -1149,14 +1151,18 @@ export class RelaySync implements RelaySyncApi {
 			// Dual read: a pre-migration vault syncs exactly as before.
 			await cover(changeFilters, resumeUntil, trackFloor);
 		} else {
-			// Live deltas of every held current base, then the deltas of objects
-			// with no base (and any untagged write) in a window bounded by the
-			// newest base: never kind-1078 history from event zero.
+			// Live deltas of every held current base, the vanish ledger's whole
+			// stream (it never gets a base, and without it nothing vanished is
+			// enforced here), then the deltas of objects with no base (and any
+			// untagged write) in a window bounded by the newest base: never
+			// kind-1078 history from event zero.
 			const hashes = [...new Set(bases.map((base) => base.hash))].sort();
 			const deltaFilters: StreamFilter[] = [];
 			for (let i = 0; i < hashes.length; i += BASE_HASH_BATCH) {
 				for (const { scope, filter } of changeFilters) deltaFilters.push({ scope, filter: { ...filter, "#b": hashes.slice(i, i + BASE_HASH_BATCH) } });
 			}
+			const ledgerTag = coreCall<string>("wire", { action: "blind", secret: this.secretHex, id: VANISH_LOG_ID });
+			deltaFilters.push({ scope: "", filter: { kinds: [CHANGE_KIND], authors: [this.pk], "#h": [ledgerTag] } });
 			await cover(deltaFilters, undefined, false);
 			const newest = bases.reduce((max, base) => Math.max(max, base.createdAt), 0);
 			const bound = Math.max(1, Math.floor(newest / 1000) - BASE_LOOKBACK_S);

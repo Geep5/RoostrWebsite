@@ -19,7 +19,7 @@ const toHex = (b: Uint8Array): string => {
 import { replayObject } from "./replay";
 import { loadCorpus, needsColdLoad, runQuery } from "./query";
 import { ChangeStore, destroyDatabase, StorageUnavailableError } from "./store";
-import { RelaySync, DEFAULT_RELAYS, npubToHex, type SharedSpaceInfo } from "./sync";
+import { RelaySync, DEFAULT_RELAYS, VANISH_LOG_ID, npubToHex, type SharedSpaceInfo } from "./sync";
 import { spaceKeyAll, spaceOwner } from "./spacekeys";
 import { getPublicKey } from "nostr-tools";
 import { loadKey, authorIdFor } from "./keys";
@@ -28,9 +28,6 @@ import { runMutation } from "./mutate";
 function fstr(fields: Record<string, ValueJSON> | undefined, k: string): string {
 	return fields?.[k]?.stringValue ?? "";
 }
-
-/** The synced vanish ledger object (src/vanish.odin); the core reads its entries. */
-const VANISH_LOG_ID = "__vanished__";
 
 /** One id the core's `sync`/`vanished` method reports gone; `left` when only this identity left that space. */
 interface VanishedEntry {
