@@ -1616,11 +1616,27 @@
 		await refreshAll();
 	}
 
-	/** A plain click on a mention opens its object; a drag-select across one doesn't. */
+	/**
+	 * A plain click on a mention opens its object, and on a web link opens the
+	 * URL in a new tab (the app hands it to the default browser); a
+	 * drag-select across either doesn't.
+	 */
 	function onMentionClick(e: MouseEvent) {
-		const span = (e.target as HTMLElement).closest?.(".m-mention") as HTMLElement | null;
-		if (!span || !window.getSelection()?.isCollapsed) return;
-		const target = (span.dataset.marks ?? "").split(",").find((p) => p.startsWith(`${MarkT.MENTION}:`))?.slice(2);
+		if (!window.getSelection()?.isCollapsed) return;
+		const el = e.target as HTMLElement;
+		const link = el.closest?.(".m-link") as HTMLElement | null;
+		const url = link && (link.dataset.marks ?? "").split(",").find((p) => p.startsWith(`${MarkT.LINK}:`))?.slice(2);
+		if (url) {
+			e.preventDefault();
+			const raw = decodeURIComponent(url).trim();
+			// A bare "twitter.com/x" is a web address; any other scheme
+			// (javascript:, file:, …) is never opened.
+			const href = /^[a-z][a-z0-9+.-]*:/i.test(raw) ? raw : `https://${raw}`;
+			if (/^(https?|mailto|tel):/i.test(href)) window.open(href, "_blank", "noopener");
+			return;
+		}
+		const span = el.closest?.(".m-mention") as HTMLElement | null;
+		const target = span && (span.dataset.marks ?? "").split(",").find((p) => p.startsWith(`${MarkT.MENTION}:`))?.slice(2);
 		if (!target) return;
 		e.preventDefault();
 		void goto(`/app/object/${decodeURIComponent(target)}`);
