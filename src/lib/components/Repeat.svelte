@@ -1,5 +1,4 @@
 <script lang="ts">
-	import { showDate } from "$lib/dates";
 	/**
 	 * Recurring objects. The engine owns the rule (`object.fields.repeat`)
 	 * and the occurrence math; this component renders when it next runs and
@@ -12,12 +11,11 @@
 	 * more times of day, counted from an anchor day.
 	 */
 	import type { ObjectJSON, RepeatFreq } from "$lib/types";
-	import { DAY, DAY_MINUTES, MIN, WD, describeDraft as describe, isSubDaily, manyADay, ordinalOf, sod, sortedTimes, toDraft, type RepeatDraft as Draft } from "$lib/repeat";
+	import { DAY, DAY_MINUTES, MIN, WD, describeDraft as describe, isSubDaily, ordinalOf, sod, sortedTimes, toDraft, type RepeatDraft as Draft } from "$lib/repeat";
 	import { repeatOf, guestAgents } from "$lib/types";
 	import { note, repeat } from "$lib/api";
 	import { store } from "$lib/data.svelte";
-	import { isIOSBackend } from "$lib/client-backend";
-	import { machineName, resolveServing, servingCopy } from "$lib/serving";
+	import { fetchMachines, machineName, resolveServing, servingCopy, type MachineRow } from "$lib/serving";
 
 	let {
 		object,
@@ -38,7 +36,6 @@
 	const guests = $derived(guestAgents(object.fields).map((id) => store.agents.find((a) => a.id === id)).filter((a): a is NonNullable<typeof a> => !!a));
 	const hasGuests = $derived(guestAgents(object.fields).length > 0);
 	let assignee = $state<string>("");
-	const assigneeName = $derived(guests.find((a) => a.id === assignee)?.name ?? "");
 
 	// Agent-owned occurrences run on the machine the engine resolves for
 	// this object (`$lib/serving`), never on a phone; the cell says so and
@@ -46,6 +43,11 @@
 	const agentOwned = $derived(!!(object.fields["assignee"] ?? object.fields["agent"]));
 	let servingName = $state("");
 	let servingWarning = $state("");
+	/** Computers by machine id, so "last run … on" names one instead of printing its id. */
+	let machinesKnown = $state<MachineRow[]>([]);
+	$effect(() => {
+		void fetchMachines().then(({ machines }) => (machinesKnown = machines), () => {});
+	});
 	$effect(() => {
 		const current = object;
 		if (!agentOwned) {
@@ -75,7 +77,6 @@
 	});
 
 	// ── Dates ─────────────────────────────────────────────────────
-	const fmtDay = (ms: number) => showDate(ms, { weekday: "short", month: "short", day: "numeric" });
 	const fmtLong = (ms: number) => new Date(ms).toLocaleString(undefined, { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
 	const hhmm = (minutes: number) => `${String(Math.floor(minutes / 60)).padStart(2, "0")}:${String(minutes % 60).padStart(2, "0")}`;
 	const addMonths = (ms: number, n: number, day: number) => {
@@ -355,13 +356,14 @@
 	</div>
 
 	{#if rule}
-		<!-- One quiet line under the rule: when next, and who runs it where. -->
-		<p class="meta">
-			<span class:overdue>{stuck ? `Stuck since ${fmtLong(rule.next)} - see Error` : overdue ? `Overdue since ${fmtLong(rule.next)}` : `Next ${manyADay(rule) ? fmtLong(rule.next) : fmtDay(rule.next)}`}</span>
-			{#if agentOwned}
-				<span>{#if assigneeName}{assigneeName} on {servingName || "its machine"}{:else}on {servingName || "its agent's machine"}{/if}{isIOSBackend ? " · not on this device" : ""}{#if servingWarning}<span class="overdue"> · {servingWarning}</span>{/if}</span>
-			{/if}
-		</p>
+		<!-- Only when something needs a hand: the next dates live in the editor's
+		     preview, the computer in the Served by / Agent rows. -->
+		{#if stuck || overdue || (agentOwned && servingWarning)}
+			<p class="meta">
+				{#if stuck || overdue}<span class="overdue">{stuck ? `Stuck since ${fmtLong(rule.next)} - see Error` : `Overdue since ${fmtLong(rule.next)}`}</span>{/if}
+				{#if agentOwned && servingWarning}<span class="overdue">{servingWarning}</span>{/if}
+			</p>
+		{/if}
 		{#if rule.fired_at !== undefined || rule.last_run}
 			<p class="meta">
 				{#if rule.fired_at !== undefined}
@@ -369,7 +371,7 @@
 				{/if}
 				{#if rule.last_run}
 					<span>
-						last run {fmtLong(rule.last_run.at)}{rule.last_run.machine ? ` on ${rule.last_run.machine}` : ""}{#if rule.last_run.error}<span class="overdue"> · {rule.last_run.error}</span>{/if}
+						last run {fmtLong(rule.last_run.at)}{rule.last_run.machine ? ` on ${machineName(machinesKnown, rule.last_run.machine)}` : ""}{#if rule.last_run.error}<span class="overdue"> · {rule.last_run.error}</span>{/if}
 					</span>
 				{/if}
 			</p>
