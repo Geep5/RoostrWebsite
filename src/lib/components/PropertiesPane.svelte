@@ -19,7 +19,7 @@
 	import { normalizeHex } from "$lib/chat-color";
 	import { AGENTLESS_TYPES } from "$lib/agent-field";
 	import { machineName, resolveServing, servedByMachineId, servingCopy, type MachineRow, type Serving } from "$lib/serving";
-	import { credentialStatusBadge, credentialStatusText, pollWhileConnecting } from "$lib/credential-actions";
+	import { CONNECT_TIMEOUT_TEXT, credentialStatusBadge, credentialStatusText, pollWhileConnecting } from "$lib/credential-actions";
 	import { capabilityStatusBadge, capabilityStatusText } from "$lib/capability-actions";
 	import CredentialStatus from "./CredentialStatus.svelte";
 	import CapabilityStatus from "./CapabilityStatus.svelte";
@@ -325,7 +325,7 @@
 		if (credentialStatus !== "connecting") return;
 		connectPollError = "";
 		return pollWhileConnecting(objectId, () => object.fields, onchanged, () => {
-			connectPollError = "Still not signed in after 5 minutes. Connect again when you are ready.";
+			connectPollError = CONNECT_TIMEOUT_TEXT;
 		});
 	});
 
