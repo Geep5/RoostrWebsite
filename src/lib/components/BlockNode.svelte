@@ -790,6 +790,8 @@
 		text-overflow: ellipsis;
 	}
 	:global(.m-link) { color: var(--accent); text-decoration: underline; cursor: pointer; }
+	/* A mention: the text links to an object (param = its id); a plain click opens it. */
+	:global(.m-mention) { color: var(--accent); text-decoration: underline; text-decoration-style: dotted; text-underline-offset: 3px; cursor: pointer; }
 	.block.selected::after {
 		content: "";
 		position: absolute;

@@ -16,6 +16,8 @@
 	import SlashMenu, { type SlashPick } from "./SlashMenu.svelte";
 	import PropertySuggest from "./PropertySuggest.svelte";
 	import LinkPicker from "./LinkPicker.svelte";
+	import TypeSuggest from "./TypeSuggest.svelte";
+	import { goto } from "$app/navigation";
 	import { store, refreshAll } from "$lib/data.svelte";
 	import { RESERVED_KEYS, emptyValueFor, objectSpaceId, spaceRelations } from "$lib/relations";
 	import { addFailureText, pickFile, uploadFile } from "$lib/files";
@@ -1600,6 +1602,42 @@
 		if (url) await applyMark(id, MarkT.LINK, url);
 	}
 
+	/** Highlighted text waiting for a type from the "Turn into object" picker. */
+	let turnInto = $state<{ blockId: string; from: number; to: number; x: number; y: number } | null>(null);
+
+	/**
+	 * Anytype's Turn into object on a text selection: a new object of the
+	 * chosen type is named after the highlighted text, and that text becomes
+	 * a mention linking to it - the words stay where they were.
+	 */
+	async function turnSelectionInto(typeKey: string) {
+		const at = turnInto;
+		turnInto = null;
+		if (!at) return;
+		const el = blockEl(at.blockId);
+		if (!el) return;
+		const { text, marks } = fromDom(el);
+		const name = text.slice(at.from, at.to).trim().slice(0, 120) || "Untitled";
+		const ch = object.fields["channel"]?.stringValue ?? "";
+		const { id: newId } = await note.create(name, typeKey, ch ? { channel: { stringValue: ch } } : {});
+		const next = [...marks.filter((m) => m.type !== MarkT.MENTION || m.to <= at.from || m.from >= at.to), { from: at.from, to: at.to, type: MarkT.MENTION, param: newId }];
+		cancelPending(at.blockId);
+		commit([{ kind: "content", id: at.blockId, content: contentFor(at.blockId, text, next) }]);
+		el.innerHTML = toHtml(text, next);
+		// The mention's title and the sidebar resolve through store.summaries.
+		await refreshAll();
+	}
+
+	/** A plain click on a mention opens its object; a drag-select across one doesn't. */
+	function onMentionClick(e: MouseEvent) {
+		const span = (e.target as HTMLElement).closest?.(".m-mention") as HTMLElement | null;
+		if (!span || !window.getSelection()?.isCollapsed) return;
+		const target = (span.dataset.marks ?? "").split(",").find((p) => p.startsWith(`${MarkT.MENTION}:`))?.slice(2);
+		if (!target) return;
+		e.preventDefault();
+		void goto(`/app/object/${decodeURIComponent(target)}`);
+	}
+
 	// ── Drag & drop ───────────────────────────────────────────────
 	async function onDrop(targetId: string, position: number) {
 		const dragged = draggingId;
@@ -2312,6 +2350,7 @@
 	ondragleave={onEditorDragLeave}
 	ondrop={(e) => void onEditorDrop(e)}
 	onclick={(e) => {
+		onMentionClick(e);
 		if (!readonly && e.target === e.currentTarget && !selectedIds.length) onBackgroundClick(e.clientY);
 	}}
 >
@@ -2419,6 +2458,14 @@
 		<button title="Strikethrough" onclick={() => void applyMark(toolbar!.blockId, MarkT.STRIKETHROUGH)}><s>S</s></button>
 		<button title="Code (⌘E)" onclick={() => void applyMark(toolbar!.blockId, MarkT.INLINE_CODE)}>{"<>"}</button>
 		<button title="Link" onclick={() => void addLink(toolbar!.blockId)}>🔗</button>
+		<button class="wide" title="Turn into object" onclick={() => { turnInto = { ...toolbar! }; toolbar = null; }}>↗ Object</button>
+	</div>
+{/if}
+
+{#if turnInto}
+	<button class="turn-backdrop" aria-label="Close" onclick={() => (turnInto = null)}></button>
+	<div class="turn-pop" style="left: {Math.max(8, turnInto.x - 130)}px; top: {turnInto.y + 8}px" role="dialog" aria-label="Turn into object">
+		<TypeSuggest placeholder="Turn into… (search types)" onpick={(key) => void turnSelectionInto(key)} onclose={() => (turnInto = null)} />
 	</div>
 {/if}
 
@@ -2525,6 +2572,30 @@
 	}
 	.toolbar button:hover {
 		background: var(--hover);
+	}
+	.toolbar button.wide {
+		width: auto;
+		padding: 0 8px;
+		font-size: 12px;
+		white-space: nowrap;
+	}
+	.turn-backdrop {
+		position: fixed;
+		inset: 0;
+		z-index: 59;
+		background: none;
+		border: none;
+		cursor: default;
+	}
+	.turn-pop {
+		position: fixed;
+		z-index: 60;
+		width: 260px;
+		background: var(--panel);
+		border: 1px solid var(--border);
+		border-radius: 10px;
+		padding: 6px;
+		box-shadow: 0 8px 24px rgb(0 0 0 / 0.35);
 	}
 	.paste-menu {
 		position: fixed;

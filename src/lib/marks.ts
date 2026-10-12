@@ -46,6 +46,7 @@ const CLASS_BY_MARK: Record<number, string> = {
 	5: "m-link",
 	6: "m-color",
 	7: "m-bg",
+	8: "m-mention",
 };
 
 function escapeHtml(s: string): string {
