@@ -8,9 +8,13 @@
 	 */
 	import { goto } from "$app/navigation";
 	import RowContextMenu from "./RowContextMenu.svelte";
-	import { tagStyle } from "$lib/options";
+	import { badgeStyle, tagStyle } from "$lib/options";
+	import { credentialCellBadge, reconnectTarget } from "$lib/credential-actions";
+	import { reconnectState } from "$lib/credential-reconnect.svelte";
+	import CredentialCell from "./CredentialCell.svelte";
+	import PropIcon from "./PropIcon.svelte";
 	import { fetchQuery, type QueryResultRow } from "$lib/api";
-	import type { ObjectJSON, RelationDefJSON } from "$lib/types";
+	import { fieldStr, type ObjectJSON, type RelationDefJSON } from "$lib/types";
 	import { objectIcon } from "$lib/icons";
 
 	let {
@@ -73,9 +77,18 @@
 
 <div class="gallery">
 	{#each rows as r (r.id)}
-		<button
+		<!-- A div, not a button: a credential cell inside is its own button. -->
+		<div
 			class="card"
+			role="button"
+			tabindex="0"
 			onclick={() => void goto(`/app/object/${r.id}`)}
+			onkeydown={(e) => {
+				if (e.key === "Enter" || e.key === " ") {
+					e.preventDefault();
+					void goto(`/app/object/${r.id}`);
+				}
+			}}
 			oncontextmenu={(e) => {
 				e.preventDefault();
 				ctxMenu = { x: e.clientX, y: e.clientY, id: r.id };
@@ -87,7 +100,17 @@
 			</div>
 			{#each visible as rel (rel.key)}
 				{@const t = cellText(r, rel)}
-				{#if t}
+				{@const target = reconnectTarget(r, rel.key)}
+				{#if target && r.typeKey === "credential" && rel.key === "status"}
+					{@const badge = credentialCellBadge(fieldStr(r.fields, "status"), reconnectState(r.id))}
+					<div class="g-cell" title={rel.name || rel.key}>
+						<CredentialCell row={r} {target} onchanged={load} label={`Reconnect ${fieldStr(r.fields, "name") || "credential"}: ${badge.text}`}><span class="g-cred" style={badgeStyle(badge.color)}><PropIcon icon={badge.icon} size={13} />{badge.text}</span></CredentialCell>
+					</div>
+				{:else if target && rel.key === "error"}
+					<div class="g-cell" title={rel.name || rel.key}>
+						<CredentialCell row={r} {target} onchanged={load} label={`Reconnect: ${t}`}>{t}</CredentialCell>
+					</div>
+				{:else if t}
 					<div class="g-cell" title={rel.name || rel.key}>
 						{#if rel.format === "tag" || rel.format === "status"}
 							{#each t.split(", ") as tg (tg)}
@@ -100,7 +123,7 @@
 					</div>
 				{/if}
 			{/each}
-		</button>
+		</div>
 	{/each}
 	{#if rows.length === 0}
 		<p class="muted">No objects match.</p>
@@ -139,7 +162,8 @@
 		color: var(--fg);
 		min-height: 74px;
 	}
-	.card:hover {
+	.card:hover,
+	.card:focus-visible {
 		border-color: var(--accent);
 	}
 	.card-head {
@@ -166,6 +190,12 @@
 		gap: 4px;
 		max-width: 100%;
 		overflow: hidden;
+	}
+	.g-cred {
+		display: inline-flex;
+		align-items: center;
+		gap: 4px;
+		color: var(--badge-fg);
 	}
 	/* Anytype tagItem.isSmall: filled pill. */
 	.g-tag {

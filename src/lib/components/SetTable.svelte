@@ -13,7 +13,9 @@
 	import RowContextMenu from "./RowContextMenu.svelte";
 	import PropertyValue from "./PropertyValue.svelte";
 	import { badgeStyle, tagStyle } from "$lib/options";
-	import { credentialStatusBadge, credentialStatusText } from "$lib/credential-actions";
+	import { credentialCellBadge, credentialStatusBadge, credentialStatusText, reconnectTarget } from "$lib/credential-actions";
+	import { reconnectState } from "$lib/credential-reconnect.svelte";
+	import CredentialCell from "./CredentialCell.svelte";
 	import PropIcon from "./PropIcon.svelte";
 	import CheckboxIcon from "./CheckboxIcon.svelte";
 	import { fetchQuery, note, type QueryResultRow } from "$lib/api";
@@ -664,10 +666,19 @@
 						{/if}
 						{fieldStr(r.fields, "name") || "Untitled"}</td>
 					{#each columns as c (c)}
+						{@const target = reconnectTarget(r, c)}
 						{#if r.typeKey === "credential" && c === "status"}
-							<!-- The harness writes a credential's status: shown in words like its Properties row, never hand-edited here. -->
+							<!-- The harness writes a credential's status: shown in words like its Properties row, never hand-edited here. Not connected, it reconnects from here. -->
 							{@const st = fieldStr(r.fields, "status")}
-							<td><span class="cred-status" style={badgeStyle(credentialStatusBadge(st).color)}><PropIcon icon={credentialStatusBadge(st).icon} size={14} />{credentialStatusText(st)}</span></td>
+							{#if target}
+								{@const badge = credentialCellBadge(st, reconnectState(r.id))}
+								<td><CredentialCell row={r} {target} onchanged={reload} label={`Reconnect ${fieldStr(r.fields, "name") || "credential"}: ${badge.text}`}><span class="cred-status" style={badgeStyle(badge.color)}><PropIcon icon={badge.icon} size={14} />{badge.text}</span></CredentialCell></td>
+							{:else}
+								<td><span class="cred-status" style={badgeStyle(credentialStatusBadge(st).color)}><PropIcon icon={credentialStatusBadge(st).icon} size={14} />{credentialStatusText(st)}</span></td>
+							{/if}
+						{:else if target && c === "error"}
+							<!-- A signed-out credential's Error (its own, or one a task/agent run hit) reconnects instead of editing. -->
+							<td><CredentialCell row={r} {target} onchanged={reload} label={`Reconnect: ${cell(r, c)}`}><span class="cell-warn">{cell(r, c)}</span></CredentialCell></td>
 						{:else if isEditable(c) && !isLockedTool(r.fields)}
 							{@const rel = relations.find((x) => x.key === c)}
 							{@const fmt = formatOf(c)}

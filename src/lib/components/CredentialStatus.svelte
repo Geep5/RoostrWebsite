@@ -7,7 +7,7 @@
 	 */
 	import { onMount } from "svelte";
 	import { thisMachineId } from "$lib/capability-actions";
-	import { canConnect, credentialStatusText, GOOGLE_ACCOUNT, runCredentialAction, type CredentialAction } from "$lib/credential-actions";
+	import { canConnect, connectingHint, connectLabel, credentialActionGate, credentialStatusText, performCredentialAction, type CredentialAction } from "$lib/credential-actions";
 	import { onPairingChange, pairedSession } from "$lib/local-transport";
 	import { fetchMachines, machineName, servedByMachineId, type MachineRow } from "$lib/serving";
 	import { fieldStr, type ObjectJSON } from "$lib/types";
@@ -35,8 +35,7 @@
 	const status = $derived(fieldStr(object.fields, "status") || "missing");
 	const servedBy = $derived(servedByMachineId(object.fields, machines));
 	const computer = $derived(servedBy ? machineName(machines, servedBy) : "");
-	const canAct = $derived(paired && !!thisMachine && thisMachine === servedBy);
-	const isGoogle = $derived(fieldStr(object.fields, "service") === GOOGLE_ACCOUNT);
+	const gate = $derived(credentialActionGate(paired, thisMachine, servedBy, computer));
 
 	async function loadPairing() {
 		paired = pairedSession() !== null;
@@ -48,14 +47,8 @@
 		if (action === "disconnect" && !confirm(`Disconnect ${fieldStr(object.fields, "name") || "this credential"}? This removes its sign-in from ${computer || "the computer that keeps it"}.`)) return;
 		busy = action;
 		actionError = "";
-		try {
-			await runCredentialAction(action, object.id);
-		} catch (e) {
-			actionError = e instanceof Error ? e.message : String(e);
-		} finally {
-			busy = "";
-			await onchanged().catch(() => {});
-		}
+		actionError = (await performCredentialAction(action, object.id, onchanged)).error;
+		busy = "";
 	}
 
 	onMount(() => {
@@ -72,26 +65,20 @@
 	{#if isTemplate}
 		<p class="muted">A template does not connect; each credential made from it does.</p>
 	{:else if ready}
-		{#if canAct}
+		{#if gate.canAct}
 			<div class="actions">
 				{#if canConnect(object.fields)}
-					<button class="act" disabled={!!busy} data-testid="credential-connect" onclick={() => void run("connect")}>{status === "active" || status === "needs_auth" ? "Reconnect" : "Connect"}</button>
+					<button class="act" disabled={!!busy} data-testid="credential-connect" onclick={() => void run("connect")}>{connectLabel(status)}</button>
 				{/if}
 				<button class="act" disabled={!!busy} data-testid="credential-check" onclick={() => void run("check")}>Check now</button>
 				<button class="act" disabled={!!busy} data-testid="credential-disconnect" onclick={() => void run("disconnect")}>Disconnect</button>
 			</div>
 		{:else}
-			<p class="muted">{servedBy ? `Open Roostr on ${computer} to connect or check this credential.` : "Set Served by to a computer first."}</p>
+			<p class="muted">{gate.reason}</p>
 			{#if !paired}<PairGate compact onready={() => void loadPairing()} />{/if}
 		{/if}
 		{#if status === "connecting"}
-			<p class="muted" role="status">
-				{#if isGoogle}
-					Sign in to {fieldStr(object.fields, "account") || "the Google account"} in the browser window gws opens on {computer || "its computer"}.
-				{:else}
-					Sign in in the Chrome window that just opened on {computer || "its computer"}.
-				{/if}
-			</p>
+			<p class="muted" role="status">{connectingHint(object.fields, computer)}</p>
 		{/if}
 	{/if}
 	{#if actionError || pollError}<p class="error" role="alert" data-testid="credential-error">{actionError || pollError}</p>{/if}
