@@ -1,9 +1,11 @@
 <script lang="ts">
 	/**
 	 * One credential's Reconnect, as a view's popover offers it: the same
-	 * pairing gate, harness Connect and status follow as its Properties
-	 * Status row (credential-actions.ts), plus Open credential. A website or
-	 * Google sign-in reconnects from any paired computer. Progress lives in
+	 * pairing gate, harness Connect, Check now and status follow as its
+	 * Properties Status row (credential-actions.ts), plus Open credential. A
+	 * website or Google sign-in reconnects from any paired computer; Check
+	 * runs from anywhere (the Served by computer answers) - also while a
+	 * sign-in waits, to say "I signed in, check it". Progress lives in
 	 * credential-reconnect.svelte.ts, so the cell shows it too and it carries
 	 * on when the popover closes.
 	 */
@@ -11,8 +13,8 @@
 	import { goto } from "$app/navigation";
 	import { fetchObject } from "$lib/api";
 	import { thisMachineId } from "$lib/capability-actions";
-	import { canConnect, connectingHint, connectLabel, credentialActionGate, credentialStatusText } from "$lib/credential-actions";
-	import { reconnect, reconnectState } from "$lib/credential-reconnect.svelte";
+	import { canConnect, checkLine, connectingHint, connectLabel, credentialActionGate, credentialStatusText } from "$lib/credential-actions";
+	import { check, checking, checkState, followCheck, reconnect, reconnectState } from "$lib/credential-reconnect.svelte";
 	import { onPairingChange, pairedSession } from "$lib/local-transport";
 	import { fetchMachines, machineName, servedByMachineId, type MachineRow } from "$lib/serving";
 	import { fieldStr, type ObjectJSON } from "$lib/types";
@@ -38,6 +40,9 @@
 	const handsTo = $derived(thisMachine && thisMachine !== servedBy ? computer : "");
 	const progress = $derived(reconnectState(id));
 	const running = $derived(progress?.phase === "starting" || progress?.phase === "waiting");
+	const checkNow = $derived(checkState(id));
+	const waitingForCheck = $derived(checking(id, fields));
+	const checkSays = $derived(waitingForCheck ? checkLine({ phase: "checking", error: "", fields, requestedAt: 0 }, computer) : checkNow ? checkLine(checkNow, computer) : null);
 
 	async function loadObject() {
 		try {
@@ -64,8 +69,11 @@
 			loadPairing(),
 		]).then(() => {
 			ready = true;
+			const now = object?.fields ?? {};
 			// A sign-in already under way (started in the pane or another tab): follow it here too.
-			if (fieldStr(object?.fields ?? {}, "status") === "connecting") reconnect(id, changed, true);
+			if (fieldStr(now, "status") === "connecting") reconnect(id, changed, true);
+			// So is a Check another device asked for.
+			followCheck(id, now, changed);
 		});
 		return onPairingChange(() => void loadPairing());
 	});
@@ -78,11 +86,19 @@
 		<p class="muted">Loading…</p>
 	{:else}
 		<p class="now"><span class="name">{name}</span> · {credentialStatusText(status)}</p>
+		{#if canConnect(fields) && gate.canConnect || gate.canCheck}
+			<div class="actions">
+				{#if canConnect(fields) && gate.canConnect}
+					<button class="act primary" disabled={running} data-testid="credential-reconnect-run" onclick={() => { pressed = true; reconnect(id, changed); }}>{connectLabel(status)} {name}</button>
+				{/if}
+				{#if gate.canCheck}
+					<button class="act" disabled={waitingForCheck} data-testid="credential-reconnect-check" title={`${computer || "The computer serving it"} tests the login now`} onclick={() => check(id, fields, changed, { here: gate.checkHere })}>Check now</button>
+				{/if}
+			</div>
+		{/if}
 		{#if !canConnect(fields)}
 			<p class="muted">{name} signs in with pasted keys - open it to replace them.</p>
-		{:else if gate.canConnect}
-			<button class="act primary" disabled={running} data-testid="credential-reconnect-run" onclick={() => { pressed = true; reconnect(id, changed); }}>{connectLabel(status)} {name}</button>
-		{:else}
+		{:else if !gate.canConnect && gate.reason}
 			<p class="muted">{gate.reason}</p>
 			{#if !paired}<PairGate compact onready={() => void loadPairing()} />{/if}
 		{/if}
@@ -95,6 +111,9 @@
 		{:else if progress?.phase === "failed"}
 			<p class="error" role="alert" data-testid="credential-reconnect-error">{progress.error}</p>
 		{/if}
+		{#if checkSays}
+			<p class={checkSays.tone} role={checkSays.tone === "error" ? "alert" : "status"} data-testid="credential-reconnect-check-result">{checkSays.text}</p>
+		{/if}
 	{/if}
 	<button class="act" onclick={() => void goto(`/app/object/${id}`)}>Open credential</button>
 </div>
@@ -103,6 +122,7 @@
 	.cred-reconnect { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; }
 	.now { margin: 0; font-size: 13px; color: var(--fg); }
 	.name { font-weight: 600; }
+	.actions { display: flex; gap: 6px; flex-wrap: wrap; }
 	.muted { margin: 0; color: var(--muted); font-size: 12.5px; line-height: 1.45; }
 	.ok { margin: 0; color: var(--fg); font-size: 12.5px; font-weight: 600; }
 	.error { margin: 0; color: var(--red); font-size: 12.5px; line-height: 1.45; white-space: pre-wrap; }

@@ -1,14 +1,16 @@
 /**
- * A credential's harness actions, shared by its Status property. Connect
- * runs on whichever computer this tab is paired with: the sign-in window
- * opens there and the login is saved on the credential (`cookie_*` /
- * `key_*` properties), which the computer its Served by names then keeps
- * and checks. Check runs only on that computer (anywhere else answers 409
- * with a sentence); Disconnect stops a sign-in running on this computer and
+ * A credential's harness actions, shared by its Status property and the
+ * views' popover. Connect runs on whichever computer this tab is paired
+ * with: the sign-in window opens there and the login is saved on the
+ * credential (`cookie_*` / `key_*` properties), which the computer its
+ * Served by names then keeps and checks. Check works from any device: it
+ * writes `check_requested` on the credential and the computer serving it
+ * runs the check and stamps `checked_at` (a tab paired with that computer
+ * asks it straight). Disconnect stops a sign-in running on this computer and
  * leaves the saved login on the credential.
  */
 
-import { fetchObject } from "$lib/api";
+import { fetchObject, note } from "$lib/api";
 import { harnessFetch } from "$lib/local-transport";
 import type { BadgeIcon } from "$lib/options";
 import { fieldStr, type ValueJSON } from "$lib/types";
@@ -133,25 +135,28 @@ export function connectLabel(status: string): "Reconnect" | "Connect" {
 export interface CredentialGate {
 	/** Connect (and Disconnect, which stops a sign-in here) may run from this tab's computer. */
 	canConnect: boolean;
-	/** Check now may run: only on the computer its Served by names. */
+	/** Check may be asked for: from any device, once a computer serves the credential. */
 	canCheck: boolean;
+	/** This tab is paired with the computer serving it: Check asks it straight instead of through the credential. */
+	checkHere: boolean;
 	/** Where to go for what this tab cannot do ("" when it can do everything). */
 	reason: string;
 }
 
 /**
- * What this tab may run for a credential. A website or Google sign-in
+ * What this tab may run for a credential. Check runs from anywhere (the
+ * computer its Served by names answers). A website or Google sign-in
  * connects from any paired computer - the login is saved on the credential
- * and handed to the Served by computer; checking it (and connecting
- * anything else, a database) needs a tab paired with that computer.
+ * and handed to the Served by computer; connecting anything else (a
+ * database) needs a tab paired with that computer.
  */
 export function credentialActionGate(paired: boolean, thisMachine: string, servedBy: string, computer: string, fields: Record<string, ValueJSON>): CredentialGate {
-	if (!servedBy) return { canConnect: false, canCheck: false, reason: "Set Served by to a computer first." };
+	if (!servedBy) return { canConnect: false, canCheck: false, checkHere: false, reason: "Set Served by to a computer first." };
 	const linked = paired && !!thisMachine;
-	if (linked && thisMachine === servedBy) return { canConnect: true, canCheck: true, reason: "" };
-	if (!canConnect(fields)) return { canConnect: false, canCheck: false, reason: `Open Roostr on ${computer} to connect or check this credential.` };
-	if (linked) return { canConnect: true, canCheck: false, reason: `Check now runs on ${computer}.` };
-	return { canConnect: false, canCheck: false, reason: `Pair this tab with one of your computers to sign in there, or open Roostr on ${computer} to check this credential.` };
+	if (linked && thisMachine === servedBy) return { canConnect: true, canCheck: true, checkHere: true, reason: "" };
+	if (!canConnect(fields)) return { canConnect: false, canCheck: true, checkHere: false, reason: `Open Roostr on ${computer} to connect this credential.` };
+	if (linked) return { canConnect: true, canCheck: true, checkHere: false, reason: "" };
+	return { canConnect: false, canCheck: true, checkHere: false, reason: "Pair this tab with one of your computers to sign in there." };
 }
 
 /**
@@ -262,6 +267,164 @@ export function startReconnect(
 	};
 }
 
+// ── Check, from any device ─────────────────────────────────────────────
+
+/** On a credential: when a person last pressed Check (epoch ms); the computer serving it answers by stamping `checked_at` (harness credential-objects.ts). */
+export const CHECK_REQUEST_KEY = "check_requested";
+const CHECK_POLL_MS = 2_500;
+/** No answer this long: the computer serving the credential is taken to be off. */
+export const CHECK_TIMEOUT_MS = 60_000;
+
+function fieldNum(fields: Record<string, ValueJSON>, key: string): number {
+	const v = fields[key];
+	return Number(v?.intValue ?? v?.floatValue ?? 0) || 0;
+}
+
+/**
+ * A Check asked for (on any device) that the computer serving the
+ * credential has not answered and still may: newer than `checked_at`, under
+ * a minute old. Its time, or 0. While there is one, every device says
+ * "Checking on …" - the request is not hidden.
+ */
+export function pendingCheck(fields: Record<string, ValueJSON>, now = Date.now()): number {
+	const at = fieldNum(fields, CHECK_REQUEST_KEY);
+	return at > fieldNum(fields, "checked_at") && now - at < CHECK_TIMEOUT_MS ? at : 0;
+}
+
+/**
+ * The computer serving a credential answered a Check asked for at
+ * `requestedAt`: it stamped `checked_at` since - later than the request, or
+ * at all (`before`: `checked_at` when it was asked), since the asking
+ * device's clock may run ahead of that computer's.
+ */
+export function checkAnswered(fields: Record<string, ValueJSON>, requestedAt: number, before: number): boolean {
+	const at = fieldNum(fields, "checked_at");
+	return at >= requestedAt || at !== before;
+}
+
+/** Where a Check is: asked and waiting, answered (`fields` carry the answer), no answer within a minute, or the ask itself refused. */
+export type CheckPhase = "checking" | "checked" | "unanswered" | "failed";
+export interface CheckState {
+	phase: CheckPhase;
+	/** The refusal (failed only). */
+	error: string;
+	/** The credential's fields as last read. */
+	fields: Record<string, ValueJSON>;
+	/** When it was asked for (epoch ms, the asking device's clock). */
+	requestedAt: number;
+}
+
+export interface CheckDeps {
+	/** POST /credentials/check on the paired harness. */
+	run: (action: CredentialAction, id: string) => Promise<CredentialResult>;
+	/** Write the request on the credential. */
+	ask: (id: string, at: number) => Promise<unknown>;
+	read: (id: string) => Promise<Record<string, ValueJSON> | null>;
+	every: (ms: number, tick: () => void) => () => void;
+	now: () => number;
+}
+
+const liveCheckDeps: CheckDeps = {
+	run: runCredentialAction,
+	ask: (id, at) => note.setField(id, CHECK_REQUEST_KEY, { intValue: at }),
+	read: async (id) => (await fetchObject(id).catch(() => null))?.fields ?? null,
+	every: (ms, tick) => {
+		const timer = setInterval(tick, ms);
+		return () => clearInterval(timer);
+	},
+	now: () => Date.now(),
+};
+
+/**
+ * Check, from any device: ask the computer serving the credential to test
+ * its login now and follow until it answers. A tab paired with that
+ * computer (`here`) asks it straight (POST /credentials/check); anywhere
+ * else `check_requested` is written on the credential and it is re-read
+ * every 2.5 s until that computer stamps `checked_at` - or, after a minute
+ * with no answer, `unanswered`. `pending` follows a request already written
+ * (another device's) without writing one. `fields` are the credential's as
+ * the Check was pressed; every change calls `onchanged`. Returns a stop.
+ */
+export function startCheck(
+	id: string,
+	fields: Record<string, ValueJSON>,
+	onstate: (state: CheckState) => void,
+	onchanged: () => Promise<void>,
+	opts: { here?: boolean; pending?: number; deps?: CheckDeps } = {},
+): () => void {
+	const deps = opts.deps ?? liveCheckDeps;
+	const before = fieldNum(fields, "checked_at");
+	const requestedAt = opts.pending || deps.now();
+	let stopped = false;
+	let stopPoll = () => {};
+	const emit = (s: Omit<CheckState, "requestedAt">) => {
+		if (!stopped) onstate({ ...s, requestedAt });
+	};
+	const finish = async (s: Omit<CheckState, "requestedAt">) => {
+		emit(s);
+		await onchanged().catch(() => {});
+	};
+	const follow = () => {
+		let busy = false;
+		stopPoll = deps.every(CHECK_POLL_MS, async () => {
+			if (busy || stopped) return;
+			if (deps.now() - requestedAt > CHECK_TIMEOUT_MS) {
+				stopPoll();
+				emit({ phase: "unanswered", error: "", fields });
+				return;
+			}
+			busy = true;
+			try {
+				const fresh = await deps.read(id);
+				if (fresh && checkAnswered(fresh, requestedAt, before)) {
+					stopPoll();
+					await finish({ phase: "checked", error: "", fields: fresh });
+				}
+			} finally {
+				busy = false;
+			}
+		});
+		if (stopped) stopPoll();
+	};
+	emit({ phase: "checking", error: "", fields });
+	void (async () => {
+		if (opts.pending) return follow();
+		if (opts.here) {
+			let result: CredentialResult;
+			try {
+				result = await deps.run("check", id);
+			} catch (e) {
+				return finish({ phase: "failed", error: e instanceof Error ? e.message : String(e), fields });
+			}
+			const answer = (await deps.read(id)) ?? { ...fields, status: { stringValue: result.status ?? "" }, error: { stringValue: result.error ?? "" } };
+			return finish({ phase: "checked", error: "", fields: answer });
+		}
+		try {
+			await deps.ask(id, requestedAt);
+		} catch (e) {
+			return finish({ phase: "failed", error: e instanceof Error ? e.message : String(e), fields });
+		}
+		await onchanged().catch(() => {});
+		follow();
+	})();
+	return () => {
+		stopped = true;
+		stopPoll();
+	};
+}
+
+/** What a Check says while it runs and once answered (`computer`: the one serving the credential). */
+export function checkLine(state: CheckState, computer: string): { text: string; tone: "muted" | "ok" | "error" } {
+	if (state.phase === "checking") return { text: `Checking on ${computer || "its computer"}…`, tone: "muted" };
+	if (state.phase === "unanswered") return { text: `${computer || "Its computer"} hasn't answered - is Roostr running there?`, tone: "error" };
+	if (state.phase === "failed") return { text: state.error, tone: "error" };
+	const status = fieldStr(state.fields, "status") || "missing";
+	const error = fieldStr(state.fields, "error");
+	if (status === "active") return { text: "Connected", tone: "ok" };
+	if (status === "connecting") return { text: error || credentialStatusText(status), tone: "muted" };
+	return { text: error || credentialStatusText(status), tone: "error" };
+}
+
 // ── A signed-out credential named on another object's Error ────────────
 
 /** The harness's Error badge on a task or agent whose run hit a dead login (harness credential-issues.ts). */
@@ -333,11 +496,12 @@ export function reconnectTarget(
 }
 
 /**
- * A credential's Status cell: its status, or - while a reconnect started in
- * this tab runs, or after one failed and the credential is still not
- * connected - that reconnect's progress.
+ * A credential's Status cell: its status, or - while a Check is waiting for
+ * its answer, a reconnect started in this tab runs, or after one failed and
+ * the credential is still not connected - that progress.
  */
-export function credentialCellBadge(status: string, progress: ReconnectState | undefined): { text: string; icon: BadgeIcon; color: string } {
+export function credentialCellBadge(status: string, progress: ReconnectState | undefined, checking = false): { text: string; icon: BadgeIcon; color: string } {
+	if (checking) return { text: "Checking…", ...credentialStatusBadge("connecting") };
 	if (progress?.phase === "starting") return { text: "Starting sign-in…", ...credentialStatusBadge("connecting") };
 	if (progress?.phase === "waiting") return { text: "Waiting for sign-in…", ...credentialStatusBadge("connecting") };
 	if (progress?.phase === "failed" && status !== "active") return { text: progress.error, ...credentialStatusBadge("broken") };

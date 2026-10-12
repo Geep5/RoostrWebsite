@@ -10,7 +10,7 @@
 	import RowContextMenu from "./RowContextMenu.svelte";
 	import { badgeStyle, tagStyle } from "$lib/options";
 	import { credentialCellBadge, reconnectTarget } from "$lib/credential-actions";
-	import { reconnectState } from "$lib/credential-reconnect.svelte";
+	import { checking, reconnectState } from "$lib/credential-reconnect.svelte";
 	import CredentialCell from "./CredentialCell.svelte";
 	import PropIcon from "./PropIcon.svelte";
 	import { fetchQuery, type QueryResultRow } from "$lib/api";
@@ -102,7 +102,7 @@
 				{@const t = cellText(r, rel)}
 				{@const target = reconnectTarget(r, rel.key)}
 				{#if target && r.typeKey === "credential" && rel.key === "status"}
-					{@const badge = credentialCellBadge(fieldStr(r.fields, "status"), reconnectState(r.id))}
+					{@const badge = credentialCellBadge(fieldStr(r.fields, "status"), reconnectState(r.id), checking(r.id, r.fields))}
 					<div class="g-cell" title={rel.name || rel.key}>
 						<CredentialCell row={r} {target} onchanged={load} label={`Reconnect ${fieldStr(r.fields, "name") || "credential"}: ${badge.text}`}><span class="g-cred" style={badgeStyle(badge.color)}><PropIcon icon={badge.icon} size={13} />{badge.text}</span></CredentialCell>
 					</div>

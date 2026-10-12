@@ -14,7 +14,7 @@
 	import PropertyValue from "./PropertyValue.svelte";
 	import { badgeStyle, tagStyle } from "$lib/options";
 	import { credentialCellBadge, credentialStatusBadge, credentialStatusText, reconnectTarget } from "$lib/credential-actions";
-	import { reconnectState } from "$lib/credential-reconnect.svelte";
+	import { checking, reconnectState } from "$lib/credential-reconnect.svelte";
 	import CredentialCell from "./CredentialCell.svelte";
 	import PropIcon from "./PropIcon.svelte";
 	import CheckboxIcon from "./CheckboxIcon.svelte";
@@ -671,7 +671,7 @@
 							<!-- The harness writes a credential's status: shown in words like its Properties row, never hand-edited here. Not connected, it reconnects from here. -->
 							{@const st = fieldStr(r.fields, "status")}
 							{#if target}
-								{@const badge = credentialCellBadge(st, reconnectState(r.id))}
+								{@const badge = credentialCellBadge(st, reconnectState(r.id), checking(r.id, r.fields))}
 								<td><CredentialCell row={r} {target} onchanged={reload} label={`Reconnect ${fieldStr(r.fields, "name") || "credential"}: ${badge.text}`}><span class="cred-status" style={badgeStyle(badge.color)}><PropIcon icon={badge.icon} size={14} />{badge.text}</span></CredentialCell></td>
 							{:else}
 								<td><span class="cred-status" style={badgeStyle(credentialStatusBadge(st).color)}><PropIcon icon={credentialStatusBadge(st).icon} size={14} />{credentialStatusText(st)}</span></td>

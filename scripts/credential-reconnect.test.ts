@@ -1,15 +1,23 @@
 import { describe, expect, test } from "bun:test";
 import {
+	CHECK_REQUEST_KEY,
+	CHECK_TIMEOUT_MS,
 	CONNECT_TIMEOUT_TEXT,
+	checkAnswered,
+	checkLine,
 	connectingHint,
 	credentialActionGate,
 	credentialCellBadge,
 	credentialsForError,
 	linkedCredentialIds,
 	isSecretField,
+	pendingCheck,
 	reconnectTarget,
 	signedOutNames,
+	startCheck,
 	startReconnect,
+	type CheckDeps,
+	type CheckState,
 	type CredentialAction,
 	type CredentialResult,
 	type ReconnectDeps,
@@ -73,22 +81,23 @@ describe("action gate", () => {
 	const google = { service: s("google-account"), account: s("me@example.com") };
 	const database = { service: s("postgres"), key_url: s("postgres://x") };
 
-	test("the tab paired with the serving computer does everything", () => {
-		for (const fields of [website, google, database]) expect(credentialActionGate(true, "m1", "m1", "Mac", fields)).toEqual({ canConnect: true, canCheck: true, reason: "" });
+	test("the tab paired with the serving computer does everything, and checks straight", () => {
+		for (const fields of [website, google, database]) expect(credentialActionGate(true, "m1", "m1", "Mac", fields)).toEqual({ canConnect: true, canCheck: true, checkHere: true, reason: "" });
 	});
 
-	test("a website or Google sign-in connects from any paired computer; Check stays on the serving one", () => {
-		for (const fields of [website, google]) expect(credentialActionGate(true, "m2", "m1", "Mac", fields)).toEqual({ canConnect: true, canCheck: false, reason: "Check now runs on Mac." });
+	test("a website or Google sign-in connects from any paired computer; Check is asked of the serving one", () => {
+		for (const fields of [website, google]) expect(credentialActionGate(true, "m2", "m1", "Mac", fields)).toEqual({ canConnect: true, canCheck: true, checkHere: false, reason: "" });
 	});
 
-	test("anything else connects and checks only on the serving computer", () => {
-		expect(credentialActionGate(true, "m2", "m1", "Mac", database)).toEqual({ canConnect: false, canCheck: false, reason: "Open Roostr on Mac to connect or check this credential." });
+	test("anything else connects only on the serving computer, and checks from anywhere", () => {
+		expect(credentialActionGate(true, "m2", "m1", "Mac", database)).toEqual({ canConnect: false, canCheck: true, checkHere: false, reason: "Open Roostr on Mac to connect this credential." });
 	});
 
-	test("an unpaired tab acts nowhere; no Served by, nobody acts", () => {
-		expect(credentialActionGate(false, "", "m1", "Mac", website)).toEqual({ canConnect: false, canCheck: false, reason: "Pair this tab with one of your computers to sign in there, or open Roostr on Mac to check this credential." });
-		expect(credentialActionGate(false, "", "m1", "Mac", database).reason).toBe("Open Roostr on Mac to connect or check this credential.");
-		expect(credentialActionGate(true, "m1", "", "", website)).toEqual({ canConnect: false, canCheck: false, reason: "Set Served by to a computer first." });
+	test("an unpaired tab (the website, iOS) still checks; no Served by, nobody acts", () => {
+		expect(credentialActionGate(false, "", "m1", "Mac", website)).toEqual({ canConnect: false, canCheck: true, checkHere: false, reason: "Pair this tab with one of your computers to sign in there." });
+		for (const fields of [google, database]) expect(credentialActionGate(false, "", "m1", "Mac", fields).canCheck).toBe(true);
+		expect(credentialActionGate(false, "", "m1", "Mac", database).reason).toBe("Open Roostr on Mac to connect this credential.");
+		expect(credentialActionGate(true, "m1", "", "", website)).toEqual({ canConnect: false, canCheck: false, checkHere: false, reason: "Set Served by to a computer first." });
 	});
 
 	test("the sign-in hint names where the window opened and who gets the login", () => {
@@ -216,5 +225,147 @@ describe("cell badge", () => {
 		const failed = { phase: "failed" as const, error: "Window closed", fields: {} };
 		expect(credentialCellBadge("needs_auth", failed)).toEqual({ text: "Window closed", icon: "x", color: "red" });
 		expect(credentialCellBadge("active", failed).text).toBe("Connected");
+	});
+});
+
+/** Fakes for Check: the harness POST, the request write, reads and a hand-driven clock and poll. */
+function checkFakes(answers: Array<Record<string, ValueJSON> | null>, opts: { run?: () => Promise<CredentialResult>; ask?: () => Promise<unknown> } = {}) {
+	const calls: string[] = [];
+	const clock = { now: 1_000_000 };
+	let tick: (() => void | Promise<void>) | null = null;
+	let polling = false;
+	const deps: CheckDeps = {
+		run: async (action, id) => {
+			calls.push(`${action}:${id}`);
+			return opts.run ? opts.run() : { status: "active" };
+		},
+		ask: async (id, at) => {
+			calls.push(`ask:${id}:${at}`);
+			return opts.ask?.();
+		},
+		read: async () => answers.shift() ?? null,
+		every: (_ms, fn) => {
+			tick = fn;
+			polling = true;
+			return () => (polling = false);
+		},
+		now: () => clock.now,
+	};
+	const states: CheckState[] = [];
+	let reloads = 0;
+	const settle = () => new Promise((r) => setTimeout(r, 0));
+	return {
+		deps,
+		calls,
+		clock,
+		states,
+		phases: () => states.map((x) => x.phase),
+		polling: () => polling,
+		reloads: () => reloads,
+		onstate: (st: CheckState) => void states.push(st),
+		onchanged: async () => void reloads++,
+		settle,
+		/** One poll tick, after `ms` more milliseconds. */
+		tick: async (ms = 2_500) => {
+			clock.now += ms;
+			await tick?.();
+			await settle();
+		},
+	};
+}
+
+const i = (intValue: number): ValueJSON => ({ intValue });
+
+describe("Check from any device", () => {
+	const before = { status: s("connecting"), checked_at: i(900_000) };
+
+	test("writes the request, says Checking, and settles when checked_at moves past it", async () => {
+		const f = checkFakes([{ ...before }, { status: s("active"), checked_at: i(1_002_000) }]);
+		startCheck("c1", before, f.onstate, f.onchanged, { deps: f.deps });
+		expect(f.phases()).toEqual(["checking"]);
+		await f.settle();
+		expect(f.calls).toEqual(["ask:c1:1000000"]);
+		await f.tick();
+		expect(f.phases()).toEqual(["checking"]);
+		await f.tick();
+		expect(f.phases()).toEqual(["checking", "checked"]);
+		expect(f.polling()).toBe(false);
+		expect(checkLine(f.states.at(-1)!, "Mac")).toEqual({ text: "Connected", tone: "ok" });
+		expect(f.reloads()).toBe(2);
+	});
+
+	test("the answer is the credential's error when the login is gone", async () => {
+		const f = checkFakes([{ status: s("needs_auth"), error: s("The X sign-in expired"), checked_at: i(1_001_000) }]);
+		startCheck("c1", before, f.onstate, f.onchanged, { deps: f.deps });
+		await f.settle();
+		await f.tick();
+		expect(checkLine(f.states.at(-1)!, "Mac")).toEqual({ text: "The X sign-in expired", tone: "error" });
+	});
+
+	test("an answer stamped by a computer whose clock runs behind still counts", async () => {
+		const f = checkFakes([{ status: s("active"), checked_at: i(950_000) }]);
+		startCheck("c1", before, f.onstate, f.onchanged, { deps: f.deps });
+		await f.settle();
+		await f.tick();
+		expect(f.phases().at(-1)).toBe("checked");
+	});
+
+	test("no answer within a minute: the serving computer hasn't answered", async () => {
+		const f = checkFakes(Array.from({ length: 30 }, () => ({ ...before })));
+		startCheck("c1", before, f.onstate, f.onchanged, { deps: f.deps });
+		await f.settle();
+		expect(checkLine(f.states[0], "Mac")).toEqual({ text: "Checking on Mac…", tone: "muted" });
+		for (let n = 0; n < 24; n++) await f.tick();
+		expect(f.phases().at(-1)).toBe("checking");
+		await f.tick();
+		expect(f.phases().at(-1)).toBe("unanswered");
+		expect(f.polling()).toBe(false);
+		expect(checkLine(f.states.at(-1)!, "Mac").text).toBe("Mac hasn't answered - is Roostr running there?");
+	});
+
+	test("a tab paired with the serving computer asks it straight, writing no request", async () => {
+		const f = checkFakes([{ status: s("active"), checked_at: i(1_000_500) }]);
+		startCheck("c1", before, f.onstate, f.onchanged, { deps: f.deps, here: true });
+		await f.settle();
+		expect(f.calls).toEqual(["check:c1"]);
+		expect(f.phases()).toEqual(["checking", "checked"]);
+		expect(f.polling()).toBe(false);
+	});
+
+	test("a refusal or failed write fails with its sentence", async () => {
+		const refused = checkFakes([], { run: async () => { throw new Error("This credential is looked after by Mac."); } });
+		startCheck("c1", before, refused.onstate, refused.onchanged, { deps: refused.deps, here: true });
+		await refused.settle();
+		expect(refused.states.at(-1)).toMatchObject({ phase: "failed", error: "This credential is looked after by Mac." });
+		const offline = checkFakes([], { ask: async () => { throw new Error("offline"); } });
+		startCheck("c1", before, offline.onstate, offline.onchanged, { deps: offline.deps });
+		await offline.settle();
+		expect(offline.states.at(-1)).toMatchObject({ phase: "failed", error: "offline" });
+		expect(offline.polling()).toBe(false);
+	});
+
+	test("following another device's request writes nothing and waits for the same answer", async () => {
+		const asked = { ...before, [CHECK_REQUEST_KEY]: i(999_000) };
+		const f = checkFakes([{ status: s("active"), checked_at: i(1_001_000) }]);
+		startCheck("c1", asked, f.onstate, f.onchanged, { deps: f.deps, pending: pendingCheck(asked, 1_000_000) });
+		await f.settle();
+		expect(f.calls).toEqual([]);
+		expect(f.states[0].requestedAt).toBe(999_000);
+		await f.tick();
+		expect(f.phases()).toEqual(["checking", "checked"]);
+	});
+
+	test("a request is pending until answered, and for a minute at most", () => {
+		const asked = { checked_at: i(900_000), [CHECK_REQUEST_KEY]: i(1_000_000) };
+		expect(pendingCheck(asked, 1_010_000)).toBe(1_000_000);
+		expect(pendingCheck(asked, 1_000_000 + CHECK_TIMEOUT_MS + 1)).toBe(0);
+		expect(pendingCheck({ ...asked, checked_at: i(1_000_100) }, 1_010_000)).toBe(0);
+		expect(pendingCheck({ checked_at: i(900_000) }, 1_010_000)).toBe(0);
+		expect(checkAnswered({ checked_at: i(900_000) }, 1_000_000, 900_000)).toBe(false);
+	});
+
+	test("the cell says Checking… over any other progress", () => {
+		expect(credentialCellBadge("connecting", { phase: "waiting", error: "", fields: {} }, true).text).toBe("Checking…");
+		expect(credentialCellBadge("needs_auth", undefined, false).text).toBe("Signed out - reconnect");
 	});
 });

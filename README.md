@@ -121,7 +121,11 @@ a key; its editor shows the value) plus Cookie details (`cookie_meta`), a
 Google account as its client and refresh-token keys. The computer in its
 Served by keeps it: it tries a login made elsewhere on the site and keeps the
 status current, saying plainly when a site refuses a login made on another
-computer. Check now runs only on that computer. Disconnect stops a sign-in
+computer. Check now works from any device: it writes `check_requested` (epoch
+ms) on the credential, that computer runs the check and stamps `checked_at`,
+and the Status (pane, table popover, cell) says "Checking on <computer>…" until
+it does - or, after a minute, that the computer hasn't answered; a tab paired
+with that computer asks it straight. Disconnect stops a sign-in
 running on this computer; the saved login stays and keeps working until the
 site refuses it (clear its Cookie / key properties to remove it). Agents list
 the credentials they may use in their Credentials property.
