@@ -1147,15 +1147,15 @@
 		border-radius: 16px;
 		border-bottom-left-radius: 5px;
 	}
-	/* Your own messages: Roostr yellow (the front page's), dark ink for contrast. */
+	/* Your own messages: the front page's golden cream with its ink. */
 	.msg.own .text {
-		background: #fcd038;
-		color: #1d1a10;
+		background: #edcf7f;
+		color: #1b1b1b;
 		border-radius: 16px;
 		border-bottom-right-radius: 5px;
 	}
 	.msg.own .md :global(a) {
-		color: #1d1a10;
+		color: #1b1b1b;
 		text-decoration: underline;
 	}
 	.msg.own .md :global(code.ic) {
@@ -1339,8 +1339,8 @@
 		border-color: var(--accent);
 	}
 	.chip.mine {
-		border-color: #fcd038;
-		background: rgb(252 208 56 / 0.16);
+		border-color: #edcf7f;
+		background: rgb(237 207 127 / 0.16);
 	}
 	.picker-wrap {
 		position: absolute;
@@ -1424,7 +1424,7 @@
 		text-decoration: none;
 	}
 	.text.md :global(a.obj-link:hover) { background: rgba(46, 160, 67, 0.36); }
-	.msg.own .text.md :global(a.obj-link) { background: rgba(0, 0, 0, 0.12); color: #1d1a10; }
+	.msg.own .text.md :global(a.obj-link) { background: rgba(0, 0, 0, 0.12); color: #1b1b1b; }
 	.mirror :global(.mention.obj) {
 		background: rgba(46, 160, 67, 0.22);
 		box-shadow: 0 2px 0 0 rgba(46, 160, 67, 0.22), 0 -2px 0 0 rgba(46, 160, 67, 0.22);
@@ -1544,8 +1544,8 @@
 		height: 24px;
 		border-radius: 50%;
 		border: none;
-		background: #fcd038;
-		color: #1d1a10;
+		background: #edcf7f;
+		color: #1b1b1b;
 		cursor: pointer;
 		display: flex;
 		align-items: center;
@@ -1662,7 +1662,7 @@
 	   wash and lavender-white text, no heavier weight. */
 	.msg.own .text :global(.mention) {
 		background: rgba(0, 0, 0, 0.12);
-		color: #1d1a10;
+		color: #1b1b1b;
 	}
 	.text :global(.mention-ico) {
 		display: inline-block;
