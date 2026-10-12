@@ -95,14 +95,35 @@
 		// After paint, or scrollHeight is still the previous thread's.
 		requestAnimationFrame(() => toBottom(el));
 	});
-	// On new messages: pagemode always follows, as it did. The drawer follows
-	// only when the reader is already at the end, so scrolling back through
-	// history is not yanked away by an arriving reply.
-	$effect(() => {
-		void messages.length;
+	// On new messages: pagemode always follows. The drawer follows when the
+	// reader was at the end BEFORE the message arrived (measured after it, a
+	// long reply already pushed the end out of reach, so it never followed),
+	// and always for a reply to what you just sent. Scrolling back through
+	// history is not yanked away by unrelated traffic.
+	let following = true;
+	let seenCount = untrack(() => messages.length);
+	function onMessagesScroll() {
 		const el = messagesEl;
-		if (!el) return;
-		if (pagemode || atBottom(el)) requestAnimationFrame(() => toBottom(el));
+		if (el) following = atBottom(el);
+	}
+	$effect(() => {
+		const count = messages.length;
+		const el = messagesEl;
+		if (!el || count === seenCount) return;
+		const fresh = count > seenCount;
+		seenCount = count;
+		if (!fresh) return;
+		const newest = messages[count - 1];
+		const previous = messages[count - 2];
+		const mineBefore = !!previous && previous.author === me && newest?.author !== me;
+		if (!(pagemode || following || mineBefore || newest?.author === me)) return;
+		requestAnimationFrame(() => {
+			// A reply taller than the pane opens at its first line, not its last.
+			const last = newest ? document.getElementById(`msg-${newest.id}`) : null;
+			if (last && last.offsetHeight > el.clientHeight * 0.8) last.scrollIntoView({ block: "start" });
+			else toBottom(el);
+			following = true;
+		});
 	});
 	$effect(() => {
 		if (isOpen) composerEl?.focus();
@@ -684,7 +705,7 @@
 		{#if legacy}<p class="presence" role="status">This shared exchange is read-only, awaiting migration to object inboxes.</p>{/if}
 		{#if isExchange && conversation?.closed}<p class="presence">This exchange is closed.</p>{/if}
 		{#if retryError}<p class="presence error" role="alert">Retry failed: {retryError}</p>{/if}
-		<div class="messages" bind:this={messagesEl}>
+		<div class="messages" bind:this={messagesEl} onscroll={onMessagesScroll}>
 			{#each messages as m (m.id)}
 				{@const bubble = m.author === me ? store.chatColor : (store.agents.find((a) => a.id === m.author)?.chatColor ?? "")}
 				<div class="msg" class:own={m.author === me} class:tinted={!!bubble} style={bubble ? bubbleVars(bubble) : undefined} id="msg-{m.id}">
