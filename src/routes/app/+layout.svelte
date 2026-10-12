@@ -59,11 +59,11 @@
 	const objectRelation = $derived(objectId ? store.relations.find((r) => r.id === objectId) : undefined);
 	/** The open object is a space: not a summary row, but still an object with an id. */
 	const objectSpace = $derived(objectId && !objectSummary ? channels.find((c) => c.id === objectId) : undefined);
-	/** Why the open type/property can't be deleted ("" = it can); fetched when one is open. */
+	/** Why the open type/property/tool can't be deleted ("" = it can); fetched when one is open. */
 	let deleteBlocker = $state("");
 	$effect(() => {
 		const id = objectId;
-		const isDef = !!objectRelation || objectSummary?.typeKey === "type";
+		const isDef = !!objectRelation || objectSummary?.typeKey === "type" || objectSummary?.typeKey === "tool";
 		deleteBlocker = "";
 		if (!id || !isDef) return;
 		void fetchObject(id)

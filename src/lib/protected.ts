@@ -1,8 +1,9 @@
 /**
- * Types and properties the UI refuses to delete: Roostr's own (core
- * built-ins carry `bundled`, harness seeds carry `system`) and anything a
- * query, template or property in the same space depends on. UI-level only:
- * the engine still deletes whatever it is told to.
+ * Types, properties and tools the UI refuses to delete: Roostr's own (core
+ * built-ins carry `bundled`, harness seeds carry `system`, shipped tools
+ * carry `tool_builtin`) and any type/property a query, template or property
+ * in the same space depends on. UI-level only: the engine still deletes
+ * whatever it is told to.
  */
 import { fetchAllQuery, fetchObject, type QueryResultRow } from "$lib/api";
 import { store } from "$lib/data.svelte";
@@ -19,8 +20,9 @@ const strItems = (v: ValueJSON | undefined): string[] => (v?.valuesValue?.items 
 const mapKeys = (v: ValueJSON | undefined): string[] => (v?.valuesValue?.items ?? []).map((i) => i.mapValue?.entries?.["key"]?.stringValue ?? "").filter(Boolean);
 const name = (r: QueryResultRow): string => fieldStr(r.fields, "name") || "Untitled";
 
-/** Why `def` (a type or relation object) can't be deleted, or "" when it can. */
+/** Why `def` (a type, relation or tool object) can't be deleted, or "" when it can. */
 export async function deletionBlocker(def: Def): Promise<string> {
+	if (def.typeKey === "tool") return def.fields["tool_builtin"]?.boolValue ? "Built into Roostr" : "";
 	if (def.typeKey !== "type" && def.typeKey !== "relation") return "";
 	if (def.fields["bundled"]?.boolValue) return "Built into Roostr";
 	if (def.fields["system"]?.boolValue) return "A Roostr default";
@@ -60,7 +62,7 @@ export async function deletionBlocker(def: Def): Promise<string> {
 export async function blockersFor(ids: string[]): Promise<Map<string, string>> {
 	const out = new Map<string, string>();
 	for (const id of ids) {
-		const isDef = store.relations.some((r) => r.id === id) || store.summaries.some((s) => s.id === id && s.typeKey === "type");
+		const isDef = store.relations.some((r) => r.id === id) || store.summaries.some((s) => s.id === id && (s.typeKey === "type" || s.typeKey === "tool"));
 		if (!isDef) continue;
 		const why = await deletionBlocker(await fetchObject(id));
 		if (why) out.set(id, why);
