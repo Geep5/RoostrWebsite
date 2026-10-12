@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { portal } from "$lib/portal";
 	/**
 	 * Anytype's relationSuggest menu (menu/relation/suggest.tsx): one
 	 * search-or-create surface. Filter over existing properties; when the
@@ -83,7 +84,7 @@
 	}}
 />
 
-<div class="suggest" bind:this={menuEl} style="left: {pos.left}px; top: {pos.top}px" role="dialog" aria-label="Add property">
+<div class="suggest" use:portal bind:this={menuEl} style="left: {pos.left}px; top: {pos.top}px" role="dialog" aria-label="Add property">
 	<input
 		bind:this={inputEl}
 		bind:value={query}

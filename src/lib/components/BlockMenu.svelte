@@ -1,5 +1,6 @@
 <script lang="ts">
 	import Icon from "./Icon.svelte";
+	import { portal } from "$lib/portal";
 	import type { BlockJSON } from "$lib/types";
 	import { Style } from "$lib/types";
 	import { creatableTypes } from "$lib/create";
@@ -264,7 +265,7 @@
 	}}
 />
 
-<div class="block-menu" bind:this={menuEl} style="left:{pos.left}px; top:{pos.top}px" role="menu" tabindex="-1">
+<div class="block-menu" use:portal bind:this={menuEl} style="left:{pos.left}px; top:{pos.top}px" role="menu" tabindex="-1">
 	<input bind:this={filterEl} bind:value={filter} placeholder="Filter actions…" oninput={closeSub} />
 	{#if groupCount > 1}
 		<div class="group-note">Applies to {groupCount} selected blocks</div>
@@ -348,6 +349,7 @@
 	     on the way. -->
 	<div
 		class="flyout"
+		use:portal
 		bind:this={flyoutEl}
 		style="left:{subPos.left}px; top:{subPos.top}px"
 		role="menu"

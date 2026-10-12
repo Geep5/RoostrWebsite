@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { portal } from "$lib/portal";
 	/**
 	 * Anytype's add-menu (menu/block/add.tsx): opens at the caret when "/"
 	 * is typed, sectioned items with a rendered style preview + description,
@@ -139,7 +140,7 @@
 
 <svelte:window onpointerdown={onWindowPointerDown} />
 
-<div class="slash-menu" bind:this={menuEl} style="left: {pos.left}px; top: {pos.top}px">
+<div class="slash-menu" use:portal bind:this={menuEl} style="left: {pos.left}px; top: {pos.top}px">
 	{#if filtered.length === 0}
 		<div class="none">No matches</div>
 	{/if}

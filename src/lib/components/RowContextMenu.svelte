@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { goto } from "$app/navigation";
 	import Icon from "./Icon.svelte";
+	import { portal } from "$lib/portal";
 	/**
 	 * Right-click menu for a record in a set/collection view: open it,
 	 * retype it, add it to a collection, sever its collection membership,
@@ -239,6 +240,7 @@
 
 <button
 	class="ctx-backdrop"
+	use:portal
 	aria-label="Close menu"
 	onclick={onclose}
 	oncontextmenu={(e) => {
@@ -248,6 +250,7 @@
 ></button>
 <div
 	class="ctx-menu"
+	use:portal
 	bind:this={menuEl}
 	style="left: {Math.min(x, window.innerWidth - 230)}px; top: {menuTop ?? Math.min(y, window.innerHeight - 320)}px"
 	role="menu"
@@ -292,7 +295,7 @@
 </div>
 
 {#if fly}
-	<div class="ctx-menu ctx-fly" style="left: {fly.left}px; top: {fly.top}px" role="menu">
+	<div class="ctx-menu ctx-fly" use:portal style="left: {fly.left}px; top: {fly.top}px" role="menu">
 		{#if fly.kind === "types"}
 			<input
 				class="ctx-filter"

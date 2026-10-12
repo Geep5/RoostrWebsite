@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { flushSync } from "svelte";
+	import { portal } from "$lib/portal";
 	import { createWriteQueue, queued } from "$lib/editor/write-queue";
 	import { applyAll, BLOCKS_MIME, copySlice, History, opWrite, pasteOps, sliceText, type Op } from "$lib/editor/doc";
 	import type { ObjectJSON, BlockJSON, MarkJSON } from "$lib/types";
@@ -2377,7 +2378,7 @@
 {/if}
 
 {#if spellMenu}
-	<div class="spell-menu" style="left:{spellMenu.x}px; top:{spellMenu.y + 6}px" role="menu">
+	<div class="spell-menu" use:portal style="left:{spellMenu.x}px; top:{spellMenu.y + 6}px" role="menu">
 		{#if spellMenu.options.length}
 			<div class="sm-options">
 				{#each spellMenu.options as option (option)}
@@ -2425,7 +2426,7 @@
 {/if}
 
 {#if pasteMenu}
-	<div class="paste-menu" style="left: {pasteMenu.x}px; top: {pasteMenu.y}px">
+	<div class="paste-menu" use:portal style="left: {pasteMenu.x}px; top: {pasteMenu.y}px">
 		<div class="paste-head">Paste as</div>
 		{#if pasteMenu.processor}
 			<button onclick={() => void pasteAsBlock("embed")}>Embed</button>
@@ -2434,11 +2435,11 @@
 		<button onclick={() => void pasteAsText(true)}>Link</button>
 		<button onclick={() => void pasteAsText(false)}>Text</button>
 	</div>
-	<button class="paste-backdrop" aria-label="Close" onclick={() => (pasteMenu = null)}></button>
+	<button class="paste-backdrop" use:portal aria-label="Close" onclick={() => (pasteMenu = null)}></button>
 {/if}
 
 {#if toolbar}
-	<div class="toolbar" style="left: {toolbar.x}px; top: {toolbar.y - 44}px">
+	<div class="toolbar" use:portal style="left: {toolbar.x}px; top: {toolbar.y - 44}px">
 		<button title="Bold (⌘B)" onclick={() => void applyMark(toolbar!.blockId, MarkT.BOLD)}><b>B</b></button>
 		<button title="Italic (⌘I)" onclick={() => void applyMark(toolbar!.blockId, MarkT.ITALIC)}><i>I</i></button>
 		<button title="Underline (⌘U)" onclick={() => void applyMark(toolbar!.blockId, MarkT.UNDERLINE)}><u>U</u></button>
@@ -2450,8 +2451,8 @@
 {/if}
 
 {#if turnInto}
-	<button class="turn-backdrop" aria-label="Close" onclick={() => (turnInto = null)}></button>
-	<div class="turn-pop" style="left: {Math.max(8, turnInto.x - 130)}px; top: {turnInto.y + 8}px" role="dialog" aria-label="Turn into object">
+	<button class="turn-backdrop" use:portal aria-label="Close" onclick={() => (turnInto = null)}></button>
+	<div class="turn-pop" use:portal style="left: {Math.max(8, turnInto.x - 130)}px; top: {turnInto.y + 8}px" role="dialog" aria-label="Turn into object">
 		<TypeSuggest placeholder="Turn into… (search types)" onpick={(key) => void turnSelectionInto(key)} onclose={() => (turnInto = null)} />
 	</div>
 {/if}

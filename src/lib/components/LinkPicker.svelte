@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { portal } from "$lib/portal";
 	/**
 	 * Anytype's searchObject menu for "Link to existing page": a search box
 	 * over the space's objects; picking one creates the link block.
@@ -47,7 +48,7 @@
 	}}
 />
 
-<div class="link-picker" style="left:{x}px; top:{y}px" role="dialog" aria-label="Link to object">
+<div class="link-picker" use:portal style="left:{x}px; top:{y}px" role="dialog" aria-label="Link to object">
 	<input
 		bind:this={inputEl}
 		bind:value={query}
