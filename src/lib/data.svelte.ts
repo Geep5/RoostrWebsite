@@ -4,8 +4,9 @@
  * Odin backend and kept live via the /api/events SSE stream.
  */
 
-import { fetchChannels, fetchObjects, fetchQuery, fetchRelations, fetchAllQuery } from "$lib/api";
+import { fetchChannels, fetchObjects, fetchQuery, fetchRelations, fetchAllQuery, userPrefs } from "$lib/api";
 import { backend } from "$lib/client-backend";
+import { DEFAULT_CHAT_COLOR, normalizeHex } from "$lib/chat-color";
 import type { SpaceJSON, ObjectSummary, RelationDefJSON } from "$lib/types";
 
 /** A type object (Anytype ObjectType analog). */
@@ -20,6 +21,8 @@ export interface AgentRef {
 	icon: string;
 	/** Owning space: an agent lives in exactly one. Empty = unassigned. */
 	channel: string;
+	/** The agent's `chat_color` as #RRGGBB; "" = the default grey bubble. */
+	chatColor: string;
 }
 
 export interface TypeDef {
@@ -43,6 +46,8 @@ export const store = $state({
 	/** Ids of types and properties that are built in or Roostr defaults - marked in the sidebar, never deletable from the UI. */
 	builtinIds: new Set<string>(),
 	agents: [] as AgentRef[],
+	/** The user's own chat bubble color (Settings; synced on the personal stream). */
+	chatColor: DEFAULT_CHAT_COLOR,
 	loaded: false,
 });
 
@@ -75,16 +80,18 @@ async function fetchAgents(): Promise<AgentRef[]> {
 		name: r.fields["name"]?.stringValue ?? "",
 		icon: r.fields["iconEmoji"]?.stringValue ?? "",
 		channel: r.fields["channel"]?.stringValue ?? "",
+		chatColor: normalizeHex(r.fields["chat_color"]?.stringValue ?? "") ?? "",
 	}));
 }
 
 export async function refreshAll(): Promise<void> {
-	const [channels, summaries, relations, defs, agents] = await Promise.all([
+	const [channels, summaries, relations, defs, agents, chatColor] = await Promise.all([
 		fetchChannels(),
 		fetchObjects(),
 		fetchRelations(),
 		fetchDefs(),
 		fetchAgents(),
+		userPrefs.chatColor(),
 	]);
 	store.channels = channels;
 	store.summaries = summaries;
@@ -92,6 +99,7 @@ export async function refreshAll(): Promise<void> {
 	store.types = defs.types;
 	store.builtinIds = defs.builtinIds;
 	store.agents = agents;
+	store.chatColor = chatColor;
 	store.loaded = true;
 }
 

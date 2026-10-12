@@ -1,6 +1,8 @@
 <script lang="ts">
 	import { onMount } from "svelte";
-	import { settings } from "$lib/api";
+	import { settings, userPrefs } from "$lib/api";
+	import { store } from "$lib/data.svelte";
+	import { DEFAULT_CHAT_COLOR, normalizeHex } from "$lib/chat-color";
 	import { exportAll } from "$lib/export";
 	import { ignoredWords, removeFromDictionary } from "$lib/spell";
 	import { backend, isLocalBackend } from "$lib/client-backend";
@@ -182,6 +184,24 @@
 			avatarState = err instanceof Error ? err.message : String(err);
 		} finally {
 			avatarBusy = false;
+		}
+	}
+
+	// ── Chat color (personal prefs object, synced to this key's devices) ──
+	let chatColorDraft = $state(store.chatColor);
+	let chatColorState = $state("");
+	onMount(() => void userPrefs.chatColor().then((c) => (store.chatColor = chatColorDraft = c)));
+	async function saveChatColor(raw: string) {
+		if (!normalizeHex(raw)) {
+			chatColorState = "Use a hex color like #EDCF7F";
+			return;
+		}
+		chatColorState = "saving…";
+		try {
+			store.chatColor = chatColorDraft = await userPrefs.setChatColor(raw);
+			chatColorState = "saved";
+		} catch (err) {
+			chatColorState = err instanceof Error ? err.message : String(err);
 		}
 	}
 
@@ -395,6 +415,25 @@
 					<button disabled={avatarBusy} onclick={() => void removeAvatar()}>Remove</button>
 				{/if}
 				{#if avatarState}<span class="hint">{avatarState}</span>{/if}
+			</div>
+		</section>
+		<section>
+			<h3>Chat color</h3>
+			<p class="hint">Your message bubbles and send button, on every device holding this key. Text on it switches to dark or white to stay readable.</p>
+			<div class="profile-row">
+				<input class="chat-swatch" type="color" aria-label="Chat color picker" value={normalizeHex(chatColorDraft)?.toLowerCase() ?? "#edcf7f"} onchange={(e) => void saveChatColor(e.currentTarget.value)} />
+				<input
+					class="profile-name"
+					aria-label="Chat color hex"
+					placeholder={DEFAULT_CHAT_COLOR}
+					bind:value={chatColorDraft}
+					onchange={() => void saveChatColor(chatColorDraft)}
+					onkeydown={(e) => { if (e.key === "Enter") e.currentTarget.blur(); }}
+				/>
+				{#if normalizeHex(chatColorDraft) !== DEFAULT_CHAT_COLOR}
+					<button onclick={() => void saveChatColor(DEFAULT_CHAT_COLOR)}>Reset</button>
+				{/if}
+				{#if chatColorState}<span class="hint">{chatColorState}</span>{/if}
 			</div>
 		</section>
 		<section>
@@ -938,6 +977,13 @@
 		display: flex;
 		align-items: center;
 		gap: 12px;
+	}
+	.chat-swatch {
+		flex: none;
+		width: 40px;
+		height: 32px;
+		padding: 2px;
+		cursor: pointer;
 	}
 	.profile-name {
 		flex: 1;

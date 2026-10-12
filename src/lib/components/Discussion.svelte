@@ -2,6 +2,7 @@
 	/** Human/private chat stays local; exchanges send immutable mailbox envelopes. */
 	import { guestAgents, type AgentEndpoint, type AgentMessage, type ObjectJSON } from "$lib/types";
 	import { chatMessages, isLegacyExchange, objectChatMessages, replyRecipients, uniqueEndpoints } from "$lib/chat";
+	import { bubbleVars } from "$lib/chat-color";
 	import { endpointName, loadObjectAgents } from "$lib/conversations";
 	import type { ObjectAgentOption } from "$lib/threads";
 	import { goto } from "$app/navigation";
@@ -645,7 +646,7 @@
 	}
 </script>
 
-<section class="discussion" class:full class:pagemode>
+<section class="discussion" class:full class:pagemode style="--mine: {store.chatColor}">
 	{#if !isOpen}
 		<!-- Anytype commentCounter: a centered floating pill, not a full-width bar. -->
 		<div class="counter-wrap">
@@ -685,7 +686,8 @@
 		{#if retryError}<p class="presence error" role="alert">Retry failed: {retryError}</p>{/if}
 		<div class="messages" bind:this={messagesEl}>
 			{#each messages as m (m.id)}
-				<div class="msg" class:own={m.author === me} id="msg-{m.id}">
+				{@const bubble = m.author === me ? store.chatColor : (store.agents.find((a) => a.id === m.author)?.chatColor ?? "")}
+				<div class="msg" class:own={m.author === me} class:tinted={!!bubble} style={bubble ? bubbleVars(bubble) : undefined} id="msg-{m.id}">
 					{#if m.author !== me}
 						{@const agentHref = authorHref(m.author)}
 						{#if avatarEmoji(m.author)}
@@ -928,7 +930,7 @@
 			</div>
 			<div class="form-toolbar">
 				<span class="toolbar-side"></span>
-				<button class="send" disabled={sending || !draft.trim() || (isExchange && !audience.length)} aria-label="Send" onclick={() => void send()}>
+				<button class="send" style={bubbleVars(store.chatColor)} disabled={sending || !draft.trim() || (isExchange && !audience.length)} aria-label="Send" onclick={() => void send()}>
 					<svg viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M10 16V5M10 5L5 10M10 5l5 5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" /></svg>
 				</button>
 			</div>
@@ -1147,19 +1149,22 @@
 		border-radius: 16px;
 		border-bottom-left-radius: 5px;
 	}
-	/* Your own messages: the front page's golden cream with its ink. */
+	/* A colored bubble (yours: Settings; an agent's: its chat_color): text,
+	   links and code take the ink or white chosen for contrast (chat-color.ts). */
+	.msg.tinted .text {
+		background: var(--bubble-bg);
+		color: var(--bubble-ink);
+	}
 	.msg.own .text {
-		background: #edcf7f;
-		color: #1b1b1b;
 		border-radius: 16px;
 		border-bottom-right-radius: 5px;
 	}
-	.msg.own .md :global(a) {
-		color: #1b1b1b;
+	.msg.tinted .md :global(a) {
+		color: var(--bubble-ink);
 		text-decoration: underline;
 	}
-	.msg.own .md :global(code.ic) {
-		background: rgba(0, 0, 0, 0.12);
+	.msg.tinted .md :global(code.ic) {
+		background: var(--bubble-tint);
 	}
 	.msg.own .meta-row {
 		justify-content: flex-end;
@@ -1339,8 +1344,8 @@
 		border-color: var(--accent);
 	}
 	.chip.mine {
-		border-color: #edcf7f;
-		background: rgb(237 207 127 / 0.16);
+		border-color: var(--mine);
+		background: color-mix(in srgb, var(--mine) 16%, transparent);
 	}
 	.picker-wrap {
 		position: absolute;
@@ -1424,7 +1429,7 @@
 		text-decoration: none;
 	}
 	.text.md :global(a.obj-link:hover) { background: rgba(46, 160, 67, 0.36); }
-	.msg.own .text.md :global(a.obj-link) { background: rgba(0, 0, 0, 0.12); color: #1b1b1b; }
+	.msg.tinted .text.md :global(a.obj-link) { background: var(--bubble-tint); color: var(--bubble-ink); }
 	.mirror :global(.mention.obj) {
 		background: rgba(46, 160, 67, 0.22);
 		box-shadow: 0 2px 0 0 rgba(46, 160, 67, 0.22), 0 -2px 0 0 rgba(46, 160, 67, 0.22);
@@ -1544,8 +1549,8 @@
 		height: 24px;
 		border-radius: 50%;
 		border: none;
-		background: #edcf7f;
-		color: #1b1b1b;
+		background: var(--bubble-bg);
+		color: var(--bubble-ink);
 		cursor: pointer;
 		display: flex;
 		align-items: center;

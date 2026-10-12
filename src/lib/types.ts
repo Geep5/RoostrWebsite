@@ -180,6 +180,7 @@ export const SYSTEM_TYPE_KEYS = [
 	"machine",
 	"pinned_fact",
 	"milestone",
+	"user_prefs",
 	"skill",
 	"set",
 	"",

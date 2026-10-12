@@ -15,6 +15,7 @@
 	import { goto } from "$app/navigation";
 	import { layoutOf, store } from "$lib/data.svelte";
 	import { RESERVED_KEYS } from "$lib/relations";
+	import { normalizeHex } from "$lib/chat-color";
 	import { AGENTLESS_TYPES } from "$lib/agent-field";
 	import { machineName, resolveServing, servedByMachineId, servingCopy, type MachineRow, type Serving } from "$lib/serving";
 	import { credentialStatusBadge, credentialStatusText, pollWhileConnecting } from "$lib/credential-actions";
@@ -45,7 +46,7 @@
 	    machine and the project folder on it, the agent, its config, then its
 	    credentials and what it needs - the "how this object runs" block ahead
 	    of ordinary fields. */
-	const AGENT_PRIORITY = ["served_by", "repo_path", "agent", "model", "prompt", "skills", "tools", "credentials", "capability"];
+	const AGENT_PRIORITY = ["served_by", "repo_path", "agent", "model", "prompt", "skills", "tools", "credentials", "capability", "chat_color"];
 	const agentRank = new Map(AGENT_PRIORITY.map((k, i) => [k, i]));
 
 	/** A template edits the properties of the type it stamps out, so an
@@ -109,7 +110,7 @@
 	/** Featured order first, then the rest. */
 	const shown = $derived.by(() => {
 		const MACHINE_BOUND = ["agent", "capability", "credential"].includes(typeKey);
-		const AGENT_CONFIG = typeKey === "agent" ? ["prompt", "model", "skills", "tools", "credentials", "served_by", "repo_path"] : [];
+		const AGENT_CONFIG = typeKey === "agent" ? ["prompt", "model", "skills", "tools", "credentials", "served_by", "repo_path", "chat_color"] : [];
 		// A Tool's own: what the model is told, its inputs, whether it ships with Roostr, and which version of its code runs.
 		const TOOL_CONFIG = typeKey === "tool" ? ["description", "tool_inputs", "tool_builtin", "tool_version"] : [];
 		// A Skill's Jev settings: an Answer makes it a Jev Skill, Writes to names its property.
@@ -387,6 +388,7 @@
 		switch (rel.key) {
 			case "served_by": return { emoji: "🖥️" };
 			case "repo_path": return { emoji: "📁" };
+			case "chat_color": return { emoji: "🎨" };
 			case "credentials": return { emoji: "🔑" };
 			case "agent": return { emoji: "🤖" };
 			case "skills": return { emoji: "🛠️" };
@@ -420,6 +422,7 @@
 		switch (rel.key) {
 			case "served_by": return "No machine yet";
 			case "repo_path": return "No project folder";
+			case "chat_color": return "Default grey";
 			case "credentials": return "No credentials";
 			case "agent": return "Add agent";
 			case "skills": return "No skills";
@@ -464,7 +467,7 @@
 	const canRepeat = $derived(!["channel", "chat", "type", "relation", "template", "query", "set", "collection", "agent", "tool"].includes(object.typeKey));
 
 	// ── Grouped display: System / Tool / Agent / Custom, each a labeled section ──
-	const AGENT_KEYS = new Set(["served_by", "repo_path", "agent", "model", "prompt", "skills", "tools", "credentials", "capability"]);
+	const AGENT_KEYS = new Set(["served_by", "repo_path", "agent", "model", "prompt", "skills", "tools", "credentials", "capability", "chat_color"]);
 	const SYSTEM_KEYS = new Set(["done", "due_date", "status", "tag", "description", "url", "email", "phone", "error", "created_date", "modified_date", "createdDate", "modifiedDate", "check_first"]);
 	const TOOL_KEYS = new Set(["tool_inputs", "tool_builtin", "tool_version"]);
 	type Group = "own" | "system" | "tool" | "jev" | "agent" | "custom";
@@ -627,6 +630,7 @@
 					{@const d = display(rel)}
 					{#if d}
 						<!-- A pasted key is a secret: the row says it is set; its editor shows it. -->
+						{#if rel.key === "chat_color" && normalizeHex(d)}<span class="color-dot" style="background: {normalizeHex(d)}"></span>{/if}
 						<span class="val-text" class:wrap={rel.key === "error"}>{isCredential && rel.key.startsWith(KEY_PREFIX) ? "••••••••" : d}</span>
 					{:else}
 						<span class="placeholder">{placeholderFor(rel)}</span>
@@ -809,6 +813,14 @@
 		gap: 4px 6px;
 		min-width: 0;
 		text-align: right;
+	}
+	.color-dot {
+		flex: none;
+		width: 12px;
+		height: 12px;
+		margin-right: 6px;
+		border-radius: 50%;
+		border: 1px solid var(--border);
 	}
 	.val-text {
 		overflow: hidden;

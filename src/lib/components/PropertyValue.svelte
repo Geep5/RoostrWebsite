@@ -16,6 +16,7 @@
 	import { fetchMachines } from "$lib/serving";
 	import { newAgent } from "$lib/create";
 	import { note } from "$lib/api";
+	import { normalizeHex } from "$lib/chat-color";
 	import CalendarPicker from "./CalendarPicker.svelte";
 	import OptionPicker from "./OptionPicker.svelte";
 	import CheckboxIcon from "./CheckboxIcon.svelte";
@@ -56,6 +57,18 @@
 		const n = Number(raw);
 		if (!Number.isFinite(n)) return;
 		void onsave(Number.isInteger(n) ? { intValue: n } : { floatValue: n });
+	}
+
+	// ── Hex color (chat_color) ────────────────────────────────────
+	let hexError = $state("");
+	function saveHex(raw: string) {
+		const hex = raw.trim() ? normalizeHex(raw) : "";
+		if (hex === null) {
+			hexError = "Use a hex color like #EDCF7F";
+			return;
+		}
+		hexError = "";
+		void onsave(sv(hex));
 	}
 
 	// ── Date ──────────────────────────────────────────────────────
@@ -247,6 +260,12 @@
 			{/if}
 		</span>
 	</div>
+{:else if rel.key === "chat_color"}
+	<!-- A #RRGGBB hex with a swatch picker; anything else is refused, blank clears it. -->
+	<span class="link-row">
+		<input class="swatch" type="color" aria-label="Pick {rel.name}" value={(normalizeHex(text) ?? "#3A3A3E").toLowerCase()} onchange={(e) => void saveHex(e.currentTarget.value)} />
+		<input type="text" value={text} placeholder="#RRGGBB" class:bad={!!hexError} title={hexError || undefined} onchange={(e) => void saveHex(e.currentTarget.value)} />
+	</span>
 {:else if rel.format === "longtext" || rel.key === "error"}
 	<textarea rows={rel.key === "error" ? 5 : 3} placeholder="Empty" onchange={(e) => void onsave(sv(e.currentTarget.value))}>{text}</textarea>
 {:else}
@@ -446,5 +465,18 @@
 	}
 	.chk:hover {
 		color: var(--fg);
+	}
+	.swatch {
+		flex: none;
+		width: 26px;
+		height: 22px;
+		padding: 0;
+		border: 1px solid var(--border);
+		border-radius: 4px;
+		background: none;
+		cursor: pointer;
+	}
+	input.bad {
+		border-color: #e5484d;
 	}
 </style>

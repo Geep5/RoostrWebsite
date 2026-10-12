@@ -8,6 +8,7 @@
 	import { deletionBlocker } from "$lib/protected";
 	import { isImageIcon, objectIcon } from "$lib/icons";
 	import { layoutOf, discussionUI, store, refreshAll, connectEvents } from "$lib/data.svelte";
+	import { DEFAULT_CHAT_COLOR } from "$lib/chat-color";
 	import { tabs, HOME_PATH } from "$lib/tabs.svelte";
 	import CheckboxIcon from "$lib/components/CheckboxIcon.svelte";
 	import { backend, isLocalBackend, isIOSBackend, type SyncStatus } from "$lib/client-backend";
@@ -758,7 +759,7 @@
 			bootError = "Pairing expired or was removed. Enter a fresh terminal code to reconnect.";
 			disconnect?.();
 			backend.stop();
-			store.channels = []; store.summaries = []; store.relations = []; store.types = []; store.agents = []; store.loaded = false;
+			store.channels = []; store.summaries = []; store.relations = []; store.types = []; store.agents = []; store.chatColor = DEFAULT_CHAT_COLOR; store.loaded = false;
 			activeSpace.id = "";
 		});
 		return () => {

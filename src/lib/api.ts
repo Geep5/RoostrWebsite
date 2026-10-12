@@ -12,6 +12,7 @@ import { localJSON } from "$lib/local-transport";
 import { loadKey, saveKey, authorIdFor, clearKey } from "$lib/engine/keys";
 import { nip19 } from "nostr-tools";
 import { bytesToHex } from "@noble/hashes/utils.js";
+import { DEFAULT_CHAT_COLOR, normalizeHex } from "$lib/chat-color";
 
 /** Reads and mutations use the explicitly selected platform backend. */
 
@@ -92,6 +93,34 @@ export const note = {
 	setType: (objectId: string, typeKey: string) => mutate("set_type", { object_id: objectId, type_key: typeKey }),
 	vanish: (objectIds: string | string[]) =>
 		mutate("vanish", Array.isArray(objectIds) ? { object_ids: objectIds } : { object_id: objectIds }),
+};
+
+/**
+ * The user's own preferences (the chat color): a personal (space-less)
+ * object under a fixed id, so it syncs on the user's own encrypted stream
+ * to every device holding their key - never into a space or the public
+ * Nostr profile.
+ */
+const USER_PREFS_ID = "__user_prefs__";
+export const userPrefs = {
+	/** The chat color, or DEFAULT_CHAT_COLOR when unset or unreadable. */
+	chatColor: async (): Promise<string> => {
+		try {
+			const prefs = await fetchObject(USER_PREFS_ID);
+			return normalizeHex(prefs.fields["chat_color"]?.stringValue ?? "") ?? DEFAULT_CHAT_COLOR;
+		} catch {
+			return DEFAULT_CHAT_COLOR;
+		}
+	},
+	/** Saves a hex chat color (the default stores as empty); throws on invalid hex. */
+	setChatColor: async (raw: string): Promise<string> => {
+		const hex = normalizeHex(raw);
+		if (!hex) throw new Error("Use a hex color like #EDCF7F");
+		// Create-if-absent under the fixed id; channel "" keeps it personal.
+		await mutate("create", { id: USER_PREFS_ID, name: "Preferences", type_key: "user_prefs", fields: { channel: { stringValue: "" } } });
+		await note.setField(USER_PREFS_ID, "chat_color", { stringValue: hex === DEFAULT_CHAT_COLOR ? "" : hex });
+		return hex;
+	},
 };
 
 /** Recurring objects: the engine owns the rule and the occurrence math; a recurring object is never `done`. Advancing an occurrence is the agent's `occurrence_complete` tool, not a UI action. */
