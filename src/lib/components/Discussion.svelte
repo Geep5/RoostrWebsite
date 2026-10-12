@@ -1147,18 +1147,19 @@
 		border-radius: 16px;
 		border-bottom-left-radius: 5px;
 	}
+	/* Your own messages: Roostr yellow (the front page's), dark ink for contrast. */
 	.msg.own .text {
-		background: var(--accent, #0a84ff);
-		color: #fff;
+		background: #fcd038;
+		color: #1d1a10;
 		border-radius: 16px;
 		border-bottom-right-radius: 5px;
 	}
 	.msg.own .md :global(a) {
-		color: #fff;
+		color: #1d1a10;
 		text-decoration: underline;
 	}
 	.msg.own .md :global(code.ic) {
-		background: rgba(255, 255, 255, 0.18);
+		background: rgba(0, 0, 0, 0.12);
 	}
 	.msg.own .meta-row {
 		justify-content: flex-end;
@@ -1338,8 +1339,8 @@
 		border-color: var(--accent);
 	}
 	.chip.mine {
-		border-color: var(--accent);
-		background: rgb(10 132 255 / 0.12);
+		border-color: #fcd038;
+		background: rgb(252 208 56 / 0.16);
 	}
 	.picker-wrap {
 		position: absolute;
@@ -1423,7 +1424,7 @@
 		text-decoration: none;
 	}
 	.text.md :global(a.obj-link:hover) { background: rgba(46, 160, 67, 0.36); }
-	.msg.own .text.md :global(a.obj-link) { background: rgba(46, 160, 67, 0.4); color: #eafbee; }
+	.msg.own .text.md :global(a.obj-link) { background: rgba(0, 0, 0, 0.12); color: #1d1a10; }
 	.mirror :global(.mention.obj) {
 		background: rgba(46, 160, 67, 0.22);
 		box-shadow: 0 2px 0 0 rgba(46, 160, 67, 0.22), 0 -2px 0 0 rgba(46, 160, 67, 0.22);
@@ -1543,8 +1544,8 @@
 		height: 24px;
 		border-radius: 50%;
 		border: none;
-		background: var(--accent);
-		color: #fff;
+		background: #fcd038;
+		color: #1d1a10;
 		cursor: pointer;
 		display: flex;
 		align-items: center;
@@ -1560,7 +1561,7 @@
 		cursor: default;
 	}
 	.send:not(:disabled):hover {
-		border-color: var(--accent);
+		filter: brightness(1.08);
 	}
 	.empty {
 		color: var(--muted);
@@ -1660,8 +1661,8 @@
 	/* On the solid accent bubble: the same light touch - a faint blurple
 	   wash and lavender-white text, no heavier weight. */
 	.msg.own .text :global(.mention) {
-		background: rgba(88, 101, 242, 0.45);
-		color: #eef0ff;
+		background: rgba(0, 0, 0, 0.12);
+		color: #1d1a10;
 	}
 	.text :global(.mention-ico) {
 		display: inline-block;
