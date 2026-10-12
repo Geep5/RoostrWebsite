@@ -147,6 +147,42 @@
 
 	let showCollections = $state(false);
 	let showCreate = $state(false);
+	/** The New menu's search: narrows Query, Collection and the space's types by name. */
+	let createFilter = $state("");
+	/** Highlighted choice (-1 = none: the first ↓ lands on the first); Enter creates it, or the first. */
+	let createActive = $state(-1);
+	const createChoices = $derived.by(() => {
+		if (!showCreate) return [];
+		const all = [
+			{ key: "query", icon: typeGlyph("query"), name: "Query", fixed: true },
+			{ key: "collection", icon: typeGlyph("collection"), name: "Collection", fixed: true },
+			...creatableTypes().map((t) => ({ key: t.key, icon: t.icon, name: t.name, fixed: false })),
+		];
+		const q = createFilter.trim().toLowerCase();
+		return q ? all.filter((c) => c.name.toLowerCase().includes(q) || c.key.toLowerCase().includes(q)) : all;
+	});
+	$effect(() => {
+		if (!showCreate) createFilter = "";
+	});
+	$effect(() => {
+		void createFilter;
+		createActive = -1;
+	});
+	function onCreateSearchKey(e: KeyboardEvent) {
+		const n = createChoices.length;
+		if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+			e.preventDefault();
+			if (!n) return;
+			createActive = e.key === "ArrowDown" ? (createActive + 1) % n : createActive <= 0 ? n - 1 : createActive - 1;
+			queueMicrotask(() => document.querySelector("[role=menu] .create-choice.active")?.scrollIntoView({ block: "nearest" }));
+		} else if (e.key === "Enter") {
+			e.preventDefault();
+			const c = createChoices[Math.max(0, createActive)];
+			if (c) void sidebarCreate(c.key);
+		} else if (e.key === "Escape") {
+			showCreate = false;
+		}
+	}
 
 	/** Sidebar create (Anytype's typeSuggest menu): pick a type, get an object. */
 	async function sidebarCreate(kind: string) {
@@ -785,6 +821,19 @@
 	{#if bootError}<p role="alert" style="text-align:center">{bootError}</p>{/if}
 {:else}
 
+<!-- The New menu, desktop and phone: a search over Query, Collection and the
+     space's types; ↑/↓ highlight, Enter creates. -->
+{#snippet createMenuBody()}
+	<input class="type-search create-search" placeholder="Search types…" bind:value={createFilter} use:focusOnMount onkeydown={onCreateSearchKey} />
+	{#each createChoices as c, i (c.key)}
+		{#if i > 0 && !c.fixed && createChoices[i - 1].fixed}<div class="create-sep"></div>{/if}
+		<button role="menuitem" class="create-choice" class:active={i === createActive} onmouseenter={() => (createActive = i)} onclick={() => void sidebarCreate(c.key)}>
+			<span class="obj-icon">{c.icon}</span>{c.name}
+		</button>
+	{/each}
+	{#if createChoices.length === 0}<span class="create-none">No matching type</span>{/if}
+{/snippet}
+
 {#if isMobile}
 <div class="m-shell">
 	{#if page.url.pathname.startsWith("/app/chat/")}
@@ -1109,18 +1158,7 @@
 
 	{#if showCreate}
 		<div class="m-create-menu" role="menu">
-						<button role="menuitem" onclick={() => void sidebarCreate("query")}>
-				<span class="obj-icon">{typeGlyph("query")}</span>Query
-			</button>
-<button role="menuitem" onclick={() => void sidebarCreate("collection")}>
-				<span class="obj-icon">{typeGlyph("collection")}</span>Collection
-			</button>
-			<div class="create-sep"></div>
-			{#each creatableTypes() as t (t.key)}
-				<button role="menuitem" onclick={() => void sidebarCreate(t.key)}>
-					<span class="obj-icon">{t.icon}</span>{t.name}
-				</button>
-			{/each}
+			{@render createMenuBody()}
 		</div>
 	{/if}
 </div>
@@ -1282,18 +1320,7 @@
 					</button>
 					{#if showCreate}
 						<div class="create-menu" role="menu">
-														<button role="menuitem" onclick={() => void sidebarCreate("query")}>
-								<span class="obj-icon">{typeGlyph("query")}</span>Query
-							</button>
-<button role="menuitem" onclick={() => void sidebarCreate("collection")}>
-								<span class="obj-icon">{typeGlyph("collection")}</span>Collection
-							</button>
-							<div class="create-sep"></div>
-							{#each creatableTypes() as t (t.key)}
-								<button role="menuitem" onclick={() => void sidebarCreate(t.key)}>
-									<span class="obj-icon">{t.icon}</span>{t.name}
-								</button>
-							{/each}
+							{@render createMenuBody()}
 						</div>
 					{/if}
 				</div>
@@ -1726,8 +1753,22 @@
 		border-radius: 6px;
 		cursor: pointer;
 	}
-	.create-menu > button:hover {
+	.create-menu > button:hover,
+	.create-choice.active {
 		background: var(--hover);
+	}
+	/* Stays in view while the list scrolls under it. */
+	.create-search {
+		position: sticky;
+		top: -6px;
+		z-index: 1;
+		flex-shrink: 0;
+		margin: 0 0 4px;
+	}
+	.create-none {
+		color: var(--muted);
+		font-size: 12.5px;
+		padding: 6px 8px;
 	}
 	.create-sep {
 		height: 1px;
