@@ -1505,10 +1505,10 @@
 	/* The composer pill cannot take padding or weight (either would widen the
 	   text under the caret); the shadow paints the breathing room instead. */
 	.mirror :global(.mention) {
-		background: rgba(88, 101, 242, 0.3);
+		background: #fff;
 		/* Height only: a side ring would cover the ~4px space between adjacent tags. */
-		box-shadow: 0 2px 0 0 rgba(88, 101, 242, 0.3), 0 -2px 0 0 rgba(88, 101, 242, 0.3);
-		color: #c9cdfb;
+		box-shadow: 0 2px 0 0 #fff, 0 -2px 0 0 #fff;
+		color: #1b1b1b;
 		border-radius: 3px;
 	}
 	/* The `@` holds its width for the caret; the agent's icon covers it. */
@@ -1650,19 +1650,13 @@
 		padding: 1px 5px;
 	}
 	.status button:disabled { opacity: 0.5; }
-	/* Discord-style mention: tinted pill, lighter text, slight weight. */
+	/* An @agent mention: a white pill with ink text, in every bubble. */
 	.text :global(.mention) {
-		background: rgba(88, 101, 242, 0.3);
-		color: #c9cdfb;
+		background: #fff;
+		color: #1b1b1b;
 		border-radius: 3px;
 		padding: 0 2px;
 		font-weight: 500;
-	}
-	/* On the solid accent bubble: the same light touch - a faint blurple
-	   wash and lavender-white text, no heavier weight. */
-	.msg.own .text :global(.mention) {
-		background: rgba(0, 0, 0, 0.12);
-		color: #1b1b1b;
 	}
 	.text :global(.mention-ico) {
 		display: inline-block;
