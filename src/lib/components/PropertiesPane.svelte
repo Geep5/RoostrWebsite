@@ -520,7 +520,7 @@
 	const canRepeat = $derived(!["channel", "chat", "type", "relation", "template", "query", "set", "collection", "agent", "tool"].includes(object.typeKey));
 
 	// ── Grouped display: "How it runs", then "Properties" ──
-	const HOW_KEYS = new Set(["served_by", "repo_path", "agent", "model", "prompt", "skills", "tools", "credentials", "chat_color", "check_first", "error", "capability"]);
+	const HOW_KEYS = new Set(["served_by", "repo_path", "agent", "model", "prompt", "skills", "tools", "credentials", "chat_color", "assignee", "check_first", "error", "capability"]);
 	/** Within Properties: the common ones, then a Tool's, then Jev's, then everything custom. */
 	const SYSTEM_KEYS = new Set(["done", "due_date", "status", "tag", "description", "url", "email", "phone", "created_date", "modified_date", "createdDate", "modifiedDate"]);
 	const TOOL_KEYS = new Set(["tool_inputs", "tool_builtin", "tool_version"]);
@@ -528,11 +528,13 @@
 	const groups = $derived.by(() => {
 		const how = [...ownRows, ...shown].filter((r) => HOW_KEYS.has(r.key));
 		const at = (key: string) => how.findIndex((r) => r.key === key);
-		// Repeat, Check first under it (run before each occurrence), and Error last.
+		// Repeat, then Assignee (the agent that runs each occurrence) and Check
+		// first (run before each occurrence) under it, and Error last.
+		const assignee = at("assignee") >= 0 ? how.splice(at("assignee"), 1) : [];
 		const checkFirst = at("check_first") >= 0 ? how.splice(at("check_first"), 1) : [];
 		const error = at("error") >= 0 ? how.splice(at("error"), 1) : [];
 		if (canRepeat) how.push({ key: "__repeat__", name: "Repeat" } as unknown as (typeof shown)[number]);
-		how.push(...checkFirst, ...error);
+		how.push(...assignee, ...checkFirst, ...error);
 		const props = [
 			...ownRows.filter((r) => !HOW_KEYS.has(r.key)),
 			...shown.filter((r) => !HOW_KEYS.has(r.key)).toSorted((a, b) => propRank(a.key) - propRank(b.key)),
@@ -567,7 +569,7 @@
 			onkeydown={(e) => onRowKey(e, rel)}
 		>
 			<span class="row-label">
-				<span class="row-icon"><PropIcon line={li} size={14} /></span>
+				<span class="row-icon">{#if rel.iconEmoji}<span class="row-emoji">{rel.iconEmoji}</span>{:else}<PropIcon line={li} size={14} />{/if}</span>
 				<span class="row-name">{rel.name || rel.key}</span>
 			</span>
 			<span class="row-value">
@@ -846,6 +848,12 @@
 		display: inline-flex;
 		flex: none;
 		color: var(--muted);
+	}
+	.row-emoji {
+		width: 14px;
+		font-size: 13px;
+		line-height: 1;
+		text-align: center;
 	}
 	.row-name {
 		font-size: 13px;

@@ -368,7 +368,7 @@
 		{#if rule.fired_at !== undefined || rule.last_run}
 			<p class="meta">
 				{#if rule.fired_at !== undefined}
-					<span>fired {fmtLong(rule.fired_at)}{rule.fired_by ? ` by ${rule.fired_by}` : ""}</span>
+					<span>fired {fmtLong(rule.fired_at)}{rule.fired_by ? ` by ${machineName(machinesKnown, rule.fired_by)}` : ""}</span>
 				{/if}
 				{#if rule.last_run}
 					<span>
