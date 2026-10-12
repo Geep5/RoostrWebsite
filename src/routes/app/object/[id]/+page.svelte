@@ -172,7 +172,9 @@
 		sizeTitle();
 	});
 	// The same text wraps onto more lines when the column narrows (a pane
-	// opened or collapsed, the window resized): re-measure on every width change.
+	// opened or collapsed, the window resized) or when the web font arrives
+	// after the first measure (wider glyphs, same width - the phone case):
+	// re-measure on both.
 	$effect(() => {
 		const el = titleEl;
 		if (!el) return;
@@ -183,7 +185,12 @@
 			sizeTitle();
 		});
 		ro.observe(el);
-		return () => ro.disconnect();
+		void document.fonts?.ready.then(() => sizeTitle());
+		document.fonts?.addEventListener("loadingdone", sizeTitle);
+		return () => {
+			ro.disconnect();
+			document.fonts?.removeEventListener("loadingdone", sizeTitle);
+		};
 	});
 
 	async function saveName() {
@@ -762,6 +769,8 @@
 		resize: none;
 		overflow: hidden;
 		display: block;
+		/* Where supported, the browser itself grows the box to its wrapped text. */
+		field-sizing: content;
 	}
 	.title::placeholder {
 		color: var(--muted);
