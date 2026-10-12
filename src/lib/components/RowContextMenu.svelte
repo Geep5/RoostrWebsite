@@ -324,7 +324,7 @@
 			{#if editRel}
 				<button role="menuitem" class="ctx-back" onclick={() => { editKey = ""; editValue = undefined; }}><Icon name="chevron-left" size={14} />{editRel.iconEmoji ? editRel.iconEmoji + " " : ""}{editRel.name || editRel.key}</button>
 				<div class="ctx-editor">
-					<PropertyValue rel={editRel} value={editValue} onsave={(v) => void applyProp(editRel, v)} />
+					<PropertyValue rel={editRel} value={editValue} autoOpen onsave={(v) => void applyProp(editRel, v)} />
 				</div>
 			{:else}
 				{#if propRels.length > 6}

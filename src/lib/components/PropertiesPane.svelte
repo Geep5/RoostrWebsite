@@ -717,7 +717,7 @@
 				{:else if isCredential && rel.key === "status"}
 					<CredentialStatus {object} {onchanged} pollError={connectPollError} />
 				{:else}
-					<PropertyValue {rel} value={v} spaceId={object.fields["channel"]?.stringValue ?? ""} seeds={tagSeeds} onsave={(nv) => void saveValue(rel.key, nv)} />
+					<PropertyValue {rel} value={v} spaceId={object.fields["channel"]?.stringValue ?? ""} seeds={tagSeeds} autoOpen onsave={(nv) => void saveValue(rel.key, nv)} />
 				{/if}
 			</div>
 		{/if}

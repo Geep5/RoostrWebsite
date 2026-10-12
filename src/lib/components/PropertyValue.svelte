@@ -20,6 +20,7 @@
 	import CalendarPicker from "./CalendarPicker.svelte";
 	import OptionPicker from "./OptionPicker.svelte";
 	import CheckboxIcon from "./CheckboxIcon.svelte";
+	import { onMount } from "svelte";
 
 	let {
 		rel,
@@ -27,6 +28,7 @@
 		onsave,
 		spaceId = "",
 		seeds = {},
+		autoOpen = false,
 	}: {
 		rel: RelationDefJSON;
 		value: ValueJSON | undefined;
@@ -35,6 +37,8 @@
 		spaceId?: string;
 		/** Fields a "+ New agent" made here starts with: a view's filter values (view-seeds.ts). */
 		seeds?: Record<string, ValueJSON>;
+		/** An editor opened on demand (property pane, table cell): an EMPTY object property opens its picker at once. */
+		autoOpen?: boolean;
 	} = $props();
 
 	const text = $derived(value?.stringValue ?? "");
@@ -94,6 +98,11 @@
 	// ── Object links ──────────────────────────────────────────────
 	let objectQuery = $state("");
 	let objectOpen = $state(false);
+	/** The highlighted candidate (-1 = none yet: the first ↓ lands on the first result); Enter links it, or the first. */
+	let objectActive = $state(-1);
+	onMount(() => {
+		if (autoOpen && rel.format === "object" && objectIds.length === 0) objectOpen = true;
+	});
 	const HIDDEN_TYPES: Record<string, true> = { program: true, relation: true, channel: true, pinned_fact: true, milestone: true, type: true, template: true, agent: true, skill: true };
 
 	// Relation restriction (Anytype relationFormatObjectTypes): the picker offers only these types.
@@ -115,6 +124,30 @@
 		// other object type can number thousands, so the search narrows those.
 		return wantsAgents ? matches : matches.slice(0, 8);
 	});
+	$effect(() => {
+		void objectQuery;
+		objectActive = -1;
+	});
+	function pickCandidate(id: string) {
+		objectOpen = false;
+		void toggleObject(id);
+	}
+	function onObjectSearchKey(e: KeyboardEvent) {
+		if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+			e.preventDefault();
+			if (!candidates.length) return;
+			const n = candidates.length;
+			objectActive = e.key === "ArrowDown" ? (objectActive + 1) % n : objectActive <= 0 ? n - 1 : objectActive - 1;
+			queueMicrotask(() => document.querySelector(".obj-menu .obj-item.active")?.scrollIntoView({ block: "nearest" }));
+		} else if (e.key === "Enter") {
+			e.preventDefault();
+			const c = candidates[Math.max(0, objectActive)];
+			if (c) pickCandidate(c.id);
+		} else if (e.key === "Escape") {
+			e.stopPropagation();
+			objectOpen = false;
+		}
+	}
 	/** `served_by` may hold a machine_id (what harnesses write) instead of the
 	 *  Computer object's id; chips show that Computer either way. */
 	let machineObjects = $state(new Map<string, string>());
@@ -226,14 +259,13 @@
 			<button class="pill" onclick={() => { objectOpen = !objectOpen; agentName = null; }}>+ link object</button>
 			{#if objectOpen}
 				<div class="obj-menu">
-									<input class="search" bind:value={objectQuery} placeholder="Search objects…" />
-					{#each candidates as c (c.id)}
+									<input class="search" bind:value={objectQuery} placeholder="Search objects…" use:focusOnMount onkeydown={onObjectSearchKey} />
+					{#each candidates as c, i (c.id)}
 						<button
 							class="obj-item"
-							onclick={() => {
-								objectOpen = false;
-								void toggleObject(c.id);
-							}}><span class="obj-name">{#if c.typeKey === "agent"}{c.icon || store.agents.find((a) => a.id === c.id)?.icon || "🤖"}{:else if layoutOf(c.typeKey) === "task"}<span class="li-check" class:on={c.done === true}><CheckboxIcon checked={c.done === true} size={15} /></span>{:else}{objectIcon(c.icon, c.typeKey)}{/if} {c.name || "Untitled"}</span> <span class="tk">{c.typeKey}</span></button
+							class:active={i === objectActive}
+							onmouseenter={() => (objectActive = i)}
+							onclick={() => pickCandidate(c.id)}><span class="obj-name">{#if c.typeKey === "agent"}{c.icon || store.agents.find((a) => a.id === c.id)?.icon || "🤖"}{:else if layoutOf(c.typeKey) === "task"}<span class="li-check" class:on={c.done === true}><CheckboxIcon checked={c.done === true} size={15} /></span>{:else}{objectIcon(c.icon, c.typeKey)}{/if} {c.name || "Untitled"}</span> <span class="tk">{c.typeKey}</span></button
 						>
 					{/each}
 					{#if candidates.length === 0}<span class="tk pad">No matches</span>{/if}
@@ -441,7 +473,7 @@
 		text-overflow: ellipsis;
 		white-space: nowrap;
 	}
-	.obj-item:hover {
+	.obj-item.active {
 		background: var(--hover);
 	}
 	.tk {

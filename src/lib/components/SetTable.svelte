@@ -743,7 +743,7 @@
 		{@const row = rows.find((x) => x.id === cellEdit!.recordId)}
 		{#if rel && row}
 			<div class="cell-pop" style="left:{Math.min(cellEdit.x, (document.querySelector('.main-col')?.getBoundingClientRect().right ?? window.innerWidth) - 320)}px; top:{cellEdit.y}px" role="dialog">
-				<PropertyValue {rel} value={row.fields[rel.key]} spaceId={row.fields["channel"]?.stringValue ?? ""} seeds={viewSeeds} onsave={(v) => void cellSave(v)} />
+				<PropertyValue {rel} value={row.fields[rel.key]} spaceId={row.fields["channel"]?.stringValue ?? ""} seeds={viewSeeds} autoOpen onsave={(v) => void cellSave(v)} />
 			</div>
 		{/if}
 	{/if}
