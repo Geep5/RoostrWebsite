@@ -197,7 +197,7 @@
 		<div class="input-row">
 			<span class="scope">{spaceName}</span>
 			<span class="m-search-icon">⌕</span>
-			<input bind:this={inputEl} bind:value={query} placeholder="Search objects and content…" />
+			<input bind:this={inputEl} bind:value={query} data-search-input placeholder="Search objects and content…" />
 			{#if query !== ""}
 				<button class="clear-btn" aria-label="Clear" onclick={() => { query = ""; inputEl?.focus(); }}>×</button>
 			{/if}

@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { onMount } from "svelte";
+	import { flushSync, onMount } from "svelte";
 	import { goto } from "$app/navigation";
 	import { page } from "$app/state";
 	import { activeSpace } from "$lib/space.svelte";
@@ -1096,7 +1096,12 @@
 				</div>
 			</div>
 			<div class="m-bottom">
-				<button class="m-search" onclick={() => (showSearch = true)}>⌕ Search</button>
+				<button class="m-search" onclick={() => {
+					// iOS raises the keyboard only for a focus() made inside the tap
+					// itself: render the sheet now and focus its field in this handler.
+					flushSync(() => (showSearch = true));
+					document.querySelector<HTMLInputElement>("[data-search-input]")?.focus();
+				}}>⌕ Search</button>
 				<button class="m-compose" data-tip="New object" onclick={() => (showCreate = !showCreate)}>＋</button>
 			</div>
 		</div>
