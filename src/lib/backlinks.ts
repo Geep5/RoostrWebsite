@@ -6,15 +6,6 @@
  */
 
 import { fetchAllQuery } from "$lib/api";
-import type { BlockJSON } from "$lib/types";
-
-/** The object a block points at: a link block's target or an embedded File; "" otherwise. Mirrored into `links`. */
-export function blockLinkTarget(block: BlockJSON): string {
-	const custom = block.content.custom;
-	if (custom?.contentType === "link") return custom.meta?.target ?? "";
-	if (custom?.contentType === "file") return custom.meta?.fileId ?? "";
-	return "";
-}
 
 export interface Backlink {
 	id: string;
