@@ -43,8 +43,39 @@
 		return chip === "" ? [scope, TYPE_EXCLUDE] : [scope, TYPE_EXCLUDE, { key: "type", condition: "equal", value: chip }];
 	}
 
-	/** Shown after every other match: the imports made thousands of these. */
-	const LOW_PRIORITY_TYPES = ["file", "bookmark"];
+	/** Enough matches to count what each type holds; results group by type. */
+	const SEARCH_LIMIT = 200;
+
+	/** A type's display name, falling back to its key made readable. */
+	const typeName = (key: string) => store.types.find((t) => t.key === key)?.name || (key.charAt(0).toUpperCase() + key.slice(1)).replaceAll("_", " ");
+
+	/**
+	 * Anytype search: matches grouped by type, the type with the FEWEST
+	 * matches first - so the many files and bookmarks naturally come last.
+	 * Empty query: the recents, in recency order, one group.
+	 */
+	const groups = $derived.by(() => {
+		if (query.trim() === "") return results.length ? [{ key: "", name: "Recently edited", rows: results }] : [];
+		const byType = new Map<string, typeof results>();
+		for (const r of results) byType.set(r.typeKey, [...(byType.get(r.typeKey) ?? []), r]);
+		return [...byType.entries()]
+			.map(([key, rows]) => ({ key, name: typeName(key), rows }))
+			.sort((a, b) => a.rows.length - b.rows.length || a.name.localeCompare(b.name));
+	});
+	/** Types whose name matches: jump straight to the type and its objects. */
+	const typeMatches = $derived.by(() => {
+		const q = query.trim().toLowerCase();
+		if (!q || typeChip) return [];
+		return store.types.filter((t) => t.space === channelId && (t.name || t.key).toLowerCase().includes(q)).slice(0, 5);
+	});
+	/** Keyboard order: matching types, then each group's rows. */
+	const ordered = $derived([...typeMatches.map((t) => ({ id: t.id })), ...groups.flatMap((g) => g.rows)]);
+	/** Chips: the types present in this search, fewest first (every space type while the box is empty). */
+	const chipTypes = $derived(
+		query.trim() === ""
+			? store.types.filter((t) => t.space === channelId).map((t) => ({ key: t.key, label: `${t.icon} ${t.name || t.key}`, count: 0 }))
+			: groups.map((g) => ({ key: g.key, label: `${typeIcon(g.key)} ${g.name}`, count: g.rows.length })),
+	);
 
 	let seq = 0;
 	let debounce: ReturnType<typeof setTimeout> | undefined;
@@ -59,22 +90,13 @@
 		debounce = setTimeout(async () => {
 			searching = true;
 			try {
-				let records: QueryResultRow[];
-				if (q === "") {
-					records = (await fetchQuery({ filters: scopeFilters(chip), sorts: [{ key: "updatedAt", type: "desc" }], limit: RECENT_LIMIT })).records;
-				} else if (chip === "") {
-					// Files and bookmarks (thousands, from imports) come after
-					// everything else: the other matches first, then theirs.
-					const [main, low] = await Promise.all([
-						fetchQuery({ textQuery: q, filters: [...scopeFilters(chip), { key: "typeKey", condition: "notIn", value: LOW_PRIORITY_TYPES }], limit: 50 }),
-						fetchQuery({ textQuery: q, filters: [...scopeFilters(chip), { key: "typeKey", condition: "in", value: LOW_PRIORITY_TYPES }], limit: 50 }),
-					]);
-					records = [...main.records, ...low.records.slice(0, Math.max(10, 50 - main.records.length))];
-				} else {
-					records = (await fetchQuery({ textQuery: q, filters: scopeFilters(chip), limit: 50 })).records;
-				}
+				const res = await fetchQuery(
+					q === ""
+						? { filters: scopeFilters(chip), sorts: [{ key: "updatedAt", type: "desc" }], limit: RECENT_LIMIT }
+						: { textQuery: q, filters: scopeFilters(chip), limit: SEARCH_LIMIT },
+				);
 				if (mine !== seq) return; // stale response
-				results = records as typeof results;
+				results = res.records as typeof results;
 				selected = 0;
 			} finally {
 				if (mine === seq) searching = false;
@@ -83,14 +105,14 @@
 		return () => clearTimeout(debounce);
 	});
 
-	function open(row: QueryResultRow) {
+	function open(row: { id: string }) {
 		onclose();
 		void goto(`/app/object/${row.id}`);
 	}
 
 	/** Anytype: the search popup appends a `Create object "<filter>"` row. */
 	const canCreate = $derived(query.trim() !== "");
-	const rowCount = $derived(results.length + (canCreate ? 1 : 0));
+	const rowCount = $derived(ordered.length + (canCreate ? 1 : 0));
 
 	async function createFromQuery() {
 		const name = query.trim();
@@ -111,12 +133,11 @@
 			selected = Math.max(selected - 1, 0);
 		}
 		if (e.key === "Enter") {
-			if (results[selected]) open(results[selected]);
-			else if (canCreate && selected === results.length) void createFromQuery();
+			const row = ordered[selected];
+			if (row) open(row);
+			else if (canCreate && selected === ordered.length) void createFromQuery();
 		}
 	}
-
-	
 
 	/** Split text into [before, match, after] for highlight rendering. */
 	function highlight(text: string, q: string): [string, string, string] {
@@ -216,39 +237,61 @@
 		</div>
 
 		<div class="chips">
-			<button class="chip" class:on={typeChip === ""} onclick={() => (typeChip = "")}>All</button>
-			{#each store.types.filter((t) => t.space === channelId) as t (t.id)}
-				<button class="chip" class:on={typeChip === t.key} onclick={() => (typeChip = typeChip === t.key ? "" : t.key)}>{t.icon} {t.name || t.key}</button>
-			{/each}
+			{#if query.trim() === ""}
+				<button class="chip" class:on={typeChip === ""} onclick={() => (typeChip = "")}>All</button>
+				{#each chipTypes as c (c.key)}
+					<button class="chip" class:on={typeChip === c.key} onclick={() => (typeChip = typeChip === c.key ? "" : c.key)}>{c.label}</button>
+				{/each}
+			{:else}
+				<!-- The types in this search, fewest matches first: a tap jumps to that group. -->
+				{#if typeChip}<button class="chip on" onclick={() => (typeChip = "")}>{typeIcon(typeChip)} {typeName(typeChip)} ×</button>{/if}
+				{#each chipTypes as c (c.key)}
+					{#if !typeChip}
+						<button class="chip" onclick={() => resultsEl?.querySelector(`[data-group="${c.key}"]`)?.scrollIntoView({ block: "start", behavior: "smooth" })}>{c.label} <span class="chip-count">{c.count}</span></button>
+					{/if}
+				{/each}
+			{/if}
 		</div>
 
 		<div class="results" bind:this={resultsEl}>
-			{#if query.trim() === "" && results.length > 0}
-				<div class="section-name">Recently edited</div>
+			{#if typeMatches.length}
+				<div class="section-name">Types</div>
+				{#each typeMatches as t, i (t.id)}
+					<button class="row" class:selected={i === selected} onclick={() => open(t)} onmouseenter={() => (selected = i)}>
+						<span class="icon">{t.icon || typeIcon(t.key)}</span>
+						<span class="texts"><span class="name">{t.name || t.key}</span><span class="snippet">Type · opens with its objects</span></span>
+						<span class="kind">Type</span>
+					</button>
+				{/each}
 			{/if}
-			{#each results as row, i (row.id)}
-				{@const name = row.name || "Untitled"}
-				{@const [b, m, a] = highlight(name, query.trim())}
-				<button class="row" class:selected={i === selected} onclick={() => open(row)} onmouseenter={() => (selected = i)}>
-					<span class="icon">{objectIcon(row.fields["iconEmoji"]?.stringValue, row.typeKey)}</span>
-					<span class="texts">
-						<span class="name">{b}{#if m}<mark>{m}</mark>{/if}{a}</span>
-						{#if row.snippet}
-							{@const [sb, sm, sa] = highlight(row.snippet, query.trim())}
-							<span class="snippet">{sb}{#if sm}<mark>{sm}</mark>{/if}{sa}</span>
-						{/if}
-					</span>
-					<span class="kind">{typeIcon(row.typeKey)} {store.types.find((t) => t.key === row.typeKey)?.name || (row.typeKey.charAt(0).toUpperCase() + row.typeKey.slice(1)).replaceAll("_", " ")}</span>
-				</button>
+			{#each groups as g, gi (g.key)}
+				{@const offset = typeMatches.length + groups.slice(0, gi).reduce((n, x) => n + x.rows.length, 0)}
+				<div class="section-name" data-group={g.key}>{g.key ? `${typeIcon(g.key)} ` : ""}{g.name}{query.trim() !== "" ? ` · ${g.rows.length}` : ""}</div>
+				{#each g.rows as row, j (row.id)}
+					{@const i = offset + j}
+					{@const name = row.name || "Untitled"}
+					{@const [b, m, a] = highlight(name, query.trim())}
+					<button class="row" class:selected={i === selected} onclick={() => open(row)} onmouseenter={() => (selected = i)}>
+						<span class="icon">{objectIcon(row.fields["iconEmoji"]?.stringValue, row.typeKey)}</span>
+						<span class="texts">
+							<span class="name">{b}{#if m}<mark>{m}</mark>{/if}{a}</span>
+							{#if row.snippet}
+								{@const [sb, sm, sa] = highlight(row.snippet, query.trim())}
+								<span class="snippet">{sb}{#if sm}<mark>{sm}</mark>{/if}{sa}</span>
+							{/if}
+						</span>
+						<span class="kind">{typeIcon(row.typeKey)} {typeName(row.typeKey)}</span>
+					</button>
+				{/each}
 			{/each}
 			{#if canCreate && !searching}
-				<button class="row create" class:selected={selected === results.length} onclick={() => void createFromQuery()} onmouseenter={() => (selected = results.length)}>
+				<button class="row create" class:selected={selected === ordered.length} onclick={() => void createFromQuery()} onmouseenter={() => (selected = ordered.length)}>
 					<span class="icon">＋</span>
 					<span class="texts"><span class="name">Create object "{query.trim()}"</span></span>
 					<span class="kind">{typeChip || "note"}</span>
 				</button>
 			{/if}
-			{#if results.length === 0 && !searching && !canCreate}
+			{#if ordered.length === 0 && !searching && !canCreate}
 				<div class="none">Nothing here yet.</div>
 			{/if}
 		</div>
@@ -404,8 +447,37 @@
 	.clear-btn {
 		display: none;
 	}
+	/* The types in the search, as a row of chips under the field (Anytype). */
 	.chips {
+		display: flex;
+		gap: 6px;
+		overflow-x: auto;
+		padding: 8px 14px;
+		border-bottom: 1px solid var(--border);
+		scrollbar-width: none;
+		flex: none;
+	}
+	.chips:empty {
 		display: none;
+	}
+	.chips .chip {
+		flex: none;
+		border: none;
+		background: var(--hover);
+		color: var(--fg);
+		border-radius: 999px;
+		padding: 4px 11px;
+		font-size: 12.5px;
+		cursor: pointer;
+		white-space: nowrap;
+	}
+	.chips .chip.on {
+		background: var(--accent);
+		color: #fff;
+	}
+	.chip-count {
+		color: var(--muted);
+		margin-left: 2px;
 	}
 	@media (max-width: 720px) {
 		.overlay {
