@@ -229,20 +229,38 @@
 	}
 
 	/**
-	 * An object with exactly one agent opens its composer already addressed
-	 * to it: `@Name `, tagged, caret after - you just type. Several agents
-	 * (or none) start empty; type @ to pick. An agent's own page needs no tag.
-	 * Only ever fills an empty draft, so a message in progress is untouched.
+	 * The composer opens already addressed: `@Name `, tagged, caret after -
+	 * you just type. Name = the agent last @-tagged in this chat (by a person,
+	 * not an agent), else the object's only agent; otherwise it starts empty.
+	 * An agent's own page needs no tag. Only ever fills an empty draft, so a
+	 * message in progress is untouched. `justSent` is the tags of the message
+	 * just posted, which may not be in `messages` yet.
 	 */
-	async function seedSoleAgent(): Promise<void> {
+	async function seedDefaultAgent(justSent: ObjectAgentOption[] = []): Promise<void> {
 		if (draft !== "" || readOnly || isExchange || object.typeKey === "agent") return;
-		const assigned = guestAgents(object.fields);
-		if (assigned.length !== 1) return;
 		await ensureTagOptions();
-		const sole = (tagOptions ?? []).find((option) => option.endpoint.agentId === assigned[0]);
-		if (!sole || draft !== "") return;
-		tagged = [sole];
-		draft = `@${sole.agentName} `;
+		const options = tagOptions ?? [];
+		if (draft !== "" || !options.length) return;
+		const agentIds = new Set(store.agents.map((a) => a.id));
+		const lastTagged = (): ObjectAgentOption | undefined => {
+			for (let i = messages.length - 1; i >= 0; i--) {
+				const m = messages[i];
+				if (agentIds.has(m.author)) continue;
+				let best: { option: ObjectAgentOption; at: number } | undefined;
+				for (const option of options) {
+					const at = m.text.lastIndexOf(`@${option.agentName}`);
+					if (at >= 0 && (!best || at > best.at)) best = { option, at };
+				}
+				if (best) return best.option;
+			}
+			return undefined;
+		};
+		const assigned = guestAgents(object.fields);
+		const sole = assigned.length === 1 ? options.find((option) => option.endpoint.agentId === assigned[0]) : undefined;
+		const pick = justSent[justSent.length - 1] ?? lastTagged() ?? sole;
+		if (!pick) return;
+		tagged = [pick];
+		draft = `@${pick.agentName} `;
 		requestAnimationFrame(() => {
 			const el = composerEl;
 			if (!el) return;
@@ -367,7 +385,7 @@
 	}
 	onMount(() => {
 		refreshPairing();
-		void seedSoleAgent();
+		void seedDefaultAgent();
 		return onPairingChange(refreshPairing);
 	});
 	interface AgentPresence {
@@ -591,7 +609,7 @@
 			tagged = [];
 			taggedObjects = [];
 			await onchanged();
-			void seedSoleAgent();
+			void seedDefaultAgent(mentions);
 		} catch (err) {
 			sendError = err instanceof Error ? err.message : String(err);
 		} finally {
