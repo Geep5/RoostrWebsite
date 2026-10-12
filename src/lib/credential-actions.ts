@@ -1,8 +1,11 @@
 /**
- * A credential's harness actions, shared by its Status property. The
- * computer its Served by names opens the sign-in window and writes the
- * credential's `status`; Connect, Check and Disconnect only succeed on that
- * computer's harness (anywhere else answers 409 with a sentence).
+ * A credential's harness actions, shared by its Status property. Connect
+ * runs on whichever computer this tab is paired with: the sign-in window
+ * opens there and the login is saved on the credential (`cookie_*` /
+ * `key_*` properties), which the computer its Served by names then keeps
+ * and checks. Check runs only on that computer (anywhere else answers 409
+ * with a sentence); Disconnect stops a sign-in running on this computer and
+ * leaves the saved login on the credential.
  */
 
 import { fetchObject } from "$lib/api";
@@ -46,17 +49,31 @@ export function credentialStatusBadge(status: string): { icon: BadgeIcon; color:
 	}
 }
 
-/** The Google-account service: its sign-in is `gws auth login` on the serving computer. */
+/** The Google-account service: its sign-in is `gws auth login` on the computer Connect runs on. */
 export const GOOGLE_ACCOUNT = "google-account";
 
 /**
  * Whether Connect can sign this credential in: a Google account (gws opens
  * the browser), or a browser sign-in with its login page and the cookie
- * (host + name) that proves it worked.
+ * (host + name) that proves it worked. Either signs in on any paired computer.
  */
 export function canConnect(fields: Record<string, ValueJSON>): boolean {
 	if (fieldStr(fields, "service") === GOOGLE_ACCOUNT) return true;
 	return ["login_url", "session_host", "session_cookie"].every((k) => fieldStr(fields, k).trim() !== "");
+}
+
+/** A saved cookie's value (`cookie_<name>`; `cookie_meta` only describes them). */
+export const COOKIE_PREFIX = "cookie_";
+export const COOKIE_META = "cookie_meta";
+
+/**
+ * A credential field holding a secret: a pasted key (`key_*`, not the legacy
+ * `key_fields` list) or a saved cookie's value (`cookie_*`, not
+ * `cookie_meta`). Its row says it is set (••••••••); its editor shows it.
+ */
+export function isSecretField(key: string): boolean {
+	if (key.startsWith("key_")) return key.length > 4 && key !== "key_fields";
+	return key.startsWith(COOKIE_PREFIX) && key.length > COOKIE_PREFIX.length && key !== COOKIE_META;
 }
 
 /** Run one action on the paired harness. Throws the harness's sentence when it refuses. */
@@ -112,20 +129,42 @@ export function connectLabel(status: string): "Reconnect" | "Connect" {
 	return status === "active" || status === "needs_auth" ? "Reconnect" : "Connect";
 }
 
-/**
- * Whether this tab may run the credential's actions: only a tab paired with
- * the computer its Served by names. Otherwise `reason` says where to go.
- */
-export function credentialActionGate(paired: boolean, thisMachine: string, servedBy: string, computer: string): { canAct: boolean; reason: string } {
-	if (paired && !!thisMachine && thisMachine === servedBy) return { canAct: true, reason: "" };
-	return { canAct: false, reason: servedBy ? `Open Roostr on ${computer} to connect or check this credential.` : "Set Served by to a computer first." };
+/** Where a tab may run a credential's actions, and what to say about the rest. */
+export interface CredentialGate {
+	/** Connect (and Disconnect, which stops a sign-in here) may run from this tab's computer. */
+	canConnect: boolean;
+	/** Check now may run: only on the computer its Served by names. */
+	canCheck: boolean;
+	/** Where to go for what this tab cannot do ("" when it can do everything). */
+	reason: string;
 }
 
-/** What to do while the sign-in window is open. */
-export function connectingHint(fields: Record<string, ValueJSON>, computer: string): string {
+/**
+ * What this tab may run for a credential. A website or Google sign-in
+ * connects from any paired computer - the login is saved on the credential
+ * and handed to the Served by computer; checking it (and connecting
+ * anything else, a database) needs a tab paired with that computer.
+ */
+export function credentialActionGate(paired: boolean, thisMachine: string, servedBy: string, computer: string, fields: Record<string, ValueJSON>): CredentialGate {
+	if (!servedBy) return { canConnect: false, canCheck: false, reason: "Set Served by to a computer first." };
+	const linked = paired && !!thisMachine;
+	if (linked && thisMachine === servedBy) return { canConnect: true, canCheck: true, reason: "" };
+	if (!canConnect(fields)) return { canConnect: false, canCheck: false, reason: `Open Roostr on ${computer} to connect or check this credential.` };
+	if (linked) return { canConnect: true, canCheck: false, reason: `Check now runs on ${computer}.` };
+	return { canConnect: false, canCheck: false, reason: `Pair this tab with one of your computers to sign in there, or open Roostr on ${computer} to check this credential.` };
+}
+
+/**
+ * What to do while a sign-in started from this tab runs: `where` is the
+ * computer the window opened on ("this computer"), `handsTo` the Served by
+ * computer when that is another one ("" when the login stays where it was made).
+ */
+export function connectingHint(fields: Record<string, ValueJSON>, where: string, handsTo: string): string {
+	const place = where || "its computer";
+	const then = handsTo ? `; Roostr then hands the login to ${handsTo}` : "";
 	return fieldStr(fields, "service") === GOOGLE_ACCOUNT
-		? `Sign in to ${fieldStr(fields, "account") || "the Google account"} in the browser window gws opens on ${computer || "its computer"}.`
-		: `Sign in in the Chrome window that just opened on ${computer || "its computer"}.`;
+		? `Sign in to ${fieldStr(fields, "account") || "the Google account"} in the browser window gws opens on ${place}${then}.`
+		: `Sign in in the Chrome window on ${place}${then}.`;
 }
 
 /** Run one action, then let the caller re-read the credential either way. Resolves to the refusal's sentence, or "". */

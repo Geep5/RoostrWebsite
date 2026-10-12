@@ -2,8 +2,10 @@
 	/**
 	 * A credential's Status editor. The status is the harness's to write, so
 	 * instead of options it says the status in words and offers the actions
-	 * that change it - only in a tab paired with the computer its Served by
-	 * names, since that computer's harness opens the sign-in window.
+	 * that change it: Connect in a tab paired with any of the person's
+	 * computers for a website or Google sign-in (the window opens on that
+	 * computer and the login is handed to the Served by one), Check now only
+	 * in a tab paired with the computer its Served by names.
 	 */
 	import { onMount } from "svelte";
 	import { thisMachineId } from "$lib/capability-actions";
@@ -30,12 +32,15 @@
 	let ready = $state(false);
 	let busy = $state<CredentialAction | "">("");
 	let actionError = $state("");
+	/** This tab started the sign-in that is running (so its window is on this computer). */
+	let startedHere = $state(false);
 
 	const isTemplate = $derived(object.typeKey === "template");
 	const status = $derived(fieldStr(object.fields, "status") || "missing");
 	const servedBy = $derived(servedByMachineId(object.fields, machines));
 	const computer = $derived(servedBy ? machineName(machines, servedBy) : "");
-	const gate = $derived(credentialActionGate(paired, thisMachine, servedBy, computer));
+	const gate = $derived(credentialActionGate(paired, thisMachine, servedBy, computer, object.fields));
+	const handsTo = $derived(thisMachine && thisMachine !== servedBy ? computer : "");
 
 	async function loadPairing() {
 		paired = pairedSession() !== null;
@@ -44,10 +49,12 @@
 
 	async function run(action: CredentialAction) {
 		if (busy) return;
-		if (action === "disconnect" && !confirm(`Disconnect ${fieldStr(object.fields, "name") || "this credential"}? This removes its sign-in from ${computer || "the computer that keeps it"}.`)) return;
 		busy = action;
 		actionError = "";
-		actionError = (await performCredentialAction(action, object.id, onchanged)).error;
+		const { result, error } = await performCredentialAction(action, object.id, onchanged);
+		actionError = error;
+		if (action === "connect") startedHere = result?.status === "connecting";
+		if (action === "disconnect") startedHere = false;
 		busy = "";
 	}
 
@@ -65,20 +72,23 @@
 	{#if isTemplate}
 		<p class="muted">A template does not connect; each credential made from it does.</p>
 	{:else if ready}
-		{#if gate.canAct}
+		{#if gate.canConnect || gate.canCheck}
 			<div class="actions">
-				{#if canConnect(object.fields)}
+				{#if gate.canConnect && canConnect(object.fields)}
 					<button class="act" disabled={!!busy} data-testid="credential-connect" onclick={() => void run("connect")}>{connectLabel(status)}</button>
 				{/if}
-				<button class="act" disabled={!!busy} data-testid="credential-check" onclick={() => void run("check")}>Check now</button>
-				<button class="act" disabled={!!busy} data-testid="credential-disconnect" onclick={() => void run("disconnect")}>Disconnect</button>
+				{#if gate.canCheck}
+					<button class="act" disabled={!!busy} data-testid="credential-check" onclick={() => void run("check")}>Check now</button>
+				{/if}
+				<button class="act" disabled={!!busy} data-testid="credential-disconnect" title="Stops a sign-in running on this computer. The saved login stays on the credential and keeps working until the site refuses it - clear its Cookie or key properties to remove it." onclick={() => void run("disconnect")}>Disconnect</button>
 			</div>
-		{:else}
+		{/if}
+		{#if gate.reason}
 			<p class="muted">{gate.reason}</p>
 			{#if !paired}<PairGate compact onready={() => void loadPairing()} />{/if}
 		{/if}
 		{#if status === "connecting"}
-			<p class="muted" role="status">{connectingHint(object.fields, computer)}</p>
+			<p class="muted" role="status">{startedHere ? connectingHint(object.fields, "this computer", handsTo) : fieldStr(object.fields, "error") || connectingHint(object.fields, "", "")}</p>
 		{/if}
 	{/if}
 	{#if actionError || pollError}<p class="error" role="alert" data-testid="credential-error">{actionError || pollError}</p>{/if}

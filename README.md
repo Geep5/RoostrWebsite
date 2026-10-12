@@ -111,13 +111,20 @@ off / Switch on / Uninstall as mailbox requests on the capability, and lists
 its waiting requests with Approve / Reject; approval runs on that computer.
 What the software is and how agents use it lives on its Skill object.
 
-A Credential page (New → Credential) is one login for one service. Keys typed
-there are saved on the credential itself (readable by everyone in its space);
-Connect / Check / Disconnect run on the computer in its Served by, which opens
-the Chrome sign-in window and keeps the status current. A Google account is a
-credential with service `google-account` and the address as its Account:
-Connect runs `gws auth login` there and signs in through the browser window gws
-opens. Agents list the credentials they may use in their Credentials property.
+A Credential page (New → Credential) is one login for one service. Pasted keys
+and saved logins are on the credential, readable by everyone in its space; sign
+in from any of your computers. Connect runs on the computer this tab is paired
+with: it opens the Chrome sign-in window there (a Google account: `gws auth
+login` and its browser window) and saves the login on the credential - a
+website sign-in as one Cookie property per cookie (`cookie_<name>`, masked like
+a key; its editor shows the value) plus Cookie details (`cookie_meta`), a
+Google account as its client and refresh-token keys. The computer in its
+Served by keeps it: it tries a login made elsewhere on the site and keeps the
+status current, saying plainly when a site refuses a login made on another
+computer. Check now runs only on that computer. Disconnect stops a sign-in
+running on this computer; the saved login stays and keeps working until the
+site refuses it (clear its Cookie / key properties to remove it). Agents list
+the credentials they may use in their Credentials property.
 
 ## Verification
 

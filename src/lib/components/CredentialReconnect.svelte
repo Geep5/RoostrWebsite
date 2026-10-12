@@ -2,9 +2,10 @@
 	/**
 	 * One credential's Reconnect, as a view's popover offers it: the same
 	 * pairing gate, harness Connect and status follow as its Properties
-	 * Status row (credential-actions.ts), plus Open credential. Progress lives
-	 * in credential-reconnect.svelte.ts, so the cell shows it too and it
-	 * carries on when the popover closes.
+	 * Status row (credential-actions.ts), plus Open credential. A website or
+	 * Google sign-in reconnects from any paired computer. Progress lives in
+	 * credential-reconnect.svelte.ts, so the cell shows it too and it carries
+	 * on when the popover closes.
 	 */
 	import { onMount } from "svelte";
 	import { goto } from "$app/navigation";
@@ -25,13 +26,16 @@
 	let paired = $state(pairedSession() !== null);
 	let thisMachine = $state("");
 	let ready = $state(false);
+	/** This popover pressed Reconnect (so the sign-in window is on this tab's computer). */
+	let pressed = $state(false);
 
 	const fields = $derived(object?.fields ?? {});
 	const name = $derived(fieldStr(fields, "name") || "this credential");
 	const status = $derived(fieldStr(fields, "status") || "missing");
 	const servedBy = $derived(servedByMachineId(fields, machines));
 	const computer = $derived(servedBy ? machineName(machines, servedBy) : "");
-	const gate = $derived(credentialActionGate(paired, thisMachine, servedBy, computer));
+	const gate = $derived(credentialActionGate(paired, thisMachine, servedBy, computer, fields));
+	const handsTo = $derived(thisMachine && thisMachine !== servedBy ? computer : "");
 	const progress = $derived(reconnectState(id));
 	const running = $derived(progress?.phase === "starting" || progress?.phase === "waiting");
 
@@ -76,16 +80,16 @@
 		<p class="now"><span class="name">{name}</span> · {credentialStatusText(status)}</p>
 		{#if !canConnect(fields)}
 			<p class="muted">{name} signs in with pasted keys - open it to replace them.</p>
-		{:else if gate.canAct}
-			<button class="act primary" disabled={running} data-testid="credential-reconnect-run" onclick={() => reconnect(id, changed)}>{connectLabel(status)} {name}</button>
+		{:else if gate.canConnect}
+			<button class="act primary" disabled={running} data-testid="credential-reconnect-run" onclick={() => { pressed = true; reconnect(id, changed); }}>{connectLabel(status)} {name}</button>
 		{:else}
 			<p class="muted">{gate.reason}</p>
 			{#if !paired}<PairGate compact onready={() => void loadPairing()} />{/if}
 		{/if}
 		{#if progress?.phase === "starting"}
-			<p class="muted" role="status">Opening the sign-in on {computer || "its computer"}…</p>
+			<p class="muted" role="status">Opening the sign-in on this computer…</p>
 		{:else if progress?.phase === "waiting" || (!progress && status === "connecting")}
-			<p class="muted" role="status">Waiting for sign-in… {connectingHint(fields, computer)}</p>
+			<p class="muted" role="status">Waiting for sign-in… {pressed ? connectingHint(fields, "this computer", handsTo) : fieldStr(progress?.fields ?? fields, "error") || fieldStr(fields, "error") || connectingHint(fields, "", "")}</p>
 		{:else if progress?.phase === "connected"}
 			<p class="ok" role="status">Connected</p>
 		{:else if progress?.phase === "failed"}

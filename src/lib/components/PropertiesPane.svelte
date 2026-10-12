@@ -19,7 +19,7 @@
 	import { normalizeHex } from "$lib/chat-color";
 	import { AGENTLESS_TYPES } from "$lib/agent-field";
 	import { machineName, resolveServing, servedByMachineId, servingCopy, type MachineRow, type Serving } from "$lib/serving";
-	import { CONNECT_TIMEOUT_TEXT, credentialStatusBadge, credentialStatusText, pollWhileConnecting } from "$lib/credential-actions";
+	import { CONNECT_TIMEOUT_TEXT, COOKIE_META, COOKIE_PREFIX, credentialStatusBadge, credentialStatusText, isSecretField, pollWhileConnecting } from "$lib/credential-actions";
 	import { capabilityStatusBadge, capabilityStatusText } from "$lib/capability-actions";
 	import CredentialStatus from "./CredentialStatus.svelte";
 	import CapabilityStatus from "./CapabilityStatus.svelte";
@@ -59,9 +59,10 @@
 	});
 
 	/** A credential's / capability's own properties, always shown in this
-	    order (a credential's then each `key_*` field it carries, one pasted
-	    key each). The harness seeds their defs in every space; these names
-	    and emoji stand in until it has. */
+	    order (a credential's, then each `key_*` field it carries - one pasted
+	    key each - then each saved cookie `cookie_*` and `cookie_meta`). The
+	    harness seeds their defs in every space; these names and emoji stand
+	    in until it has. */
 	const CREDENTIAL_PROPS: Array<[key: string, name: string, format: string, emoji: string]> = [
 		["status", "Status", "status", ""],
 		["error", "Error", "longtext", ""],
@@ -96,12 +97,16 @@
 		if (isCapability) return CAPABILITY_PROPS.map(([key, name, format, emoji]) => def(key, name, format, emoji));
 		// `key_fields` is the pre-property recipe list the harness converts, not a pasted key.
 		const keyFields = Object.keys(object.fields).filter((k) => k.startsWith(KEY_PREFIX) && k !== "key_fields");
+		// A saved sign-in: one Cookie row per cookie (masked like a key) and its Cookie details - shown, never hidden.
+		const cookieFields = Object.keys(object.fields).filter((k) => k.startsWith(COOKIE_PREFIX) && k !== COOKIE_META);
 		return [
 			...CREDENTIAL_PROPS.map(([key, name, format, emoji]) => def(key, name, format, emoji)),
 			...keyFields.map((key) => {
 				const words = key.slice(KEY_PREFIX.length).replaceAll("_", " ");
 				return def(key, words.charAt(0).toUpperCase() + words.slice(1), "shorttext", "🔑");
 			}),
+			...cookieFields.map((key) => def(key, `Cookie ${key.slice(COOKIE_PREFIX.length)}`, "shorttext", "🍪")),
+			...(COOKIE_META in object.fields ? [def(COOKIE_META, "Cookie details", "longtext", "🍪")] : []),
 		];
 	});
 	const ownRowKeys = $derived(new Set(ownRows.map((r) => r.key)));
@@ -438,7 +443,7 @@
 			case "key": return "key";
 			case "checked_at": return "clock";
 		}
-		if (isCredential && rel.key.startsWith(KEY_PREFIX)) return "key";
+		if (isCredential && isSecretField(rel.key)) return "key";
 		switch (rel.format) {
 			case "checkbox": return "checkbox";
 			case "date": return "date";
@@ -681,9 +686,9 @@
 				{:else}
 					{@const d = display(rel)}
 					{#if d}
-						<!-- A pasted key is a secret: the row says it is set; its editor shows it. -->
+						<!-- A pasted key or saved cookie is a secret: the row says it is set; its editor shows it. -->
 						{#if rel.key === "chat_color" && normalizeHex(d)}<span class="color-dot" style="background: {normalizeHex(d)}"></span>{/if}
-						<span class="val-text" class:wrap={rel.key === "error"} class:warn={rel.key === "error" || overdue(rel)}>{isCredential && rel.key.startsWith(KEY_PREFIX) ? "••••••••" : d}</span>
+						<span class="val-text" class:wrap={rel.key === "error"} class:warn={rel.key === "error" || overdue(rel)}>{isCredential && isSecretField(rel.key) ? "••••••••" : d}</span>
 					{:else}
 						{@render empty(rel)}
 					{/if}

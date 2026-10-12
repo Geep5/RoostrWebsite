@@ -1,10 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import {
 	CONNECT_TIMEOUT_TEXT,
+	connectingHint,
 	credentialActionGate,
 	credentialCellBadge,
 	credentialsForError,
 	linkedCredentialIds,
+	isSecretField,
 	reconnectTarget,
 	signedOutNames,
 	startReconnect,
@@ -67,11 +69,39 @@ describe("signed-out Error → credential", () => {
 });
 
 describe("action gate", () => {
-	test("only the tab paired with the serving computer acts", () => {
-		expect(credentialActionGate(true, "m1", "m1", "Mac").canAct).toBe(true);
-		expect(credentialActionGate(true, "m2", "m1", "Mac")).toEqual({ canAct: false, reason: "Open Roostr on Mac to connect or check this credential." });
-		expect(credentialActionGate(false, "", "m1", "Mac").canAct).toBe(false);
-		expect(credentialActionGate(true, "m1", "", "").reason).toBe("Set Served by to a computer first.");
+	const website = { login_url: s("https://x.com/login"), session_host: s("x.com"), session_cookie: s("auth_token") };
+	const google = { service: s("google-account"), account: s("me@example.com") };
+	const database = { service: s("postgres"), key_url: s("postgres://x") };
+
+	test("the tab paired with the serving computer does everything", () => {
+		for (const fields of [website, google, database]) expect(credentialActionGate(true, "m1", "m1", "Mac", fields)).toEqual({ canConnect: true, canCheck: true, reason: "" });
+	});
+
+	test("a website or Google sign-in connects from any paired computer; Check stays on the serving one", () => {
+		for (const fields of [website, google]) expect(credentialActionGate(true, "m2", "m1", "Mac", fields)).toEqual({ canConnect: true, canCheck: false, reason: "Check now runs on Mac." });
+	});
+
+	test("anything else connects and checks only on the serving computer", () => {
+		expect(credentialActionGate(true, "m2", "m1", "Mac", database)).toEqual({ canConnect: false, canCheck: false, reason: "Open Roostr on Mac to connect or check this credential." });
+	});
+
+	test("an unpaired tab acts nowhere; no Served by, nobody acts", () => {
+		expect(credentialActionGate(false, "", "m1", "Mac", website)).toEqual({ canConnect: false, canCheck: false, reason: "Pair this tab with one of your computers to sign in there, or open Roostr on Mac to check this credential." });
+		expect(credentialActionGate(false, "", "m1", "Mac", database).reason).toBe("Open Roostr on Mac to connect or check this credential.");
+		expect(credentialActionGate(true, "m1", "", "", website)).toEqual({ canConnect: false, canCheck: false, reason: "Set Served by to a computer first." });
+	});
+
+	test("the sign-in hint names where the window opened and who gets the login", () => {
+		expect(connectingHint(website, "this computer", "Sharky's Mac Studio")).toBe("Sign in in the Chrome window on this computer; Roostr then hands the login to Sharky's Mac Studio.");
+		expect(connectingHint(website, "this computer", "")).toBe("Sign in in the Chrome window on this computer.");
+		expect(connectingHint(google, "this computer", "Mac")).toBe("Sign in to me@example.com in the browser window gws opens on this computer; Roostr then hands the login to Mac.");
+	});
+});
+
+describe("secret rows", () => {
+	test("pasted keys and saved cookie values are masked; cookie details and the legacy key list are not", () => {
+		for (const key of ["key_api_key", "key_refresh_token", "cookie_auth_token", "cookie_meta_2"]) expect(isSecretField(key)).toBe(true);
+		for (const key of ["key_fields", "key_", "cookie_meta", "cookie_", "session_cookie", "status"]) expect(isSecretField(key)).toBe(false);
 	});
 });
 

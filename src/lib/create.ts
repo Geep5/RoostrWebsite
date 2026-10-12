@@ -162,9 +162,10 @@ function defaultTemplateOf(key: string, channelId: string): string {
 	return (types.find((t) => t.space === channelId) ?? types[0])?.defaultTemplateId ?? "";
 }
 /**
- * A credential lives on one computer - its Chrome profile or keys never
- * leave it - so a new one starts pinned to the computer this tab is paired
- * with, when there is one. The type's default template still applies.
+ * A credential is kept and checked by one computer (its Served by), though
+ * its login rides on the credential and can be signed in from any of them -
+ * so a new one starts served by the computer this tab is paired with, when
+ * there is one. The type's default template still applies.
  */
 async function createCredential(channelId: string, name: string): Promise<string> {
 	const machineId = await thisMachineId();

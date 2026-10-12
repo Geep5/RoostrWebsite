@@ -11,6 +11,7 @@
 	 *   3. dataviewRelationEdit — Name input, Type row opening a custom
 	 *      format submenu (never the browser's native select), Create.
 	 */
+	import { COOKIE_META, isSecretField } from "$lib/credential-actions";
 	import { store } from "$lib/data.svelte";
 	import { RESERVED_KEYS, createRelation, currentSpaceId, spaceRelations } from "$lib/relations";
 	import type { RelationDefJSON } from "$lib/types";
@@ -80,9 +81,9 @@
 
 	// ── Stage 2 data (Anytype relationSuggest getSections) ─────────
 	const SYSTEM_KEYS = ["createdDate", "modifiedDate", "dueDate", "done", "tag", "status", "url", "email", "phone", "description", "error",
-		// Roostr's own credential properties (seeded by the harness in every space), and every pasted key.
-		"account", "service", "login_url", "session_host", "session_cookie"];
-	const isSystem = (key: string) => SYSTEM_KEYS.includes(key) || (key.startsWith("key_") && key !== "key_fields");
+		// Roostr's own credential properties (seeded by the harness in every space), every pasted key and every saved cookie.
+		"account", "service", "login_url", "session_host", "session_cookie", COOKIE_META];
+	const isSystem = (key: string) => SYSTEM_KEYS.includes(key) || isSecretField(key);
 	const present = $derived(new Set(items.map((i) => i.key)));
 	const allRels = $derived(spaceRelations(store.relations, currentSpaceId()).filter((r) => !r.hidden && !RESERVED_KEYS[r.key] && !present.has(r.key) && !exclude.includes(r.key)));
 	const q = $derived(query.trim().toLowerCase());

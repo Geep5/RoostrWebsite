@@ -117,8 +117,8 @@
 	<ul>
 		<li>A <b>Credential</b> is one login: an API key, a bot token, a database, a Google account or a website sign-in.</li>
 		<li>Its <b>Served by</b> computer keeps it and checks it; its Status says whether it still works.</li>
-		<li>Only you can sign in: press <b>Connect</b> and the sign-in window opens on that computer. Agents can prepare a credential but never sign in for you.</li>
-		<li>An agent can use a login only if it is in the agent's Credentials. Pasted keys are visible to the members of the credential's space.</li>
+		<li>Only you can sign in: press <b>Connect</b> and the sign-in window opens on the computer you are using; Roostr then hands the login to the Served by computer. If a site won't take a login made on another computer, the credential's Error says so - sign in on its Served by computer instead. Agents can prepare a credential but never sign in for you.</li>
+		<li>An agent can use a login only if it is in the agent's Credentials. Pasted keys and saved logins are on the credential, readable by everyone in its space; sign in from any of your computers.</li>
 	</ul>
 
 	<h2 id="practices">Best practices</h2>
