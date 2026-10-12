@@ -11,10 +11,11 @@
 	 * Tool (the harness writes it) and read-only properties show, never edit.
 	 */
 	import { fieldStr, isBuiltinTool, isLockedTool, repeatOf, type ObjectJSON, type RelationDefJSON, type ValueJSON } from "$lib/types";
-	import { note, fetchAllQuery, fetchObject, type QueryResultRow } from "$lib/api";
+	import { note, fetchAllQuery, fetchObject, fetchQuery, type QueryResultRow } from "$lib/api";
 	import { goto } from "$app/navigation";
 	import { layoutOf, store } from "$lib/data.svelte";
-	import { RESERVED_KEYS } from "$lib/relations";
+	import { RESERVED_KEYS, objectSpaceId, spaceRelations } from "$lib/relations";
+	import { engineFiltersOf, spaceFilterOf } from "$lib/filters";
 	import { normalizeHex } from "$lib/chat-color";
 	import { AGENTLESS_TYPES } from "$lib/agent-field";
 	import { machineName, resolveServing, servedByMachineId, servingCopy, type MachineRow, type Serving } from "$lib/serving";
@@ -107,6 +108,50 @@
 
 	const capabilityStatus = $derived(fieldStr(object.fields, "status") || "missing");
 
+	/**
+	 * Columns of the views this object belongs to count as properties it has,
+	 * set or not - like a page in a database showing the database's columns.
+	 * Views = collections listing it, and queries with a Source type that
+	 * match it under their own filters (a query with no type lists
+	 * everything; it lends nothing). Never written to the object: worked out
+	 * when it opens, so a column added to or removed from a view follows.
+	 */
+	let viewKeys = $state(new Set<string>());
+	$effect(() => {
+		const obj = object;
+		const id = obj.id;
+		const space = objectSpaceId(obj);
+		void (async () => {
+			const keys = new Set<string>();
+			try {
+				const views = await fetchAllQuery({ filters: [{ key: "typeKey", condition: "in", value: ["query", "set", "collection"] }, { key: "channel", condition: "equal", value: space }] });
+				const rels = spaceRelations(store.relations, space);
+				for (const v of views) {
+					if (v.id === id) continue;
+					const items = (key: string) => v.fields[key]?.valuesValue?.items ?? [];
+					let member = false;
+					if (v.typeKey === "collection") {
+						member = items("collectionIds").some((i) => i.stringValue === id);
+					} else {
+						const sources = items("setOf").map((i) => i.stringValue ?? "").filter(Boolean);
+						if (!sources.includes(obj.typeKey)) continue;
+						const view = { id: v.id, typeKey: v.typeKey, fields: v.fields, blocks: [], deleted: false, createdAt: 0, updatedAt: 0 } as ObjectJSON;
+						const filters = [...engineFiltersOf(view, rels), spaceFilterOf(view, store.channels[0]?.id ?? ""), { key: "id", condition: "in", value: [id] }];
+						member = (await fetchQuery({ setId: v.id, filters, limit: 1 })).total > 0;
+					}
+					if (!member) continue;
+					for (const i of items("viewRelations")) {
+						const k = i.stringValue ?? i.mapValue?.entries?.["key"]?.stringValue ?? "";
+						if (k) keys.add(k);
+					}
+				}
+			} catch {
+				/* the views lend nothing this time; the object's own properties still show */
+			}
+			if (object.id === id) viewKeys = keys;
+		})();
+	});
+
 	/** Featured order first, then the rest. */
 	const shown = $derived.by(() => {
 		const MACHINE_BOUND = ["agent", "capability", "credential"].includes(typeKey);
@@ -138,7 +183,7 @@
 			if (r.key === "check_first") return repeating || r.key in object.fields;
 			if (r.key === "agent") return !AGENTLESS_TYPES[typeKey] || r.key in object.fields;
 			if (r.key === "model") return typeKey === "agent" || r.key in object.fields;
-			return !r.hidden && r.key in object.fields;
+			return !r.hidden && (r.key in object.fields || viewKeys.has(r.key));
 		});
 		const rank = new Map(featuredKeys.map((k, i) => [k, i]));
 		return present.toSorted((a, b) =>
