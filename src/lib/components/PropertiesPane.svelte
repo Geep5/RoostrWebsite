@@ -11,11 +11,10 @@
 	 * Tool (the harness writes it) and read-only properties show, never edit.
 	 */
 	import { fieldStr, isBuiltinTool, isLockedTool, repeatOf, type ObjectJSON, type RelationDefJSON, type ValueJSON } from "$lib/types";
-	import { note, fetchAllQuery, fetchObject, fetchQuery, type QueryResultRow } from "$lib/api";
+	import { note, fetchAllQuery, fetchObject, type QueryResultRow } from "$lib/api";
 	import { goto } from "$app/navigation";
 	import { layoutOf, store } from "$lib/data.svelte";
-	import { RESERVED_KEYS, objectSpaceId, spaceRelations } from "$lib/relations";
-	import { engineFiltersOf, spaceFilterOf } from "$lib/filters";
+	import { RESERVED_KEYS, objectSpaceId } from "$lib/relations";
 	import { normalizeHex } from "$lib/chat-color";
 	import { AGENTLESS_TYPES } from "$lib/agent-field";
 	import { machineName, resolveServing, servedByMachineId, servingCopy, type MachineRow, type Serving } from "$lib/serving";
@@ -116,10 +115,12 @@
 	/**
 	 * Columns of the views this object belongs to count as properties it has,
 	 * set or not - like a page in a database showing the database's columns.
-	 * Views = collections listing it, and queries with a Source type that
-	 * match it under their own filters (a query with no type lists
-	 * everything; it lends nothing). Never written to the object: worked out
-	 * when it opens, so a column added to or removed from a view follows.
+	 * Views = collections listing it, and queries whose Source type is its
+	 * type, whatever their filters: a filtered view ("Team is checked") would
+	 * otherwise never lend its columns to the objects that don't yet have the
+	 * very property that lets them in. A query with no type lends nothing.
+	 * Never written to the object: worked out when it opens, so a column
+	 * added to or removed from a view follows.
 	 */
 	let viewKeys = $state(new Set<string>());
 	$effect(() => {
@@ -130,20 +131,13 @@
 			const keys = new Set<string>();
 			try {
 				const views = await fetchAllQuery({ filters: [{ key: "typeKey", condition: "in", value: ["query", "set", "collection"] }, { key: "channel", condition: "equal", value: space }] });
-				const rels = spaceRelations(store.relations, space);
 				for (const v of views) {
 					if (v.id === id) continue;
 					const items = (key: string) => v.fields[key]?.valuesValue?.items ?? [];
-					let member = false;
-					if (v.typeKey === "collection") {
-						member = items("collectionIds").some((i) => i.stringValue === id);
-					} else {
-						const sources = items("setOf").map((i) => i.stringValue ?? "").filter(Boolean);
-						if (!sources.includes(obj.typeKey)) continue;
-						const view = { id: v.id, typeKey: v.typeKey, fields: v.fields, blocks: [], deleted: false, createdAt: 0, updatedAt: 0 } as ObjectJSON;
-						const filters = [...engineFiltersOf(view, rels), spaceFilterOf(view, store.channels[0]?.id ?? ""), { key: "id", condition: "in", value: [id] }];
-						member = (await fetchQuery({ setId: v.id, filters, limit: 1 })).total > 0;
-					}
+					const member =
+						v.typeKey === "collection"
+							? items("collectionIds").some((i) => i.stringValue === id)
+							: items("setOf").some((i) => i.stringValue === obj.typeKey);
 					if (!member) continue;
 					for (const i of items("viewRelations")) {
 						const k = i.stringValue ?? i.mapValue?.entries?.["key"]?.stringValue ?? "";
