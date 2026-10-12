@@ -159,9 +159,11 @@
 		padding: 0 14px;
 		overflow-wrap: anywhere;
 	}
+	/* Width only grows by resizing the pane: nothing inside may scroll it sideways. */
 	.dd-props {
 		flex: 1;
 		min-height: 0;
+		overflow-x: hidden;
 		overflow-y: auto;
 		padding: 8px 14px;
 	}

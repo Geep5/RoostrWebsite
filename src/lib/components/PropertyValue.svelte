@@ -255,7 +255,7 @@
 				<button title="Remove" onclick={() => void toggleObject(id)}>×</button>
 			</span>
 		{/each}
-		<span class="anchor">
+		<span class="obj-anchor">
 			<button class="pill" onclick={() => { objectOpen = !objectOpen; agentName = null; }}>+ link object</button>
 			{#if objectOpen}
 				<div class="obj-menu">
@@ -359,7 +359,11 @@
 	.date-btn:hover {
 		border-color: var(--accent);
 	}
+	/* The link menu hangs below the whole value (not the "+ link object"
+	   pill, which can sit far right after the chips) and spans its width,
+	   so it never pushes past the pane. */
 	.objects {
+		position: relative;
 		display: flex;
 		flex-wrap: wrap;
 		gap: 4px;
@@ -439,8 +443,9 @@
 		position: absolute;
 		top: calc(100% + 6px);
 		left: 0;
+		right: 0;
 		z-index: 95;
-		width: 320px;
+		min-width: 240px;
 		max-height: 320px;
 		overflow-y: auto;
 		background: var(--panel, #1a1d23);
