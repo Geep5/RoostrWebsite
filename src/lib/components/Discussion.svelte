@@ -11,7 +11,7 @@
 	import { loadDraft, saveDraft } from "$lib/drafts";
 	import EmojiPicker from "./EmojiPicker.svelte";
 	import { renderMarkdown } from "$lib/markdown";
-	import { onMount, untrack } from "svelte";
+	import { flushSync, onMount, untrack } from "svelte";
 	import { harnessFetch, pairedSession, onPairingChange } from "$lib/local-transport";
 	import { objectSpaceId } from "$lib/relations";
 	import { openedRanks } from "$lib/recent-opened";
@@ -212,10 +212,41 @@
 		draft = `${draft.slice(0, at.start)}${label}${after}`;
 		if (!tagged.some((t) => guestKey(t) === guestKey(option))) tagged = [...tagged, option];
 		mention = null;
+		refocusAt(el, at.start + label.length + 1);
+	}
+
+	/**
+	 * Back into the composer, caret after the tag - inside the tap itself.
+	 * iOS WebKit only raises the keyboard for a focus() made during the user's
+	 * gesture; deferred to a frame, it left the caret outside the box.
+	 */
+	function refocusAt(el: HTMLTextAreaElement, pos: number) {
+		flushSync();
+		el.focus();
+		el.setSelectionRange(pos, pos);
+		el.style.height = "auto";
+		el.style.height = `${el.scrollHeight}px`;
+	}
+
+	/**
+	 * An object with exactly one agent opens its composer already addressed
+	 * to it: `@Name `, tagged, caret after - you just type. Several agents
+	 * (or none) start empty; type @ to pick. An agent's own page needs no tag.
+	 * Only ever fills an empty draft, so a message in progress is untouched.
+	 */
+	async function seedSoleAgent(): Promise<void> {
+		if (draft !== "" || readOnly || isExchange || object.typeKey === "agent") return;
+		const assigned = guestAgents(object.fields);
+		if (assigned.length !== 1) return;
+		await ensureTagOptions();
+		const sole = (tagOptions ?? []).find((option) => option.endpoint.agentId === assigned[0]);
+		if (!sole || draft !== "") return;
+		tagged = [sole];
+		draft = `@${sole.agentName} `;
 		requestAnimationFrame(() => {
-			el.focus();
-			const pos = at.start + label.length + 1;
-			el.setSelectionRange(pos, pos);
+			const el = composerEl;
+			if (!el) return;
+			el.setSelectionRange(draft.length, draft.length);
 			el.style.height = "auto";
 			el.style.height = `${el.scrollHeight}px`;
 		});
@@ -286,13 +317,7 @@
 		draft = `${draft.slice(0, at.start)}${label}${after}`;
 		if (!taggedObjects.some((t) => t.id === option.id)) taggedObjects = [...taggedObjects, option];
 		objectTag = null;
-		requestAnimationFrame(() => {
-			el.focus();
-			const pos = at.start + label.length + 1;
-			el.setSelectionRange(pos, pos);
-			el.style.height = "auto";
-			el.style.height = `${el.scrollHeight}px`;
-		});
+		refocusAt(el, at.start + label.length + 1);
 	}
 
 	const escapeRegExp = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -342,6 +367,7 @@
 	}
 	onMount(() => {
 		refreshPairing();
+		void seedSoleAgent();
 		return onPairingChange(refreshPairing);
 	});
 	interface AgentPresence {
@@ -565,6 +591,7 @@
 			tagged = [];
 			taggedObjects = [];
 			await onchanged();
+			void seedSoleAgent();
 		} catch (err) {
 			sendError = err instanceof Error ? err.message : String(err);
 		} finally {
@@ -790,7 +817,8 @@
 							aria-selected={i === mentionIndex}
 							class:active={i === mentionIndex}
 							onmouseenter={() => (mentionIndex = i)}
-							onmousedown={(e) => { e.preventDefault(); pickMention(option); }}
+							onmousedown={(e) => e.preventDefault()}
+							onclick={() => pickMention(option)}
 						>
 							{#if option.icon}
 								<span class="m-icon">{option.icon}</span>
@@ -819,7 +847,8 @@
 									aria-selected={i === objectTagIndex}
 									class:active={i === objectTagIndex}
 									onmouseenter={() => (objectTagIndex = i)}
-									onmousedown={(e) => { e.preventDefault(); pickObject(option); }}
+									onmousedown={(e) => e.preventDefault()}
+									onclick={() => pickObject(option)}
 								>
 									<span class="m-icon">{@html iconGlyph(option.icon || objectIcon("", option.typeKey))}</span>
 									<span class="m-name">{option.name}</span>
