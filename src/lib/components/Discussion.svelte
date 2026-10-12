@@ -871,7 +871,7 @@
 				placeholder={isExchange ? "Write a message… (@ agent, ! object)" : "Write a comment… (@ agent, ! object)"}
 				bind:value={draft}
 				rows={1}
-				disabled={sending}
+				readonly={sending}
 				onscroll={(e) => { if (mirrorEl) mirrorEl.scrollTop = e.currentTarget.scrollTop; }}
 				oninput={(e) => {
 					const el = e.currentTarget as HTMLTextAreaElement;
@@ -889,15 +889,17 @@
 						if (e.key === "Enter" || e.key === "Tab") { e.preventDefault(); pickObject(objectMatches[Math.min(objectTagIndex, objectMatches.length - 1)]); return; }
 					}
 					if (objectTag && e.key === "Escape") { e.preventDefault(); objectTag = null; return; }
-					if (objectTag && e.key === "Enter" && !e.shiftKey) { e.preventDefault(); objectTag = null; return; }
+					// Nothing to pick: the menu closes and Enter still sends. Swallowing
+					// it left an invisible open menu eating the first Enter ("@ 5pm",
+					// iOS turning "@Name  " into "@Name. ").
+					if (objectTag && e.key === "Enter" && !e.shiftKey) objectTag = null;
 					if (mention && mentionMatches.length) {
 						if (e.key === "ArrowDown") { e.preventDefault(); mentionIndex = (mentionIndex + 1) % mentionMatches.length; return; }
 						if (e.key === "ArrowUp") { e.preventDefault(); mentionIndex = (mentionIndex + mentionMatches.length - 1) % mentionMatches.length; return; }
 						if (e.key === "Enter" || e.key === "Tab") { e.preventDefault(); pickMention(mentionMatches[Math.min(mentionIndex, mentionMatches.length - 1)]); return; }
 						if (e.key === "Escape") { e.preventDefault(); mention = null; return; }
 					}
-					// Mid-tag with nothing matching: Enter closes the menu instead of sending a half-typed tag.
-					if (mention && e.key === "Enter" && !e.shiftKey) { e.preventDefault(); mention = null; return; }
+					if (mention && e.key === "Enter" && !e.shiftKey) mention = null;
 					if (e.key === "Enter" && !e.shiftKey) {
 						e.preventDefault();
 						void send();
