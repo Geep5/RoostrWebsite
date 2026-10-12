@@ -972,11 +972,14 @@
 				return;
 			}
 
-			// An empty paragraph inside a toggle/callout/quote escapes its
-			// parent rather than splitting (Anytype moves it below the parent).
+			// An empty paragraph that is the LAST line inside a toggle/callout/
+			// quote escapes its parent (it lands directly below it). Anywhere
+			// else inside, Enter is just another new line: escaping from the
+			// middle threw the line - and the caret - past every sibling below.
 			if (curStyle === Style.PARAGRAPH && !text.length && parentStyle !== undefined) {
 				const nested = parentStyle === Style.TOGGLE || parentStyle === Style.CALLOUT || parentStyle === Style.QUOTE;
-				if (nested && (await outdentBlock(id, 0, "", []))) return;
+				const siblings = byId.get(parentIdOf(id))?.childrenIds ?? [];
+				if (nested && siblings[siblings.length - 1] === id && (await outdentBlock(id, 0, "", []))) return;
 			}
 
 			// ── blockSplit (Anytype editor/page.tsx:2872) ─────────────
