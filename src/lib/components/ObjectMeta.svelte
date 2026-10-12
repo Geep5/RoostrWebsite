@@ -9,6 +9,7 @@
 	import { guestAgents, repeatOf, type ObjectJSON } from "$lib/types";
 	import { describeRepeat } from "$lib/repeat";
 	import { store } from "$lib/data.svelte";
+	import { activeSpace } from "$lib/space.svelte";
 	import { note } from "$lib/api";
 	import { badgeStyle } from "$lib/options";
 	import { typeGlyph } from "$lib/create";
@@ -19,7 +20,13 @@
 
 	let { object }: { object: ObjectJSON } = $props();
 
-	const typeDef = $derived(store.types.find((t) => t.key === object.typeKey));
+	// Every space has its own copy of each type, listing only that space's objects: the
+	// chip opens the copy in the object's own space (else the open space's) - never
+	// whichever space's copy loaded first.
+	const typeDef = $derived.by(() => {
+		const space = object.fields["channel"]?.stringValue || activeSpace.id;
+		return store.types.find((t) => t.key === object.typeKey && t.space === space);
+	});
 	/** The chip's icon: the type's own, else the built-in glyph for kinds with no type object (collection, query). */
 	const typeIcon = $derived(typeDef?.icon || TYPE_GLYPHS[object.typeKey] || "");
 	// A space's type (`channel`) is engine infrastructure with no type page; people call it a Space.
@@ -33,10 +40,9 @@
 		object.typeKey === "query" ? (object.fields["setOf"]?.valuesValue?.items ?? []).map((i) => i.stringValue ?? "").filter(Boolean) : [],
 	);
 	const sources = $derived.by(() => {
-		const space = object.fields["channel"]?.stringValue ?? "";
+		const space = object.fields["channel"]?.stringValue || activeSpace.id;
 		return sourceKeys.map((key) => {
-			const matches = store.types.filter((t) => t.key === key);
-			const t = matches.find((x) => x.space === space) ?? matches[0];
+			const t = store.types.find((x) => x.key === key && x.space === space);
 			const builtIn = key === "query" ? "Query" : key === "collection" ? "Collection" : "";
 			return { key, id: t?.id ?? "", name: t?.name || builtIn || key, icon: t?.icon || typeGlyph(key) };
 		});
