@@ -29,8 +29,8 @@
 	import Repeat from "./Repeat.svelte";
 	import CheckboxIcon from "./CheckboxIcon.svelte";
 	import { objectIcon } from "$lib/icons";
-	import { badgeStyle, statusIcon, tagStyle, type BadgeIcon } from "$lib/options";
-	import PropIcon from "./PropIcon.svelte";
+	import { badgeStyle, statusIcon, tagStyle } from "$lib/options";
+	import PropIcon, { type LineIcon } from "./PropIcon.svelte";
 
 	let {
 		object,
@@ -408,48 +408,51 @@
 		}
 	}
 
-	/** Glyph + palette for a non-option property\. */
-	function badgeFor(rel: RelationDefJSON): { icon: BadgeIcon | null; color: string } {
+	/** A due date past due on an unfinished object: its value reads red. */
+	function overdue(rel: RelationDefJSON): boolean {
+		if (rel.format !== "date" || rel.key !== "due_date") return false;
 		const v = object.fields[rel.key];
-		switch (rel.format) {
-			case "checkbox": return { icon: plain(v, "checkbox") === true ? "check" : "dashed", color: plain(v, "checkbox") === true ? "lime" : "" };
-			case "date": {
-				const ms = v?.intValue ?? v?.floatValue;
-				const overdue = !!ms && ms < Date.now() && object.fields["done"]?.boolValue !== true && rel.key === "due_date";
-				return { icon: "calendar", color: overdue ? "red" : "" };
-			}
-			case "url": return { icon: "link", color: "blue" };
-			case "email": return { icon: "at", color: "blue" };
-			case "phone": return { icon: "phone", color: "blue" };
-			default: return { icon: null, color: "" };
-		}
+		const ms = v?.intValue ?? v?.floatValue;
+		return !!ms && ms < Date.now() && object.fields["done"]?.boolValue !== true;
 	}
 
-	/** The row's leading icon: the property's own emoji; a badge glyph only for properties that have none. */
-	function leftIcon(rel: RelationDefJSON): { emoji: string } | { icon: BadgeIcon; color: string } {
-		// A property's own emoji is its icon, here as in table headers and the
-		// property picker; its current state belongs to the value on the right.
-		if (rel.iconEmoji) return { emoji: rel.iconEmoji };
+	/** The row's leading icon: one muted line icon per property kind, the same style on every row. */
+	function lineIcon(rel: RelationDefJSON): LineIcon {
 		switch (rel.key) {
-			case "served_by": return { emoji: "🖥️" };
-			case "repo_path": return { emoji: "📁" };
-			case "chat_color": return { emoji: "🎨" };
-			case "credentials": return { emoji: "🔑" };
-			case "agent": return { emoji: "🤖" };
-			case "skills": return { emoji: "🛠️" };
-			case "tools": return { emoji: "🧰" };
-			case "check_first": return { emoji: "🔎" };
-			case "prompt": return { emoji: "🧠" };
-			case "model": return { emoji: "🧬" };
+			case "served_by": return "computer";
+			case "repo_path": return "folder";
+			case "chat_color": return "color";
+			case "credentials": return "key";
+			case "agent": return "person";
+			case "skills": return "skill";
+			case "tools": return "tool";
+			case "check_first": return "search";
+			case "prompt": return "brain";
+			case "model": return "cpu";
+			case "error": return "warning";
+			case "capability": return "box";
+			case "account": return "person";
+			case "service": return "box";
+			case "session_host": return "globe";
+			case "session_cookie": return "key";
+			case "key": return "key";
+			case "checked_at": return "clock";
 		}
-		if (rel.format === "status") {
-			const d = display(rel);
-			const opt = d ? rel.options.find((o) => o.text === d) : undefined;
-			return { icon: d ? statusIcon(d) : "dot", color: opt?.color ?? "" };
+		if (isCredential && rel.key.startsWith(KEY_PREFIX)) return "key";
+		switch (rel.format) {
+			case "checkbox": return "checkbox";
+			case "date": return "date";
+			case "number": return "number";
+			case "status":
+			case "select": return "status";
+			case "tag": return "tag";
+			case "url": return "url";
+			case "email": return "email";
+			case "phone": return "phone";
+			case "object": return "object";
+			case "file": return "file";
+			default: return "text";
 		}
-		if (rel.format === "object") return { icon: "link", color: "" };
-		const b = badgeFor(rel);
-		return { icon: b.icon ?? "dot", color: b.color };
 	}
 
 	/** Whether the row itself carries a hover × (single-value rows; multi rows put the × on each value). */
@@ -511,27 +514,35 @@
 	    plain objects that can recur. A Tool runs when called, never on a schedule. */
 	const canRepeat = $derived(!["channel", "chat", "type", "relation", "template", "query", "set", "collection", "agent", "tool"].includes(object.typeKey));
 
-	// ── Grouped display: System / Tool / Agent / Custom, each a labeled section ──
-	const AGENT_KEYS = new Set(["served_by", "repo_path", "agent", "model", "prompt", "skills", "tools", "credentials", "capability", "chat_color"]);
-	const SYSTEM_KEYS = new Set(["done", "due_date", "status", "tag", "description", "url", "email", "phone", "error", "created_date", "modified_date", "createdDate", "modifiedDate", "check_first"]);
+	// ── Grouped display: "How it runs", then "Properties" ──
+	const HOW_KEYS = new Set(["served_by", "repo_path", "agent", "model", "prompt", "skills", "tools", "credentials", "chat_color", "check_first", "error", "capability"]);
+	/** Within Properties: the common ones, then a Tool's, then Jev's, then everything custom. */
+	const SYSTEM_KEYS = new Set(["done", "due_date", "status", "tag", "description", "url", "email", "phone", "created_date", "modified_date", "createdDate", "modifiedDate"]);
 	const TOOL_KEYS = new Set(["tool_inputs", "tool_builtin", "tool_version"]);
-	type Group = "own" | "system" | "tool" | "jev" | "agent" | "custom";
-	const groupOf = (key: string): Group => (JEV_KEYS.includes(key) ? "jev" : AGENT_KEYS.has(key) ? "agent" : SYSTEM_KEYS.has(key) ? "system" : TOOL_KEYS.has(key) ? "tool" : "custom");
+	const propRank = (key: string) => (SYSTEM_KEYS.has(key) ? 0 : TOOL_KEYS.has(key) ? 1 : JEV_KEYS.includes(key) ? 2 : 3);
 	const groups = $derived.by(() => {
-		const out: Array<{ id: Group; label: string; rows: typeof shown }> = [];
-		// System first, and Repeat first within it: the one row every object shares sits at the very top.
-		for (const [id, label] of [["system", "System"], ["own", isCapability ? "Capability" : "Credential"], ["tool", "Tool"], ["jev", "Jev"], ["agent", "Agent"], ["custom", "Custom"]] as Array<[Group, string]>) {
-			const rows = id === "own" ? ownRows : shown.filter((r) => groupOf(r.key) === id);
-			if (id === "system" && canRepeat) {
-				// Check first rides right under Repeat: it runs before each occurrence.
-				const at = rows.findIndex((r) => r.key === "check_first");
-				rows.unshift({ key: "__repeat__", name: "Repeat" } as unknown as (typeof shown)[number], ...(at >= 0 ? rows.splice(at, 1) : []));
-			}
-			if (rows.length) out.push({ id, label, rows });
-		}
-		return out;
+		const how = [...ownRows, ...shown].filter((r) => HOW_KEYS.has(r.key));
+		const at = (key: string) => how.findIndex((r) => r.key === key);
+		// Repeat, Check first under it (run before each occurrence), and Error last.
+		const checkFirst = at("check_first") >= 0 ? how.splice(at("check_first"), 1) : [];
+		const error = at("error") >= 0 ? how.splice(at("error"), 1) : [];
+		if (canRepeat) how.push({ key: "__repeat__", name: "Repeat" } as unknown as (typeof shown)[number]);
+		how.push(...checkFirst, ...error);
+		const props = [
+			...ownRows.filter((r) => !HOW_KEYS.has(r.key)),
+			...shown.filter((r) => !HOW_KEYS.has(r.key)).toSorted((a, b) => propRank(a.key) - propRank(b.key)),
+		];
+		return [
+			{ id: "how", label: "How it runs", rows: how },
+			{ id: "props", label: "Properties", rows: props },
+		].filter((g) => g.rows.length > 0);
 	});
 </script>
+
+{#snippet empty(rel: RelationDefJSON)}
+	<!-- One faint dash when empty; the specific hint shows on row hover/focus. -->
+	<span class="placeholder"><span class="dash">—</span><span class="hint">{placeholderFor(rel)}</span></span>
+{/snippet}
 
 {#snippet propRow(rel: (typeof shown)[number])}
 	{#if rel.key === "__repeat__"}
@@ -540,7 +551,7 @@
 		</div>
 	{:else}
 	{@const v = object.fields[rel.key]}
-	{@const li = leftIcon(rel)}
+	{@const li = lineIcon(rel)}
 	<div class="row-wrap" class:ro={!editable(rel)}>
 		<div
 			class="row"
@@ -551,11 +562,7 @@
 			onkeydown={(e) => onRowKey(e, rel)}
 		>
 			<span class="row-label">
-				{#if "emoji" in li}
-					<span class="emoji">{li.emoji}</span>
-				{:else}
-					<span class="row-icon" style={badgeStyle(li.color)}><PropIcon icon={li.icon} size={14} /></span>
-				{/if}
+				<span class="row-icon"><PropIcon line={li} size={14} /></span>
 				<span class="row-name">{rel.name || rel.key}</span>
 			</span>
 			<span class="row-value">
@@ -586,7 +593,7 @@
 							<button class="rm" aria-label={`Remove ${t}`} title={`Remove ${t}`} onclick={(e) => { e.stopPropagation(); void removeValue(rel.key, t); }}>×</button>
 						</span>
 					{:else}
-						<span class="placeholder">{placeholderFor(rel)}</span>
+						{@render empty(rel)}
 					{/each}
 				{:else if rel.format === "status"}
 					{@const d = display(rel)}
@@ -596,25 +603,25 @@
 							<PropIcon icon={statusIcon(d)} size={14} />{d}
 						</span>
 					{:else}
-						<span class="placeholder">{placeholderFor(rel)}</span>
+						{@render empty(rel)}
 					{/if}
 				{:else if rel.key === "served_by"}
 					{#if serve}
 						<span class="val-text" class:warn={serve.warning} title={serve.warning ? "Cannot be honoured" : ""}>{serve.text.replace(/^served by /, "")}</span>
 					{:else}
-						<span class="placeholder">{placeholderFor(rel)}</span>
+						{@render empty(rel)}
 					{/if}
 				{:else if rel.key === "credentials"}
 					{#each plain(v, "object") as string[] as id (id)}
 						{@const cred = credentialChip(id)}
 						<span class="chip-wrap">
-							<a class="chip" class:ok={cred.tone === "ok"} class:pending={cred.tone === "pending"} class:warn={cred.tone === "warn"} href="/app/object/{id}" title={cred.title} onclick={(e) => e.stopPropagation()}>
-								<span class="emoji">🔑</span>{cred.label}
+							<a class="chip" class:warn={cred.tone === "warn"} href="/app/object/{id}" title={cred.title} onclick={(e) => e.stopPropagation()}>
+								<span class="chip-icon"><PropIcon line="key" size={12} /></span>{cred.label}
 							</a>
 							<button class="rm" aria-label={`Remove ${cred.label}`} title="Remove" onclick={(e) => { e.stopPropagation(); void removeValue(rel.key, id); }}>×</button>
 						</span>
 					{:else}
-						<span class="placeholder">{placeholderFor(rel)}</span>
+						{@render empty(rel)}
 					{/each}
 				{:else if rel.key === "agent"}
 					{#each plain(v, "object") as string[] as id (id)}
@@ -626,32 +633,32 @@
 							<button class="rm" aria-label={`Remove ${a?.name ?? "agent"}`} title="Remove" onclick={(e) => { e.stopPropagation(); void removeValue(rel.key, id); }}>×</button>
 						</span>
 					{:else}
-						<span class="placeholder">{placeholderFor(rel)}</span>
+						{@render empty(rel)}
 					{/each}
 				{:else if rel.key === "skills"}
 					{#each plain(v, "object") as string[] as id (id)}
 						{@const sk = skillsById.get(id)}
 						{@const ok = !!sk && (!sk.key || sk.machines.length > 0)}
 						<span class="chip-wrap">
-							<span class="chip" class:ok={!!sk?.key && ok} class:warn={!!sk?.key && !ok} title={!sk ? "Skill" : !sk.key ? `${sk.name} · instructions` : sk.machines.length ? `${sk.name} · working on ${sk.machines.join(", ")}` : `${sk.name} · not working on any computer yet`}>
-								<span class="emoji">🛠️</span>{sk?.name ?? `${id.slice(0, 8)}…`}
+							<span class="chip" class:warn={!!sk?.key && !ok} title={!sk ? "Skill" : !sk.key ? `${sk.name} · instructions` : sk.machines.length ? `${sk.name} · working on ${sk.machines.join(", ")}` : `${sk.name} · not working on any computer yet`}>
+								<span class="chip-icon"><PropIcon line="skill" size={12} /></span>{sk?.name ?? `${id.slice(0, 8)}…`}
 							</span>
 							<button class="rm" aria-label={`Remove ${sk?.name ?? "skill"}`} title="Remove" onclick={(e) => { e.stopPropagation(); void removeValue(rel.key, id); }}>×</button>
 						</span>
 					{:else}
-						<span class="placeholder">{placeholderFor(rel)}</span>
+						{@render empty(rel)}
 					{/each}
 				{:else if rel.key === "tools"}
 					{#each plain(v, "object") as string[] as id (id)}
 						{@const tl = toolsById.get(id)}
 						<span class="chip-wrap">
 							<span class="chip" class:warn={!!tl?.error} title={!tl ? "Tool" : tl.error ? `${tl.name} · ${tl.error}` : `${tl.name} · ${tl.builtin ? "built-in tool" : "tool"}`}>
-								<span class="emoji">🧰</span>{tl?.name ?? `${id.slice(0, 8)}…`}
+								<span class="chip-icon"><PropIcon line="tool" size={12} /></span>{tl?.name ?? `${id.slice(0, 8)}…`}
 							</span>
 							<button class="rm" aria-label={`Remove ${tl?.name ?? "tool"}`} title="Remove" onclick={(e) => { e.stopPropagation(); void removeValue(rel.key, id); }}>×</button>
 						</span>
 					{:else}
-						<span class="placeholder">{placeholderFor(rel)}</span>
+						{@render empty(rel)}
 					{/each}
 				{:else if rel.format === "object"}
 					{#each plain(v, "object") as string[] as id (id)}
@@ -669,16 +676,16 @@
 							<button class="rm" aria-label={`Remove ${o?.name || a?.name || "link"}`} title="Remove" onclick={(e) => { e.stopPropagation(); void removeValue(rel.key, id); }}>×</button>
 						</span>
 					{:else}
-						<span class="placeholder">{placeholderFor(rel)}</span>
+						{@render empty(rel)}
 					{/each}
 				{:else}
 					{@const d = display(rel)}
 					{#if d}
 						<!-- A pasted key is a secret: the row says it is set; its editor shows it. -->
 						{#if rel.key === "chat_color" && normalizeHex(d)}<span class="color-dot" style="background: {normalizeHex(d)}"></span>{/if}
-						<span class="val-text" class:wrap={rel.key === "error"}>{isCredential && rel.key.startsWith(KEY_PREFIX) ? "••••••••" : d}</span>
+						<span class="val-text" class:wrap={rel.key === "error"} class:warn={rel.key === "error" || overdue(rel)}>{isCredential && rel.key.startsWith(KEY_PREFIX) ? "••••••••" : d}</span>
 					{:else}
-						<span class="placeholder">{placeholderFor(rel)}</span>
+						{@render empty(rel)}
 					{/if}
 				{/if}
 				{#if judgedNote(rel.key)}
@@ -719,7 +726,7 @@
 
 {#each groups as g (g.id)}
 	<div class="prop-group">
-		<span class="group-label">{g.label} Properties</span>
+		<span class="group-label">{g.label}</span>
 		{#each g.rows as rel (rel.key)}
 			{@render propRow(rel)}
 		{/each}
@@ -772,12 +779,10 @@
 		white-space: nowrap;
 	}
 	.group-label {
-		font-size: 11px;
-		font-weight: 600;
-		text-transform: uppercase;
-		letter-spacing: 0.06em;
+		font-size: 12px;
+		font-weight: 500;
 		color: var(--muted);
-		padding: 4px 4px 2px;
+		padding: 6px 6px 4px;
 	}
 	.add-prop {
 		display: block;
@@ -785,8 +790,8 @@
 		background: none;
 		border: none;
 		border-radius: 6px;
-		padding: 6px 4px;
-		font-size: 12.5px;
+		padding: 6px;
+		font-size: 13px;
 		color: var(--muted);
 		text-align: left;
 		cursor: pointer;
@@ -798,32 +803,27 @@
 	.row-wrap {
 		position: relative;
 	}
-	/* Inset divider: the line starts at the label text, not full-bleed. */
-	.row-wrap:not(:first-child)::before {
-		content: "";
-		display: block;
-		height: 1px;
-		margin-left: 24px;
-		background: var(--border);
-		opacity: 0.5;
-	}
+	/* Two columns: a fixed label column (narrower on a narrow pane), the value left-aligned beside it. */
 	.row {
-		display: flex;
-		align-items: center;
-		gap: 10px;
-		min-height: 28px;
-		padding: 3px 22px 3px 4px;
+		display: grid;
+		grid-template-columns: min(120px, 40%) minmax(0, 1fr);
+		align-items: start;
+		column-gap: 10px;
+		padding: 4px 24px 4px 6px;
 		border-radius: 6px;
+		font-size: 13px;
+		line-height: 22px;
 		cursor: pointer;
 	}
-	.row:hover {
+	.row-wrap:hover .row,
+	.row:focus-visible {
 		background: var(--hover);
 	}
 	/* Read-only: shown, not editable - no hover, no per-value ×. */
 	.ro .row {
 		cursor: default;
 	}
-	.ro .row:hover {
+	.ro.row-wrap:hover .row {
 		background: none;
 	}
 	.ro .rm {
@@ -833,15 +833,14 @@
 		display: flex;
 		align-items: center;
 		gap: 7px;
-		flex: none;
 		min-width: 0;
+		min-height: 22px;
 		color: var(--muted);
 	}
 	.row-icon {
 		display: inline-flex;
-		width: 16px;
-		justify-content: center;
 		flex: none;
+		color: var(--muted);
 	}
 	.row-name {
 		font-size: 13px;
@@ -850,24 +849,25 @@
 		text-overflow: ellipsis;
 	}
 	.row-value {
-		margin-left: auto;
 		display: flex;
 		align-items: center;
-		justify-content: flex-end;
+		justify-content: flex-start;
 		flex-wrap: wrap;
 		gap: 4px 6px;
 		min-width: 0;
-		text-align: right;
+		min-height: 22px;
+		color: var(--fg);
+		text-align: left;
 	}
 	.color-dot {
 		flex: none;
 		width: 12px;
 		height: 12px;
-		margin-right: 6px;
 		border-radius: 50%;
 		border: 1px solid var(--border);
 	}
 	.val-text {
+		min-width: 0;
 		overflow: hidden;
 		text-overflow: ellipsis;
 		white-space: nowrap;
@@ -876,27 +876,38 @@
 	.val-text.wrap {
 		white-space: normal;
 		overflow-wrap: anywhere;
-		text-align: left;
+		line-height: 18px;
+		padding: 2px 0;
 	}
 	.val-text.warn {
 		color: var(--red);
 	}
+	/* Empty: one faint dash; the hint replaces it on row hover/focus. */
 	.placeholder {
 		color: var(--muted);
-		opacity: 0.65;
+		opacity: 0.6;
+	}
+	.placeholder .hint {
+		display: none;
+	}
+	.row-wrap:not(.ro):hover .placeholder .hint,
+	.row:focus-visible .placeholder .hint {
+		display: inline;
+	}
+	.row-wrap:not(.ro):hover .placeholder .dash,
+	.row:focus-visible .placeholder .dash {
+		display: none;
 	}
 	.emoji {
-		font-size: 13px;
+		font-size: 12px;
 		line-height: 1;
-		width: 16px;
-		text-align: center;
 		flex: none;
 	}
 	.pill {
-		padding: 1px 8px;
-		border-radius: 6px;
+		padding: 0 8px;
+		border-radius: 10px;
 		font-size: 12px;
-		line-height: 16px;
+		line-height: 20px;
 		white-space: nowrap;
 	}
 	.status-val {
@@ -909,33 +920,52 @@
 		position: relative;
 		display: inline-flex;
 		align-items: center;
-		gap: 2px;
 		min-width: 0;
+		max-width: 100%;
 	}
+	/* Neutral chip: plain text on a quiet outline; colour only for problems. */
 	.chip {
 		display: inline-flex;
 		align-items: center;
-		gap: 5px;
+		gap: 4px;
 		min-width: 0;
+		max-width: 100%;
+		padding: 0 8px;
+		border: 1px solid var(--border);
+		border-radius: 10px;
+		font-size: 12px;
+		line-height: 20px;
+		color: var(--fg);
 		overflow: hidden;
 		text-overflow: ellipsis;
 		white-space: nowrap;
 	}
-	.chip.ok {
-		color: var(--green);
+	.chip-icon {
+		display: inline-flex;
+		flex: none;
+		color: var(--muted);
 	}
-	.chip.warn {
+	.chip.warn,
+	.chip.warn .chip-icon {
 		color: var(--red);
 	}
 	a.chip {
-		color: inherit;
 		text-decoration: none;
 	}
 	a.chip:hover {
-		text-decoration: underline;
+		border-color: var(--muted);
 	}
-	.chip.pending {
-		color: var(--orange);
+	/* A chip's × sits on its corner, taking no room in the wrap. */
+	.chip-wrap .rm {
+		position: absolute;
+		top: -6px;
+		right: -6px;
+		width: 15px;
+		height: 15px;
+		font-size: 11px;
+		background: var(--panel);
+		border: 1px solid var(--border);
+		z-index: 1;
 	}
 	.li-check {
 		display: inline-flex;

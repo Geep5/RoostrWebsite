@@ -16,6 +16,7 @@
 	import { note, repeat } from "$lib/api";
 	import { store } from "$lib/data.svelte";
 	import { fetchMachines, machineName, resolveServing, servingCopy, type MachineRow } from "$lib/serving";
+	import PropIcon from "./PropIcon.svelte";
 
 	let {
 		object,
@@ -342,14 +343,14 @@
 	<div class="row-wrap">
 		<button class="row" class:empty={!rule} onclick={openEditor} title="Repeat">
 			<span class="row-label">
-				<span class="glyph">↻</span>
+				<span class="glyph"><PropIcon line="repeat" size={14} /></span>
 				<span class="row-name">Repeat</span>
 			</span>
 			<span class="row-value">
 				{#if rule && view}
 					<span class="summary-line">{describe(view)}</span>
 				{:else}
-					<span class="placeholder">Off</span>
+					<span class="placeholder"><span class="dash">—</span><span class="hint">Off</span></span>
 				{/if}
 			</span>
 		</button>
@@ -520,30 +521,34 @@
 		flex-direction: column;
 		gap: 2px;
 	}
+	/* Same two-column grid as the Properties pane rows: fixed label column, value left-aligned beside it. */
 	.row {
-		display: flex;
-		align-items: center;
-		gap: 10px;
+		display: grid;
+		grid-template-columns: min(120px, 40%) minmax(0, 1fr);
+		align-items: start;
+		column-gap: 10px;
 		width: 100%;
-		min-height: 28px;
-		padding: 3px 22px 3px 4px;
+		min-height: 30px;
+		padding: 4px 24px 4px 6px;
 		border: none;
 		background: none;
 		border-radius: 6px;
 		color: var(--fg);
 		font-size: 13px;
+		line-height: 22px;
 		text-align: left;
 		cursor: pointer;
 	}
-	.row:hover {
+	.row:hover,
+	.row:focus-visible {
 		background: var(--hover);
 	}
 	.row-label {
 		display: flex;
 		align-items: center;
 		gap: 7px;
-		flex: none;
 		min-width: 0;
+		min-height: 22px;
 		color: var(--muted);
 	}
 	.row-name {
@@ -551,24 +556,32 @@
 		white-space: nowrap;
 	}
 	.row-value {
-		margin-left: auto;
 		display: flex;
 		align-items: center;
-		justify-content: flex-end;
 		gap: 4px;
 		min-width: 0;
-		text-align: right;
+		min-height: 22px;
 	}
+	/* Off: one faint dash; "Off" on hover/focus. */
 	.placeholder {
 		color: var(--muted);
-		opacity: 0.65;
+		opacity: 0.6;
+	}
+	.placeholder .hint {
+		display: none;
+	}
+	.row:hover .placeholder .hint,
+	.row:focus-visible .placeholder .hint {
+		display: inline;
+	}
+	.row:hover .placeholder .dash,
+	.row:focus-visible .placeholder .dash {
+		display: none;
 	}
 	.glyph {
-		font-size: 14px;
-		color: var(--accent);
-	}
-	.row.empty .glyph {
-		color: inherit;
+		display: inline-flex;
+		flex: none;
+		color: var(--muted);
 	}
 	.summary-line {
 		white-space: nowrap;
@@ -585,7 +598,7 @@
 	}
 	.meta {
 		margin: 0;
-		padding-left: 25px;
+		padding-left: calc(16px + min(120px, 40%));
 		display: flex;
 		flex-wrap: wrap;
 		gap: 2px 6px;
@@ -812,9 +825,6 @@
 		cursor: default;
 	}
 	@media (max-width: 720px) {
-		.repeat {
-			margin: -4px 16px 10px;
-		}
 		.pop {
 			width: min(360px, calc(100vw - 32px));
 		}
