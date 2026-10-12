@@ -171,6 +171,20 @@
 		void nameDraft;
 		sizeTitle();
 	});
+	// The same text wraps onto more lines when the column narrows (a pane
+	// opened or collapsed, the window resized): re-measure on every width change.
+	$effect(() => {
+		const el = titleEl;
+		if (!el) return;
+		let width = el.clientWidth;
+		const ro = new ResizeObserver(() => {
+			if (el.clientWidth === width) return;
+			width = el.clientWidth;
+			sizeTitle();
+		});
+		ro.observe(el);
+		return () => ro.disconnect();
+	});
 
 	async function saveName() {
 		if (!object || nameDraft === fieldStr(object.fields, "name")) return;
