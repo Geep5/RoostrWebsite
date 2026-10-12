@@ -43,6 +43,9 @@
 		return chip === "" ? [scope, TYPE_EXCLUDE] : [scope, TYPE_EXCLUDE, { key: "type", condition: "equal", value: chip }];
 	}
 
+	/** Shown after every other match: the imports made thousands of these. */
+	const LOW_PRIORITY_TYPES = ["file", "bookmark"];
+
 	let seq = 0;
 	let debounce: ReturnType<typeof setTimeout> | undefined;
 
@@ -56,13 +59,22 @@
 		debounce = setTimeout(async () => {
 			searching = true;
 			try {
-				const res = await fetchQuery(
-					q === ""
-						? { filters: scopeFilters(chip), sorts: [{ key: "updatedAt", type: "desc" }], limit: RECENT_LIMIT }
-						: { textQuery: q, filters: scopeFilters(chip), limit: 50 },
-				);
+				let records: QueryResultRow[];
+				if (q === "") {
+					records = (await fetchQuery({ filters: scopeFilters(chip), sorts: [{ key: "updatedAt", type: "desc" }], limit: RECENT_LIMIT })).records;
+				} else if (chip === "") {
+					// Files and bookmarks (thousands, from imports) come after
+					// everything else: the other matches first, then theirs.
+					const [main, low] = await Promise.all([
+						fetchQuery({ textQuery: q, filters: [...scopeFilters(chip), { key: "typeKey", condition: "notIn", value: LOW_PRIORITY_TYPES }], limit: 50 }),
+						fetchQuery({ textQuery: q, filters: [...scopeFilters(chip), { key: "typeKey", condition: "in", value: LOW_PRIORITY_TYPES }], limit: 50 }),
+					]);
+					records = [...main.records, ...low.records.slice(0, Math.max(10, 50 - main.records.length))];
+				} else {
+					records = (await fetchQuery({ textQuery: q, filters: scopeFilters(chip), limit: 50 })).records;
+				}
 				if (mine !== seq) return; // stale response
-				results = res.records as typeof results;
+				results = records as typeof results;
 				selected = 0;
 			} finally {
 				if (mine === seq) searching = false;
