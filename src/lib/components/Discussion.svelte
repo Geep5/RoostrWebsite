@@ -246,9 +246,20 @@
 		flushSync();
 		el.focus();
 		el.setSelectionRange(pos, pos);
+	}
+
+	/**
+	 * The composer fits its text, whatever changed it - typing, a pasted
+	 * block, a picked mention, or a send emptying it (which used to leave it
+	 * at the pasted message's height).
+	 */
+	$effect(() => {
+		void draft;
+		const el = composerEl;
+		if (!el) return;
 		el.style.height = "auto";
 		el.style.height = `${el.scrollHeight}px`;
-	}
+	});
 
 	/**
 	 * The composer opens already addressed: `@Name `, tagged, caret after -
@@ -287,8 +298,6 @@
 			const el = composerEl;
 			if (!el) return;
 			el.setSelectionRange(draft.length, draft.length);
-			el.style.height = "auto";
-			el.style.height = `${el.scrollHeight}px`;
 		});
 	}
 
@@ -914,12 +923,7 @@
 				rows={1}
 				readonly={sending}
 				onscroll={(e) => { if (mirrorEl) mirrorEl.scrollTop = e.currentTarget.scrollTop; }}
-				oninput={(e) => {
-					const el = e.currentTarget as HTMLTextAreaElement;
-					el.style.height = "auto";
-					el.style.height = `${el.scrollHeight}px`;
-					updateMention();
-				}}
+				oninput={() => updateMention()}
 				onclick={updateMention}
 				onkeyup={(e) => { if (e.key.startsWith("Arrow") && !mention && !objectTag) updateMention(); }}
 				onblur={() => { mention = null; objectTag = null; }}
