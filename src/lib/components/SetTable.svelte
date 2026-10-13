@@ -372,19 +372,46 @@
 		window.addEventListener("pointerup", up);
 	}
 
-	// ── Column reorder (drag a header onto another) ───────────────
+	// ── Column reorder (drag a header into a gap between columns) ──
+	// The dragged column is tinted top to bottom, and one bar the table's full
+	// height marks the gap it lands in: left or right of the header under the
+	// pointer, by which half the pointer is over.
 	let dragIdx = $state(-1);
-	let overIdx = $state(-1);
+	/** The gap the column lands in: 0 = before the first column, cols.length = after the last; -1 = nowhere (or where it already is). */
+	let gapIdx = $state(-1);
+	let gapBar = $state<{ left: number; top: number; height: number } | null>(null);
 
-	function dropColumn() {
-		if (dragIdx < 0 || overIdx < 0 || dragIdx === overIdx) {
-			dragIdx = overIdx = -1;
+	function onColumnDragOver(e: DragEvent, i: number, forceAfter = false) {
+		if (dragIdx < 0) return;
+		e.preventDefault();
+		const th = e.currentTarget as HTMLTableCellElement;
+		const r = th.getBoundingClientRect();
+		const after = forceAfter || e.clientX > r.left + r.width / 2;
+		const gap = forceAfter ? cols.length : after ? i + 1 : i;
+		if (gap === dragIdx || gap === dragIdx + 1) {
+			gapIdx = -1;
+			gapBar = null;
 			return;
 		}
+		gapIdx = gap;
+		const table = th.closest("table") as HTMLTableElement;
+		const edge = forceAfter ? th.offsetLeft : th.offsetLeft + (after ? th.offsetWidth : 0);
+		gapBar = { left: table.offsetLeft + edge, top: table.offsetTop, height: table.offsetHeight };
+	}
+
+	function endColumnDrag() {
+		dragIdx = gapIdx = -1;
+		gapBar = null;
+	}
+
+	function dropColumn() {
+		const from = dragIdx;
+		const gap = gapIdx;
+		endColumnDrag();
+		if (from < 0 || gap < 0) return;
 		const next = cols.map((c) => ({ ...c }));
-		const [moved] = next.splice(dragIdx, 1);
-		next.splice(overIdx, 0, moved);
-		dragIdx = overIdx = -1;
+		const [moved] = next.splice(from, 1);
+		next.splice(gap > from ? gap - 1 : gap, 0, moved);
 		void saveColumns(next);
 	}
 
@@ -581,6 +608,9 @@
 <svelte:window onkeydown={(e) => { if (e.key === "Escape") { cellEdit = null; selectedRows = []; ctxMenu = null; } }} onmousedown={(e) => { if (cellEdit && !(e.target as HTMLElement).closest(".cell-pop, td.editable")) cellEdit = null; onSetMouseDown(e); }} onmousemove={onMarqueeMove} onmouseup={endRowDrag} />
 
 <div class="set-table" bind:this={setEl}>
+	{#if gapBar}
+		<div class="col-gap" style="left: {gapBar.left}px; top: {gapBar.top}px; height: {gapBar.height}px"></div>
+	{/if}
 	{#if marquee && dragMoved}
 		<div
 			class="marquee"
@@ -590,8 +620,8 @@
 	<table>
 		<colgroup>
 			<col style={nameWidth ? `width:${nameWidth}px` : ""} />
-			{#each cols as c (c.key)}
-				<col style="width: {c.width}px" />
+			{#each cols as c, i (c.key)}
+				<col style="width: {c.width}px" class:col-dragging={dragIdx === i} />
 			{/each}
 			<col style="width: 32px" />
 		</colgroup>
@@ -609,26 +639,18 @@
 				</th>
 				{#each cols as c, i (c.key)}
 					<th
-						class:drag-over={overIdx === i && dragIdx !== i}
+						class:dragging={dragIdx === i}
 						draggable="true"
 						ondragstart={(e) => {
 							dragIdx = i;
 							e.dataTransfer?.setData("text/plain", c.key);
 						}}
-						ondragover={(e) => {
-							if (dragIdx < 0) return;
-							e.preventDefault();
-							overIdx = i;
-						}}
-						ondragleave={() => {
-							if (overIdx === i) overIdx = -1;
-						}}
+						ondragover={(e) => onColumnDragOver(e, i)}
 						ondrop={(e) => {
 							e.preventDefault();
-							overIdx = i;
 							dropColumn();
 						}}
-						ondragend={() => (dragIdx = overIdx = -1)}
+						ondragend={endColumnDrag}
 					>
 						<button class="head" onclick={() => toggleSort(c.key)}>{#if colIcon(c.key)}<span class="head-icon">{colIcon(c.key)}</span>{/if}{colName(c.key)} {sortKey === c.key ? (sortDir === "asc" ? "↑" : "↓") : ""}</button>
 						<button class="hide" title="Hide column" onclick={() => void saveColumns(cols.filter((x) => x.key !== c.key))}>×</button>
@@ -641,7 +663,7 @@
 						></span>
 					</th>
 				{/each}
-				<th class="plus-col">
+				<th class="plus-col" ondragover={(e) => onColumnDragOver(e, cols.length - 1, true)} ondrop={(e) => { e.preventDefault(); dropColumn(); }}>
 					<button
 						class="head plus"
 						title="Add column"
@@ -805,6 +827,8 @@
 		margin-right: 6px;
 	}
 	.set-table {
+		/* The column-move bar is placed inside it and scrolls with the table. */
+		position: relative;
 		overflow-x: auto;
 	}
 	table {
@@ -842,8 +866,23 @@
 		cursor: pointer;
 		user-select: none;
 	}
-	th.drag-over {
-		box-shadow: inset 2px 0 0 var(--accent);
+	/* The column being moved: tinted from header to last row, its label dimmed. */
+	col.col-dragging {
+		background: color-mix(in srgb, var(--accent) 14%, transparent);
+	}
+	th.dragging .head {
+		opacity: 0.55;
+	}
+	/* Where it lands: one bar the table's full height, in the gap between columns. */
+	.col-gap {
+		position: absolute;
+		width: 3px;
+		margin-left: -1.5px;
+		border-radius: 2px;
+		background: var(--accent);
+		box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+		pointer-events: none;
+		z-index: 5;
 	}
 	.resize {
 		position: absolute;
