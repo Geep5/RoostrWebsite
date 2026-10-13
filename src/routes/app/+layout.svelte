@@ -22,7 +22,7 @@
 	import PaneIcon from "$lib/components/PaneIcon.svelte";
 	import PinnedWidget from "$lib/components/PinnedWidget.svelte";
 	import Icon from "$lib/components/Icon.svelte";
-	import { creatableTypes, typeGlyph, createTyped, createCollection, createQuery, seedSpaceDefaults, defaultTypeKey } from "$lib/create";
+	import { creatableTypes, typeGlyph, createTyped, createCollection, createQuery, defaultTypeKey } from "$lib/create";
 	import { RESERVED_KEYS, formatGlyph, spaceRelations } from "$lib/relations";
 	import type { RelationDefJSON, SpaceJSON } from "$lib/types";
 	import PropertySuggest from "$lib/components/PropertySuggest.svelte";
@@ -561,7 +561,6 @@
 		const name = prompt("Space name:");
 		if (!name) return;
 		const { id } = await spaceApi.create(name);
-		await seedSpaceDefaults(id);
 		await refreshAll();
 		selectSpace(id);
 	}
@@ -807,7 +806,6 @@
 		if (!seedingPersonal && sync.phase === "live" && sync.bootstrapped && store.loaded && store.channels.length === 0) {
 			seedingPersonal = true;
 			void spaceApi.create("Personal").then(async ({ id }) => {
-				await seedSpaceDefaults(id);
 				await refreshAll();
 				activeSpace.id = id;
 			}).finally(() => { seedingPersonal = false; });
