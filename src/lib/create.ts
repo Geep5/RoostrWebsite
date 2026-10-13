@@ -140,6 +140,8 @@ async function createAgent(channelId: string, name = ""): Promise<string> {
 
 /** The built-in Tools (by callable name) a new agent gets when its template sets none. */
 const DEFAULT_TOOLS = ["shell_exec", "web_fetch"];
+/** The Model a new agent starts with when its template sets none - an agent runs only on its own Model. */
+const DEFAULT_AGENT_MODEL = "claude-sonnet-4-5";
 
 /**
  * A new agent in the space, from the agent type's default template there
@@ -175,6 +177,7 @@ export async function newAgent(channelId: string, name = "", seeds: Record<strin
 		...(assistant ? { prompt: { linkValue: { targetId: assistant.id, relationKey: "prompt" } } } : {}),
 		...(tools.length ? { tools: { valuesValue: { items: tools.map((t) => ({ linkValue: { targetId: t.id, relationKey: "tools" } })) } } } : {}),
 		...(modelCred ? { credentials: { valuesValue: { items: [{ linkValue: { targetId: modelCred.id, relationKey: "credentials" } }] } } } : {}),
+		...(tpl?.fields["model"] ? {} : { model: { valuesValue: { items: [{ stringValue: DEFAULT_AGENT_MODEL }] } } }),
 	});
 	if (tpl) await applyTemplate(agentId, tpl.id);
 	return agentId;
