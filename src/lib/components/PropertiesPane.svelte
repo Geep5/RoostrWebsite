@@ -24,6 +24,7 @@
 	import CapabilityStatus from "./CapabilityStatus.svelte";
 	import { harnessFetch } from "$lib/local-transport";
 	import PropertyValue from "./PropertyValue.svelte";
+	import ProjectFolder from "./ProjectFolder.svelte";
 	import PropertySuggest from "./PropertySuggest.svelte";
 	import Repeat from "./Repeat.svelte";
 	import CheckboxIcon from "./CheckboxIcon.svelte";
@@ -718,6 +719,9 @@
 					<CredentialStatus {object} {onchanged} pollError={connectPollError} />
 				{:else}
 					<PropertyValue {rel} value={v} spaceId={object.fields["channel"]?.stringValue ?? ""} seeds={tagSeeds} autoOpen onsave={(nv) => void saveValue(rel.key, nv)} />
+					{#if rel.key === "repo_path" && object.typeKey === "agent"}
+						<ProjectFolder {object} onsave={(p) => saveValue("repo_path", { stringValue: p })} />
+					{/if}
 				{/if}
 			</div>
 		{/if}
