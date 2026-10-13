@@ -272,8 +272,13 @@
 			.join(", ");
 	}
 
+	/** A property as the graph names it everywhere: its emoji, then its name. */
+	function propLabel(rel: { iconEmoji?: string; name: string; key: string } | undefined, key: string): string {
+		return rel ? `${rel.iconEmoji ? `${rel.iconEmoji} ` : ""}${rel.name || rel.key}` : key;
+	}
+
 	function objectFields(o: GraphObject) {
-		return [...o.held].map((k) => ({ k: relByKey.get(k)?.name || k, v: formatValue(relByKey.get(k), o.fields[k]) }));
+		return [...o.held].map((k) => ({ k: propLabel(relByKey.get(k), k), v: formatValue(relByKey.get(k), o.fields[k]) }));
 	}
 </script>
 
@@ -353,7 +358,7 @@
 							{#if p.targets.length}
 								<circle cx={p.x} cy={p.y} r={r + 5} fill="none" stroke={on ? "#e9ebf0" : "#3a3f4a"} stroke-opacity="0.5" stroke-width="1" pointer-events="none" />
 							{/if}
-							<text x={l.x} y={l.y} text-anchor={l.anchor} transform={l.transform} dominant-baseline="central" class="mono" font-size="17" fill={idle ? "#6f7686" : on ? "#dfe2ea" : "#3f4450"} data-k="prop" data-p={p.key}>{p.name}</text>
+							<text x={l.x} y={l.y} text-anchor={l.anchor} transform={l.transform} dominant-baseline="central" class="mono" font-size="17" fill={idle ? "#6f7686" : on ? "#dfe2ea" : "#3f4450"} data-k="prop" data-p={p.key}>{propLabel(relByKey.get(p.key), p.name)}</text>
 						{/each}
 						{#each g.types as t (t.key)}
 							{@const on = typeOn(t)}
@@ -410,7 +415,7 @@
 					<div class="bars">
 						{#each [...selType.usage].sort((a, b) => b[1] - a[1]) as [key, u] (key)}
 							<div class="bar-row">
-								<span class="bar-name">{relByKey.get(key)?.name || key}</span>
+								<span class="bar-name">{propLabel(relByKey.get(key), key)}</span>
 								<span class="track"><span class="fill" style:width={pct(u)} style:background={selType.color}></span></span>
 								<span class="mono muted small right">{pct(u)}</span>
 							</div>
@@ -418,7 +423,7 @@
 					</div>
 					<div class="mono kicker">AVAILABLE, UNUSED</div>
 					<div class="chips">
-						{#each [...graph.props.filter((p) => !selType.usage.has(p.key)).map((p) => p.name), ...graph.idle.map((r) => r.name || r.key)] as name (name)}
+						{#each [...graph.props.filter((p) => !selType.usage.has(p.key)).map((p) => propLabel(relByKey.get(p.key), p.name)), ...graph.idle.map((r) => propLabel(r, r.key))] as name (name)}
 							<span class="mono chip">{name}</span>
 						{/each}
 					</div>
