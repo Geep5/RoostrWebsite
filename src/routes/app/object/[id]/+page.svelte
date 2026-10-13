@@ -29,6 +29,7 @@
 	import { UNSERVED_TYPES } from "$lib/serving";
 	import { StorageUnavailableError } from "$lib/engine/store";
 	import { markOpened } from "$lib/recent-opened";
+	import { defaultTypeKey } from "$lib/create";
 
 	let object = $state<ObjectJSON>();
 	let editor = $state<Editor>();
@@ -337,10 +338,11 @@
 		picking = true;
 	}
 
-	/** Anytype collection New: create an object and link it as a member. */
+	/** Anytype collection New: create an object of the space's Default type, in the collection's space, and link it as a member. */
 	async function newInCollection() {
 		if (!object) return;
-		const { id } = await note.create("", "note");
+		const ch = fieldStr(object.fields, "channel");
+		const { id } = await note.create("", await defaultTypeKey(ch), ch ? { channel: { stringValue: ch } } : {});
 		await setMembers([...memberIds, id]);
 		await goto(`/app/object/${id}`);
 	}

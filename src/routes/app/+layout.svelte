@@ -22,7 +22,7 @@
 	import PaneIcon from "$lib/components/PaneIcon.svelte";
 	import PinnedWidget from "$lib/components/PinnedWidget.svelte";
 	import Icon from "$lib/components/Icon.svelte";
-	import { creatableTypes, typeGlyph, createTyped, createCollection, createQuery, seedSpaceDefaults } from "$lib/create";
+	import { creatableTypes, typeGlyph, createTyped, createCollection, createQuery, seedSpaceDefaults, defaultTypeKey } from "$lib/create";
 	import { RESERVED_KEYS, formatGlyph, spaceRelations } from "$lib/relations";
 	import type { RelationDefJSON, SpaceJSON } from "$lib/types";
 	import PropertySuggest from "$lib/components/PropertySuggest.svelte";
@@ -151,12 +151,24 @@
 	let createFilter = $state("");
 	/** Highlighted choice (-1 = none: the first ↓ lands on the first); Enter creates it, or the first. */
 	let createActive = $state(-1);
+	/** The space's Default type (space settings), listed first in the New menu. */
+	let createDefault = $state("note");
+	$effect(() => {
+		if (!showCreate) return;
+		const sid = activeSpace.id || defaultChannelId;
+		void defaultTypeKey(sid).then((k) => {
+			if (sid === (activeSpace.id || defaultChannelId)) createDefault = k;
+		});
+	});
 	const createChoices = $derived.by(() => {
 		if (!showCreate) return [];
+		const types = creatableTypes();
+		const def = types.find((t) => t.key === createDefault);
 		const all = [
-			{ key: "query", icon: typeGlyph("query"), name: "Query", fixed: true },
-			{ key: "collection", icon: typeGlyph("collection"), name: "Collection", fixed: true },
-			...creatableTypes().map((t) => ({ key: t.key, icon: t.icon, name: t.name, fixed: false })),
+			...(def ? [{ key: def.key, icon: def.icon, name: def.name, group: "default" }] : []),
+			{ key: "query", icon: typeGlyph("query"), name: "Query", group: "fixed" },
+			{ key: "collection", icon: typeGlyph("collection"), name: "Collection", group: "fixed" },
+			...types.filter((t) => t !== def).map((t) => ({ key: t.key, icon: t.icon, name: t.name, group: "type" })),
 		];
 		const q = createFilter.trim().toLowerCase();
 		return q ? all.filter((c) => c.name.toLowerCase().includes(q) || c.key.toLowerCase().includes(q)) : all;
@@ -826,9 +838,9 @@
 {#snippet createMenuBody()}
 	<input class="type-search create-search" placeholder="Search types…" bind:value={createFilter} use:focusOnMount onkeydown={onCreateSearchKey} />
 	{#each createChoices as c, i (c.key)}
-		{#if i > 0 && !c.fixed && createChoices[i - 1].fixed}<div class="create-sep"></div>{/if}
+		{#if i > 0 && c.group !== createChoices[i - 1].group}<div class="create-sep"></div>{/if}
 		<button role="menuitem" class="create-choice" class:active={i === createActive} onmouseenter={() => (createActive = i)} onclick={() => void sidebarCreate(c.key)}>
-			<span class="obj-icon">{c.icon}</span>{c.name}
+			<span class="obj-icon">{c.icon}</span>{c.name}{#if c.group === "default"}<span class="create-default">Default</span>{/if}
 		</button>
 	{/each}
 	{#if createChoices.length === 0}<span class="create-none">No matching type</span>{/if}
@@ -1764,6 +1776,12 @@
 		z-index: 1;
 		flex-shrink: 0;
 		margin: 0 0 4px;
+	}
+	.create-default {
+		margin-left: auto;
+		padding-left: 12px;
+		font-size: 11px;
+		color: var(--muted);
 	}
 	.create-none {
 		color: var(--muted);

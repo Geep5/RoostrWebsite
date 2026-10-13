@@ -30,6 +30,22 @@ export function creatableTypes(): Array<{ key: string; name: string; icon: strin
 	return own.map((t) => ({ key: t.key, name: t.name || t.key, icon: t.icon || typeGlyph(t.key) }));
 }
 
+/** Types a space can't default to: each needs a choice first (a file to pick, an agent or login to set up). */
+export const NOT_DEFAULTABLE = new Set(["file", "machine", "agent", "credential"]);
+
+/**
+ * The space's Default type (space settings, the space object's
+ * `default_type`): what Roostr makes when it doesn't ask - search's
+ * "Create object", a collection's New - and what the New menu lists first.
+ * "note" when unset, or when that type is gone from the space.
+ */
+export async function defaultTypeKey(spaceId: string): Promise<string> {
+	if (!spaceId) return "note";
+	const space = await fetchObject(spaceId).catch(() => null);
+	const key = space?.fields["default_type"]?.stringValue ?? "";
+	return key && !NOT_DEFAULTABLE.has(key) && store.types.some((t) => t.space === spaceId && t.key === key) ? key : "note";
+}
+
 export function typeGlyph(typeKey: string): string {
 	return typeIcon(typeKey) || "▨";
 }

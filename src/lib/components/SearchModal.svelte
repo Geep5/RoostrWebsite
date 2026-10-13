@@ -4,7 +4,7 @@
 	import { store } from "$lib/data.svelte";
 	import { activeSpace } from "$lib/space.svelte";
 	import { objectIcon, typeIcon } from "$lib/icons";
-	import { createTyped } from "$lib/create";
+	import { createTyped, defaultTypeKey } from "$lib/create";
 
 	let { onclose }: { onclose: () => void } = $props();
 
@@ -21,6 +21,14 @@
 	const channelId = $derived(activeSpace.id || store.channels[0]?.id || "");
 	const isDefault = $derived(channelId === (store.channels[0]?.id ?? ""));
 	const spaceName = $derived(store.channels.find((c) => c.id === channelId)?.name ?? "");
+	/** The space's Default type: what "Create object" makes when no type chip is picked. */
+	let spaceDefault = $state("note");
+	$effect(() => {
+		const id = channelId;
+		void defaultTypeKey(id).then((k) => {
+			if (id === channelId) spaceDefault = k;
+		});
+	});
 
 	$effect(() => {
 		inputEl?.focus();
@@ -119,7 +127,7 @@
 		if (!name) return;
 		onclose();
 		// Anytype: the create row targets the selected chip's type.
-		await createTyped(typeChip || "note", channelId, name);
+		await createTyped(typeChip || spaceDefault, channelId, name);
 	}
 
 	function onKeydown(e: KeyboardEvent) {
@@ -288,7 +296,7 @@
 				<button class="row create" class:selected={selected === ordered.length} onclick={() => void createFromQuery()} onmouseenter={() => (selected = ordered.length)}>
 					<span class="icon">＋</span>
 					<span class="texts"><span class="name">Create object "{query.trim()}"</span></span>
-					<span class="kind">{typeChip || "note"}</span>
+					<span class="kind">{typeIcon(typeChip || spaceDefault)} {typeName(typeChip || spaceDefault)}</span>
 				</button>
 			{/if}
 			{#if ordered.length === 0 && !searching && !canCreate}

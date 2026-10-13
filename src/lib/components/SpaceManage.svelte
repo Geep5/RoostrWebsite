@@ -9,6 +9,7 @@
 	import { goto, invalidateAll } from "$app/navigation";
 	import { layoutOf, store, refreshAll } from "$lib/data.svelte";
 	import { activeSpace } from "$lib/space.svelte";
+	import { NOT_DEFAULTABLE, typeGlyph } from "$lib/create";
 	import { myNpub, listJoinRequests, clearJoinRequest, type JoinRequest } from "$lib/client-identity";
 	import { backend } from "$lib/client-backend";
 	import { onPairingChange } from "$lib/local-transport";
@@ -133,6 +134,14 @@
 	/** SpaceJSON.owner is "" when this identity administers the space. */
 	const isOwner = $derived(!spaceInfo?.owner);
 	const spaceName = $derived(object.fields["name"]?.stringValue?.trim() ?? "");
+
+	/** Default type: what this space makes when Roostr doesn't ask (defaultTypeKey in create.ts). */
+	const defaultType = $derived(object.fields["default_type"]?.stringValue || "note");
+	const defaultableTypes = $derived(store.types.filter((t) => t.space === object.id && !NOT_DEFAULTABLE.has(t.key)).sort((a, b) => (a.name || a.key).localeCompare(b.name || b.key)));
+	async function setDefaultType(key: string) {
+		await note.setField(object.id, "default_type", { stringValue: key });
+		await onchanged();
+	}
 	/** The space's own name, not the word "delete": the gate should cost a
 	 * look at WHICH space this is, and muscle memory from every other
 	 * confirm box shouldn't clear it. A space with no name has nothing to
@@ -229,6 +238,14 @@
 <svelte:window onkeydown={(e) => { if (e.key !== "Escape") return; if (confirmEmpty) confirmEmpty = false; else if (confirmDelete && !deleting) confirmDelete = false; }} />
 
 <section class="manage">
+	<h3>Default type</h3>
+	<p class="hint">What a new object becomes when Roostr doesn't ask: search's "Create object", a collection's New, and the first choice in the New menu.</p>
+	<select class="default-type" value={defaultType} onchange={(e) => void setDefaultType(e.currentTarget.value)}>
+		{#each defaultableTypes as t (t.id)}
+			<option value={t.key}>{t.icon || typeGlyph(t.key)} {t.name || t.key}</option>
+		{/each}
+	</select>
+
 	<h3>Members</h3>
 	<p class="hint">
 		Everyone holding this space's key can read and write every object in it. Adding an npub gift-wraps
@@ -503,6 +520,17 @@
 		letter-spacing: 0.08em;
 		color: var(--muted);
 		margin: 14px 0 2px;
+	}
+	.default-type {
+		align-self: flex-start;
+		min-width: 220px;
+		padding: 6px 8px;
+		font: inherit;
+		font-size: 13px;
+		color: var(--fg);
+		background: var(--panel);
+		border: 1px solid var(--border);
+		border-radius: 8px;
 	}
 	.hint {
 		color: var(--muted);
