@@ -3,10 +3,10 @@
   "compiler": "/opt/homebrew/bin/odin version dev-2026-07:819fdc7a8",
   "target": "js_wasm32",
   "artifact": "engine.wasm",
-  "sha256": "61cd042ab89081d9449e07f4adf681d09541d48e99a2cd4f57c23967892bf8b8",
-  "sourceFingerprint": "96a4001ef04fd62f8520dd652f1fd4385780ca15a15d24863f5565848b6436a9",
+  "sha256": "3702ddca0a8f4f2aaacb009bc8cb41090441eaca17b291ec17bb823e5e313a42",
+  "sourceFingerprint": "483a59c06fb9fc31caa7f60ca41fa315c24bddd959d2b8fdbd60461d6cd89165",
   "sourceFiles": {
-    "abi/abi.odin": "8c81cc5b058d4b764a649591a4061586fcd9471e7997ec73a6a48d918b81ca28",
+    "abi/abi.odin": "34d035764a9dabadcd1a6ad474a36c27ba2a3a39d32273375af93e2d316b3507",
     "core/agent_message.odin": "b044ff123c05f19a4110961b02d02a0f289b27d88bfa729e398c72a4a39d1b23",
     "core/agent_serving.odin": "aa87a7027f2582434c3039ccb2c30f24258344dc91141164f0939382ef5ac114",
     "core/authority.odin": "e14c858ba1e309b96c165bd6fa91858e5cfe65019a3a58a223196b292c5a54fd",
