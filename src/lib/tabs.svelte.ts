@@ -3,13 +3,18 @@
  *
  * Browser model: the ACTIVE tab follows navigation (opening an object from
  * the sidebar replaces the active tab's content, like a browser tab), and
- * "Open in new tab" adds a background tab. Per-window, persisted to
- * localStorage so a reload restores the strip.
+ * "Open in new tab" adds a background tab.
+ *
+ * Each space keeps its own strip: switching spaces puts that space's tabs
+ * back as you left them. Strips live in this device's localStorage only -
+ * open tabs are not synced, so another device keeps its own.
  */
 import { goto } from "$app/navigation";
 import { browser } from "$app/environment";
 
-const KEY = "roostr.tabs";
+const KEY = "roostr.tabs.spaces";
+/** The single strip kept before tabs were per space: adopted by the first space opened. */
+const LEGACY_KEY = "roostr.tabs";
 export const HOME_PATH = "/app";
 
 export interface Tab {
@@ -17,31 +22,69 @@ export interface Tab {
 	path: string;
 }
 
+interface Saved {
+	paths: string[];
+	active: number;
+}
+
 let nextUid = 1;
 
 class TabStrip {
 	list = $state<Tab[]>([]);
 	active = $state(0);
+	/** The space whose strip is showing; "" until the app knows its space (nothing is saved before then). */
+	space = "";
+	private saved: Record<string, Saved> = {};
+	private legacy: Saved | null = null;
 
 	constructor() {
 		if (!browser) return;
 		try {
-			const raw = JSON.parse(localStorage.getItem(KEY) ?? "null") as { paths: string[]; active: number } | null;
-			if (raw && Array.isArray(raw.paths) && raw.paths.length) {
-				this.list = raw.paths.map((path) => ({ uid: nextUid++, path }));
-				this.active = Math.min(Math.max(0, raw.active | 0), raw.paths.length - 1);
-			}
+			const raw = JSON.parse(localStorage.getItem(KEY) ?? "null") as Record<string, Saved> | null;
+			if (raw && typeof raw === "object") this.saved = raw;
+			const old = JSON.parse(localStorage.getItem(LEGACY_KEY) ?? "null") as Saved | null;
+			if (old && Array.isArray(old.paths) && old.paths.length) this.legacy = old;
 		} catch {
 			// corrupted store - start fresh
 		}
 	}
 
 	private save(): void {
-		if (!browser) return;
-		localStorage.setItem(KEY, JSON.stringify({ paths: this.list.map((t) => t.path), active: this.active }));
+		if (!browser || !this.space) return;
+		this.saved[this.space] = { paths: this.list.map((t) => t.path), active: this.active };
+		localStorage.setItem(KEY, JSON.stringify(this.saved));
+		if (this.legacy) {
+			this.legacy = null;
+			localStorage.removeItem(LEGACY_KEY);
+		}
 	}
 
-	/** Route changed: the active tab absorbs it (first load creates the tab). */
+	/**
+	 * Shows `spaceId`'s strip, as it was left on this device. Returns the
+	 * active tab's path, or "" when the space has no tabs here yet.
+	 */
+	use(spaceId: string): string {
+		if (spaceId === this.space) return this.list[this.active]?.path ?? "";
+		const s = this.saved[spaceId] ?? (this.space === "" ? this.legacy : null) ?? null;
+		this.space = spaceId;
+		if (s && Array.isArray(s.paths) && s.paths.length) {
+			this.list = s.paths.map((path) => ({ uid: nextUid++, path }));
+			this.active = Math.min(Math.max(0, s.active | 0), s.paths.length - 1);
+		} else {
+			this.list = [];
+			this.active = 0;
+		}
+		return this.list[this.active]?.path ?? "";
+	}
+
+	/** Drops a space's strip (the space was deleted or left). */
+	forget(spaceId: string): void {
+		if (!browser || !(spaceId in this.saved)) return;
+		delete this.saved[spaceId];
+		localStorage.setItem(KEY, JSON.stringify(this.saved));
+	}
+
+	/** Route changed: the active tab absorbs it (an empty strip gets its first tab). */
 	sync(path: string): void {
 		if (this.list.length === 0) {
 			this.list = [{ uid: nextUid++, path }];

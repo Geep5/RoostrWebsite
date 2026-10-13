@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { flushSync, onMount } from "svelte";
+	import { flushSync, onMount, untrack } from "svelte";
 	import { goto } from "$app/navigation";
 	import { page } from "$app/state";
 	import { activeSpace } from "$lib/space.svelte";
@@ -510,6 +510,28 @@
 	$effect(() => {
 		tabs.sync(page.url.pathname);
 	});
+	// Each space has its own strip (this device only): entering a space puts
+	// its tabs back and opens the one that was active there.
+	$effect(() => {
+		const id = activeSpace.id;
+		if (!authed || !id) return;
+		untrack(() => {
+			const booting = tabs.space === "";
+			const path = tabs.use(id);
+			const here = page.url.pathname as string;
+			// The page this window opened on joins the restored strip as its active tab.
+			if (booting) return tabs.sync(here);
+			// Phones show no tab strip: a space opens on its home, as before.
+			if (path && !isMobile) {
+				if (path !== here) void goto(path);
+				return;
+			}
+			// No tabs here yet (or a phone): the space's home - the graph stays, it is per space.
+			const target = here === "/app/graph" ? here : "/app";
+			tabs.sync(target);
+			if (target !== here) void goto(target);
+		});
+	});
 
 	function tabInfo(path: string): { icon: string; name: string; task?: boolean; done?: boolean } {
 		if (!path.startsWith("/app/object/")) {
@@ -529,11 +551,10 @@
 		return { icon: "📄", name: "Untitled" };
 	}
 
+	/** Switches space; the tab effect above restores its tabs (or opens its home). */
 	function selectSpace(id: string) {
 		activeSpace.id = id;
 		localStorage.setItem("glon.channel", id);
-		// Graph view is per-channel: switching channels swaps the graph in place.
-		if ((page.url.pathname as string) !== "/app/graph") void goto("/app");
 	}
 
 	async function newSpace() {

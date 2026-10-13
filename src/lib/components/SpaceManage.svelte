@@ -13,6 +13,7 @@
 	import { myNpub, listJoinRequests, clearJoinRequest, type JoinRequest } from "$lib/client-identity";
 	import { backend } from "$lib/client-backend";
 	import { onPairingChange } from "$lib/local-transport";
+	import { tabs } from "$lib/tabs.svelte";
 
 	let identityError = $state("");
 
@@ -44,9 +45,11 @@
 				await spaceApi.leave(object.id);
 			}
 			await refreshAll();
+			tabs.forget(object.id);
 			const next = store.channels[0]?.id ?? "";
+			// Switching space restores that space's tabs (app layout); with none left, home.
 			activeSpace.id = next;
-			await goto("/app");
+			if (!next) await goto("/app");
 		} finally {
 			deleting = false;
 		}
