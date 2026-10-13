@@ -300,14 +300,48 @@
 		applyView();
 	}
 
+	// Fingers down on the stage, for two-finger pinch zoom about their midpoint.
+	const pointers = new Map<number, { x: number; y: number }>();
+	let pinch: { d: number; s: number; wx: number; wy: number } | null = null;
+	/** A pinch ended this gesture: lifting the last finger must not pin what is under it. */
+	let pinched = false;
+	const fingerSpan = () => {
+		const [a, b] = [...pointers.values()];
+		return { d: Math.hypot(a.x - b.x, a.y - b.y), mx: (a.x + b.x) / 2, my: (a.y + b.y) / 2 };
+	};
+
 	function onDown(e: PointerEvent) {
 		touched = true;
 		cancelAnimationFrame(anim);
+		pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+		try {
+			stage!.setPointerCapture(e.pointerId);
+		} catch {
+			// The pointer already lifted: nothing to capture.
+		}
+		if (pointers.size === 2) {
+			const { d, mx, my } = fingerSpan();
+			const r = stage!.getBoundingClientRect();
+			pinch = { d: Math.max(1, d), s: v.s, wx: (mx - r.left - v.x) / v.s, wy: (my - r.top - v.y) / v.s };
+			pinched = true;
+			drag = null;
+			dragging = true;
+			return;
+		}
+		if (pointers.size === 1) pinched = false;
 		drag = { x: e.clientX, y: e.clientY, vx: v.x, vy: v.y, moved: false };
-		stage!.setPointerCapture(e.pointerId);
 	}
 
 	function onMove(e: PointerEvent) {
+		if (pointers.has(e.pointerId)) pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+		if (pinch && pointers.size >= 2) {
+			const { d, mx, my } = fingerSpan();
+			const r = stage!.getBoundingClientRect();
+			const s = Math.min(7, Math.max(0.02, (pinch.s * d) / pinch.d));
+			v = { s, x: mx - r.left - pinch.wx * s, y: my - r.top - pinch.wy * s };
+			applyView();
+			return;
+		}
 		if (drag) {
 			const dx = e.clientX - drag.x;
 			const dy = e.clientY - drag.y;
@@ -324,8 +358,17 @@
 		if (JSON.stringify(next) !== JSON.stringify(hover)) hover = next;
 	}
 
-	function onUp() {
-		if (drag && !drag.moved) pin = hover;
+	function onUp(e: PointerEvent) {
+		pointers.delete(e.pointerId);
+		if (pointers.size < 2) pinch = null;
+		if (pointers.size === 1) {
+			// One finger left after a pinch: it carries on panning from here.
+			const [rest] = [...pointers.values()];
+			drag = { x: rest.x, y: rest.y, vx: v.x, vy: v.y, moved: true };
+			return;
+		}
+		// A tap (no drag, no pinch) pins what is under it - a touch has no hover to read.
+		if (drag && !drag.moved && !pinched) pin = hitAt(e.clientX, e.clientY);
 		drag = null;
 		dragging = false;
 	}
@@ -370,7 +413,7 @@
 
 <div class="stage">
 	<!-- svelte-ignore a11y_no_static_element_interactions -->
-	<div class="canvas" bind:this={stage} onwheel={onWheel} onpointerdown={onDown} onpointermove={onMove} onpointerup={onUp} ondblclick={onDblClick} class:dragging>
+	<div class="canvas" bind:this={stage} onwheel={onWheel} onpointerdown={onDown} onpointermove={onMove} onpointerup={onUp} onpointercancel={onUp} ondblclick={onDblClick} class:dragging>
 		{#if graph}
 			{@const g = graph}
 			<svg width="100%" height="100%">
@@ -556,7 +599,7 @@
 						<div><div class="num">{graph.objectCount}</div><div class="mono kicker">OBJECTS</div></div>
 						<div><div class="num">{graph.props.length}</div><div class="mono kicker">PROPERTIES</div></div>
 					</div>
-					<div class="note">Hover a type, property or object. Click to pin. Scroll to zoom. Double-click an object to open it.</div>
+					<div class="note">Hover a type, property or object. Click to pin. Scroll or pinch to zoom. Double-click an object to open it.</div>
 				</div>
 			{/if}
 		</aside>
