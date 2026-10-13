@@ -1,531 +1,505 @@
 <script lang="ts">
 	import { goto } from "$app/navigation";
 	import { page } from "$app/state";
-	import { buildGraph, simStep, type ObjectGraph } from "$lib/graph";
-	import { fetchObject } from "$lib/api";
-	import { formatGlyph, spaceRelations } from "$lib/relations";
+	import { untrack } from "svelte";
+	import { buildSchemaGraph, type GraphObject, type GraphProperty, type GraphType, type SchemaGraph } from "$lib/graph";
+	import { spaceRelations } from "$lib/relations";
 	import { activeSpace } from "$lib/space.svelte";
 	import { store, refreshAll } from "$lib/data.svelte";
-	import { createGraphRenderer } from "$lib/graph-renderer";
+	import type { RelationDefJSON, ValueJSON } from "$lib/types";
 
-	let canvasEl = $state<HTMLCanvasElement>();
-	let labelHost = $state<HTMLDivElement>();
-	let status = $state("Loading graph…");
+	type Sel = { k: "type"; t: number } | { k: "prop"; p: string } | { k: "obj"; t: number; j: number };
 
-	const MAX_LABELS = 100; // Anytype's visible-label cull
-	/** Off-screen settling before the first paint: until it is essentially still, at most this long (ms). */
-	const WARM_MS = 1200;
-	/** "Essentially still": the layout energy the warm-up settles to before drawing. */
-	const WARM_DONE = 0.02;
+	/** Type→property curve bend: 0 straight, toward 1 pulled to the centre. */
+	const CURVATURE = 0.55;
+	const LEVELS = [
+		["Types", "Types as clusters, sized by object count"],
+		["Schema", "Properties appear; lines show which types use them"],
+		["Objects", "Individual objects and their values"],
+	] as const;
 
-	// Each channel gets its own graph (Anytype: one graph per space).
+	// Each space gets its own graph.
 	const defaultChannelId = $derived(store.channels[0]?.id ?? "");
 	const channelId = $derived(activeSpace.id || defaultChannelId);
-	const spaceName = $derived(store.channels.find((c) => c.id === channelId)?.name ?? "");
-	// ?focus=<objectId>: highlight + center that object (Anytype's
-	// "show in graph" from an open object).
+	// ?focus=<objectId>: pin that object and zoom to it ("show in graph").
 	const focusId = $derived(page.url.searchParams.get("focus") ?? "");
-	/** Tag and status values as their own nodes (Anytype's "show relations"); remembered per browser. */
-	let showValues = $state(typeof localStorage === "undefined" || localStorage.getItem("graph.values") !== "off");
-	$effect(() => {
-		localStorage.setItem("graph.values", showValues ? "on" : "off");
-	});
+	const relations = $derived(spaceRelations(store.relations, channelId));
 
+	let graph = $state<SchemaGraph | null>(null);
+	let status = $state("Loading graph…");
+	let hover = $state<Sel | null>(null);
+	let pin = $state<Sel | null>(null);
+	let level = $state(0);
+	let stage = $state<HTMLDivElement>();
+	let world = $state<SVGGElement>();
+	let zoomLabel = $state<HTMLSpanElement>();
+	const layers: Record<"far" | "schema" | "schemaLabels" | "obj", SVGGElement | undefined> = { far: undefined, schema: undefined, schemaLabels: undefined, obj: undefined };
+
+	// Built once per space (and once the definitions first load): rebuilding on
+	// every sync refresh would reset the view and drop what is pinned.
 	$effect(() => {
 		const id = channelId;
-		const el = canvasEl; // dep: re-run when the keyed canvas remounts
 		const isDefault = id === defaultChannelId && id !== "";
-		const valueRels = showValues ? spaceRelations(store.relations, id) : [];
-		if (!id) {
-			void refreshAll(); // channels not loaded yet; effect re-runs when they land
+		if (!id || !store.loaded) {
+			void refreshAll(); // channels not loaded yet; the effect re-runs when they land
 			return;
 		}
-		if (!el || !labelHost) return;
-		let cleanup: (() => void) | null = null;
+		const rels = untrack(() => relations);
+		const types = untrack(() => store.types);
 		let cancelled = false;
 		status = "Loading graph…";
-
-		void (async () => {
-			const graph: ObjectGraph = await buildGraph(id, isDefault, valueRels);
-			if (graph.nodes.length === 0) {
-				status = "Nothing in this space yet.";
-				return;
-			}
-			// Warm start (d3's simulation.tick() before the first paint): the
-			// layout does nearly all its moving in the first few dozen steps, and
-			// drawing those is the jitter you saw on open. Run them off-screen,
-			// in short slices so the page stays responsive; what's left to settle
-			// on screen moves well under a pixel a frame.
-			let warmAlpha = 1;
-			const warmUntil = performance.now() + WARM_MS;
-			while (warmAlpha > WARM_DONE && performance.now() < warmUntil) {
-				const slice = Math.min(warmUntil, performance.now() + 40);
-				while (warmAlpha > WARM_DONE && performance.now() < slice) {
-					simStep(graph, warmAlpha);
-					warmAlpha *= 0.99; // the frame loop's 0.98 per two steps
-				}
-				await new Promise((r) => setTimeout(r, 0));
+		void buildSchemaGraph(id, isDefault, rels, types)
+			.then((g) => {
 				if (cancelled) return;
-			}
-			status = "";
-			if (!canvasEl || cancelled) return;
-
-			const n = graph.nodes.length;
-			const centers = new Float32Array(n * 2);
-			const radii = new Float32Array(n);
-			const tints = new Float32Array(n * 3);
-			const flags = new Float32Array(n);
-			for (const [i, node] of graph.nodes.entries()) {
-				radii[i] = node.radius;
-				tints.set(node.color, i * 3);
-			}
-			const m = graph.edges.length;
-			const starts = new Float32Array(m * 2);
-			const ends = new Float32Array(m * 2);
-			const ecolors = new Float32Array(m * 4);
-			for (const [i, e] of graph.edges.entries()) ecolors.set(e.color, i * 4);
-			// three.js (lib/graph-renderer.ts) draws straight from these arrays.
-			const renderer = createGraphRenderer(canvasEl, { centers, radii, tints, flags, starts, ends, colors: ecolors }, [0.047, 0.055, 0.066]);
-
-			// View state (world → screen: (p - offset) * scale + viewport/2).
-			let scale = 1;
-			let offsetX = 0;
-			let offsetY = 0;
-			// The layout never moves on its own after opening: it settled
-			// off-screen above, and dragging places only the held node.
-			let hovered = -1;
-			const focused = focusId ? graph.nodes.findIndex((node) => node.id === focusId) : -1;
-			let dragNode = -1;
-			let panning = false;
-			let moved = 0;
-			let lastX = 0;
-			let lastY = 0;
-
-			// Label pool.
-			const labels: HTMLDivElement[] = [];
-			for (let i = 0; i < Math.min(MAX_LABELS, n); i++) {
-				const div = document.createElement("div");
-				div.className = "graph-label";
-				labelHost!.appendChild(div);
-				labels.push(div);
-			}
-			// Type-neighborhood captions: one per anchor, always on.
-			const anchorLabels: HTMLDivElement[] = [];
-			for (const a of graph.anchors) {
-				const div = document.createElement("div");
-				div.className = "graph-anchor-label";
-				div.textContent = `${a.label} · ${a.count}`;
-				labelHost!.appendChild(div);
-				anchorLabels.push(div);
-			}
-			// ── Hover preview: a plain HTML card over the canvas - the
-			// object's fields and first blocks, fetched once and cached. ──
-			const card = document.createElement("div");
-			card.className = "graph-card";
-			card.style.display = "none";
-			labelHost!.appendChild(card);
-			const cardCache = new Map<string, string>();
-			let cardFor = -1;
-			let cardTimer: ReturnType<typeof setTimeout> | undefined;
-			const esc = (t: string) => t.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]!);
-			const renderCard = async (id: string): Promise<string> => {
-				const hit = cardCache.get(id);
-				if (hit) return hit;
-				const o = await fetchObject(id);
-				const name = esc(o.fields["name"]?.stringValue || "Untitled");
-				const icon = esc(o.fields["iconEmoji"]?.stringValue ?? "");
-				// Property rows carry the property's own emoji and display name.
-				const defs = spaceRelations(store.relations, o.fields["channel"]?.stringValue || store.channels[0]?.id || "");
-				const rows: string[] = [];
-				for (const [k, v] of Object.entries(o.fields)) {
-					if (["name", "iconEmoji", "channel", "collectionIds", "viewFilters", "viewSorts", "viewRelations", "pinnedIds", "setOf", "featuredRelations"].includes(k)) continue;
-					let val = "";
-					let valHtml = "";
-					if (v.stringValue !== undefined) val = v.stringValue;
-					else if (v.boolValue !== undefined) valHtml = `<span class="gc-chk${v.boolValue ? " on" : ""}"></span>`;
-					else if (v.intValue !== undefined) val = new Date(v.intValue).getFullYear() > 1990 ? new Date(v.intValue).toLocaleDateString() : String(v.intValue);
-					else if (v.valuesValue) val = v.valuesValue.items.map((i) => i.stringValue ?? "").filter(Boolean).join(", ");
-					if (!val && !valHtml) continue;
-					const def = defs.find((r) => r.key === k);
-					const label = def ? `${def.iconEmoji || formatGlyph(def.format)} ${def.name || k}` : k;
-					rows.push(`<div class="gc-row"><span class="gc-k">${esc(label)}</span><span class="gc-v">${valHtml || esc(val.slice(0, 60))}</span></div>`);
-					if (rows.length >= 4) break;
-				}
-				const byId = new Map(o.blocks.map((b) => [b.id, b]));
-				const skip = new Set(["__discussion__"]);
-				const lines: string[] = [];
-				const walk = (bid: string) => {
-					if (skip.has(bid) || lines.length >= 8) return;
-					const b = byId.get(bid);
-					if (!b) return;
-					const t = b.content.text;
-					if (t?.text?.trim()) {
-						const st = t.style ?? 0;
-						const cls = st >= 1 && st <= 3 ? "gc-h" : st === 8 ? "gc-check" : st === 6 || st === 7 ? "gc-li" : "gc-p";
-						const pre = st === 8 ? `<span class="gc-chk${t.checked ? " on" : ""}"></span> ` : st === 6 ? "\u2022 " : "";
-						lines.push(`<div class="${cls}">${pre}${esc(t.text.slice(0, 90))}</div>`);
-					}
-					for (const c of b.childrenIds ?? []) walk(c);
-				};
-				const roots = o.blocks.filter((b) => !o.blocks.some((x) => (x.childrenIds ?? []).includes(b.id)));
-				for (const r of roots) walk(r.id);
-				const html = `<div class="gc-title">${icon ? icon + " " : ""}${name}</div>${rows.join("")}${lines.length ? `<div class="gc-body">${lines.join("")}</div>` : ""}`;
-				cardCache.set(id, html);
-				return html;
-			};
-			const showCard = (i: number) => {
-				clearTimeout(cardTimer);
-				if (i < 0) {
-					cardFor = -1;
-					card.style.display = "none";
-					return;
-				}
-				if (i === cardFor) return;
-				cardTimer = setTimeout(() => {
-					cardFor = i;
-					const node = graph.nodes[i];
-					const html = node.value
-						? Promise.resolve(`<div class="gc-title">${esc(node.name)}</div><div class="gc-row"><span class="gc-k">${esc(store.relations.find((r) => r.id === node.ref)?.name || node.value.relationKey)}</span><span class="gc-v">${node.value.count} objects</span></div>`)
-						: renderCard(node.id);
-					void html.then((html) => {
-						if (cardFor !== i) return;
-						card.innerHTML = html;
-						card.style.display = "block";
-					});
-				}, 260);
-			};
-
-			const cssSize = () => ({ w: canvasEl!.clientWidth, h: canvasEl!.clientHeight });
-
-			const toWorld = (sx: number, sy: number) => {
-				const { w, h } = cssSize();
-				return { x: (sx - w / 2) / scale + offsetX, y: (sy - h / 2) / scale + offsetY };
-			};
-
-			const pick = (sx: number, sy: number): number => {
-				const p = toWorld(sx, sy);
-				let best = -1;
-				let bestD = Infinity;
-				for (const [i, node] of graph.nodes.entries()) {
-					const d = Math.hypot(node.x - p.x, node.y - p.y);
-					// The shader clamps dots to >=3px on screen - pick the same.
-					if (d <= Math.max(node.radius, 3 / scale) + 4 / scale && d < bestD) {
-						bestD = d;
-						best = i;
-					}
-				}
-				return best;
-			};
-
-			const fit = () => {
-				const { w, h } = cssSize();
-				if (focused >= 0) {
-					// Center the focused object; comfortable fixed zoom.
-					scale = 1.2;
-					offsetX = graph.nodes[focused].x;
-					offsetY = graph.nodes[focused].y;
-					return;
-				}
-				let r = 1;
-				for (const node of graph.nodes) r = Math.max(r, Math.hypot(node.x, node.y) + node.radius + 40);
-				scale = Math.min(1.6, Math.min(w, h) / (2 * r));
-				offsetX = 0;
-				offsetY = 0;
-			};
-
-			fit(); // once, on the settled layout - the frame loop only re-fits while it moves
-
-			// ── Interaction ─────────────────────────────────────────
-			const el = canvasEl!;
-			el.addEventListener("pointerdown", (e) => {
-				el.setPointerCapture(e.pointerId);
-				moved = 0;
-				lastX = e.offsetX;
-				lastY = e.offsetY;
-				const hit = pick(e.offsetX, e.offsetY);
-				if (hit >= 0) {
-					// Dragging places one node: the rest of the layout stays put (no
-					// reheat - waking the simulation re-settled every node).
-					dragNode = hit;
-				} else {
-					panning = true;
-				}
-			});
-			el.addEventListener("pointermove", (e) => {
-				const dx = e.offsetX - lastX;
-				const dy = e.offsetY - lastY;
-				if (dragNode >= 0) {
-					moved += Math.abs(dx) + Math.abs(dy);
-					const p = toWorld(e.offsetX, e.offsetY);
-					graph.nodes[dragNode].x = p.x;
-					graph.nodes[dragNode].y = p.y;
-					lastX = e.offsetX;
-					lastY = e.offsetY;
-				} else if (panning) {
-					moved += Math.abs(dx) + Math.abs(dy);
-					offsetX -= dx / scale;
-					offsetY -= dy / scale;
-					lastX = e.offsetX;
-					lastY = e.offsetY;
-				} else {
-					hovered = pick(e.offsetX, e.offsetY);
-					el.style.cursor = hovered >= 0 ? "pointer" : "grab";
-					showCard(hovered);
-				}
-			});
-			el.addEventListener("pointerup", (e) => {
-				if (dragNode >= 0 && moved < 4) {
-					void goto(`/app/object/${graph.nodes[dragNode].ref}`);
-				}
-				dragNode = -1;
-				panning = false;
-			});
-			el.addEventListener("wheel", (e) => {
-				e.preventDefault();
-				const { w, h } = cssSize();
-				const before = toWorld(e.offsetX, e.offsetY);
-				scale = Math.min(8, Math.max(0.05, scale * Math.exp(-e.deltaY * 0.0015)));
-				// Keep the point under the cursor fixed.
-				offsetX = before.x - (e.offsetX - w / 2) / scale;
-				offsetY = before.y - (e.offsetY - h / 2) / scale;
-			}, { passive: false });
-
-			// ── Frame loop ──────────────────────────────────────────
-			const stop = renderer.loop(() => {
-				const { w, h } = cssSize();
-				for (const [i, node] of graph.nodes.entries()) {
-					centers[i * 2] = node.x;
-					centers[i * 2 + 1] = node.y;
-					flags[i] = i === hovered || i === focused ? 1 : node.hasAgent ? 0.5 : 0;
-				}
-				for (const [i, e] of graph.edges.entries()) {
-					starts[i * 2] = graph.nodes[e.a].x;
-					starts[i * 2 + 1] = graph.nodes[e.a].y;
-					ends[i * 2] = graph.nodes[e.b].x;
-					ends[i * 2 + 1] = graph.nodes[e.b].y;
-				}
-				renderer.render({ scale, offsetX, offsetY, width: w, height: h });
-
-				// Labels: on-screen nodes first, then biggest - a zoomed-in view
-				// must label what you can SEE, not the vault's heavyweights.
-				const order = graph.nodes
-					.map((node, i) => {
-						const sx = (node.x - offsetX) * scale + w / 2;
-						const sy = (node.y - offsetY) * scale + h / 2;
-						const vis = sx >= -40 && sx <= w + 40 && sy >= -20 && sy <= h + 20 ? 1000 : 0;
-						return { i, r: vis + node.radius + (i === hovered ? 100 : 0) + (i === focused ? 200 : 0) };
-					})
-					.sort((a, b) => b.r - a.r);
-				for (const [li, div] of labels.entries()) {
-					const entry = order[li];
-					if (!entry) {
-						div.style.display = "none";
-						continue;
-					}
-					const node = graph.nodes[entry.i];
-					const sx = (node.x - offsetX) * scale + w / 2;
-					const sy = (node.y - offsetY) * scale + h / 2 + node.radius * scale + 4;
-					if (sx < -80 || sx > w + 80 || sy < -20 || sy > h + 20 || scale < 0.35) {
-						div.style.display = "none";
-						continue;
-					}
-					div.style.display = "block";
-					div.style.transform = `translate(${sx}px, ${sy}px) translateX(-50%)`;
-					div.textContent = node.name;
-					div.classList.toggle("hot", entry.i === hovered);
-				}
-				for (const [ai, div] of anchorLabels.entries()) {
-					const a = graph.anchors[ai];
-					// The caption floats above its neighborhood's top edge.
-					const spread = 40 + 11 * Math.sqrt(a.count);
-					const sx = (a.x - offsetX) * scale + w / 2;
-					const sy = (a.y - spread - offsetY) * scale + h / 2 - 22;
-					if (sx < -140 || sx > w + 140 || sy < -30 || sy > h + 30) {
-						div.style.display = "none";
-						continue;
-					}
-					div.style.display = "block";
-					div.style.transform = `translate(${sx}px, ${sy}px) translateX(-50%)`;
-				}
-				if (cardFor >= 0 && cardFor === hovered) {
-					const node = graph.nodes[cardFor];
-					const sx = (node.x - offsetX) * scale + w / 2;
-					const sy = (node.y - offsetY) * scale + h / 2;
-					const left = Math.min(Math.max(8, sx + 16), w - 268);
-					const top = Math.min(Math.max(8, sy - 20), h - 180);
-					card.style.transform = `translate(${left}px, ${top}px)`;
-				} else if (cardFor >= 0) {
-					showCard(-1);
-				}
-			});
-
-			cleanup = () => {
-				stop();
-				renderer.destroy();
-			};
-		})().catch((e) => (status = `Graph failed: ${e}`));
-
+				graph = g;
+				hover = null;
+				pin = null;
+				status = g.types.length === 0 ? "Nothing in this space yet." : "";
+			})
+			.catch((e) => (status = `Graph failed: ${e}`));
 		return () => {
 			cancelled = true;
-			cleanup?.();
 		};
 	});
+
+	const sel = $derived(pin ?? hover);
+	const selType = $derived(graph && sel && sel.k !== "prop" ? graph.types[sel.t] : null);
+	const selProp = $derived(graph && sel?.k === "prop" ? graph.props.find((p) => p.key === sel.p) ?? null : null);
+	const selObj = $derived(selType && sel?.k === "obj" ? selType.objects[sel.j] : null);
+
+	const typeOn = (t: GraphType) => !sel || (selType ? t === selType : !!selProp?.users.includes(t));
+	const propOn = (p: GraphProperty) => !sel || (selObj ? selObj.held.has(p.key) : selType ? selType.usage.has(p.key) : p === selProp);
+
+	/** Type cluster rim (facing the centre) → property, bent toward the centre. */
+	function edgePath(t: GraphType, p: { x: number; y: number }): string {
+		const sx = t.x - Math.cos(t.a) * t.rad;
+		const sy = t.y - Math.sin(t.a) * t.rad;
+		return `M${sx},${sy} Q${((sx + p.x) / 2) * (1 - CURVATURE)},${((sy + p.y) / 2) * (1 - CURVATURE)} ${p.x},${p.y}`;
+	}
+
+	/** A label along the radius at angle `a`; flipped on the left half so it never reads upside down. `out`: text runs away from the centre. */
+	function radial(a: number, dist: number, out: boolean) {
+		const x = Math.cos(a) * dist;
+		const y = Math.sin(a) * dist;
+		const deg = (a * 180) / Math.PI;
+		const flip = Math.cos(a) < -0.0001;
+		return { x, y, anchor: out === flip ? "end" : "start", transform: `rotate(${flip ? deg + 180 : deg} ${x} ${y})` };
+	}
+
+	const propRadius = (p: GraphProperty) => 4 + Math.sqrt(p.users.length) * 2.4;
+
+	// ── View: world → screen is translate(x, y) scale(s); kept off the reactive graph so panning never re-renders ──
+	let v = { s: 0.3, x: 0, y: 0 };
+	let box = { w: 0, h: 0 };
+	let touched = false;
+	let anim = 0;
+	const wide = () => box.w > 900;
+	/** Screen x of the world origin: left of centre when the side panel takes the right edge. */
+	const centreX = () => (wide() ? (box.w - 300) / 2 : box.w / 2);
+
+	function fitView() {
+		const span = Math.min(wide() ? box.w - 360 : box.w * 0.95, box.h);
+		return { s: Math.max(0.02, span / (2 * (graph?.extent ?? 1750))), x: centreX(), y: box.h / 2 };
+	}
+
+	function applyView() {
+		const { s, x, y } = v;
+		world?.setAttribute("transform", `translate(${x},${y}) scale(${s})`);
+		const ramp = (a: number, b: number) => Math.min(1, Math.max(0, (s - a) / (b - a)));
+		const schema = ramp(0.36, 0.52);
+		const obj = ramp(1.4, 1.9);
+		const set = (k: keyof typeof layers, o: number) => {
+			const el = layers[k];
+			if (!el) return;
+			el.style.opacity = String(o);
+			// Object labels sit on the dots and must never take their pointer.
+			el.style.pointerEvents = o < 0.3 || k === "obj" ? "none" : "auto";
+		};
+		set("far", 1 - schema);
+		set("schema", schema);
+		set("obj", obj);
+		set("schemaLabels", schema * (1 - obj * 0.35));
+		if (zoomLabel) zoomLabel.textContent = `${Math.round(s * 100)}%`;
+		const next = s < 0.44 ? 0 : s < 1.65 ? 1 : 2;
+		if (next !== level) level = next;
+	}
+
+	/** Eased zoom to scale `s2` centred on world point (cx, cy). */
+	function zoomTo(s2: number, cx: number, cy: number) {
+		cancelAnimationFrame(anim);
+		touched = true;
+		const from = { ...v };
+		const t0 = performance.now();
+		const fc = { x: (centreX() - from.x) / from.s, y: (box.h / 2 - from.y) / from.s };
+		const step = (now: number) => {
+			const k = Math.min(1, (now - t0) / 700);
+			const e = k < 0.5 ? 4 * k * k * k : 1 - Math.pow(-2 * k + 2, 3) / 2;
+			const s = Math.exp(Math.log(from.s) + (Math.log(s2) - Math.log(from.s)) * e);
+			v = { s, x: centreX() - (fc.x + (cx - fc.x) * e) * s, y: box.h / 2 - (fc.y + (cy - fc.y) * e) * s };
+			applyView();
+			if (k < 1) anim = requestAnimationFrame(step);
+		};
+		anim = requestAnimationFrame(step);
+	}
+
+	function goLevel(l: number) {
+		if (!graph) return;
+		const fit = fitView();
+		if (l === 0) zoomTo(fit.s, 0, 0);
+		else if (l === 1) zoomTo(Math.max(0.62, fit.s * 1.9), 0, 0);
+		else if (selObj) zoomTo(2.3, selObj.x, selObj.y);
+		else {
+			const t = selType ?? graph.types.reduce((a, b) => (b.objects.length > a.objects.length ? b : a));
+			zoomTo(2.3, t.x, t.y);
+		}
+	}
+
+	// Fit on load and on resize until the user takes over; ?focus zooms to its object.
+	// Only the stage, the graph and the focus re-run it: the view writes `level` and
+	// `pin`, and tracking those would re-fit (and cancel) every zoom the user starts.
+	$effect(() => {
+		const el = stage;
+		const g = graph;
+		const focus = focusId;
+		if (!el || !g) return;
+		const refit = () => {
+			const r = el.getBoundingClientRect();
+			if (r.width === 0 || r.height === 0) return;
+			box = { w: r.width, h: r.height };
+			if (!touched) {
+				v = fitView();
+				applyView();
+			}
+		};
+		untrack(() => {
+			touched = false;
+			refit();
+			for (const t of focus ? g.types : []) {
+				const j = t.objects.findIndex((o) => o.id === focus);
+				if (j < 0) continue;
+				pin = { k: "obj", t: t.index, j };
+				zoomTo(2.3, t.objects[j].x, t.objects[j].y);
+				break;
+			}
+		});
+		const ro = new ResizeObserver(refit);
+		ro.observe(el);
+		return () => {
+			ro.disconnect();
+			cancelAnimationFrame(anim);
+		};
+	});
+
+	// ── Pointer: drag pans, scroll zooms about the cursor, click pins what is under it ──
+	let drag: { x: number; y: number; vx: number; vy: number; moved: boolean } | null = null;
+	let dragging = $state(false);
+
+	function hitOf(target: EventTarget | null): Sel | null {
+		const d = target instanceof Element ? (target as SVGElement).dataset : undefined;
+		if (!d?.k) return null;
+		if (d.k === "type") return { k: "type", t: Number(d.t) };
+		if (d.k === "prop") return { k: "prop", p: d.p! };
+		// Dots are too small to aim at until zoomed in: before that they stand for their type.
+		return v.s > 1.2 ? { k: "obj", t: Number(d.t), j: Number(d.j) } : { k: "type", t: Number(d.t) };
+	}
+
+	function onWheel(e: WheelEvent) {
+		e.preventDefault();
+		touched = true;
+		cancelAnimationFrame(anim);
+		const r = stage!.getBoundingClientRect();
+		const mx = e.clientX - r.left;
+		const my = e.clientY - r.top;
+		const s2 = Math.min(7, Math.max(0.02, v.s * Math.exp(-e.deltaY * (e.ctrlKey ? 0.01 : 0.0016))));
+		const f = s2 / v.s;
+		v = { s: s2, x: mx - (mx - v.x) * f, y: my - (my - v.y) * f };
+		applyView();
+	}
+
+	function onDown(e: PointerEvent) {
+		touched = true;
+		cancelAnimationFrame(anim);
+		drag = { x: e.clientX, y: e.clientY, vx: v.x, vy: v.y, moved: false };
+		stage!.setPointerCapture(e.pointerId);
+	}
+
+	function onMove(e: PointerEvent) {
+		if (drag) {
+			const dx = e.clientX - drag.x;
+			const dy = e.clientY - drag.y;
+			if (Math.abs(dx) + Math.abs(dy) > 4) drag.moved = dragging = true;
+			if (drag.moved) {
+				v.x = drag.vx + dx;
+				v.y = drag.vy + dy;
+				applyView();
+				return;
+			}
+		}
+		// Captured pointers report the stage as target: hit-test the point instead.
+		const next = hitOf(document.elementFromPoint(e.clientX, e.clientY));
+		if (JSON.stringify(next) !== JSON.stringify(hover)) hover = next;
+	}
+
+	function onUp() {
+		if (drag && !drag.moved) pin = hover;
+		drag = null;
+		dragging = false;
+	}
+
+	function onDblClick(e: MouseEvent) {
+		const hit = hitOf(document.elementFromPoint(e.clientX, e.clientY));
+		if (hit?.k === "obj" && graph) void goto(`/app/object/${graph.types[hit.t].objects[hit.j].id}`);
+	}
+
+	// ── Panel ──
+	const pct = (u: number) => `${Math.round(u * 100)}%`;
+	const relByKey = $derived(new Map(relations.map((r) => [r.key, r])));
+	const nameById = $derived(new Map(store.summaries.map((s) => [s.id, s.name])));
+
+	function formatValue(rel: RelationDefJSON | undefined, value: ValueJSON): string {
+		const items = value.valuesValue ? value.valuesValue.items : [value];
+		return items
+			.map((it) => {
+				if (it.linkValue) return nameById.get(it.linkValue.targetId) || "Untitled";
+				if (it.boolValue !== undefined) return it.boolValue ? "Yes" : "No";
+				if (it.intValue !== undefined) return rel?.format === "date" ? new Date(it.intValue).toLocaleDateString() : String(it.intValue);
+				if (it.floatValue !== undefined) return String(it.floatValue);
+				const s = it.stringValue ?? "";
+				if (rel?.format === "object") return nameById.get(s) || "Untitled";
+				return rel?.options.find((o) => o.id === s)?.text ?? s;
+			})
+			.filter(Boolean)
+			.join(", ");
+	}
+
+	function objectFields(o: GraphObject) {
+		return [...o.held].map((k) => ({ k: relByKey.get(k)?.name || k, v: formatValue(relByKey.get(k), o.fields[k]) }));
+	}
 </script>
 
-<svelte:head><title>Graph — glon</title></svelte:head>
+<svelte:head><title>Graph — Roostr</title></svelte:head>
 
 <div class="stage">
-	{#key `${channelId}:${showValues}`}
-		<canvas bind:this={canvasEl}></canvas>
-		<div class="labels" bind:this={labelHost}></div>
-	{/key}
+	<!-- svelte-ignore a11y_no_static_element_interactions -->
+	<div class="canvas" bind:this={stage} onwheel={onWheel} onpointerdown={onDown} onpointermove={onMove} onpointerup={onUp} ondblclick={onDblClick} class:dragging>
+		{#if graph}
+			{@const g = graph}
+			<svg width="100%" height="100%">
+				<g bind:this={world}>
+					<g bind:this={layers.schema}>
+						<g class="screen">
+							{#each g.types as t (t.key)}
+								{#each [...t.usage] as [key, u] (key)}
+									{@const p = g.props.find((x) => x.key === key)}
+									{#if p}
+										{@const lit = sel ? (selType ? t === selType : selProp === p) : false}
+										<path d={edgePath(t, p)} fill="none" stroke={t.color} stroke-linecap="round" stroke-width={lit ? 1.5 + u * 5 : 0.8 + u * 3.2} stroke-opacity={sel && !lit ? 0.035 : lit ? 0.5 + u * 0.45 : 0.1 + u * 0.32} />
+									{/if}
+								{/each}
+							{/each}
+						</g>
+						{#if selType && sel?.k === "type"}
+							{#each g.props as p (p.key)}
+								{#if !selType.usage.has(p.key)}
+									<path d={edgePath(selType, p)} fill="none" stroke={selType.color} stroke-opacity="0.28" stroke-width="1.2" stroke-dasharray="3 9" />
+								{/if}
+							{/each}
+						{/if}
+						{#each g.props as p (p.key)}
+							{#each p.targets as tt (tt.key)}
+								{@const ex = tt.x - Math.cos(tt.a) * tt.rad}
+								{@const ey = tt.y - Math.sin(tt.a) * tt.rad}
+								{@const lit = !!sel && (selProp === p || (!!selType && !selObj && selType.usage.has(p.key)) || (!!selObj && selObj.held.has(p.key)))}
+								<path d="M{p.x},{p.y} Q{(p.x + ex) * 0.15},{(p.y + ey) * 0.15} {ex},{ey}" fill="none" stroke="#e7e9ee" stroke-opacity={lit ? 0.55 : sel ? 0.03 : 0.1} stroke-width={lit ? 2 : 1.2} stroke-dasharray="2 7" stroke-linecap="round" />
+							{/each}
+						{/each}
+						<text y="-10" text-anchor="middle" class="sans" font-size="30" font-weight="500" fill="#c9cfdc" pointer-events="none">{g.props.length} properties in use</text>
+						<text y="26" text-anchor="middle" class="sans" font-size="18" fill="#6f7686" pointer-events="none">any type can hold any of them</text>
+					</g>
+
+					<g bind:this={layers.far}>
+						<circle r={g.rp} fill="rgba(255,255,255,0.02)" stroke="rgba(255,255,255,0.18)" stroke-width="3" stroke-dasharray="4 14" />
+						<text y="-18" text-anchor="middle" class="sans" font-size="96" font-weight="500" fill="#e7e9ee">{g.props.length}</text>
+						<text y="58" text-anchor="middle" class="mono" font-size="30" letter-spacing="4" fill="#7d8496">SHARED PROPERTIES</text>
+						{#each g.types as t (t.key)}
+							{@const on = typeOn(t)}
+							{@const l = radial(t.a, g.rt + t.rad + 40, true)}
+							<line x1={Math.cos(t.a) * (g.rp + 16)} y1={Math.sin(t.a) * (g.rp + 16)} x2={t.x - Math.cos(t.a) * (t.rad + 8)} y2={t.y - Math.sin(t.a) * (t.rad + 8)} stroke={t.color} stroke-opacity={on ? 0.45 : 0.08} stroke-width={2 + t.usage.size * 2.2} stroke-linecap="round" />
+							<text x={l.x} y={l.y} text-anchor={l.anchor} transform={l.transform} dominant-baseline="central" class="sans" font-size="60" letter-spacing="3" data-k="type" data-t={t.index}
+								><tspan fill={on ? "#e7e9ee" : "#4a4f5c"} font-weight="500" data-k="type" data-t={t.index}>{t.name.toUpperCase()}</tspan><tspan fill={on ? t.color : "#3a3f4a"} dx="18" data-k="type" data-t={t.index}>{t.objects.length}</tspan></text
+							>
+						{/each}
+					</g>
+
+					{#each g.types as t (t.key)}
+						{@const isSel = selType === t}
+						<g opacity={typeOn(t) ? 1 : 0.18}>
+							<circle cx={t.x} cy={t.y} r={t.rad} fill={t.color} fill-opacity={isSel ? 0.14 : 0.06} stroke={t.color} stroke-opacity={isSel ? 0.7 : 0.22} stroke-width={isSel ? 2.5 : 1.5} data-k="type" data-t={t.index} />
+							{#each t.objects as o, j (o.id)}
+								{@const on = selObj === o}
+								<circle cx={o.x} cy={o.y} r={on ? 6.5 : 4.3} fill={t.color} stroke={on ? "#fff" : "none"} stroke-width="1.5" data-k="obj" data-t={t.index} data-j={j} />
+							{/each}
+						</g>
+					{/each}
+
+					<g bind:this={layers.schemaLabels}>
+						{#each g.props as p (p.key)}
+							{@const on = propOn(p)}
+							{@const idle = !!selType && !selType.usage.has(p.key)}
+							{@const r = propRadius(p)}
+							{@const l = radial(p.a, g.rp - r - 14, false)}
+							<circle cx={p.x} cy={p.y} r={r + 8} fill="transparent" data-k="prop" data-p={p.key} />
+							<circle cx={p.x} cy={p.y} {r} fill={on && !idle ? "#e9ebf0" : "#0c0e13"} stroke={idle ? "rgba(255,255,255,0.35)" : on ? "#e9ebf0" : "#3a3f4a"} stroke-width="2" stroke-dasharray={idle ? "3 3" : undefined} pointer-events="none" />
+							{#if p.targets.length}
+								<circle cx={p.x} cy={p.y} r={r + 5} fill="none" stroke={on ? "#e9ebf0" : "#3a3f4a"} stroke-opacity="0.5" stroke-width="1" pointer-events="none" />
+							{/if}
+							<text x={l.x} y={l.y} text-anchor={l.anchor} transform={l.transform} dominant-baseline="central" class="mono" font-size="17" fill={idle ? "#6f7686" : on ? "#dfe2ea" : "#3f4450"} data-k="prop" data-p={p.key}>{p.name}</text>
+						{/each}
+						{#each g.types as t (t.key)}
+							{@const on = typeOn(t)}
+							{@const l = radial(t.a, g.rt + t.rad + 18, true)}
+							<text x={l.x} y={l.y} text-anchor={l.anchor} transform={l.transform} dominant-baseline="central" class="sans" font-size="22" data-k="type" data-t={t.index}
+								><tspan fill={on ? "#e7e9ee" : "#4f5461"} font-weight="500" data-k="type" data-t={t.index}>{t.icon ? `${t.icon} ` : ""}{t.name}</tspan><tspan fill={on ? t.color : "#3d424d"} dx="8" class="mono" font-size="17" data-k="type" data-t={t.index}>{t.objects.length}</tspan></text
+							>
+						{/each}
+					</g>
+
+					<g bind:this={layers.obj} pointer-events="none">
+						{#each g.types as t (t.key)}
+							{#each t.objects as o (o.id)}
+								<text x={o.x + 6.5} y={o.y} font-size="4.2" class="sans" fill={selObj === o ? "#fff" : "#c6cbd6"} dominant-baseline="central">{o.name}</text>
+							{/each}
+						{/each}
+					</g>
+				</g>
+			</svg>
+		{/if}
+	</div>
+
 	{#if status}<p class="status">{status}</p>{/if}
-	<label class="toggle" title="Show tag and status values as nodes linking the objects that share them">
-		<input type="checkbox" bind:checked={showValues} /> Properties
-	</label>
+
+	{#if graph && !status}
+		<div class="intro">
+			<div class="mono eyebrow">Object graph</div>
+			<div class="lede">Everything is an object. Types group objects. Properties are shared: any type can hold any of them, and lines appear only where they’re used.</div>
+		</div>
+
+		<aside class="panel">
+			{#if selObj && selType}
+				<div class="col">
+					<div class="obj-head">
+						<div class="row"><span class="dot" style:background={selType.color}></span><span class="mono kicker">{selType.name.toUpperCase()}</span></div>
+						<div class="title">{selObj.name}</div>
+					</div>
+					<div>
+						{#each objectFields(selObj) as f (f.k)}
+							<div class="field"><span class="mono fk">{f.k}</span><span class="fv">{f.v}</span></div>
+						{/each}
+					</div>
+					<div class="note">{graph.props.length + graph.idle.length - selObj.held.size} other properties available, empty</div>
+					<a class="open" href="/app/object/{selObj.id}">Open object</a>
+				</div>
+			{:else if selType}
+				<div class="col">
+					<div class="row">
+						<span class="dot big" style:background={selType.color}></span>
+						<span class="title grow">{selType.icon ? `${selType.icon} ` : ""}{selType.name}</span>
+						<span class="mono muted small">{selType.objects.length} objects</span>
+					</div>
+					<div class="mono kicker">IN USE · {selType.usage.size} OF {graph.props.length + graph.idle.length}</div>
+					<div class="bars">
+						{#each [...selType.usage].sort((a, b) => b[1] - a[1]) as [key, u] (key)}
+							<div class="bar-row">
+								<span class="bar-name">{relByKey.get(key)?.name || key}</span>
+								<span class="track"><span class="fill" style:width={pct(u)} style:background={selType.color}></span></span>
+								<span class="mono muted small right">{pct(u)}</span>
+							</div>
+						{/each}
+					</div>
+					<div class="mono kicker">AVAILABLE, UNUSED</div>
+					<div class="chips">
+						{#each [...graph.props.filter((p) => !selType.usage.has(p.key)).map((p) => p.name), ...graph.idle.map((r) => r.name || r.key)] as name (name)}
+							<span class="mono chip">{name}</span>
+						{/each}
+					</div>
+				</div>
+			{:else if selProp}
+				{@const users = [...selProp.users].sort((a, b) => b.usage.get(selProp.key)! * b.objects.length - a.usage.get(selProp.key)! * a.objects.length)}
+				<div class="col">
+					<div class="row baseline">
+						<span class="mono title grow">{selProp.icon ? `${selProp.icon} ` : ""}{selProp.name}</span>
+						<span class="mono muted small">{selProp.targets.length ? `→ ${selProp.targets.map((t) => t.name).join(", ")}` : selProp.format}</span>
+					</div>
+					<div class="mono kicker">USED BY {users.length} OF {graph.types.length} TYPES</div>
+					<div class="bars">
+						{#each users as t (t.key)}
+							{@const u = t.usage.get(selProp.key)!}
+							<div class="bar-row with-dot">
+								<span class="dot" style:background={t.color}></span>
+								<span class="bar-name">{t.name}</span>
+								<span class="track"><span class="fill" style:width={pct(u)} style:background={t.color}></span></span>
+								<span class="mono muted small right">{pct(u)}</span>
+							</div>
+						{/each}
+					</div>
+					<div class="note">{users.length === graph.types.length ? "Used by every type." : `The other ${graph.types.length - users.length} types can hold ${selProp.name} too; none of their objects do yet.`}</div>
+				</div>
+			{:else}
+				<div class="col">
+					<div class="totals">
+						<div><div class="num">{graph.types.length}</div><div class="mono kicker">TYPES</div></div>
+						<div><div class="num">{graph.objectCount}</div><div class="mono kicker">OBJECTS</div></div>
+						<div><div class="num">{graph.props.length}</div><div class="mono kicker">PROPERTIES</div></div>
+					</div>
+					<div class="note">Hover a type, property or object. Click to pin. Scroll to zoom. Double-click an object to open it.</div>
+				</div>
+			{/if}
+		</aside>
+
+		<div class="levels">
+			<div class="hint">{LEVELS[level][1]}</div>
+			<div class="pill">
+				{#each LEVELS as [label], i (label)}
+					<button class:on={i === level} onclick={() => goLevel(i)}><span class="mono n">{i + 1}</span>{label}</button>
+				{/each}
+				<span class="mono zoom" bind:this={zoomLabel}>100%</span>
+			</div>
+		</div>
+	{/if}
 </div>
 
 <style>
-	.toggle {
-		position: absolute;
-		top: 12px;
-		right: 14px;
-		display: flex;
-		align-items: center;
-		gap: 6px;
-		padding: 5px 10px;
-		border-radius: 8px;
-		background: var(--hl-light);
-		border: 1px solid var(--border);
-		font-size: 12px;
-		color: var(--fg);
-		cursor: pointer;
-		user-select: none;
-	}
 	.stage {
 		position: relative;
 		width: 100%;
 		height: calc(100vh - 120px);
 		min-height: 400px;
-	}
-	canvas {
-		display: block;
-		width: 100%;
-		height: 100%;
-		min-width: 0;
-		min-height: 0;
+		overflow: hidden;
 		border-radius: 12px;
-		cursor: grab;
+		background: radial-gradient(ellipse at 50% 45%, #141823 0%, #0c0e13 70%);
+		color: #e7e9ee;
+		user-select: none;
 	}
-	.labels {
+	.mono {
+		font-family: ui-monospace, "SF Mono", Menlo, monospace;
+	}
+	.sans {
+		font-family: inherit;
+	}
+	.canvas {
 		position: absolute;
 		inset: 0;
-		pointer-events: none;
-		overflow: hidden;
+		cursor: grab;
+		touch-action: none;
 	}
-	:global(.graph-label) {
-		position: absolute;
-		top: 0;
-		left: 0;
-		font-size: 11px;
-		color: var(--muted);
-		white-space: nowrap;
-		text-shadow: 0 1px 3px rgb(0 0 0 / 0.8);
+	.canvas.dragging {
+		cursor: grabbing;
 	}
-	:global(.graph-label.hot) {
-		color: var(--fg);
-		font-weight: 600;
+	.canvas svg {
+		display: block;
 	}
-	:global(.graph-anchor-label) {
-		position: absolute;
-		top: 0;
-		left: 0;
-		font-size: 12px;
-		font-weight: 700;
-		letter-spacing: 0.06em;
-		text-transform: uppercase;
-		color: var(--muted);
-		white-space: nowrap;
-		text-shadow: 0 1px 4px rgb(0 0 0 / 0.9);
-		opacity: 0.85;
-	}
-	:global(.graph-card) {
-		position: absolute;
-		top: 0;
-		left: 0;
-		width: 260px;
-		max-height: 300px;
-		overflow: hidden;
-		background: var(--panel);
-		border: 1px solid var(--border);
-		border-radius: 10px;
-		padding: 10px 12px;
-		box-shadow: 0 10px 30px rgb(0 0 0 / 0.5);
-		font-size: 12px;
-		line-height: 1.45;
-		pointer-events: none;
-	}
-	:global(.graph-card .gc-title) {
-		font-size: 13px;
-		font-weight: 700;
-		color: var(--fg);
-		margin-bottom: 4px;
-	}
-	:global(.graph-card .gc-row) {
-		display: flex;
-		gap: 8px;
-	}
-	:global(.graph-card .gc-k) {
-		color: var(--muted);
-		flex: none;
-		max-width: 90px;
-		overflow: hidden;
-		text-overflow: ellipsis;
-	}
-	:global(.graph-card .gc-v) {
-		color: var(--fg);
-		overflow: hidden;
-		text-overflow: ellipsis;
-		white-space: nowrap;
-	}
-	:global(.graph-card .gc-body) {
-		margin-top: 6px;
-		padding-top: 6px;
-		border-top: 1px solid var(--border);
-		color: var(--muted);
-	}
-	:global(.graph-card .gc-h) {
-		font-weight: 600;
-		color: var(--fg);
-	}
-	:global(.graph-card .gc-p),
-	:global(.graph-card .gc-li),
-	:global(.graph-card .gc-check) {
-		overflow: hidden;
-		text-overflow: ellipsis;
-		white-space: nowrap;
-	}
-	:global(.graph-card .gc-chk) {
-		display: inline-block;
-		width: 12px;
-		height: 12px;
-		border-radius: 50%;
-		border: 1.5px solid var(--muted);
-		vertical-align: -1px;
-		position: relative;
-	}
-	:global(.graph-card .gc-chk.on) {
-		background: var(--green);
-		border-color: var(--green);
-	}
-	:global(.graph-card .gc-chk.on)::after {
-		content: "\2713";
-		position: absolute;
-		top: 50%;
-		left: 50%;
-		transform: translate(-50%, -54%);
-		font-size: 9px;
-		color: #fff;
+	.screen {
+		mix-blend-mode: screen;
 	}
 	.status {
 		position: absolute;
@@ -533,6 +507,252 @@
 		display: flex;
 		align-items: center;
 		justify-content: center;
-		color: var(--muted);
+		color: #8a90a0;
+		pointer-events: none;
+	}
+	.intro {
+		position: absolute;
+		top: 24px;
+		left: 28px;
+		max-width: 320px;
+		pointer-events: none;
+		display: flex;
+		flex-direction: column;
+		gap: 8px;
+	}
+	.eyebrow {
+		font-size: 11px;
+		letter-spacing: 0.14em;
+		color: #7d8496;
+		text-transform: uppercase;
+	}
+	.lede {
+		font-size: 15px;
+		line-height: 1.5;
+		color: #b9bfcc;
+		text-wrap: pretty;
+	}
+	.panel {
+		position: absolute;
+		top: 24px;
+		right: 24px;
+		width: 300px;
+		max-height: calc(100% - 140px);
+		overflow: auto;
+		box-sizing: border-box;
+		background: rgba(20, 23, 31, 0.86);
+		backdrop-filter: blur(10px);
+		border: 1px solid rgba(255, 255, 255, 0.07);
+		border-radius: 14px;
+		padding: 18px 18px 16px;
+	}
+	.col {
+		display: flex;
+		flex-direction: column;
+		gap: 14px;
+	}
+	.row {
+		display: flex;
+		align-items: center;
+		gap: 10px;
+	}
+	.row.baseline {
+		align-items: baseline;
+	}
+	.grow {
+		flex: 1;
+		min-width: 0;
+	}
+	.title {
+		font-size: 18px;
+		font-weight: 600;
+		overflow-wrap: anywhere;
+	}
+	.kicker {
+		font-size: 10px;
+		letter-spacing: 0.12em;
+		color: #7d8496;
+	}
+	.muted {
+		color: #8a90a0;
+	}
+	.small {
+		font-size: 11px;
+	}
+	.right {
+		text-align: right;
+	}
+	.dot {
+		width: 8px;
+		height: 8px;
+		border-radius: 50%;
+		flex: none;
+	}
+	.dot.big {
+		width: 12px;
+		height: 12px;
+	}
+	.bars {
+		display: flex;
+		flex-direction: column;
+		gap: 7px;
+	}
+	.bar-row {
+		display: grid;
+		grid-template-columns: 96px 1fr 36px;
+		align-items: center;
+		gap: 10px;
+		font-size: 13px;
+	}
+	.bar-row.with-dot {
+		grid-template-columns: 8px 104px 1fr 36px;
+		gap: 9px;
+	}
+	.bar-name {
+		color: #d6dae3;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+	.track {
+		height: 4px;
+		border-radius: 2px;
+		background: rgba(255, 255, 255, 0.06);
+		overflow: hidden;
+	}
+	.fill {
+		display: block;
+		height: 100%;
+		border-radius: 2px;
+	}
+	.chips {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 5px;
+	}
+	.chip {
+		font-size: 11px;
+		color: #6f7686;
+		border: 1px dashed rgba(255, 255, 255, 0.14);
+		border-radius: 5px;
+		padding: 2px 6px;
+	}
+	.note {
+		font-size: 12px;
+		line-height: 1.5;
+		color: #7d8496;
+	}
+	.obj-head {
+		display: flex;
+		flex-direction: column;
+		gap: 4px;
+	}
+	.obj-head .kicker {
+		font-size: 11px;
+		letter-spacing: 0.1em;
+		color: #8a90a0;
+	}
+	.field {
+		display: grid;
+		grid-template-columns: 90px 1fr;
+		gap: 10px;
+		padding: 6px 0;
+		border-top: 1px solid rgba(255, 255, 255, 0.05);
+		font-size: 13px;
+	}
+	.fk {
+		font-size: 11px;
+		color: #7d8496;
+		padding-top: 1px;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+	.fv {
+		color: #dde1e9;
+		overflow-wrap: anywhere;
+	}
+	.open {
+		align-self: flex-start;
+		font-size: 13px;
+		color: #c9cfe0;
+	}
+	.open:hover {
+		color: #fff;
+	}
+	.totals {
+		display: grid;
+		grid-template-columns: repeat(3, 1fr);
+		gap: 8px;
+	}
+	.num {
+		font-size: 22px;
+		font-weight: 500;
+	}
+	.levels {
+		position: absolute;
+		left: 50%;
+		bottom: 24px;
+		transform: translateX(-50%);
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		gap: 10px;
+	}
+	.hint {
+		font-size: 13px;
+		color: #8a90a0;
+		text-align: center;
+		pointer-events: none;
+	}
+	.pill {
+		display: flex;
+		align-items: center;
+		gap: 4px;
+		padding: 4px;
+		background: rgba(20, 23, 31, 0.9);
+		border: 1px solid rgba(255, 255, 255, 0.08);
+		border-radius: 999px;
+	}
+	.pill button {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		border: 0;
+		cursor: pointer;
+		border-radius: 999px;
+		padding: 8px 16px;
+		font: inherit;
+		font-size: 13px;
+		font-weight: 500;
+		background: transparent;
+		color: #9aa0ae;
+	}
+	.pill button.on {
+		background: #e7e9ee;
+		color: #0c0e13;
+	}
+	.n {
+		font-size: 10px;
+		opacity: 0.6;
+	}
+	.zoom {
+		font-size: 11px;
+		color: #6f7686;
+		padding: 0 12px 0 6px;
+		min-width: 40px;
+		text-align: right;
+	}
+	/* Narrow screens: the panel and intro would cover the graph; the panel tucks under the top edge. */
+	@media (max-width: 900px) {
+		.intro {
+			display: none;
+		}
+		.panel {
+			left: 12px;
+			right: 12px;
+			top: 12px;
+			width: auto;
+			max-height: 38%;
+		}
 	}
 </style>

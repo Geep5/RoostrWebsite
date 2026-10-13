@@ -1,52 +1,70 @@
 /**
- * 2D object graph: build from the query API, simulate with d3-force
- * semantics (Anytype's constants: charge −250, link distance 100, weak
- * centering, cluster pull toward channel nodes).
+ * The space's schema graph: types on an outer ring (each a cluster of its
+ * objects, sized by count), the properties those objects use on an inner
+ * ring, and a curve from each type to each property its objects hold,
+ * weighted by how many of them do. Object-format properties limited to a
+ * type also point at that type.
  */
 
-import { fetchQuery, type QueryResultRow } from "$lib/api";
-import { guestAgents, type RelationDefJSON, type ValueJSON } from "$lib/types";
+import { fetchAllQuery, type QueryResultRow } from "$lib/api";
+import type { RelationDefJSON, ValueJSON } from "$lib/types";
+import type { TypeDef } from "$lib/data.svelte";
 
-export interface GraphNode {
+export interface GraphObject {
 	id: string;
 	name: string;
-	kind: string;
-	radius: number;
-	color: [number, number, number];
-	cluster: number;
-	/** The object names an agent of its own (faint ring in the render). */
-	hasAgent: boolean;
-	/** A property value node ("Status: Done"), not an object: `ref` is its property's page. */
-	value?: { relationKey: string; text: string; count: number };
-	/** What a click opens: the object itself, or a value node's property. */
-	ref: string;
 	x: number;
 	y: number;
-	vx: number;
-	vy: number;
+	/** Keys of the properties this object holds a value for. */
+	held: Set<string>;
+	fields: Record<string, ValueJSON>;
 }
 
-export interface GraphEdge {
+export interface GraphType {
+	index: number;
+	key: string;
+	name: string;
+	icon: string;
+	color: string;
+	/** Cluster radius (world units). */
+	rad: number;
+	/** Angle on the outer ring; x/y is the cluster centre. */
 	a: number;
-	b: number;
-	color: [number, number, number, number];
-}
-
-/** A type's home in the layout: nodes of that kind spring toward it. */
-export interface GraphAnchor {
-	kind: string;
-	label: string;
 	x: number;
 	y: number;
-	count: number;
+	objects: GraphObject[];
+	/** Property key → share of this type's objects holding it (0..1]. */
+	usage: Map<string, number>;
 }
 
-export interface ObjectGraph {
-	nodes: GraphNode[];
-	edges: GraphEdge[];
-	anchors: GraphAnchor[];
+export interface GraphProperty {
+	key: string;
+	name: string;
+	format: string;
+	icon: string;
+	a: number;
+	x: number;
+	y: number;
+	/** Types whose objects use it. */
+	users: GraphType[];
+	/** Object-format property limited to types present here. */
+	targets: GraphType[];
 }
 
+export interface SchemaGraph {
+	types: GraphType[];
+	props: GraphProperty[];
+	/** Space properties no object here uses (the type panel's "available, unused"). */
+	idle: RelationDefJSON[];
+	objectCount: number;
+	/** Outer (types) and inner (properties) ring radii. */
+	rt: number;
+	rp: number;
+	/** Radius that contains everything, labels included: what "fit" frames. */
+	extent: number;
+}
+
+/** Infrastructure kinds: their objects are configuration, not content. */
 const HIDDEN_KINDS: Record<string, true> = {
 	program: true,
 	typescript: true,
@@ -57,320 +75,127 @@ const HIDDEN_KINDS: Record<string, true> = {
 	template: true,
 	agent: true,
 	skill: true,
+	channel: true,
+	vanish_log: true,
+	user_prefs: true,
 };
 
-const TYPE_COLORS: Record<string, [number, number, number]> = {
-	channel: [1.0, 0.63, 0.18],
-	note: [0.42, 0.62, 0.95],
-	task: [0.36, 0.78, 0.72],
-	query: [0.8, 0.52, 0.95],
-	set: [0.8, 0.52, 0.95],
-	collection: [0.95, 0.75, 0.35],
-	person: [0.9, 0.45, 0.55],
-	peer: [0.9, 0.45, 0.55],
-	agent: [0.55, 0.85, 0.4],
-};
+/** Spacing between neighbouring object dots inside a cluster (world units). */
+export const DOT_SPACING = 13;
 
-function typeColor(kind: string): [number, number, number] {
-	const known = TYPE_COLORS[kind];
-	if (known) return known;
-	let h = 2166136261;
-	for (const ch of kind) h = ((h ^ ch.charCodeAt(0)) * 16777619) >>> 0;
-	return [0.35 + (h % 97) / 200, 0.35 + (Math.floor(h / 97) % 97) / 200, 0.45 + (Math.floor(h / 9409) % 97) / 250];
-}
-
-const LINK_COLOR: [number, number, number, number] = [0.55, 0.65, 0.85, 0.5];
-const CLUSTER_COLOR: [number, number, number, number] = [1.0, 0.63, 0.18, 0.16];
-const COLLECTION_COLOR: [number, number, number, number] = [0.95, 0.75, 0.35, 0.4];
-const QUERY_COLOR: [number, number, number, number] = [0.8, 0.52, 0.95, 0.3];
-const VALUE_COLOR: [number, number, number, number] = [0.85, 0.85, 0.9, 0.22];
-const VALUE_NODE: [number, number, number] = [0.72, 0.72, 0.78];
-/** Formats whose values are shared categories - worth a node each. */
-const VALUE_FORMATS = new Set(["tag", "status"]);
-
-function strItems(v: ValueJSON | undefined): string[] {
-	return (v?.valuesValue?.items ?? []).map((i) => i.stringValue).filter((s): s is string => typeof s === "string");
+function hasValue(v: ValueJSON | undefined): boolean {
+	if (!v) return false;
+	if (v.stringValue !== undefined) return v.stringValue !== "";
+	if (v.boolValue !== undefined) return v.boolValue;
+	if (v.intValue !== undefined || v.floatValue !== undefined || v.linkValue) return true;
+	if (v.valuesValue) return v.valuesValue.items.some(hasValue);
+	if (v.listValue) return v.listValue.values.length > 0;
+	if (v.mapValue) return Object.keys(v.mapValue.entries).length > 0;
+	return false;
 }
 
 /**
- * Build the graph for ONE channel (Anytype: each space has its own graph).
- * Unassigned objects belong to the default channel. The channel itself
- * is not a node — the graph shows its contents.
+ * Builds the schema graph of one space from its objects. `relations` and
+ * `types` are the space's own definitions (spaceRelations / the store).
  */
-export async function buildGraph(channelId: string, isDefaultChannel: boolean, valueRelations: RelationDefJSON[] = []): Promise<ObjectGraph> {
-	const res = await fetchQuery({ limit: 2000 });
-	const rows = res.records.filter((r) => {
-		if (HIDDEN_KINDS[r.typeKey] || r.typeKey === "channel") return false;
+export async function buildSchemaGraph(channelId: string, isDefaultChannel: boolean, relations: RelationDefJSON[], types: TypeDef[]): Promise<SchemaGraph> {
+	const rows: QueryResultRow[] = (await fetchAllQuery({})).filter((r) => {
+		if (HIDDEN_KINDS[r.typeKey]) return false;
 		const ch = r.fields["channel"]?.stringValue ?? "";
 		return ch === channelId || (ch === "" && isDefaultChannel);
 	});
+	// The space's properties, minus hidden plumbing; only these count as "held".
+	const relByKey = new Map(relations.filter((r) => !r.hidden).map((r) => [r.key, r]));
+	const typeDef = (key: string) => types.find((t) => t.key === key && t.space === channelId) ?? types.find((t) => t.key === key);
 
-	const nodes: GraphNode[] = [];
-	const index = new Map<string, number>();
+	const byKind = new Map<string, GraphObject[]>();
 	for (const r of rows) {
-		index.set(r.id, nodes.length);
-		nodes.push({
+		const held = new Set<string>();
+		for (const [k, v] of Object.entries(r.fields)) if (relByKey.has(k) && hasValue(v)) held.add(k);
+		const obj: GraphObject = {
 			id: r.id,
-			name: [r.fields["iconEmoji"]?.stringValue, r.fields["name"]?.stringValue || r.id.slice(0, 8)].filter(Boolean).join(" "),
-			kind: r.typeKey,
-			radius: 10,
-			hasAgent: false,
-			ref: r.id,
-			color: typeColor(r.typeKey),
-			cluster: -1,
-			x: (Math.random() - 0.5) * 600,
-			y: (Math.random() - 0.5) * 600,
-			vx: 0,
-			vy: 0,
-		});
-	}
-
-	const edges: GraphEdge[] = [];
-	const degree = new Array<number>(nodes.length).fill(0);
-	const push = (a: number, b: number, color: GraphEdge["color"]) => {
-		if (a === b) return;
-		edges.push({ a, b, color });
-		degree[a] += 1;
-		degree[b] += 1;
-	};
-
-	const queryRows: QueryResultRow[] = [];
-	for (const r of rows) {
-		const ni = index.get(r.id)!;
-		for (const [key, v] of Object.entries(r.fields)) {
-			if (key === "channel") continue; // scoping field, not a link
-			if (key === "collectionIds") {
-				for (const id of strItems(v)) {
-					const mi = index.get(id);
-					if (mi !== undefined) push(mi, ni, COLLECTION_COLOR);
-				}
-				continue;
-			}
-			if (v.linkValue) {
-				const ti = index.get(v.linkValue.targetId);
-				if (ti !== undefined) push(ti, ni, LINK_COLOR);
-			} else if (v.valuesValue) {
-				for (const item of v.valuesValue.items) {
-					if (item.linkValue) {
-						const ti = index.get(item.linkValue.targetId);
-						if (ti !== undefined) push(ti, ni, LINK_COLOR);
-					}
-				}
-			}
-		}
-		if (r.typeKey === "query" || r.typeKey === "set") queryRows.push(r);
-	}
-
-	// Query objects → edges to their current matches.
-	for (const q of queryRows) {
-		const qi = index.get(q.id)!;
-		try {
-			const matches = await fetchQuery({ setId: q.id, limit: 50 });
-			for (const m of matches.records) {
-				const mi = index.get(m.id);
-				if (mi !== undefined && mi !== qi) push(qi, mi, QUERY_COLOR);
-			}
-		} catch {
-			// query with no sources — skip
-		}
-	}
-
-	for (const [i, n] of nodes.entries()) {
-		// Small flat dots (Anytype scale): channels stand out, degree adds a little.
-		n.radius = n.kind === "channel" ? 14 : 5 + 1.6 * Math.sqrt(degree[i]);
-		// Presence: an object naming its own agent gets a marker.
-		n.hasAgent = guestAgents(rows[i].fields).length > 0;
-	}
-
-	// ── Property values (Anytype's graph with relations shown): every tag
-	// or status value is a node, linked to each object that has it, so
-	// objects gather by what they share. Only values two or more objects
-	// share - a value on one object is already on its card. ────────────
-	const objectCount = nodes.length;
-	const valueNodes = new Map<string, { rel: RelationDefJSON; text: string; members: number[] }>();
-	const byKey = new Map(valueRelations.filter((r) => VALUE_FORMATS.has(r.format)).map((r) => [r.key, r]));
-	for (const [i, r] of rows.entries()) {
-		for (const [key, v] of Object.entries(r.fields)) {
-			const rel = byKey.get(key);
-			if (!rel) continue;
-			const texts = v.stringValue ? [v.stringValue] : strItems(v);
-			for (const text of new Set(texts.filter(Boolean))) {
-				const id = `${key}\u0000${text}`;
-				const hit = valueNodes.get(id) ?? { rel, text, members: [] };
-				hit.members.push(i);
-				valueNodes.set(id, hit);
-			}
-		}
-	}
-	for (const { rel, text, members } of valueNodes.values()) {
-		if (members.length < 2) continue;
-		const vi = nodes.length;
-		// Seeded at its members' centre once the clusters below have placed them.
-		nodes.push({
-			id: `value:${rel.key}:${text}`,
-			name: `${rel.iconEmoji || "🏷️"} ${text}`,
-			kind: "",
-			radius: 4 + 1.4 * Math.sqrt(members.length),
-			hasAgent: false,
-			value: { relationKey: rel.key, text, count: members.length },
-			ref: rel.id,
-			color: VALUE_NODE,
-			cluster: -1,
+			name: [r.fields["iconEmoji"]?.stringValue, r.fields["name"]?.stringValue || "Untitled"].filter(Boolean).join(" "),
 			x: 0,
 			y: 0,
-			vx: 0,
-			vy: 0,
-		});
-		degree.push(0);
-		for (const m of members) push(vi, m, VALUE_COLOR);
+			held,
+			fields: r.fields,
+		};
+		const list = byKind.get(r.typeKey);
+		if (list) list.push(obj);
+		else byKind.set(r.typeKey, [obj]);
 	}
 
-	// ── Type clustering: every kind gets a home on a ring sized by the
-	// vault, so groups read as neighborhoods instead of one soup. ─────
-	const byKind = new Map<string, number[]>();
-	for (const [i, n] of nodes.slice(0, objectCount).entries()) {
-		const g = byKind.get(n.kind);
-		if (g) g.push(i);
-		else byKind.set(n.kind, [i]);
-	}
-	// Type display names (emoji + name) from this space's type objects.
-	const tdefs = new Map<string, string>();
-	try {
-		const tres = await fetchQuery({ type: "type", limit: 300 });
-		for (const t of tres.records) {
-			const key = t.fields["key"]?.stringValue;
-			if (!key) continue;
-			const label = [t.fields["iconEmoji"]?.stringValue, t.fields["name"]?.stringValue || key].filter(Boolean).join(" ");
-			tdefs.set(key, label);
+	// ── Types on the outer ring, each an arc as wide as its cluster ──
+	const kinds = [...byKind.entries()].sort((a, b) => (typeDef(a[0])?.name ?? a[0]).localeCompare(typeDef(b[0])?.name ?? b[0]));
+	const n = kinds.length;
+	const gtypes: GraphType[] = kinds.map(([key, objects], index) => {
+		const usage = new Map<string, number>();
+		for (const o of objects) for (const k of o.held) usage.set(k, (usage.get(k) ?? 0) + 1);
+		for (const [k, c] of usage) usage.set(k, c / objects.length);
+		const hue = ((index / Math.max(1, n)) * 330 + 15) % 360;
+		const def = typeDef(key);
+		return { index, key, name: def?.name || key || "Untyped", icon: def?.icon ?? "", color: `oklch(0.76 0.13 ${hue})`, rad: Math.sqrt(objects.length) * DOT_SPACING + 18, a: 0, x: 0, y: 0, objects, usage };
+	});
+	const sumD = gtypes.reduce((s, t) => s + 2 * t.rad, 0);
+	// Room for every cluster plus a gap; never tighter than the design's ring.
+	const rt = Math.max(1150, (sumD * 1.35) / (2 * Math.PI));
+	const gap = (2 * Math.PI * rt - sumD) / Math.max(1, n);
+	let acc = -(gtypes[0]?.rad ?? 0);
+	for (const t of gtypes) {
+		const s = acc + t.rad;
+		acc += 2 * t.rad + gap;
+		t.a = -Math.PI / 2 + s / rt;
+		t.x = Math.cos(t.a) * rt;
+		t.y = Math.sin(t.a) * rt;
+		// Phyllotaxis: evenly packed, densest at the centre.
+		for (const [j, o] of t.objects.entries()) {
+			const rr = DOT_SPACING * Math.sqrt(j + 0.5);
+			const th = j * 2.39996;
+			o.x = t.x + rr * Math.cos(th);
+			o.y = t.y + rr * Math.sin(th);
 		}
-	} catch {
-		/* labels fall back to the raw kind */
-	}
-	// Each kind gets an arc proportional to its spread (sqrt of count),
-	// and big clusters are interleaved with small ones so heavyweights
-	// never crowd each other. The ring grows with the vault, so a large
-	// graph gets more room instead of higher density.
-	const sorted = [...byKind.entries()].sort((a, b) => b[1].length - a[1].length);
-	const kinds: typeof sorted = [];
-	for (let lo = 0, hi = sorted.length - 1; lo <= hi; lo++, hi--) {
-		kinds.push(sorted[lo]);
-		if (lo !== hi) kinds.push(sorted[hi]);
-	}
-	const weights = kinds.map(([, m]) => 24 + 11 * Math.sqrt(m.length));
-	const totalW = weights.reduce((a, b) => a + b, 0);
-	const R = Math.max(340, totalW / Math.PI * 0.75, 46 * Math.sqrt(nodes.length));
-	const anchors: GraphAnchor[] = [];
-	let acc = 0;
-	for (const [k, [kind, members]] of kinds.entries()) {
-		const angle = ((acc + weights[k] / 2) / totalW) * Math.PI * 2 - Math.PI / 2;
-		acc += weights[k];
-		const ax = Math.cos(angle) * R;
-		const ay = Math.sin(angle) * R;
-		anchors.push({ kind, label: tdefs.get(kind) ?? kind, x: ax, y: ay, count: members.length });
-		// Seed members inside their neighborhood - convergence is instant
-		// and clusters never have to untangle from a random soup.
-		const spread = 40 + 11 * Math.sqrt(members.length);
-		for (const [j, i] of members.entries()) {
-			const a = j * 2.399963;
-			const rr = spread * Math.sqrt(j / Math.max(1, members.length));
-			nodes[i].cluster = k;
-			nodes[i].x = ax + Math.cos(a) * rr;
-			nodes[i].y = ay + Math.sin(a) * rr;
-		}
-	}
-	// Value nodes start at the middle of the objects that share them.
-	for (const e of edges) {
-		const v = nodes[e.a].value ? e.a : -1;
-		if (v < 0) continue;
-		nodes[v].x += nodes[e.b].x / nodes[v].value!.count;
-		nodes[v].y += nodes[e.b].y / nodes[v].value!.count;
-	}
-	return { nodes, edges, anchors };
-}
-
-/** One d3-force step in 2D (velocity Verlet, decay 0.6). */
-export function simStep(g: ObjectGraph, alpha: number, pinned = -1): void {
-	const CHARGE = -600;
-	const LINK_DIST = 110;
-	const CENTER = 0.0015;
-	const CLUSTER = 0.14;
-
-	const n = g.nodes.length;
-	for (let i = 0; i < n; i++) {
-		for (let j = i + 1; j < n; j++) {
-			const a = g.nodes[i];
-			const b = g.nodes[j];
-			const dx = b.x - a.x;
-			const dy = b.y - a.y;
-			const l2 = Math.max(dx * dx + dy * dy, 25);
-			const l = Math.sqrt(l2);
-			const f = (CHARGE * alpha) / l2;
-			a.vx += (dx / l) * f;
-			a.vy += (dy / l) * f;
-			b.vx -= (dx / l) * f;
-			b.vy -= (dy / l) * f;
-		}
-	}
-	for (const e of g.edges) {
-		const a = g.nodes[e.a];
-		const b = g.nodes[e.b];
-		const dx = b.x - a.x;
-		const dy = b.y - a.y;
-		const l = Math.max(Math.hypot(dx, dy), 1);
-		// Weak links: an edge is a hint, the type neighborhood is the law -
-		// cross-type links must not collapse two clusters into each other.
-		const f = ((l - LINK_DIST) / l) * alpha * 0.05;
-		a.vx += dx * f * 0.5;
-		a.vy += dy * f * 0.5;
-		b.vx -= dx * f * 0.5;
-		b.vy -= dy * f * 0.5;
-	}
-	for (const [i, node] of g.nodes.entries()) {
-		node.vx -= node.x * CENTER * alpha;
-		node.vy -= node.y * CENTER * alpha;
-		if (node.cluster >= 0 && g.anchors[node.cluster]) {
-			node.vx += (g.anchors[node.cluster].x - node.x) * CLUSTER * alpha;
-			node.vy += (g.anchors[node.cluster].y - node.y) * CLUSTER * alpha;
-		}
-		node.vx *= 0.6;
-		node.vy *= 0.6;
-		if (i === pinned) {
-			node.vx = 0;
-			node.vy = 0;
-			continue;
-		}
-		node.x += node.vx;
-		node.y += node.vy;
 	}
 
-	// d3 forceCollide semantics: positional separation so nodes never
-	// touch — padded by COLLIDE_PAD, displacement split by radius weight,
-	// a pinned (dragged) node stays put and pushes the other fully.
-	const COLLIDE_PAD = 14;
-	for (let iter = 0; iter < 2; iter++) {
-		for (let i = 0; i < n; i++) {
-			for (let j = i + 1; j < n; j++) {
-				const a = g.nodes[i];
-				const b = g.nodes[j];
-				let dx = b.x - a.x;
-				let dy = b.y - a.y;
-				const minDist = a.radius + b.radius + COLLIDE_PAD;
-				let l = Math.hypot(dx, dy);
-				if (l >= minDist) continue;
-				if (l === 0) {
-					// Coincident: nudge apart deterministically by index.
-					dx = Math.cos(i * 2.399963);
-					dy = Math.sin(i * 2.399963);
-					l = 1;
-				}
-				const overlap = (minDist - l) / l;
-				const wa = i === pinned ? 0 : j === pinned ? 1 : b.radius / (a.radius + b.radius);
-				const wb = 1 - wa;
-				a.x -= dx * overlap * wa;
-				a.y -= dy * overlap * wa;
-				b.x += dx * overlap * wb;
-				b.y += dy * overlap * wb;
-			}
-		}
+	// ── Properties in use, on the inner ring near the types that use them ──
+	const typeById = new Map<string, GraphType>();
+	for (const t of gtypes) {
+		const def = typeDef(t.key);
+		if (def) typeById.set(def.id, t);
+		for (const d of types) if (d.key === t.key) typeById.set(d.id, t);
 	}
+	const props: (GraphProperty & { mean: number })[] = [];
+	for (const [key, rel] of relByKey) {
+		const users = gtypes.filter((t) => t.usage.has(key));
+		if (users.length === 0) continue;
+		let cx = 0;
+		let cy = 0;
+		for (const t of users) {
+			const w = t.usage.get(key)! * Math.sqrt(t.objects.length);
+			cx += Math.cos(t.a) * w;
+			cy += Math.sin(t.a) * w;
+		}
+		// A property nearly every type uses sits at the top, not at a meaningless mean.
+		const mean = users.length >= n * 0.9 ? -Math.PI / 2 + 0.001 : Math.atan2(cy, cx);
+		const targets = rel.format === "object" ? [...new Set((rel.objectTypes ?? []).map((id) => typeById.get(id)).filter((t): t is GraphType => !!t))] : [];
+		props.push({ key, name: rel.name || key, format: rel.format, icon: rel.iconEmoji ?? "", a: 0, x: 0, y: 0, users, targets, mean });
+	}
+	props.sort((a, b) => a.mean - b.mean);
+	// Label room: ~26 world units of arc per property.
+	const rp = Math.max(440, (props.length * 26) / (2 * Math.PI));
+	for (const [k, p] of props.entries()) {
+		p.a = -Math.PI / 2 + ((k + 0.5) * 2 * Math.PI) / props.length;
+		p.x = Math.cos(p.a) * rp;
+		p.y = Math.sin(p.a) * rp;
+	}
+	const used = new Set(props.map((p) => p.key));
+	const maxRad = gtypes.reduce((m, t) => Math.max(m, t.rad), 0);
+	return {
+		types: gtypes,
+		props: props.map(({ mean: _mean, ...p }) => p),
+		idle: [...relByKey.values()].filter((r) => !used.has(r.key)),
+		objectCount: rows.length,
+		rt,
+		rp,
+		extent: rt + maxRad + 420,
+	};
 }
