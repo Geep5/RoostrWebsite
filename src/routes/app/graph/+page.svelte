@@ -85,6 +85,62 @@
 	}
 	const propByKey = $derived(new Map((graph?.props ?? []).map((p) => [p.key, p])));
 
+	// ── Geometry, built once per graph: thousands of lines and dots drawn as a
+	// few dozen shapes. One SVG element per line/dot made every pan frame
+	// repaint ~15k nodes and every hover touch thousands of them. ──
+	/** A dot as path commands (two arcs), so a whole type's dots are one shape. */
+	const dotD = (x: number, y: number, r: number) => `M${x - r},${y}a${r},${r} 0 1,0 ${2 * r},0a${r},${r} 0 1,0 ${-2 * r},0`;
+	/** Per type: its object→property lines, joined per property and in all. */
+	const edgeGeo = $derived(
+		(graph?.types ?? []).map((t) => {
+			const perProp = new Map<string, string>();
+			for (const o of t.objects) {
+				for (const key of o.held) {
+					const p = propByKey.get(key);
+					if (p) perProp.set(key, (perProp.get(key) ?? "") + edgePath(o, p));
+				}
+			}
+			return { all: [...perProp.values()].join(""), perProp };
+		}),
+	);
+	const dotGeo = $derived((graph?.types ?? []).map((t) => t.objects.map((o) => dotD(o.x, o.y, 4.3)).join("")));
+	/** The highlighted lines: the selected object's, a type's, or every type's to the selected property. */
+	const litEdges = $derived.by((): Array<{ color: string; d: string }> => {
+		if (!graph || !sel) return [];
+		if (selObj && selType) return [{ color: selType.color, d: [...selObj.held].map((k) => propByKey.get(k)).filter((p) => !!p).map((p) => edgePath(selObj, p)).join("") }];
+		if (selType) return [{ color: selType.color, d: edgeGeo[selType.index]?.all ?? "" }];
+		if (selProp) return graph.types.map((t) => ({ color: t.color, d: edgeGeo[t.index]?.perProp.get(selProp.key) ?? "" })).filter((e) => e.d);
+		return [];
+	});
+
+	/** Object labels: only those in view once zoomed far enough to read them, refreshed when the view settles. */
+	const LABEL_CAP = 600;
+	let labelObjs = $state<GraphObject[]>([]);
+	let labelTimer: ReturnType<typeof setTimeout> | undefined;
+	function scheduleLabels() {
+		clearTimeout(labelTimer);
+		labelTimer = setTimeout(updateLabels, 120);
+	}
+	function updateLabels() {
+		if (!graph || v.s < 1.4) {
+			if (labelObjs.length) labelObjs = [];
+			return;
+		}
+		// A label runs right of its dot: widen the left edge so ones starting off-screen still show.
+		const x0 = -v.x / v.s - 80;
+		const y0 = -v.y / v.s - 10;
+		const x1 = (box.w - v.x) / v.s + 10;
+		const y1 = (box.h - v.y) / v.s + 10;
+		const out: GraphObject[] = [];
+		for (const t of graph.types) {
+			for (const o of t.objects) {
+				if (o.x >= x0 && o.x <= x1 && o.y >= y0 && o.y <= y1) out.push(o);
+				if (out.length >= LABEL_CAP) break;
+			}
+		}
+		labelObjs = out;
+	}
+
 	/** A label along the radius at angle `a`; flipped on the left half so it never reads upside down. `out`: text runs away from the centre. */
 	function radial(a: number, dist: number, out: boolean) {
 		const x = Math.cos(a) * dist;
@@ -120,6 +176,8 @@
 			const el = layers[k];
 			if (!el) return;
 			el.style.opacity = String(o);
+			// Invisible layers leave the render tree: nothing to repaint while panning.
+			el.style.display = o <= 0 ? "none" : "";
 			// Object labels sit on the dots and must never take their pointer.
 			el.style.pointerEvents = o < 0.3 || k === "obj" ? "none" : "auto";
 		};
@@ -127,6 +185,7 @@
 		set("schema", schema);
 		set("obj", obj);
 		set("schemaLabels", schema * (1 - obj * 0.35));
+		scheduleLabels();
 		if (zoomLabel) zoomLabel.textContent = `${Math.round(s * 100)}%`;
 		const next = s < 0.44 ? 0 : s < 1.65 ? 1 : 2;
 		if (next !== level) level = next;
@@ -202,13 +261,30 @@
 	let drag: { x: number; y: number; vx: number; vy: number; moved: boolean } | null = null;
 	let dragging = $state(false);
 
-	function hitOf(target: EventTarget | null): Sel | null {
+	/** What is under the screen point: a type, a property, or (zoomed in) the object whose dot it is. */
+	function hitAt(clientX: number, clientY: number): Sel | null {
+		const target = document.elementFromPoint(clientX, clientY);
 		const d = target instanceof Element ? (target as SVGElement).dataset : undefined;
 		if (!d?.k) return null;
 		if (d.k === "type") return { k: "type", t: Number(d.t) };
 		if (d.k === "prop") return { k: "prop", p: d.p! };
+		const t = Number(d.t);
 		// Dots are too small to aim at until zoomed in: before that they stand for their type.
-		return v.s > 1.2 ? { k: "obj", t: Number(d.t), j: Number(d.j) } : { k: "type", t: Number(d.t) };
+		if (v.s <= 1.2 || !graph || !stage) return { k: "type", t };
+		// A type's dots are one shape: the nearest dot to the point is the one hit.
+		const r = stage.getBoundingClientRect();
+		const wx = (clientX - r.left - v.x) / v.s;
+		const wy = (clientY - r.top - v.y) / v.s;
+		let j = 0;
+		let best = Infinity;
+		graph.types[t].objects.forEach((o, i) => {
+			const dd = (o.x - wx) ** 2 + (o.y - wy) ** 2;
+			if (dd < best) {
+				best = dd;
+				j = i;
+			}
+		});
+		return { k: "obj", t, j };
 	}
 
 	function onWheel(e: WheelEvent) {
@@ -244,7 +320,7 @@
 			}
 		}
 		// Captured pointers report the stage as target: hit-test the point instead.
-		const next = hitOf(document.elementFromPoint(e.clientX, e.clientY));
+		const next = hitAt(e.clientX, e.clientY);
 		if (JSON.stringify(next) !== JSON.stringify(hover)) hover = next;
 	}
 
@@ -255,7 +331,7 @@
 	}
 
 	function onDblClick(e: MouseEvent) {
-		const hit = hitOf(document.elementFromPoint(e.clientX, e.clientY));
+		const hit = hitAt(e.clientX, e.clientY);
 		if (hit?.k === "obj" && graph) void goto(`/app/object/${graph.types[hit.t].objects[hit.j].id}`);
 	}
 
@@ -301,17 +377,12 @@
 				<g bind:this={world}>
 					<g bind:this={layers.schema}>
 						<g class="screen">
-							<!-- One line per object per property it holds: straight from the dot, so a type's usage reads as how many lines leave it. -->
+							<!-- One line per object per property it holds, drawn as one shape per type; the highlighted ones go over the top. -->
 							{#each g.types as t (t.key)}
-								{#each t.objects as o (o.id)}
-									{#each [...o.held] as key (key)}
-										{@const p = propByKey.get(key)}
-										{#if p}
-											{@const lit = sel ? (selObj ? o === selObj : selType ? t === selType : selProp === p) : false}
-											<path d={edgePath(o, p)} fill="none" stroke={t.color} stroke-linecap="round" stroke-width={lit ? 1.4 : 0.7} stroke-opacity={sel && !lit ? 0.025 : lit ? 0.6 : 0.12} />
-										{/if}
-									{/each}
-								{/each}
+								<path d={edgeGeo[t.index]?.all ?? ""} fill="none" stroke={t.color} stroke-linecap="round" stroke-width="0.7" stroke-opacity={sel ? 0.025 : 0.12} />
+							{/each}
+							{#each litEdges as e, i (i)}
+								<path d={e.d} fill="none" stroke={e.color} stroke-linecap="round" stroke-width="1.4" stroke-opacity="0.6" />
 							{/each}
 						</g>
 						{#if selType && sel?.k === "type"}
@@ -351,10 +422,10 @@
 						{@const isSel = selType === t}
 						<g opacity={typeOn(t) ? 1 : 0.18}>
 							<circle cx={t.x} cy={t.y} r={t.rad} fill={t.color} fill-opacity={isSel ? 0.14 : 0.06} stroke={t.color} stroke-opacity={isSel ? 0.7 : 0.22} stroke-width={isSel ? 2.5 : 1.5} data-k="type" data-t={t.index} />
-							{#each t.objects as o, j (o.id)}
-								{@const on = selObj === o}
-								<circle cx={o.x} cy={o.y} r={on ? 6.5 : 4.3} fill={t.color} stroke={on ? "#fff" : "none"} stroke-width="1.5" data-k="obj" data-t={t.index} data-j={j} />
-							{/each}
+							<path d={dotGeo[t.index] ?? ""} fill={t.color} data-k="obj" data-t={t.index} />
+							{#if selObj && isSel}
+								<circle cx={selObj.x} cy={selObj.y} r="6.5" fill={t.color} stroke="#fff" stroke-width="1.5" pointer-events="none" />
+							{/if}
 						</g>
 					{/each}
 
@@ -395,10 +466,8 @@
 					</g>
 
 					<g bind:this={layers.obj} pointer-events="none">
-						{#each g.types as t (t.key)}
-							{#each t.objects as o (o.id)}
-								<text x={o.x + 6.5} y={o.y} font-size="4.2" class="sans" fill={selObj === o ? "#fff" : "#c6cbd6"} dominant-baseline="central">{o.name}</text>
-							{/each}
+						{#each labelObjs as o (o.id)}
+							<text x={o.x + 6.5} y={o.y} font-size="4.2" class="sans" fill={selObj === o ? "#fff" : "#c6cbd6"} dominant-baseline="central">{o.name}</text>
 						{/each}
 					</g>
 				</g>
