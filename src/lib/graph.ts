@@ -18,6 +18,21 @@ export interface GraphObject {
 	/** Keys of the properties this object holds a value for. */
 	held: Set<string>;
 	fields: Record<string, ValueJSON>;
+	/** Objects in this graph it points at: link properties, links/mentions/files in its text, a collection's members. */
+	links: string[];
+}
+
+/** Every object id `fields` points at: link values anywhere, object-format property ids, `collectionIds`. */
+function outgoingIds(fields: Record<string, ValueJSON>, objectKeys: Set<string>): Set<string> {
+	const out = new Set<string>();
+	for (const [k, v] of Object.entries(fields)) {
+		const items = v.valuesValue ? v.valuesValue.items : [v];
+		for (const it of items) {
+			if (it.linkValue?.targetId) out.add(it.linkValue.targetId);
+			else if (it.stringValue && (objectKeys.has(k) || k === "collectionIds")) out.add(it.stringValue);
+		}
+	}
+	return out;
 }
 
 export interface GraphType {
@@ -109,6 +124,8 @@ export async function buildSchemaGraph(channelId: string, isDefaultChannel: bool
 	const typeDef = (key: string) => types.find((t) => t.key === key && t.space === channelId) ?? types.find((t) => t.key === key);
 
 	const byKind = new Map<string, GraphObject[]>();
+	const objectKeys = new Set(relations.filter((r) => r.format === "object").map((r) => r.key));
+	const inGraph = new Set(rows.map((r) => r.id));
 	for (const r of rows) {
 		const held = new Set<string>();
 		for (const [k, v] of Object.entries(r.fields)) if (relByKey.has(k) && hasValue(v)) held.add(k);
@@ -119,6 +136,7 @@ export async function buildSchemaGraph(channelId: string, isDefaultChannel: bool
 			y: 0,
 			held,
 			fields: r.fields,
+			links: [...outgoingIds(r.fields, objectKeys)].filter((id) => id !== r.id && inGraph.has(id)),
 		};
 		const list = byKind.get(r.typeKey);
 		if (list) list.push(obj);

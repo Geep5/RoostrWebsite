@@ -66,6 +66,15 @@
 	const selType = $derived(graph && sel && sel.k !== "prop" ? graph.types[sel.t] : null);
 	const selProp = $derived(graph && sel?.k === "prop" ? graph.props.find((p) => p.key === sel.p) ?? null : null);
 	const selObj = $derived(selType && sel?.k === "obj" ? selType.objects[sel.j] : null);
+	/** Every object in the graph by id, with its type: where a connection line ends. */
+	const objIndex = $derived(new Map((graph?.types ?? []).flatMap((t) => t.objects.map((o) => [o.id, { o, t }] as const))));
+	/** The selected object's connections to other objects: what it points at (link properties, text links, members) and what points at it. */
+	const selLinks = $derived.by(() => {
+		if (!selObj || !selType) return { out: [], inc: [] };
+		const out = selObj.links.map((id) => objIndex.get(id)).filter((x) => !!x);
+		const inc = [...objIndex.values()].filter(({ o }) => o !== selObj && o.links.includes(selObj.id));
+		return { out, inc };
+	});
 
 	const typeOn = (t: GraphType) => !sel || (selType ? t === selType : !!selProp?.users.includes(t));
 	const propOn = (p: GraphProperty) => !sel || (selObj ? selObj.held.has(p.key) : selType ? selType.usage.has(p.key) : p === selProp);
@@ -349,6 +358,20 @@
 						</g>
 					{/each}
 
+					<!-- The selected object's connections to other objects: solid out (it points at them), dashed in (they point at it). -->
+					{#if selObj && selType}
+						<g pointer-events="none">
+							{#each selLinks.out as l (l.o.id)}
+								<path d="M{selObj.x},{selObj.y} Q{(selObj.x + l.o.x) * 0.35},{(selObj.y + l.o.y) * 0.35} {l.o.x},{l.o.y}" fill="none" stroke={selType.color} stroke-width="1.6" stroke-opacity="0.85" />
+								<circle cx={l.o.x} cy={l.o.y} r="6" fill={l.t.color} stroke="#fff" stroke-width="1.2" />
+							{/each}
+							{#each selLinks.inc as l (l.o.id)}
+								<path d="M{l.o.x},{l.o.y} Q{(selObj.x + l.o.x) * 0.35},{(selObj.y + l.o.y) * 0.35} {selObj.x},{selObj.y}" fill="none" stroke={l.t.color} stroke-width="1.6" stroke-opacity="0.85" stroke-dasharray="5 4" />
+								<circle cx={l.o.x} cy={l.o.y} r="6" fill={l.t.color} stroke="#fff" stroke-width="1.2" />
+							{/each}
+						</g>
+					{/if}
+
 					<g bind:this={layers.schemaLabels}>
 						{#each g.props as p (p.key)}
 							{@const on = propOn(p)}
@@ -404,6 +427,12 @@
 						{/each}
 					</div>
 					<div class="note">{graph.props.length + graph.idle.length - selObj.held.size} other properties available, empty</div>
+					{#if selLinks.out.length || selLinks.inc.length}
+						<div>
+							{#if selLinks.out.length}<div class="field"><span class="mono fk">Links to</span><span class="fv">{selLinks.out.map((l) => l.o.name).join(", ")}</span></div>{/if}
+							{#if selLinks.inc.length}<div class="field"><span class="mono fk">Linked from</span><span class="fv">{selLinks.inc.map((l) => l.o.name).join(", ")}</span></div>{/if}
+						</div>
+					{/if}
 					<a class="open" href="/app/object/{selObj.id}">Open object</a>
 				</div>
 			{:else if selType}
