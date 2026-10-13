@@ -4,9 +4,13 @@
 	import type { BlockJSON } from "$lib/types";
 	import { Style } from "$lib/types";
 	import { creatableTypes } from "$lib/create";
+	import { copyImageBlock, downloadFileBlock, viewFailureText } from "$lib/files";
+	import { store } from "$lib/data.svelte";
+	import { goto } from "$app/navigation";
 
 	export interface MenuAction {
-		kind: "style" | "align" | "color" | "background" | "duplicate" | "delete" | "link_style" | "clear_style" | "turn_into_object";
+		/** copy_image / download / open_file: a File block's own actions, run by the menu itself. */
+		kind: "style" | "align" | "color" | "background" | "duplicate" | "delete" | "link_style" | "clear_style" | "turn_into_object" | "copy_image" | "download" | "open_file";
 		value?: number | string;
 	}
 
@@ -83,6 +87,10 @@
 
 	const t = $derived(block.content.text);
 	const isLink = $derived(block.content.custom?.contentType === "link");
+	/** A File block: its meta, and whether it shows an image (Copy image) - any file can be downloaded. */
+	const fileMeta = $derived(block.content.custom?.contentType === "file" ? (block.content.custom.meta ?? {}) : null);
+	const isImage = $derived(!!fileMeta && (fileMeta["mime"] ?? "").startsWith("image/"));
+	const fileName = $derived(fileMeta ? store.summaries.find((s) => s.id === fileMeta["fileId"])?.name || fileMeta["name"] || "file" : "");
 
 	// ── Current-value trailers for the root rows ─────────────────────
 	const curStyle = $derived(STYLES.find((s) => s.value === t?.style)?.label ?? "Text");
@@ -186,6 +194,17 @@
 	});
 
 	function fire(a: MenuAction) {
+		// The file's own actions run here: the bytes are the block's, nothing in the page changes.
+		// Everything is read before onclose - closing drops the block this menu was opened on.
+		const meta = fileMeta;
+		if (meta && (a.kind === "open_file" || a.kind === "copy_image" || a.kind === "download")) {
+			const name = fileName;
+			const run =
+				a.kind === "open_file" ? goto(`/app/object/${meta["fileId"]}`) : a.kind === "copy_image" ? copyImageBlock(meta) : downloadFileBlock(meta, name);
+			onclose();
+			if (a.kind !== "open_file") run.catch((err) => alert(`${a.kind === "copy_image" ? "Couldn't copy the image" : `Couldn't download ${name}`}: ${viewFailureText(err)}`));
+			return;
+		}
 		onaction(a);
 		onclose();
 	}
@@ -228,6 +247,10 @@
 		}
 		for (const c of COLORS) out.push({ section: "Background", label: c.name, action: { kind: "background", value: c.bg }, active: (block.backgroundColor ?? "") === c.bg, swatch: c.bg || "transparent" });
 		for (const ty of TURN_TYPES) out.push({ section: "Turn into object", label: ty.name, action: { kind: "turn_into_object", value: ty.key } });
+		// The File object: the one place every page that shows it is listed (its backlinks), with its own Download.
+		if (fileMeta?.["fileId"]) out.push({ section: "File", label: "Open file", action: { kind: "open_file" } });
+		if (isImage) out.push({ section: "File", label: "Copy image", action: { kind: "copy_image" } });
+		if (fileMeta) out.push({ section: "File", label: "Download", action: { kind: "download" } });
 		out.push({ section: "Actions", label: "Duplicate", action: { kind: "duplicate" } });
 		out.push({ section: "Actions", label: "Delete", action: { kind: "delete" } });
 		const f = filter.trim().toLowerCase();
@@ -338,6 +361,15 @@
 				<Icon name="box" />Turn into object
 				<span class="trail"><span class="chev"><Icon name="chevron-right" size={14} /></span></span>
 			</button>
+			{#if fileMeta?.["fileId"]}
+				<button onpointerenter={hoverPlain} onclick={() => fire({ kind: "open_file" })}><Icon name="external-link" />Open file</button>
+			{/if}
+			{#if isImage}
+				<button onpointerenter={hoverPlain} onclick={() => fire({ kind: "copy_image" })}><Icon name="copy" />Copy image</button>
+			{/if}
+			{#if fileMeta}
+				<button onpointerenter={hoverPlain} onclick={() => fire({ kind: "download" })}><Icon name="download" />Download</button>
+			{/if}
 			<button onpointerenter={hoverPlain} onclick={() => fire({ kind: "duplicate" })}><Icon name="copy" />Duplicate</button>
 			<button class="danger" onpointerenter={hoverPlain} onclick={() => fire({ kind: "delete" })}><Icon name="trash" />Delete block</button>
 		</div>

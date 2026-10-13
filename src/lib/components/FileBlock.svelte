@@ -12,9 +12,9 @@
 	 * dragging their bottom-right corner; the width (percent of the column)
 	 * is kept on the block as `width`.
 	 */
-	import { fetchFileBlob, viewFailureText } from "$lib/files";
+	import { fileBlockBlob, viewFailureText } from "$lib/files";
 	import { store } from "$lib/data.svelte";
-	import { fetchObject, note } from "$lib/api";
+	import { note } from "$lib/api";
 
 	let {
 		meta,
@@ -47,16 +47,14 @@
 
 	$effect(() => {
 		const hash = meta["hash"] ?? "";
-		const fileId = meta["fileId"] ?? "";
+		void meta["fileId"];
 		void attempt;
 		if (!inline || !hash) return;
 		let cancelled = false;
 		let made = "";
 		error = "";
 		url = "";
-		// The File object holds the blob and its key; a block whose File is not here yet asks the harness by hash.
-		(fileId ? fetchObject(fileId).then((file) => file.fields, () => null) : Promise.resolve(null))
-			.then((fields) => fetchFileBlob(fields ?? { file_hash: { stringValue: hash } }))
+		fileBlockBlob(meta)
 			.then((blob) => {
 				if (cancelled) return;
 				made = URL.createObjectURL(blob);

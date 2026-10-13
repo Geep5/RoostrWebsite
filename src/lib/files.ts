@@ -14,7 +14,7 @@ import { finalizeEvent } from "nostr-tools";
 import { hexToBytes } from "@noble/hashes/utils.js";
 import { backend, isIOSBackend, isLocalBackend } from "$lib/client-backend";
 import type { IOSBackend } from "$lib/ios-backend";
-import { note } from "$lib/api";
+import { fetchObject, note } from "$lib/api";
 import { blossomServer, decryptBlob, downloadBlob, encryptBlob, sha256Hex, uploadBlob, type BlossomSigner } from "$lib/blossom";
 import { loadKey } from "$lib/engine/keys";
 import { PairingError, harnessFetch, pairWithOwnerKey, pairedSession } from "$lib/local-transport";
@@ -181,6 +181,43 @@ export async function fetchFileBlob(fields: Record<string, ValueJSON>): Promise<
 	const res = await filesFetch(`/files/${encodeURIComponent(hash)}`);
 	if (!res.ok) throw await failure(res);
 	return res.blob();
+}
+
+/** The bytes a File block shows: its File object's, else (the File not synced here yet) the harness's by the block's hash. */
+export async function fileBlockBlob(meta: Record<string, string>): Promise<Blob> {
+	const fileId = meta["fileId"] ?? "";
+	const fields = fileId ? await fetchObject(fileId).then((file) => file.fields, () => null) : null;
+	return fetchFileBlob(fields ?? { file_hash: { stringValue: meta["hash"] ?? "" } });
+}
+
+/** Save a File block's bytes under its name, as the browser's own download. */
+export async function downloadFileBlock(meta: Record<string, string>, name: string): Promise<void> {
+	const blob = await fileBlockBlob(meta);
+	const a = document.createElement("a");
+	a.href = URL.createObjectURL(blob);
+	a.download = name;
+	a.click();
+	setTimeout(() => URL.revokeObjectURL(a.href), 60_000);
+}
+
+/**
+ * Put an image block on the clipboard as PNG - the one image type every
+ * browser's clipboard takes. The ClipboardItem is made inside the click
+ * with the PNG still pending: Safari refuses a write that starts after the
+ * gesture's await.
+ */
+export async function copyImageBlock(meta: Record<string, string>): Promise<void> {
+	const png = fileBlockBlob(meta).then(async (blob) => {
+		if (blob.type === "image/png") return blob;
+		const bitmap = await createImageBitmap(blob);
+		const canvas = document.createElement("canvas");
+		canvas.width = bitmap.width;
+		canvas.height = bitmap.height;
+		canvas.getContext("2d")!.drawImage(bitmap, 0, 0);
+		bitmap.close();
+		return new Promise<Blob>((resolve, reject) => canvas.toBlob((b) => (b ? resolve(b) : reject(new Error("could not convert the image to PNG"))), "image/png"));
+	});
+	await navigator.clipboard.write([new ClipboardItem({ "image/png": png })]);
 }
 
 /**
