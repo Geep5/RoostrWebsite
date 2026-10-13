@@ -1498,6 +1498,7 @@
 						<button class="hbtn" data-tip="More" onclick={() => { showMore = !showMore; showCollections = false; }}>⋯</button>
 						{#if showMore}
 							<div class="more-menu">
+								<button onclick={() => { showMore = false; tabs.open(`/app/object/${objectId}`); }}><Icon name="external-link" />Open in new tab</button>
 								<button onclick={() => { showMore = false; void togglePin(); }}>
 									{#if isPinned}<Icon name="star-off" />Unpin from space{:else}<Icon name="star" />Pin to space{/if}
 								</button>
@@ -1540,6 +1541,7 @@
 						<button class="hbtn" data-tip="More" onclick={() => { showMore = !showMore; showCollections = false; }}>⋯</button>
 						{#if showMore}
 							<div class="more-menu">
+								<button onclick={() => { showMore = false; tabs.open(`/app/object/${objectId}`); }}><Icon name="external-link" />Open in new tab</button>
 								<button onclick={() => { showMore = false; void copyObjectId(); }}><Icon name="hash" />Copy ID</button>
 							</div>
 						{/if}
