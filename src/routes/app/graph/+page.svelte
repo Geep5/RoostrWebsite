@@ -333,7 +333,7 @@
 							{@const l = radial(t.a, g.rt + t.rad + 40, true)}
 							<line x1={Math.cos(t.a) * (g.rp + 16)} y1={Math.sin(t.a) * (g.rp + 16)} x2={t.x - Math.cos(t.a) * (t.rad + 8)} y2={t.y - Math.sin(t.a) * (t.rad + 8)} stroke={t.color} stroke-opacity={on ? 0.45 : 0.08} stroke-width={2 + t.usage.size * 2.2} stroke-linecap="round" />
 							<text x={l.x} y={l.y} text-anchor={l.anchor} transform={l.transform} dominant-baseline="central" class="sans" font-size="60" letter-spacing="3" data-k="type" data-t={t.index}
-								><tspan fill={on ? "#e7e9ee" : "#4a4f5c"} font-weight="500" data-k="type" data-t={t.index}>{t.name.toUpperCase()}</tspan><tspan fill={on ? t.color : "#3a3f4a"} dx="18" data-k="type" data-t={t.index}>{t.objects.length}</tspan></text
+								><tspan fill={on ? "#e7e9ee" : "#4a4f5c"} font-weight="500" data-k="type" data-t={t.index}>{t.icon ? `${t.icon} ` : ""}{t.name.toUpperCase()}</tspan><tspan fill={on ? t.color : "#3a3f4a"} dx="18" data-k="type" data-t={t.index}>{t.objects.length}</tspan></text
 							>
 						{/each}
 					</g>
@@ -395,7 +395,7 @@
 			{#if selObj && selType}
 				<div class="col">
 					<div class="obj-head">
-						<div class="row"><span class="dot" style:background={selType.color}></span><span class="mono kicker">{selType.name.toUpperCase()}</span></div>
+						<div class="row"><span class="dot" style:background={selType.color}></span><span class="mono kicker">{selType.icon ? `${selType.icon} ` : ""}{selType.name.toUpperCase()}</span></div>
 						<div class="title">{selObj.name}</div>
 					</div>
 					<div>
@@ -435,7 +435,7 @@
 				<div class="col">
 					<div class="row baseline">
 						<span class="mono title grow">{selProp.icon ? `${selProp.icon} ` : ""}{selProp.name}</span>
-						<span class="mono muted small">{selProp.targets.length ? `→ ${selProp.targets.map((t) => t.name).join(", ")}` : selProp.format}</span>
+						<span class="mono muted small">{selProp.targets.length ? `→ ${selProp.targets.map((t) => `${t.icon ? `${t.icon} ` : ""}${t.name}`).join(", ")}` : selProp.format}</span>
 					</div>
 					<div class="mono kicker">USED BY {users.length} OF {graph.types.length} TYPES</div>
 					<div class="bars">
@@ -443,7 +443,7 @@
 							{@const u = t.usage.get(selProp.key)!}
 							<div class="bar-row with-dot">
 								<span class="dot" style:background={t.color}></span>
-								<span class="bar-name">{t.name}</span>
+								<span class="bar-name">{t.icon ? `${t.icon} ` : ""}{t.name}</span>
 								<span class="track"><span class="fill" style:width={pct(u)} style:background={t.color}></span></span>
 								<span class="mono muted small right">{pct(u)}</span>
 							</div>
