@@ -1244,7 +1244,7 @@
 			onclick={() => { dwellCancel(); togglePane(); }}
 		>{discussionUI.open ? "›" : "‹"}</button>
 	{/if}
-	<nav class="vault" class:wide={railWide} class:nav-hidden={navHidden}>
+	<nav class="vault" class:wide={railWide} class:nav-hidden={navHidden} style="--user-color: {store.chatColor || DEFAULT_CHAT_COLOR}">
 		{#each orderedSpaces as c (c.id)}
 			<button
 				class="space"
@@ -2000,8 +2000,11 @@
 	.space.active {
 		background: var(--panel);
 	}
+	/* The open space: the user's own colour (Settings → chat colour) as a ring and a faint tint. */
 	.space.active {
 		color: var(--fg);
+		background: color-mix(in srgb, var(--user-color) 16%, var(--panel));
+		box-shadow: inset 0 0 0 2px var(--user-color);
 	}
 	/* Reorder affordances. The rail is vertical, so the drop line is
 	   horizontal; the dragged tile fades so the line reads as its
