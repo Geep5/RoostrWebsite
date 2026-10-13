@@ -70,12 +70,11 @@
 	const typeOn = (t: GraphType) => !sel || (selType ? t === selType : !!selProp?.users.includes(t));
 	const propOn = (p: GraphProperty) => !sel || (selObj ? selObj.held.has(p.key) : selType ? selType.usage.has(p.key) : p === selProp);
 
-	/** Type cluster rim (facing the centre) → property, bent toward the centre. */
-	function edgePath(t: GraphType, p: { x: number; y: number }): string {
-		const sx = t.x - Math.cos(t.a) * t.rad;
-		const sy = t.y - Math.sin(t.a) * t.rad;
-		return `M${sx},${sy} Q${((sx + p.x) / 2) * (1 - CURVATURE)},${((sy + p.y) / 2) * (1 - CURVATURE)} ${p.x},${p.y}`;
+	/** A point (an object dot, or a type's centre) → property, bent toward the centre. */
+	function edgePath(s: { x: number; y: number }, p: { x: number; y: number }): string {
+		return `M${s.x},${s.y} Q${((s.x + p.x) / 2) * (1 - CURVATURE)},${((s.y + p.y) / 2) * (1 - CURVATURE)} ${p.x},${p.y}`;
 	}
+	const propByKey = $derived(new Map((graph?.props ?? []).map((p) => [p.key, p])));
 
 	/** A label along the radius at angle `a`; flipped on the left half so it never reads upside down. `out`: text runs away from the centre. */
 	function radial(a: number, dist: number, out: boolean) {
@@ -293,13 +292,16 @@
 				<g bind:this={world}>
 					<g bind:this={layers.schema}>
 						<g class="screen">
+							<!-- One line per object per property it holds: straight from the dot, so a type's usage reads as how many lines leave it. -->
 							{#each g.types as t (t.key)}
-								{#each [...t.usage] as [key, u] (key)}
-									{@const p = g.props.find((x) => x.key === key)}
-									{#if p}
-										{@const lit = sel ? (selType ? t === selType : selProp === p) : false}
-										<path d={edgePath(t, p)} fill="none" stroke={t.color} stroke-linecap="round" stroke-width={lit ? 1.5 + u * 5 : 0.8 + u * 3.2} stroke-opacity={sel && !lit ? 0.035 : lit ? 0.5 + u * 0.45 : 0.1 + u * 0.32} />
-									{/if}
+								{#each t.objects as o (o.id)}
+									{#each [...o.held] as key (key)}
+										{@const p = propByKey.get(key)}
+										{#if p}
+											{@const lit = sel ? (selObj ? o === selObj : selType ? t === selType : selProp === p) : false}
+											<path d={edgePath(o, p)} fill="none" stroke={t.color} stroke-linecap="round" stroke-width={lit ? 1.4 : 0.7} stroke-opacity={sel && !lit ? 0.025 : lit ? 0.6 : 0.12} />
+										{/if}
+									{/each}
 								{/each}
 							{/each}
 						</g>
