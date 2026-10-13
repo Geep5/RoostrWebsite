@@ -264,13 +264,15 @@
 	/**
 	 * The composer opens already addressed: `@Name `, tagged, caret after -
 	 * you just type. Name = the agent last @-tagged in this chat (by a person,
-	 * not an agent), else the object's only agent; otherwise it starts empty.
-	 * An agent's own page needs no tag. Only ever fills an empty draft, so a
-	 * message in progress is untouched. `justSent` is the tags of the message
-	 * just posted, which may not be in `messages` yet.
+	 * not an agent), else on an agent's own page that agent, else the
+	 * object's only agent; otherwise it starts empty. Only an @-mention wakes
+	 * an agent - its own page too - so this is what makes a plain message
+	 * there reach it. Only ever fills an empty draft, so a message in
+	 * progress is untouched. `justSent` is the tags of the message just
+	 * posted, which may not be in `messages` yet.
 	 */
 	async function seedDefaultAgent(justSent: ObjectAgentOption[] = []): Promise<void> {
-		if (draft !== "" || readOnly || isExchange || object.typeKey === "agent") return;
+		if (draft !== "" || readOnly || isExchange) return;
 		await ensureTagOptions();
 		const options = tagOptions ?? [];
 		if (draft !== "" || !options.length) return;
@@ -288,7 +290,7 @@
 			}
 			return undefined;
 		};
-		const assigned = guestAgents(object.fields);
+		const assigned = object.typeKey === "agent" ? [object.id] : guestAgents(object.fields);
 		const sole = assigned.length === 1 ? options.find((option) => option.endpoint.agentId === assigned[0]) : undefined;
 		const pick = justSent[justSent.length - 1] ?? lastTagged() ?? sole;
 		if (!pick) return;
