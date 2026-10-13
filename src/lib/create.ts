@@ -162,12 +162,19 @@ export async function newAgent(channelId: string, name = "", seeds: Record<strin
 		? []
 		: (await fetchAllQuery({ type: "tool", filters: [{ key: "channel", condition: "equal", value: channelId }] }))
 			.filter((r) => isBuiltinTool(r.fields) && DEFAULT_TOOLS.includes(r.fields["name"]?.stringValue ?? ""));
+	// Its model login: the space's Anthropic credential (each space has one; an active one wins), unless its template sets Credentials.
+	const modelCred = tpl?.fields["credentials"]
+		? undefined
+		: (await fetchAllQuery({ type: "credential", filters: [{ key: "channel", condition: "equal", value: channelId }] }))
+			.filter((r) => r.fields["service"]?.stringValue === "anthropic")
+			.sort((a, b) => Number(b.fields["status"]?.stringValue === "active") - Number(a.fields["status"]?.stringValue === "active") || a.createdAt - b.createdAt)[0];
 	const { id: agentId } = await note.create(name.trim() || "New agent", "agent", {
 		// A view's Agent filter seeds its records' guest list; an agent has none of its own.
 		...Object.fromEntries(Object.entries(seeds).filter(([key]) => key !== "agent")),
 		...channelField(channelId),
 		...(assistant ? { prompt: { linkValue: { targetId: assistant.id, relationKey: "prompt" } } } : {}),
 		...(tools.length ? { tools: { valuesValue: { items: tools.map((t) => ({ linkValue: { targetId: t.id, relationKey: "tools" } })) } } } : {}),
+		...(modelCred ? { credentials: { valuesValue: { items: [{ linkValue: { targetId: modelCred.id, relationKey: "credentials" } }] } } } : {}),
 	});
 	if (tpl) await applyTemplate(agentId, tpl.id);
 	return agentId;
