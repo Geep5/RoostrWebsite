@@ -128,15 +128,28 @@ let connected = false;
 export function connectEvents(): () => void {
 	if (connected) return () => {};
 	connected = true;
-	let timer: ReturnType<typeof setTimeout> | undefined;
+	// Throttle, not debounce: a catch-up commits every few hundred ms for
+	// minutes, and a timer reset on each commit never fired - the spaces list
+	// stayed as it was at load (nameless, iconless, or empty) until sync went quiet.
+	// A commit during a running refresh queues one more after it.
+	let timer: number | undefined;
+	let running = false;
+	let again = false;
+	const refresh = async (): Promise<void> => {
+		timer = undefined;
+		if (running) { again = true; return; }
+		running = true;
+		try { await refreshAll(); } catch { /* the next commit retries */ }
+		running = false;
+		if (again) { again = false; timer ??= window.setTimeout(() => void refresh(), 800); }
+	};
 	const off = backend.onCommit((ids) => {
-		clearTimeout(timer);
-		timer = setTimeout(() => void refreshAll(), 800);
+		timer ??= window.setTimeout(() => void refresh(), 800);
 		for (const id of ids) for (const fn of objectListeners) fn(id);
 	});
 	return () => {
 		connected = false;
-		clearTimeout(timer);
+		window.clearTimeout(timer);
 		off();
 	};
 }
