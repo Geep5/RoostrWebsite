@@ -120,9 +120,10 @@
 		// A system prompt belongs to one space; an agent picks from its own.
 		if (spaceId && allowedTypeKeys.has("system_prompt")) pool = pool.filter((s) => "channelId" in s && s.channelId === spaceId);
 		const matches = pool.filter((s) => !q || (s.name ?? "").toLowerCase().includes(q));
-		// A space's agents are few and all worth seeing (the menu scrolls); any
-		// other object type can number thousands, so the search narrows those.
-		return wantsAgents ? matches : matches.slice(0, 8);
+		// A relation restricted to types (an agent's tools, skills, credentials,
+		// prompt) draws from a short list worth seeing whole (the menu scrolls);
+		// an unrestricted one can number thousands, so the search narrows those.
+		return wantsAgents || allowedTypeKeys.size > 0 ? matches : matches.slice(0, 8);
 	});
 	$effect(() => {
 		void objectQuery;
