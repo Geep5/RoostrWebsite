@@ -187,7 +187,11 @@
 		const out: number[] = [];
 		let day = dayFits(draft, draft.anchor) ? draft.anchor : stepFrom(draft, draft.anchor);
 		for (let i = 0; i < 400 && out.length < 5; i++, day = stepFrom(draft, day)) {
-			for (const t of times) if (out.length < 5 && day + t * MIN > now) out.push(day + t * MIN);
+			// The wall-clock time on that day: midnight + minutes drifts an hour on a clock-change day.
+			for (const t of times) {
+				const at = new Date(day).setHours(Math.floor(t / 60), t % 60, 0, 0);
+				if (out.length < 5 && at > now) out.push(at);
+			}
 		}
 		return out;
 	});
@@ -220,7 +224,14 @@
 	function setAnchor(value: string) {
 		const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
 		if (!m) return;
-		const next = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3])).getTime();
+		// The date box reports each keystroke of the year (0002, 0020, 0202…):
+		// taking those wrote them back into the box mid-typing and scrambled
+		// the date (10/01/2026 came out 1926). Only a whole year counts.
+		const year = Number(m[1]);
+		if (year < 1970) return;
+		const day = new Date(year, Number(m[2]) - 1, Number(m[3]));
+		day.setFullYear(year);
+		const next = day.getTime();
 		const oldDay = new Date(draft.anchor).getDay();
 		if (draft.freq === "week" && draft.weekdays.length === 1 && draft.weekdays[0] === oldDay) draft.weekdays = [new Date(next).getDay()];
 		draft.anchor = next;
