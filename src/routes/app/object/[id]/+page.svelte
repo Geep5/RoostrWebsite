@@ -5,7 +5,7 @@
 	import { goto } from "$app/navigation";
 	import type { ObjectJSON } from "$lib/types";
 	import { fieldStr, isBuiltinTool, isLockedTool } from "$lib/types";
-	import { engineFiltersOf, repeatFilterOf, servingFiltersOf, spaceFilterOf } from "$lib/filters";
+	import { engineFiltersOf, servingFiltersOf, spaceFilterOf } from "$lib/filters";
 	import { spaceRelations } from "$lib/relations";
 	import { fetchObject, fetchQuery, note } from "$lib/api";
 	import { discussionUI, store, refreshAll, onObjectEvent, layoutOf } from "$lib/data.svelte";
@@ -257,7 +257,6 @@
 
 	/** Serving rules travel beside the body: host-computed, applied by the table after the engine query. */
 	const servingRules = $derived.by(() => (object ? servingFiltersOf(object) : []));
-	const repeatFilter = $derived(object ? repeatFilterOf(object) : "");
 
 	/** Pick-lists (columns, filters, featured props) offer only this
 	 *  space's properties - spaces are self-contained. */
@@ -285,7 +284,7 @@
 		// owning space's objects. A bundled type (channel "") owns no space,
 		// so its page anchors to the space being VIEWED, not the vault default.
 		const spaceFilter = spaceFilterOf(object, activeSpace.id || store.channels[0]?.id || "");
-		if (isQuery) return { setId: object.id, filters: [...engineFilters, spaceFilter], servingFilters: servingRules, repeatFilter, ...text };
+		if (isQuery) return { setId: object.id, filters: [...engineFilters, spaceFilter], servingFilters: servingRules, ...text };
 		// A type page IS a set of its instances (Anytype's type view).
 		if (isType) {
 			const key = object.fields["key"]?.stringValue;
@@ -302,12 +301,12 @@
 			// Pickers query across spaces regardless.
 			const typeFilters = engineFilters.filter((f) => !(f.key === "typeKey" && f.condition === "notIn" && Array.isArray(f.value) && (f.value as unknown[]).includes(key)));
 			const filters = key === "machine" || key === "skill" ? typeFilters : [...typeFilters, spaceFilter];
-			return { type: key, filters, servingFilters: servingRules, repeatFilter, ...text };
+			return { type: key, filters, servingFilters: servingRules, ...text };
 		}
 		if (isCollection) {
 			if (memberIds.length === 0) return null;
 			// View filters stack on top of membership (AND semantics).
-			return { filters: [{ key: "id", condition: "in", value: memberIds }, ...engineFilters, spaceFilter], servingFilters: servingRules, repeatFilter, ...text };
+			return { filters: [{ key: "id", condition: "in", value: memberIds }, ...engineFilters, spaceFilter], servingFilters: servingRules, ...text };
 		}
 		return null;
 	});

@@ -452,8 +452,30 @@
 		return info.warning ? 0 : info.machineId ? 2 : 1;
 	}
 
-	async function load() {
-		const { servingFilters, repeatFilter, ...engineBody } = body as Record<string, unknown> & { servingFilters?: Array<{ condition: string; value: string }>; repeatFilter?: string };
+	/** Rows per page: the first page opens the view, scrolling near the end fetches the next. */
+	const PAGE = 100;
+	/** What every row draws whatever the columns: name, icon, the task checkbox, a credential's status cell (and whether a check of it is underway). */
+	const ROW_FIELDS = ["name", "iconEmoji", "done", "status", "error", "service", "served_by", "check_requested", "checked_at"];
+	/** Everything that matched the query, not just the rows loaded. */
+	let total = $state(0);
+	/** The query a paged view continues with (offset = rows loaded); null while every row is loaded at once. */
+	let pageQuery = $state.raw<Record<string, unknown> | null>(null);
+	let loadingMore = false;
+	/** Bumped by every load: a response for an older one (a sort clicked meanwhile) is dropped. */
+	let generation = 0;
+
+	/**
+	 * The engine sorts and filters every matching object; the table fetches
+	 * the first page of that order - only the properties it draws - and the
+	 * next page as you scroll. A new sort or filter runs the query again.
+	 * Only what the engine can't compute (the Served by column, its filter or
+	 * sort, and a sort by next repeat) needs every row, so those views load
+	 * all of them, as before. `keepCount`: a refresh after a change keeps
+	 * the rows already scrolled into view.
+	 */
+	async function load(keepCount = false) {
+		const gen = ++generation;
+		const { servingFilters, ...engineBody } = body as Record<string, unknown> & { servingFilters?: Array<{ condition: string; value: string }> };
 		const rules = servingFilters ?? [];
 		const effectiveKey = override?.key ?? defaultSorts[0]?.key ?? "updatedAt";
 		const effectiveType = override?.dir ?? defaultSorts[0]?.type ?? "desc";
@@ -466,15 +488,25 @@
 			type: s.type,
 			emptyPlacement: ("empty" in s ? s.empty : undefined) ?? "end",
 		}));
+		const needsEveryRow = !!servingSort || !!repeatSort || rules.length > 0 || columns.includes("serving");
+		if (!needsEveryRow) {
+			const query = { ...engineBody, sorts, fields: [...new Set([...ROW_FIELDS, ...columns])] };
+			const res = await fetchQuery({ ...query, offset: 0, limit: keepCount ? Math.max(PAGE, rows.length) : PAGE });
+			if (gen !== generation) return;
+			pageQuery = query;
+			rows = res.records;
+			total = res.total;
+			return;
+		}
+		pageQuery = null;
 		const res = await fetchQuery({ ...engineBody, sorts });
-		rows = res.records;
-		if (repeatFilter === "notEmpty") rows = rows.filter((r) => repeatOf(r.fields));
-		else if (repeatFilter === "empty") rows = rows.filter((r) => !repeatOf(r.fields));
+		if (gen !== generation) return;
+		let all = res.records;
 		if (repeatSort) {
 			// One-off objects last either way, like an empty cell under any engine sort.
 			const dir = repeatSort.type === "desc" ? -1 : 1;
 			const next = (r: QueryResultRow) => repeatOf(r.fields)?.next;
-			rows = [...rows].sort((a, b) => {
+			all = [...all].sort((a, b) => {
 				const x = next(a), y = next(b);
 				if (x === undefined || y === undefined) return x === undefined ? (y === undefined ? 0 : 1) : -1;
 				return dir * (x - y);
@@ -482,10 +514,11 @@
 		}
 		if (columns.includes("serving") || rules.length > 0 || servingSort) {
 			const { rows: machineRows, machines } = await fetchMachines();
+			if (gen !== generation) return;
 			machinesNow = machines;
-			const resolved = await resolveMany(rows, machineRows);
+			const resolved = await resolveMany(all, machineRows);
 			const map = new Map<string, ServingInfo>();
-			rows.forEach((r, i) => {
+			all.forEach((r, i) => {
 				const s = resolved[i];
 				const label = s.machineId ? machineName(machines, s.machineId) : "No machine";
 				const machine = s.machineId ? machineRows.find((m) => m.fields["machine_id"]?.stringValue === s.machineId) : undefined;
@@ -493,12 +526,41 @@
 				map.set(r.id, { ...servingCopy(s, machines), label, reason: s.reason, machineId: s.machineId, icon });
 			});
 			servingById = map;
-			if (rules.length > 0) rows = rows.filter((r) => rules.every((rule) => servingMatch(rule, servingById.get(r.id))));
+			if (rules.length > 0) all = all.filter((r) => rules.every((rule) => servingMatch(rule, servingById.get(r.id))));
 			if (servingSort) {
 				const dir = servingSort.type === "desc" ? -1 : 1;
-				rows = [...rows].sort((a, b) => dir * (servingRank(servingById.get(a.id)) - servingRank(servingById.get(b.id))) || (a.updatedAt - b.updatedAt) * -1);
+				all = [...all].sort((a, b) => dir * (servingRank(servingById.get(a.id)) - servingRank(servingById.get(b.id))) || (a.updatedAt - b.updatedAt) * -1);
 			}
 		}
+		if (gen !== generation) return;
+		rows = all;
+		total = all.length;
+	}
+
+	/** The next page of a paged view, in the same order. */
+	async function loadMore() {
+		const query = pageQuery;
+		if (!query || loadingMore || rows.length >= total) return;
+		loadingMore = true;
+		const gen = generation;
+		try {
+			const res = await fetchQuery({ ...query, offset: rows.length, limit: PAGE });
+			if (gen !== generation) return;
+			const have = new Set(rows.map((r) => r.id));
+			rows = [...rows, ...res.records.filter((r) => !have.has(r.id))];
+			total = res.total;
+		} finally {
+			loadingMore = false;
+		}
+	}
+
+	/** On the sentinel row after the last one: coming within a screen of it loads the next page. */
+	function nearEnd(node: HTMLElement) {
+		const io = new IntersectionObserver((entries) => {
+			if (entries.some((e) => e.isIntersecting)) void loadMore();
+		}, { rootMargin: "800px 0px" });
+		io.observe(node);
+		return { destroy: () => io.disconnect() };
 	}
 
 	$effect(() => {
@@ -516,8 +578,9 @@
 		await reload();
 	}
 
+	/** After a change: the same view, the same rows scrolled into view. */
 	export function reload(): Promise<void> {
-		return load();
+		return load(true);
 	}
 
 	// ── Pending entry row (Anytype: "+ New Object" shows an "Enter
@@ -723,6 +786,10 @@
 					<td></td>
 				</tr>
 			{/each}
+			{#if pageQuery && rows.length < total}
+				<!-- The next page loads as this comes within a screen of view. -->
+				<tr class="more-row" use:nearEnd><td colspan={cols.length + 2}>Loading more… {rows.length} of {total}</td></tr>
+			{/if}
 			{#if oncreate}
 			{#if pendingNew}
 				<tr class="entry-row">
@@ -813,7 +880,6 @@
 		ids={ctxTargets()}
 		spaceId={fieldStr(object.fields, "channel")}
 		relationKeys={columns}
-		fieldsOf={(id) => rows.find((r) => r.id === id)?.fields}
 		{onremove}
 		onchanged={reload}
 		onclose={() => {

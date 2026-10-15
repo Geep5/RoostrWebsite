@@ -8,22 +8,11 @@ import { SYSTEM_TYPE_KEYS } from "$lib/types";
 
 /**
  * Filter keys the engine cannot evaluate. `serving` is computed by the
- * host (the engine's serving resolver, $lib/serving); `repeat` is stored,
- * but as a map, which the engine's filters treat as no value at all. Views
- * apply both client-side after the engine query (SetTable).
+ * host (the engine's serving resolver, $lib/serving); views apply it
+ * client-side after the engine query (SetTable). Repeat is the engine's:
+ * "is empty / is not empty" works on its rule like any property.
  */
-export const VIRTUAL_FILTER_KEYS: Record<string, true> = { serving: true, repeat: true };
-
-/** The stored Repeat rule of a view: "notEmpty" = only recurring objects, "empty" = only one-off ones, "" = no rule. */
-export function repeatFilterOf(object: ObjectJSON): "" | "empty" | "notEmpty" {
-	for (const item of object.fields["viewFilters"]?.valuesValue?.items ?? []) {
-		const e = item.mapValue?.entries;
-		if (e?.["key"]?.stringValue !== "repeat") continue;
-		const condition = e["condition"]?.stringValue;
-		if (condition === "empty" || condition === "notEmpty") return condition;
-	}
-	return "";
-}
+export const VIRTUAL_FILTER_KEYS: Record<string, true> = { serving: true };
 
 /** Stored serving filter rules, parsed for the client-side pass. */
 export function servingFiltersOf(object: ObjectJSON): Array<{ condition: string; value: string }> {

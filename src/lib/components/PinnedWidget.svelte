@@ -8,9 +8,8 @@
 	 */
 	import { fetchObject, fetchQuery, type QueryResultRow } from "$lib/api";
 	import type { ObjectJSON, RelationDefJSON } from "$lib/types";
-	import { repeatOf } from "$lib/types";
 	import { store, onObjectEvent } from "$lib/data.svelte";
-	import { engineFiltersOf, repeatFilterOf, spaceFilterOf } from "$lib/filters";
+	import { engineFiltersOf, spaceFilterOf } from "$lib/filters";
 	import { objectSpaceId, spaceRelations } from "$lib/relations";
 	import { objectIcon } from "$lib/icons";
 	import { page } from "$app/state";
@@ -100,10 +99,10 @@
 						return key ? { key, type, emptyPlacement: "end" } : null;
 					})
 					.filter((x): x is { key: string; type: string; emptyPlacement: string } => !!x);
-				const res = await fetchQuery({ ...body, sorts: sorts.length > 0 ? sorts : [{ key: "updatedAt", type: "desc", emptyPlacement: "end" }], limit: 50 });
-				// Repeat can't be filtered by the engine (a map value): same client pass as the page.
-				const repeatFilter = repeatFilterOf(o);
-				rows = repeatFilter ? res.records.filter((r) => !!repeatOf(r.fields) === (repeatFilter === "notEmpty")) : res.records;
+				// Only what a widget draws: names and icons, plus the key its kanban groups or calendar dates by.
+				const shown = ["name", "iconEmoji", "done", o.fields["viewGroupKey"]?.stringValue ?? "", o.fields["viewDateKey"]?.stringValue ?? ""].filter(Boolean);
+				const res = await fetchQuery({ ...body, sorts: sorts.length > 0 ? sorts : [{ key: "updatedAt", type: "desc", emptyPlacement: "end" }], limit: 50, fields: shown });
+				rows = res.records;
 				return;
 			}
 			// Tree widget: outbound links (same shapes as the graph/backlinks).
