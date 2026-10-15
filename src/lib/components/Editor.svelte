@@ -891,11 +891,13 @@
 
 		// Anytype markdown (editor/page.tsx): a line of exactly ---, —-
 		// (em-dash typo tolerance), or *** becomes a divider on enter/space -
-		// *** gives dots, the rest a line. Our divider is a custom block
-		// (content_type "divider"): pure presentation, no proto changes.
+		// *** gives dots, the rest a line. Any line but code: a checkbox or
+		// bullet line typed "---" (the next line of a list is one) is meant as
+		// a divider too. Our divider is a custom block (content_type
+		// "divider"): pure presentation, no proto changes.
 		async function convertToDivider(text: string): Promise<boolean> {
 			if (!["---", "—-", "***"].includes(text.trim())) return false;
-			if ((byId.get(id)?.content.text?.style ?? Style.PARAGRAPH) !== Style.PARAGRAPH) return false;
+			if (byId.get(id)?.content.text?.style === Style.CODE) return false;
 			const style = text.trim() === "***" ? "dots" : "line";
 			const newId = crypto.randomUUID();
 			cancelPending(id);
