@@ -291,6 +291,25 @@
 		})();
 	});
 
+	// ── Agents the agent row links that this device does not list: really
+	// deleted (binned, or in the vanish ledger), or not downloaded yet - a big
+	// agent's snapshot can take a while, and must not read as deleted. ──
+	const missingAgentsKey = $derived((plain(object.fields["agent"], "object") as string[]).filter((id) => !store.agents.some((a) => a.id === id)).join(","));
+	let goneAgents = $state<Set<string>>(new Set());
+	$effect(() => {
+		const ids = missingAgentsKey ? missingAgentsKey.split(",") : [];
+		void (async () => {
+			const gone = new Set<string>();
+			let ledger: Record<string, unknown> = {};
+			try { ledger = (await fetchObject("__vanished__")).fields; } catch { /* no ledger: nothing vanished */ }
+			for (const id of ids) {
+				if (`vanished:${id}` in ledger) { gone.add(id); continue; }
+				try { if ((await fetchObject(id)).deleted) gone.add(id); } catch { /* not here yet */ }
+			}
+			goneAgents = gone;
+		})();
+	});
+
 	// ── The credential objects the credentials row links, for their status and keeping computer ──
 	const credentialIdsKey = $derived((plain(object.fields["credentials"], "object") as string[]).join(","));
 	let credentialsById = $state<Map<string, QueryResultRow>>(new Map());
@@ -629,8 +648,8 @@
 					{#each plain(v, "object") as string[] as id (id)}
 						{@const a = store.agents.find((x) => x.id === id)}
 						<span class="chip-wrap">
-							<span class="chip" class:warn={!a} title={a ? `${a.name} · agent` : `Agent ${id.slice(0, 8)}… (no longer exists — remove)`}>
-								<span class="emoji">{a ? (a.icon || "🤖") : "⚠️"}</span>{a?.name || `${id.slice(0, 8)}…`}
+							<span class="chip" class:warn={!a && goneAgents.has(id)} class:loading={!a && !goneAgents.has(id)} title={a ? `${a.name} · agent` : goneAgents.has(id) ? `Agent ${id.slice(0, 8)}… (deleted — remove)` : `Agent ${id.slice(0, 8)}… (still loading on this device)`}>
+								<span class="emoji">{a ? (a.icon || "🤖") : goneAgents.has(id) ? "⚠️" : "⏳"}</span>{a?.name || (goneAgents.has(id) ? `${id.slice(0, 8)}…` : "Loading…")}
 							</span>
 							<button class="rm" aria-label={`Remove ${a?.name ?? "agent"}`} title="Remove" onclick={(e) => { e.stopPropagation(); void removeValue(rel.key, id); }}>×</button>
 						</span>
@@ -959,6 +978,9 @@
 	.chip.warn,
 	.chip.warn .chip-icon {
 		color: var(--red);
+	}
+	.chip.loading {
+		color: var(--muted);
 	}
 	a.chip {
 		text-decoration: none;
