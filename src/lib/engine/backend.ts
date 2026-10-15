@@ -448,7 +448,8 @@ class WebBackend {
 				done: o.fields["done"]?.boolValue === true,
 			});
 		}
-		out.sort((a, b) => b.updatedAt - a.updatedAt);
+		// Newest first, id ascending on a tie - the daemon's order, so lists don't reshuffle across reloads.
+		out.sort((a, b) => b.updatedAt - a.updatedAt || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
 		return out;
 	}
 
