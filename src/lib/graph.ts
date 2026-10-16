@@ -79,22 +79,6 @@ export interface SchemaGraph {
 	extent: number;
 }
 
-/** Infrastructure kinds: their objects are configuration, not content. */
-const HIDDEN_KINDS: Record<string, true> = {
-	program: true,
-	typescript: true,
-	json: true,
-	proto: true,
-	relation: true,
-	type: true,
-	template: true,
-	agent: true,
-	skill: true,
-	channel: true,
-	vanish_log: true,
-	user_prefs: true,
-};
-
 /** Spacing between neighbouring object dots inside a cluster (world units). */
 export const DOT_SPACING = 13;
 
@@ -110,12 +94,12 @@ function hasValue(v: ValueJSON | undefined): boolean {
 }
 
 /**
- * Builds the schema graph of one space from its objects. `relations` and
+ * Builds the schema graph of one space from its objects - every object, its
+ * types, properties, agents, skills and templates included. `relations` and
  * `types` are the space's own definitions (spaceRelations / the store).
  */
 export async function buildSchemaGraph(channelId: string, isDefaultChannel: boolean, relations: RelationDefJSON[], types: TypeDef[]): Promise<SchemaGraph> {
 	const rows: QueryResultRow[] = (await fetchAllQuery({})).filter((r) => {
-		if (HIDDEN_KINDS[r.typeKey]) return false;
 		const ch = r.fields["channel"]?.stringValue ?? "";
 		return ch === channelId || (ch === "" && isDefaultChannel);
 	});
