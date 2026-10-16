@@ -221,6 +221,34 @@
 		}
 	}
 
+	// ── Search: objects and properties by name; picking one pins it and flies there ──
+	let query = $state("");
+	let hit = $state(0);
+	type Found = { kind: "obj" | "prop"; name: string; sub: string; color: string; sel: Sel; x: number; y: number };
+	const found = $derived.by((): Found[] => {
+		const q = query.trim().toLowerCase();
+		if (!graph || !q) return [];
+		const props: Found[] = graph.props
+			.filter((p) => p.name.toLowerCase().includes(q))
+			.map((p) => ({ kind: "prop", name: `${p.icon ? `${p.icon} ` : ""}${p.name}`, sub: "Property", color: "#8a90a0", sel: { k: "prop", p: p.key }, x: p.x, y: p.y }));
+		const objs: Found[] = graph.types.flatMap((t) =>
+			t.objects.flatMap((o, j): Found[] => (o.name.toLowerCase().includes(q) ? [{ kind: "obj", name: o.name, sub: t.name, color: t.color, sel: { k: "obj", t: t.index, j }, x: o.x, y: o.y }] : [])),
+		);
+		// Names that start with the query first, then the rest; properties ahead of objects.
+		const rank = (f: Found) => (f.name.toLowerCase().replace(/^\P{L}+/u, "").startsWith(q) ? 0 : 1);
+		return [...props, ...objs].toSorted((a, b) => rank(a) - rank(b)).slice(0, 12);
+	});
+	$effect(() => {
+		void found;
+		hit = 0;
+	});
+	function flyTo(f: Found) {
+		pin = f.sel;
+		// Objects show their dots from the object level; properties from the schema level.
+		zoomTo(f.kind === "obj" ? 2.3 : Math.max(0.8, v.s), f.x, f.y);
+		query = "";
+	}
+
 	// Fit on load and on resize until the user takes over; ?focus zooms to its object.
 	// Only the stage, the graph and the focus re-run it: the view writes `level` and
 	// `pin`, and tracking those would re-fit (and cancel) every zoom the user starts.
@@ -521,9 +549,34 @@
 	{#if status}<p class="status">{status}</p>{/if}
 
 	{#if graph && !status}
-		<div class="intro">
-			<div class="mono eyebrow">Object graph</div>
-			<div class="lede">Everything is an object. Types group objects. Properties are shared: any type can hold any of them, and lines appear only where they’re used.</div>
+		<div class="finder">
+			<input
+				type="search"
+				placeholder="Find an object or property…"
+				bind:value={query}
+				onkeydown={(e) => {
+					if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+						e.preventDefault();
+						if (found.length) hit = (hit + (e.key === "ArrowDown" ? 1 : found.length - 1)) % found.length;
+					} else if (e.key === "Enter" && found[hit]) {
+						e.preventDefault();
+						flyTo(found[hit]);
+					} else if (e.key === "Escape") query = "";
+				}}
+			/>
+			{#if query.trim()}
+				<div class="found">
+					{#each found as f, i (f.kind + JSON.stringify(f.sel))}
+						<button class:on={i === hit} onmouseenter={() => (hit = i)} onclick={() => flyTo(f)}>
+							<span class="dot" style:background={f.color}></span>
+							<span class="fname">{f.name}</span>
+							<span class="mono fsub">{f.sub}</span>
+						</button>
+					{:else}
+						<div class="none">No objects or properties match.</div>
+					{/each}
+				</div>
+			{/if}
 		</div>
 
 		<aside class="panel">
@@ -658,27 +711,77 @@
 		color: #8a90a0;
 		pointer-events: none;
 	}
-	.intro {
+	.finder {
 		position: absolute;
 		top: 24px;
 		left: 28px;
-		max-width: 320px;
-		pointer-events: none;
+		width: 320px;
 		display: flex;
 		flex-direction: column;
+		gap: 6px;
+	}
+	.finder input {
+		width: 100%;
+		box-sizing: border-box;
+		background: rgb(20 22 28 / 0.85);
+		border: 1px solid #2a2f3a;
+		border-radius: 8px;
+		padding: 8px 12px;
+		color: #e4e7ee;
+		font-size: 14px;
+		outline: none;
+	}
+	.finder input:focus {
+		border-color: #4a5266;
+	}
+	.found {
+		display: flex;
+		flex-direction: column;
+		max-height: 360px;
+		overflow: auto;
+		background: rgb(20 22 28 / 0.95);
+		border: 1px solid #2a2f3a;
+		border-radius: 8px;
+		padding: 4px;
+	}
+	.found button {
+		display: flex;
+		align-items: center;
 		gap: 8px;
+		background: none;
+		border: none;
+		border-radius: 6px;
+		padding: 6px 8px;
+		color: #d6dae3;
+		font-size: 13px;
+		text-align: left;
+		cursor: pointer;
 	}
-	.eyebrow {
-		font-size: 11px;
-		letter-spacing: 0.14em;
+	.found button.on {
+		background: #262b36;
+	}
+	.found .dot {
+		width: 8px;
+		height: 8px;
+		border-radius: 50%;
+		flex: none;
+	}
+	.fname {
+		flex: 1;
+		min-width: 0;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+	.fsub {
+		font-size: 10px;
 		color: #7d8496;
-		text-transform: uppercase;
+		flex: none;
 	}
-	.lede {
-		font-size: 15px;
-		line-height: 1.5;
-		color: #b9bfcc;
-		text-wrap: pretty;
+	.found .none {
+		padding: 6px 8px;
+		font-size: 12px;
+		color: #7d8496;
 	}
 	.panel {
 		position: absolute;
@@ -892,8 +995,13 @@
 	}
 	/* Narrow screens: the panel and intro would cover the graph; the panel tucks under the top edge. */
 	@media (max-width: 900px) {
-		.intro {
-			display: none;
+		.finder {
+			top: auto;
+			bottom: 76px;
+			left: 12px;
+			right: 12px;
+			width: auto;
+			flex-direction: column-reverse;
 		}
 		.panel {
 			left: 12px;
