@@ -3,7 +3,7 @@
 	import { fetchQuery, type QueryResultRow } from "$lib/api";
 	import { store } from "$lib/data.svelte";
 	import { activeSpace } from "$lib/space.svelte";
-	import { objectIcon, typeIcon } from "$lib/icons";
+	import { kindName, objectIcon, typeIcon } from "$lib/icons";
 	import { createTyped, defaultTypeKey } from "$lib/create";
 
 	let { onclose }: { onclose: () => void } = $props();
@@ -55,7 +55,7 @@
 	const SEARCH_LIMIT = 200;
 
 	/** A type's display name, falling back to its key made readable. */
-	const typeName = (key: string) => store.types.find((t) => t.key === key)?.name || (key.charAt(0).toUpperCase() + key.slice(1)).replaceAll("_", " ");
+	const typeName = (key: string) => store.types.find((t) => t.key === key)?.name || kindName(key);
 
 	/**
 	 * Anytype search: matches grouped by type, the type with the FEWEST

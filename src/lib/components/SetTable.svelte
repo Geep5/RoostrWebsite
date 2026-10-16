@@ -25,7 +25,7 @@
 	import type { ObjectJSON, RelationDefJSON, ValueJSON } from "$lib/types";
 	import { fieldStr, isLockedTool, repeatOf } from "$lib/types";
 	import { describeRepeat } from "$lib/repeat";
-	import { objectIcon, typeIcon } from "$lib/icons";
+	import { kindName, objectIcon, typeIcon } from "$lib/icons";
 	import { seedsFromView } from "$lib/view-seeds";
 
 	let {
@@ -636,7 +636,7 @@
 			// Display name, never the raw key: "finance_task" reads as its
 			// type's name (or at worst the key with spaces).
 			const t = store.types.find((x) => x.key === r.typeKey);
-			return t?.name || (r.typeKey.charAt(0).toUpperCase() + r.typeKey.slice(1)).replaceAll("_", " ");
+			return t?.name || kindName(r.typeKey);
 		}
 		if (key === "createdAt") return r.createdAt ? showDate(r.createdAt) : "";
 		if (key === "updatedAt") return r.updatedAt ? showDate(r.updatedAt) : "";

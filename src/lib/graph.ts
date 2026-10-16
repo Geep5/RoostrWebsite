@@ -9,6 +9,7 @@
 import { fetchAllQuery, type QueryResultRow } from "$lib/api";
 import type { RelationDefJSON, ValueJSON } from "$lib/types";
 import type { TypeDef } from "$lib/data.svelte";
+import { kindName } from "$lib/icons";
 
 export interface GraphObject {
 	id: string;
@@ -136,7 +137,7 @@ export async function buildSchemaGraph(channelId: string, isDefaultChannel: bool
 		for (const [k, c] of usage) usage.set(k, c / objects.length);
 		const hue = ((index / Math.max(1, n)) * 330 + 15) % 360;
 		const def = typeDef(key);
-		return { index, key, name: def?.name || key || "Untyped", icon: def?.icon ?? "", color: `oklch(0.76 0.13 ${hue})`, rad: Math.sqrt(objects.length) * DOT_SPACING + 18, a: 0, x: 0, y: 0, objects, usage };
+		return { index, key, name: def?.name || (key ? kindName(key) : "Untyped"), icon: def?.icon ?? "", color: `oklch(0.76 0.13 ${hue})`, rad: Math.sqrt(objects.length) * DOT_SPACING + 18, a: 0, x: 0, y: 0, objects, usage };
 	});
 	const sumD = gtypes.reduce((s, t) => s + 2 * t.rad, 0);
 	// Room for every cluster plus a gap; never tighter than the design's ring.

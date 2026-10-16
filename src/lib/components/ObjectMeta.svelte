@@ -14,7 +14,7 @@
 	import { badgeStyle } from "$lib/options";
 	import { typeGlyph } from "$lib/create";
 	import PropIcon from "./PropIcon.svelte";
-	import { TYPE_GLYPHS, objectIcon } from "$lib/icons";
+	import { TYPE_GLYPHS, kindName, objectIcon } from "$lib/icons";
 	import { fetchBacklinks, type Backlink } from "$lib/backlinks";
 	import TypeSuggest from "./TypeSuggest.svelte";
 
@@ -32,7 +32,7 @@
 	// A space's type (`channel`) is engine infrastructure with no type page; people call it a Space.
 	// Built-in kinds with no type object read as words, like the table's type column: `query` → "Query".
 	const typeName = $derived(
-		typeDef?.name || (object.typeKey === "channel" ? "Space" : (object.typeKey.charAt(0).toUpperCase() + object.typeKey.slice(1)).replaceAll("_", " ")),
+		typeDef?.name || kindName(object.typeKey),
 	);
 
 	/** A query's source types (`setOf` keys), resolved to this space's copy of each type. */
