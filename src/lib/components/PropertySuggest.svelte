@@ -7,7 +7,7 @@
 	 * `Create property "<query>"` which reveals a format picker.
 	 */
 	import { store } from "$lib/data.svelte";
-	import { CREATABLE_FORMATS, RESERVED_KEYS, createRelation, currentSpaceId, spaceRelations } from "$lib/relations";
+	import { CREATABLE_FORMATS, RESERVED_KEYS, createRelation, currentSpaceId, formatGlyph, spaceRelations } from "$lib/relations";
 	import type { RelationDefJSON } from "$lib/types";
 	import TypeLimitPicker from "./TypeLimitPicker.svelte";
 
@@ -33,14 +33,35 @@
 
 	let query = $state("");
 	let creating = $state(false);
-	let createFormat = $state<string>("shorttext");
+	let createFormat = $state<string>("");
 	let createTypes = $state<string[]>([]);
 	let inputEl = $state<HTMLInputElement>();
 	let menuEl = $state<HTMLElement>();
+	/** The type highlighted in the "what type?" list (↑/↓ from the input). */
+	let fmtIdx = $state(0);
 
 	$effect(() => {
 		inputEl?.focus();
 	});
+
+	const FORMAT_NAMES: Record<string, string> = {
+		shorttext: "Text",
+		longtext: "Long text",
+		number: "Number",
+		status: "Status",
+		tag: "Tag",
+		date: "Date",
+		checkbox: "Checkbox",
+		url: "URL",
+		email: "Email",
+		phone: "Phone",
+		object: "Object",
+	};
+	/** A new property's type is always asked: an Object then asks which types it may link. */
+	function choose(format: string) {
+		createFormat = format;
+		if (format !== "object") void create();
+	}
 
 	const all = $derived(spaceRelations(store.relations, currentSpaceId()).filter((r) => !r.hidden && !RESERVED_KEYS[r.key] && !exclude.includes(r.key)));
 	const filtered = $derived.by(() => {
@@ -90,9 +111,16 @@
 		bind:value={query}
 		placeholder="Filter or create a property…"
 		onkeydown={(e) => {
+			if (creating && !createFormat && (e.key === "ArrowDown" || e.key === "ArrowUp")) {
+				e.preventDefault();
+				fmtIdx = (fmtIdx + (e.key === "ArrowDown" ? 1 : CREATABLE_FORMATS.length - 1)) % CREATABLE_FORMATS.length;
+			}
 			if (e.key === "Enter") {
 				e.preventDefault();
 				if (filtered.length > 0 && !creating) onpick(filtered[0]);
+				// A new name: ask its type first; Enter then takes the highlighted one.
+				else if (canCreate && !creating) creating = true;
+				else if (canCreate && !createFormat) choose(CREATABLE_FORMATS[fmtIdx]);
 				else if (canCreate) void create();
 			}
 		}}
@@ -100,18 +128,22 @@
 	{#if canCreate}
 		{#if !creating}
 			<button class="item create" onclick={() => (creating = true)}>＋ Create property “{query.trim()}”</button>
+		{:else if !createFormat}
+			<div class="section">Type of “{query.trim()}”</div>
+			<div class="list">
+				{#each CREATABLE_FORMATS as f, i (f)}
+					<button class="item" class:active={i === fmtIdx} onmouseenter={() => (fmtIdx = i)} onclick={() => choose(f)}>
+						<span class="name"><span class="glyph">{formatGlyph(f)}</span>{FORMAT_NAMES[f] ?? f}</span>
+					</button>
+				{/each}
+			</div>
 		{:else}
+			<div class="section">Object “{query.trim()}” links to</div>
+			<TypeLimitPicker bind:selected={createTypes} />
 			<div class="create-form">
-				<select bind:value={createFormat}>
-					{#each CREATABLE_FORMATS as f (f)}
-						<option value={f}>{f}</option>
-					{/each}
-				</select>
+				<button onclick={() => (createFormat = "")}>Back</button>
 				<button onclick={() => void create()}>Create</button>
 			</div>
-			{#if createFormat === "object"}
-				<TypeLimitPicker bind:selected={createTypes} />
-			{/if}
 		{/if}
 	{/if}
 	{#if filteredExtras.length > 0}
@@ -154,8 +186,7 @@
 		box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
 		gap: 4px;
 	}
-	input,
-	select {
+	input {
 		background: var(--hl-light);
 		border: none;
 		border-radius: 10px;
@@ -216,9 +247,11 @@
 	.create-form {
 		display: flex;
 		gap: 6px;
+		justify-content: flex-end;
+		margin-top: 6px;
 	}
-	.create-form select {
-		flex: 1;
+	.item.active {
+		background: var(--hover);
 	}
 	.create-form button {
 		border: 1px solid var(--border);
