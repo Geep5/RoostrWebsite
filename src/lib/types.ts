@@ -161,30 +161,13 @@ export interface RelationDefJSON {
 }
 
 /**
- * The substrate's own object kinds - source files, programs, agent
- * internals, infrastructure. Anytype never surfaces its system objects in
- * sets; unsourced queries and pickers exclude these (a query can still
- * target one explicitly via Source).
+ * Engine internals no one makes or edits: source files, programs, raw
+ * data, peers, an agent's private memory rows. A query with no Source
+ * leaves only these out; everything a person works with - agents,
+ * templates, skills, properties, types, spaces, machines - shows, so
+ * All Objects is all of them (a Source can still target one of these).
  */
-export const SYSTEM_TYPE_KEYS = [
-	"typescript",
-	"program",
-	"json",
-	"proto",
-	"relation",
-	"type",
-	"template",
-	"agent",
-	"channel",
-	"peer",
-	"machine",
-	"pinned_fact",
-	"milestone",
-	"user_prefs",
-	"skill",
-	"set",
-	"",
-] as const;
+export const SYSTEM_TYPE_KEYS = ["typescript", "program", "json", "proto", "peer", "pinned_fact", "milestone", "user_prefs", "vanish_log", "set", ""] as const;
 
 /** glon.Position values. */
 export const Pos = {
