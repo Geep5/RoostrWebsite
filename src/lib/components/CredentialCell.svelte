@@ -10,6 +10,7 @@
 	import { fetchAllQuery } from "$lib/api";
 	import { credentialsForError, linkedCredentialIds, signedOutNames, type CredentialRef } from "$lib/credential-actions";
 	import { fieldStr, guestAgents, type ValueJSON } from "$lib/types";
+	import { portal } from "$lib/portal";
 	import CredentialReconnect from "./CredentialReconnect.svelte";
 
 	let {
@@ -67,6 +68,33 @@
 		pop?.focus();
 	}
 
+	/**
+	 * Keep the whole popover on screen as its content grows (the pairing form,
+	 * a sign-in's progress): below the cell when it fits, else above it, else
+	 * pinned to the bottom edge - it scrolls inside when taller than the window.
+	 */
+	function fitOnScreen(node: HTMLDivElement) {
+		const place = () => {
+			if (!at || !trigger) return;
+			const cell = trigger.getBoundingClientRect();
+			const h = node.offsetHeight;
+			const below = cell.bottom + 4;
+			const above = cell.top - 4 - h;
+			const y = below + h <= window.innerHeight - 8 ? below : above >= 8 ? above : Math.max(8, window.innerHeight - 8 - h);
+			if (y !== at.y) at = { ...at, y };
+		};
+		const watch = new ResizeObserver(place);
+		watch.observe(node);
+		window.addEventListener("resize", place);
+		place();
+		return {
+			destroy() {
+				watch.disconnect();
+				window.removeEventListener("resize", place);
+			},
+		};
+	}
+
 	function close(refocus: boolean) {
 		at = null;
 		if (refocus) trigger?.focus();
@@ -103,11 +131,14 @@
 	<!-- Clicks and keys inside stay here: the row or card under the cell must not open. -->
 	<div
 		bind:this={pop}
+		use:portal
+		use:fitOnScreen
 		class="cred-pop cell-pop"
 		role="dialog"
 		aria-label="Reconnect credential"
 		tabindex="-1"
-		style="left:{at.x}px; top:{at.y}px"
+		style:left="{at.x}px"
+		style:top="{at.y}px"
 		onclick={(e) => e.stopPropagation()}
 		oncontextmenu={(e) => e.stopPropagation()}
 		onkeydown={(e) => {
@@ -169,6 +200,8 @@
 		color: var(--fg);
 		font-size: 13px;
 		white-space: normal;
+		max-height: calc(100vh - 16px);
+		overflow-y: auto;
 	}
 	.muted { margin: 0; color: var(--muted); font-size: 12.5px; }
 	.error { margin: 0; color: var(--red); font-size: 12.5px; white-space: pre-wrap; }
