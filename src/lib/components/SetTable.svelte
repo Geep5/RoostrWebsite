@@ -271,6 +271,8 @@
 	const SPECIAL_EMOJI: Record<string, string> = { type: "▦", createdAt: "🗓️", updatedAt: "🗓️", serving: "🖥️", repeat: "↻" };
 	const DEFAULT_WIDTH = 150;
 	const MIN_WIDTH = 60;
+	/** Name's share when it has no width of its own: it takes the room left, and never less than this. */
+	const NAME_MIN_WIDTH = 180;
 
 	interface Col {
 		key: string;
@@ -680,7 +682,9 @@
 			style="left: {Math.min(marquee.x0, marquee.x1)}px; top: {Math.min(marquee.y0, marquee.y1)}px; width: {Math.abs(marquee.x1 - marquee.x0)}px; height: {Math.abs(marquee.y1 - marquee.y0)}px"
 		></div>
 	{/if}
-	<table>
+	<!-- Never narrower than Name at its minimum plus the other columns: when they outgrow
+	     the view the table scrolls sideways, instead of squeezing Name to nothing. -->
+	<table style:width="max(100%, {(nameWidth ?? NAME_MIN_WIDTH) + cols.reduce((n, c) => n + c.width, 0) + 32}px)">
 		<colgroup>
 			<col style={nameWidth ? `width:${nameWidth}px` : ""} />
 			{#each cols as c, i (c.key)}
