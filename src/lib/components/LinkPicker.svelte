@@ -6,6 +6,7 @@
 	 */
 	import { store } from "$lib/data.svelte";
 	import { objectIcon } from "$lib/icons";
+	import { SYSTEM_TYPES } from "$lib/types";
 
 	let {
 		x,
@@ -25,11 +26,10 @@
 	let query = $state("");
 	let inputEl: HTMLInputElement | undefined = $state();
 
-	const HIDDEN = new Set(["type", "template", "relation", "agent", "pinned_fact", "milestone", "channel", "skill"]);
 	const candidates = $derived.by(() => {
 		const q = query.trim().toLowerCase();
 		return store.summaries
-			.filter((s) => s.id !== excludeId && !HIDDEN.has(s.typeKey))
+			.filter((s) => s.id !== excludeId && !SYSTEM_TYPES.has(s.typeKey))
 			.filter((s) => !q || (s.name || "Untitled").toLowerCase().includes(q))
 			.slice(0, 8);
 	});

@@ -10,7 +10,7 @@
 	 *
 	 * Emits complete ValueJSON via onsave; the caller owns persistence.
 	 */
-	import type { RelationDefJSON, ValueJSON } from "$lib/types";
+	import { SYSTEM_TYPES, type RelationDefJSON, type ValueJSON } from "$lib/types";
 	import { layoutOf, store } from "$lib/data.svelte";
 	import { objectIcon } from "$lib/icons";
 	import { fetchMachines } from "$lib/serving";
@@ -103,7 +103,6 @@
 	onMount(() => {
 		if (autoOpen && rel.format === "object" && objectIds.length === 0) objectOpen = true;
 	});
-	const HIDDEN_TYPES: Record<string, true> = { program: true, relation: true, channel: true, pinned_fact: true, milestone: true, type: true, template: true, agent: true, skill: true };
 
 	// Relation restriction (Anytype relationFormatObjectTypes): the picker offers only these types.
 	const allowedTypeKeys = $derived(
@@ -115,7 +114,7 @@
 		const q = objectQuery.trim().toLowerCase();
 		let pool: Array<{ id: string; name: string; typeKey: string; icon?: string; done?: boolean }> = wantsAgents
 			? store.agents.filter((a) => !objectIds.includes(a.id) && (!spaceId || !a.channel || a.channel === spaceId)).map((a) => ({ id: a.id, name: a.name, typeKey: "agent", icon: a.icon }))
-			: store.summaries.filter((s) => !objectIds.some((id) => shownId(id) === s.id) && (!HIDDEN_TYPES[s.typeKey] || allowedTypeKeys.has(s.typeKey)));
+			: store.summaries.filter((s) => !objectIds.some((id) => shownId(id) === s.id) && (!SYSTEM_TYPES.has(s.typeKey) || allowedTypeKeys.has(s.typeKey)));
 		if (!wantsAgents && allowedTypeKeys.size > 0) pool = pool.filter((s) => allowedTypeKeys.has(s.typeKey));
 		// A system prompt belongs to one space; an agent picks from its own.
 		if (spaceId && allowedTypeKeys.has("system_prompt")) pool = pool.filter((s) => "channelId" in s && s.channelId === spaceId);

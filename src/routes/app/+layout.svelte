@@ -24,7 +24,7 @@
 	import Icon from "$lib/components/Icon.svelte";
 	import { creatableTypes, typeGlyph, createTyped, createCollection, createQuery, defaultTypeKey } from "$lib/create";
 	import { RESERVED_KEYS, formatGlyph, spaceRelations } from "$lib/relations";
-	import type { RelationDefJSON, SpaceJSON } from "$lib/types";
+	import { SYSTEM_TYPES, type RelationDefJSON, type SpaceJSON } from "$lib/types";
 	import PropertySuggest from "$lib/components/PropertySuggest.svelte";
 
 	let { children }: { children: import("svelte").Snippet } = $props();
@@ -492,7 +492,7 @@
 		if (!current) return [];
 		const pinnedSet = new Set(current.pinnedIds);
 		return store.summaries
-			.filter((s) => !pinnedSet.has(s.id) && !["type", "template", "agent", "pinned_fact", "milestone"].includes(s.typeKey) && s.channelId === current.id)
+			.filter((s) => !pinnedSet.has(s.id) && !SYSTEM_TYPES.has(s.typeKey) && s.channelId === current.id)
 			.slice(0, 8);
 	});
 

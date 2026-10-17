@@ -5,6 +5,7 @@
 	import { activeSpace } from "$lib/space.svelte";
 	import { kindName, objectIcon, typeIcon } from "$lib/icons";
 	import { createTyped, defaultTypeKey } from "$lib/create";
+	import { SYSTEM_TYPE_KEYS } from "$lib/types";
 
 	let { onclose }: { onclose: () => void } = $props();
 
@@ -35,7 +36,8 @@
 	});
 
 	/** Kernel/internal types never appear in search (they're space-less). */
-	const TYPE_EXCLUDE = { key: "type", condition: "notIn", value: ["program", "typescript", "json", "proto", "relation", "channel", "type", "template", "agent", "skill", "peer", "machine", "pinned_fact", "milestone", "vanish_log"] };
+	/** Engine internals never appear in search; everything a person works with does. */
+	const TYPE_EXCLUDE = { key: "type", condition: "notIn", value: [...SYSTEM_TYPE_KEYS] };
 
 	/** Space scope filter: unassigned objects live in the default space. */
 	function scopeFilters(chip = typeChip): Array<Record<string, unknown>> {

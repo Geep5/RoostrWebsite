@@ -4,7 +4,7 @@
  * server. All state lives on-device; relays are the only network.
  */
 
-import type { ObjectJSON, ObjectSummary, SpaceJSON, RelationDefJSON, ValueJSON } from "$lib/types";
+import { SYSTEM_TYPES, type ObjectJSON, type ObjectSummary, type SpaceJSON, type RelationDefJSON, type ValueJSON } from "$lib/types";
 import type { ChangeJSON, PendingPublish, QueryBody } from "./contracts";
 import { decodeChange, encodeChange, changeId } from "./proto";
 import { coreCall, initCore } from "./core";
@@ -430,8 +430,8 @@ class WebBackend {
 		return obj;
 	}
 
-	/** The Odin server's GET /api/objects summary exclusions, verbatim. */
-	private static readonly HIDDEN_LIST_TYPES = new Set(["program", "typescript", "json", "proto", "relation", "channel", "peer", "pinned_fact", "milestone", "vanish_log", "user_prefs"]);
+	/** The Odin server's GET /api/objects summary exclusions: engine internals only. */
+	private static readonly HIDDEN_LIST_TYPES = SYSTEM_TYPES;
 
 	async fetchObjects(): Promise<ObjectSummary[]> {
 		await this.ensure();

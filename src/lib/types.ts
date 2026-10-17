@@ -167,7 +167,9 @@ export interface RelationDefJSON {
  * templates, skills, properties, types, spaces, machines - shows, so
  * All Objects is all of them (a Source can still target one of these).
  */
-export const SYSTEM_TYPE_KEYS = ["typescript", "program", "json", "proto", "peer", "pinned_fact", "milestone", "user_prefs", "vanish_log", "set", ""] as const;
+export const SYSTEM_TYPE_KEYS = ["typescript", "program", "json", "proto", "peer", "pinned_fact", "milestone", "user_prefs", "vanish_log", "descriptor", "install", "set", ""] as const;
+/** The same, for membership tests. */
+export const SYSTEM_TYPES: ReadonlySet<string> = new Set(SYSTEM_TYPE_KEYS);
 
 /** glon.Position values. */
 export const Pos = {

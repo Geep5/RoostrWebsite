@@ -135,20 +135,23 @@ function keyringFixture(owners: Record<string, string | undefined>): void {
 	});
 }
 
+/** The notes the object list shows (spaces list there too; fetchChannels covers them). */
+const notes = async () => (await backend.fetchObjects()).filter((o) => o.typeKey !== "channel").map((o) => o.name);
+
 test("a vanished space takes every object in it, including ones that arrive after it went", async () => {
 	const store = await replicaFixture([
 		spaceObject("gone"), note("before", "Before", "gone"),
 		spaceObject("kept"), note("survivor", "Survivor", "kept"),
 		created("__vanished__", "vanish_log", { "vanished:gone": { intValue: 100 } }),
 	]);
-	expect((await backend.fetchObjects()).map((o) => o.name)).toEqual(["Survivor"]);
+	expect(await notes()).toEqual(["Survivor"]);
 	expect((await backend.fetchChannels()).map((c) => c.id)).toEqual(["kept"]);
 	// A relay copy written into the space by a device that never heard it
 	// went: it lands in a steady-state replay batch, not a full sweep.
 	const late = note("late", "Late", "gone");
 	await store.addChanges([{ change: late, bytes: encodeChange(late) }]);
 	internals.dirty.add("late");
-	expect((await backend.fetchObjects()).map((o) => o.name)).toEqual(["Survivor"]);
+	expect(await notes()).toEqual(["Survivor"]);
 	const queried = (await backend.fetchQuery({ filters: [], limit: 500 })).records.map((r: { id: string }) => r.id);
 	expect(queried).toContain("survivor");
 	expect(queried).not.toContain("before");
@@ -168,13 +171,13 @@ test("spaces report their owner; a member can leave, only the owner deletes for 
 	for (const channel_id of ["mine", "echo", "local"]) {
 		await expect(backend.mutate("space_leave", { channel_id })).rejects.toThrow("You own this space");
 	}
-	expect((await backend.fetchObjects()).map((o) => o.name)).toEqual(["Shared note"]);
+	expect(await notes()).toEqual(["Shared note"]);
 
 	expect(await backend.mutate("space_leave", { channel_id: "joined" })).toEqual({ ok: true, left: "joined" });
 	expect(spaceKeyGet("joined")).toBeNull();
 	expect(spaceKeyGet("mine")).not.toBeNull();
 	expect((await backend.fetchChannels()).map((c) => c.id)).toEqual(["mine", "echo", "local"]);
-	expect(await backend.fetchObjects()).toEqual([]);
+	expect(await notes()).toEqual([]);
 });
 
 test("the owner's signal is the one path that vanishes a space someone else owns", async () => {
@@ -182,7 +185,7 @@ test("the owner's signal is the one path that vanishes a space someone else owns
 	await replicaFixture([spaceObject("joined"), note("shared", "Shared note", "joined")]);
 	await backend.mutate("vanish", { object_ids: ["joined"] }, true);
 	expect(await backend.fetchChannels()).toEqual([]);
-	expect(await backend.fetchObjects()).toEqual([]);
+	expect(await notes()).toEqual([]);
 	// Unlike leaving, the key stays: it addresses this identity's own h-deletion.
 	expect(spaceKeyGet("joined")).not.toBeNull();
 });
