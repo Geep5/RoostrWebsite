@@ -253,11 +253,11 @@
 					<button class="chip" class:on={typeChip === c.key} onclick={() => (typeChip = typeChip === c.key ? "" : c.key)}>{c.label}</button>
 				{/each}
 			{:else}
-				<!-- The types in this search, fewest matches first: a tap jumps to that group. -->
+				<!-- The types in this search, fewest matches first: a tap shows only that type (× shows them all again). -->
 				{#if typeChip}<button class="chip on" onclick={() => (typeChip = "")}>{typeIcon(typeChip)} {typeName(typeChip)} ×</button>{/if}
 				{#each chipTypes as c (c.key)}
 					{#if !typeChip}
-						<button class="chip" onclick={() => resultsEl?.querySelector(`[data-group="${c.key}"]`)?.scrollIntoView({ block: "start", behavior: "smooth" })}>{c.label} <span class="chip-count">{c.count}</span></button>
+						<button class="chip" onclick={() => (typeChip = c.key)}>{c.label} <span class="chip-count">{c.count}</span></button>
 					{/if}
 				{/each}
 			{/if}
