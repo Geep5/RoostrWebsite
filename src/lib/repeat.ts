@@ -94,8 +94,9 @@ export function describeDraft(d: RepeatDraft): string {
 	return `${s} at ${sortedTimes(d.times).map(fmtTime).join(", ")}`;
 }
 
-/** A table cell's words: the rule and when it next runs (with the time when it runs more than once a day). */
+/** A table cell's words: the rule and when it next runs (with the time when it runs more than once a day), and why when that run was moved. */
 export function describeRepeat(rule: RepeatJSON): string {
 	const when = manyADay(rule) ? `${fmt(rule.next)}, ${new Date(rule.next).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })}` : fmt(rule.next);
-	return `${describeDraft(toDraft(rule))} · next ${when}`;
+	const moved = rule.moved ? ` (moved${rule.moved.reason ? `: ${rule.moved.reason}` : ` from ${fmt(rule.moved.from)}`})` : "";
+	return `${describeDraft(toDraft(rule))} · next ${when}${moved}`;
 }

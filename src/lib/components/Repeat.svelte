@@ -376,6 +376,10 @@
 				{#if agentOwned && servingWarning}<span class="overdue">{servingWarning}</span>{/if}
 			</p>
 		{/if}
+		{#if rule.moved}
+			<!-- A run an agent (or person) moved once; saving the rule in the editor puts it back on schedule. -->
+			<p class="meta"><span>Next run moved to {fmtLong(rule.next)} (was {fmtLong(rule.moved.from)}){rule.moved.reason ? `: ${rule.moved.reason}` : ""}</span></p>
+		{/if}
 		{#if rule.fired_at !== undefined || rule.last_run}
 			<p class="meta">
 				{#if rule.fired_at !== undefined}

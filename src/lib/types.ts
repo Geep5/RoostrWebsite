@@ -282,6 +282,8 @@ export interface RepeatJSON extends Omit<RepeatRuleJSON, "anchor_ms"> {
 	last_done?: number;
 	count?: number;
 	last_run?: { at: number; machine: string; conversation: string; error?: string };
+	/** The next run was moved to `next`, once (occurrence_move): from the occurrence it displaced, by whom, why. */
+	moved?: { from: number; at: number; by: string; reason: string };
 }
 
 const REPEAT_FREQS: readonly string[] = ["minute", "hour", "day", "week", "month", "year"];
@@ -304,6 +306,8 @@ export function repeatOf(fields: Record<string, ValueJSON>): RepeatJSON | null {
 	const span = ints(e["window"]);
 	const run = e["last_run"]?.mapValue?.entries;
 	const runAt = run && int(run["at"]);
+	const move = e["moved"]?.mapValue?.entries;
+	const movedFrom = move && int(move["from"]);
 	return {
 		freq: freq as RepeatFreq,
 		interval: int(e["interval"]) ?? 1,
@@ -320,5 +324,6 @@ export function repeatOf(fields: Record<string, ValueJSON>): RepeatJSON | null {
 		last_done: int(e["last_done"]),
 		count: int(e["count"]),
 		last_run: run && runAt !== undefined ? { at: runAt, machine: str(run["machine"]) ?? "", conversation: str(run["conversation"]) ?? "", error: str(run["error"]) } : undefined,
+		moved: move && movedFrom !== undefined ? { from: movedFrom, at: int(move["at"]) ?? 0, by: str(move["by"]) ?? "", reason: str(move["reason"]) ?? "" } : undefined,
 	};
 }
