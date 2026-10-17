@@ -288,7 +288,7 @@
 			{/if}
 			{#each groups as g, gi (g.key)}
 				{@const offset = typeMatches.length + groups.slice(0, gi).reduce((n, x) => n + x.rows.length, 0)}
-				<div class="section-name" data-group={g.key}>{g.key ? `${typeIcon(g.key)} ` : ""}{g.name}{query.trim() !== "" ? ` · ${g.rows.length}` : ""}</div>
+				<div class="section-name" data-group={g.key}><span>{g.key ? `${typeIcon(g.key)} ` : ""}{g.name}</span>{#if query.trim() !== ""}<span class="section-count">{g.rows.length}</span>{/if}</div>
 				{#each g.rows as row, j (row.id)}
 					{@const i = offset + j}
 					{@const name = row.name || "Untitled"}
@@ -375,12 +375,37 @@
 		overflow-y: auto;
 		padding: 6px;
 	}
+	/* A group's heading reads as a divider, not a row: a rule above it, bold
+	   label, its count in a pill, and it stays at the top while its rows scroll. */
 	.section-name {
-		font-size: 10px;
+		position: sticky;
+		top: -6px;
+		z-index: 1;
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		margin: 10px -6px 4px;
+		padding: 8px 16px 6px;
+		background: var(--panel);
+		border-top: 1px solid var(--border);
+		font-size: 11px;
+		font-weight: 700;
 		text-transform: uppercase;
 		letter-spacing: 0.08em;
+		color: var(--fg);
+	}
+	.section-name:first-child {
+		margin-top: -6px;
+		border-top: none;
+	}
+	.section-count {
+		padding: 1px 7px;
+		border-radius: 999px;
+		background: var(--surface, rgba(255, 255, 255, 0.08));
 		color: var(--muted);
-		padding: 6px 10px 4px;
+		font-size: 10.5px;
+		font-weight: 600;
+		letter-spacing: 0;
 	}
 	.row {
 		display: flex;
