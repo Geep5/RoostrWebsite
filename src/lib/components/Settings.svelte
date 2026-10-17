@@ -15,13 +15,19 @@
 	let deskState = $state<"idle" | "checking" | "match" | "differ" | "offline">("idle");
 	let deskDetail = $state("");
 
+	/** Gives up on a desktop that doesn't answer, so the check never sits on "Checking…" for good. */
+	const DESK_TIMEOUT_MS = 15_000;
 	async function checkDesktop() {
 		deskState = "checking";
-		deskDetail = "";
+		deskDetail = "Asking the desktop for its fingerprint…";
 		try {
-			const res = await localFetch("/api/sync/digest");
-			if (!res.ok) throw new Error(`daemon ${res.status}`);
+			const res = await Promise.race([
+				localFetch("/api/sync/digest"),
+				new Promise<never>((_, reject) => setTimeout(() => reject(new Error(`the desktop didn't answer within ${DESK_TIMEOUT_MS / 1000} s - is Roostr running on it?`)), DESK_TIMEOUT_MS)),
+			]);
+			if (!res.ok) throw new Error(`the desktop answered ${res.status}`);
 			const remote = (await res.json()) as { digest: string; objects: number; changes: number };
+			deskDetail = `Desktop has ${remote.changes} changes. Counting this device's…`;
 			const local = await backend.syncDigest();
 			if (local.digest === remote.digest) {
 				deskState = "match";
@@ -545,10 +551,14 @@
 					void checkDesktop();
 				}}
 			>
-				<button type="submit" disabled={!paired || deskState === "checking"}>{deskState === "checking" ? "Checking…" : "Compare"}</button>
+				<button type="submit" disabled={!paired || deskState === "checking"}>
+					{#if deskState === "checking"}<span class="desk-spin" aria-hidden="true"></span>Checking…{:else}Compare{/if}
+				</button>
 			</form>
-			{#if deskState !== "idle"}
-				<p class="hint desk-{deskState}">{deskDetail}</p>
+			{#if !paired}
+				<p class="hint">Pair with a desktop under This machine first - until then there is nothing to compare with.</p>
+			{:else if deskState !== "idle"}
+				<p class="hint desk-{deskState}" aria-live="polite">{deskDetail}</p>
 			{/if}
 		</section>
 
@@ -863,6 +873,25 @@
 	}
 	.desk-offline {
 		color: var(--muted);
+	}
+	.desk-checking {
+		color: var(--muted);
+	}
+	.desk-spin {
+		display: inline-block;
+		width: 10px;
+		height: 10px;
+		margin-right: 6px;
+		border: 2px solid currentColor;
+		border-right-color: transparent;
+		border-radius: 50%;
+		vertical-align: -1px;
+		animation: desk-spin 0.8s linear infinite;
+	}
+	@keyframes desk-spin {
+		to {
+			transform: rotate(360deg);
+		}
 	}
 	.hint.none {
 		margin: 4px 0;
