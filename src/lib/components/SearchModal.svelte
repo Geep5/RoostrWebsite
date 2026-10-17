@@ -262,14 +262,13 @@
 		</div>
 
 		<div class="chips">
+			<!-- Each tap adds or removes a type from what shows; with none picked, every type shows. -->
 			{#if query.trim() === ""}
-				<button class="chip" class:on={typeChips.length === 0} onclick={() => (typeChips = [])}>All</button>
 				{#each chipTypes as c (c.key)}
 					<button class="chip" class:on={typeChips.includes(c.key)} onclick={() => toggleChip(c.key)}>{c.label}</button>
 				{/each}
 			{:else}
-				<!-- The types in this search, fewest matches first: each tap adds or removes a type from what shows; All shows every type again. -->
-				{#if typeChips.length > 0}<button class="chip" onclick={() => (typeChips = [])}>All</button>{/if}
+				<!-- The types in this search, fewest matches first. -->
 				{#each chipTypes as c (c.key)}
 					<button class="chip" class:on={typeChips.includes(c.key)} onclick={() => toggleChip(c.key)}>{c.label} <span class="chip-count">{c.count}</span></button>
 				{/each}
