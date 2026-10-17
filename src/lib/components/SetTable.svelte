@@ -831,7 +831,9 @@
 		{@const rel = relations.find((x) => x.key === editKey(cellEdit!.key))}
 		{@const row = rows.find((x) => x.id === cellEdit!.recordId)}
 		{#if rel && row}
-			<div class="cell-pop" style="left:{Math.min(cellEdit.x, (document.querySelector('.main-col')?.getBoundingClientRect().right ?? window.innerWidth) - 320)}px; top:{cellEdit.y}px" role="dialog">
+			{@const wide = rel.format === "longtext" || rel.key === "error"}
+			<!-- Long text gets room to read all of it: wider, and its box grows into the space below the cell. -->
+			<div class="cell-pop" class:wide style="left:{Math.min(cellEdit.x, (document.querySelector('.main-col')?.getBoundingClientRect().right ?? window.innerWidth) - (wide ? 460 : 320))}px; top:{cellEdit.y}px; --room:{Math.max(120, window.innerHeight - cellEdit.y - 40)}px" role="dialog">
 				<PropertyValue {rel} value={row.fields[rel.key]} spaceId={row.fields["channel"]?.stringValue ?? ""} seeds={viewSeeds} autoOpen onsave={(v) => void cellSave(v)} />
 			</div>
 		{/if}
@@ -1144,6 +1146,10 @@
 		border-radius: 10px;
 		padding: 8px;
 		box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5);
+	}
+	.cell-pop.wide {
+		width: 440px;
+		max-width: calc(100vw - 24px);
 	}
 	.new-object {
 		display: flex;

@@ -55,6 +55,11 @@
 	);
 
 	const sv = (s: string): ValueJSON => ({ stringValue: s });
+	/** Grows a text box to its whole text (CSS max-height caps it, then it scrolls). */
+	function fitContent(node: HTMLTextAreaElement): void {
+		node.style.height = "auto";
+		node.style.height = `${node.scrollHeight + 2}px`;
+	}
 	const list = (xs: string[]): ValueJSON => ({ valuesValue: { items: xs.map(sv) } });
 
 	function saveNumber(raw: string) {
@@ -299,7 +304,7 @@
 		<input type="text" value={text} placeholder="#RRGGBB" class:bad={!!hexError} title={hexError || undefined} onchange={(e) => void saveHex(e.currentTarget.value)} />
 	</span>
 {:else if rel.format === "longtext" || rel.key === "error"}
-	<textarea rows={rel.key === "error" ? 5 : 3} placeholder="Empty" onchange={(e) => void onsave(sv(e.currentTarget.value))}>{text}</textarea>
+	<textarea use:fitContent rows={rel.key === "error" ? 5 : 3} placeholder="Empty" oninput={(e) => fitContent(e.currentTarget)} onchange={(e) => void onsave(sv(e.currentTarget.value))}>{text}</textarea>
 {:else}
 	<input type="text" value={text} placeholder="Empty" onchange={(e) => void onsave(sv(e.currentTarget.value))} />
 {/if}
@@ -339,6 +344,8 @@
 	}
 	textarea {
 		resize: vertical;
+		/* fitContent grows it to the whole text; past the room left on screen (or 60% of it) it scrolls. */
+		max-height: min(60vh, var(--room, 60vh));
 	}
 	.anchor {
 		position: relative;
