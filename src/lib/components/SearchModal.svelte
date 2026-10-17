@@ -16,7 +16,7 @@
 	let results = $state<Array<QueryResultRow & { snippet?: string }>>([]);
 	let searching = $state(false);
 	/** Anytype mobile search chips: "" = All, else a type key. */
-	let typeChip = $state("");
+	let typeChips = $state<string[]>([]);
 	let inputEl = $state<HTMLInputElement>();
 
 	const channelId = $derived(activeSpace.id || store.channels[0]?.id || "");
@@ -40,7 +40,7 @@
 	const TYPE_EXCLUDE = { key: "type", condition: "notIn", value: [...SYSTEM_TYPE_KEYS] };
 
 	/** Space scope filter: unassigned objects live in the default space. */
-	function scopeFilters(chip = typeChip): Array<Record<string, unknown>> {
+	function scopeFilters(chips: string[]): Array<Record<string, unknown>> {
 		const scope = isDefault
 			? {
 					operator: "or",
@@ -50,7 +50,7 @@
 					],
 				}
 			: { key: "channel", condition: "equal", value: channelId };
-		return chip === "" ? [scope, TYPE_EXCLUDE] : [scope, TYPE_EXCLUDE, { key: "type", condition: "equal", value: chip }];
+		return chips.length === 0 ? [scope, TYPE_EXCLUDE] : [scope, TYPE_EXCLUDE, { key: "type", condition: "in", value: chips }];
 	}
 
 	/** Enough matches to count what each type holds; results group by type. */
@@ -64,10 +64,18 @@
 	 * matches first - so the many files and bookmarks naturally come last.
 	 * Empty query: the recents, in recency order, one group.
 	 */
+	/** A search's matches of the picked types (all of them when none is picked); the recents come filtered already. */
+	const shown = $derived(query.trim() !== "" && typeChips.length > 0 ? results.filter((r) => typeChips.includes(r.typeKey)) : results);
+	/** Every type in this search with its count, picked or not: the chips stay, so a second type can be added. */
+	const allGroups = $derived.by(() => {
+		const byType = new Map<string, number>();
+		for (const r of results) byType.set(r.typeKey, (byType.get(r.typeKey) ?? 0) + 1);
+		return [...byType.entries()].map(([key, count]) => ({ key, name: typeName(key), count })).sort((a, b) => a.count - b.count || a.name.localeCompare(b.name));
+	});
 	const groups = $derived.by(() => {
-		if (query.trim() === "") return results.length ? [{ key: "", name: "Recently edited", rows: results }] : [];
+		if (query.trim() === "") return shown.length ? [{ key: "", name: "Recently edited", rows: shown }] : [];
 		const byType = new Map<string, typeof results>();
-		for (const r of results) byType.set(r.typeKey, [...(byType.get(r.typeKey) ?? []), r]);
+		for (const r of shown) byType.set(r.typeKey, [...(byType.get(r.typeKey) ?? []), r]);
 		return [...byType.entries()]
 			.map(([key, rows]) => ({ key, name: typeName(key), rows }))
 			.sort((a, b) => a.rows.length - b.rows.length || a.name.localeCompare(b.name));
@@ -75,7 +83,7 @@
 	/** Types whose name matches: jump straight to the type and its objects. */
 	const typeMatches = $derived.by(() => {
 		const q = query.trim().toLowerCase();
-		if (!q || typeChip) return [];
+		if (!q || typeChips.length > 0) return [];
 		return store.types.filter((t) => t.space === channelId && (t.name || t.key).toLowerCase().includes(q)).slice(0, 5);
 	});
 	/** Keyboard order: matching types, then each group's rows. */
@@ -84,7 +92,7 @@
 	const chipTypes = $derived(
 		query.trim() === ""
 			? store.types.filter((t) => t.space === channelId).map((t) => ({ key: t.key, label: `${t.icon} ${t.name || t.key}`, count: 0 }))
-			: groups.map((g) => ({ key: g.key, label: `${typeIcon(g.key)} ${g.name}`, count: g.rows.length })),
+			: allGroups.map((g) => ({ key: g.key, label: `${typeIcon(g.key)} ${g.name}`, count: g.count })),
 	);
 
 	let seq = 0;
@@ -94,7 +102,8 @@
 		// Read all reactive inputs synchronously: $effect only tracks reads in
 		// this frame, not inside the debounce callback.
 		const q = query.trim();
-		const chip = typeChip;
+		// A search fetches every type once; picking types only filters what it shows. The recents fetch the picked types.
+		const chips = q === "" ? [...typeChips] : [];
 		const mine = ++seq;
 		clearTimeout(debounce);
 		debounce = setTimeout(async () => {
@@ -102,8 +111,8 @@
 			try {
 				const res = await fetchQuery(
 					q === ""
-						? { filters: scopeFilters(chip), sorts: [{ key: "updatedAt", type: "desc" }], limit: RECENT_LIMIT }
-						: { textQuery: q, filters: scopeFilters(chip), limit: SEARCH_LIMIT },
+						? { filters: scopeFilters(chips), sorts: [{ key: "updatedAt", type: "desc" }], limit: RECENT_LIMIT }
+						: { textQuery: q, filters: scopeFilters(chips), limit: SEARCH_LIMIT },
 				);
 				if (mine !== seq) return; // stale response
 				results = res.records as typeof results;
@@ -120,6 +129,12 @@
 		void goto(`/app/object/${row.id}`);
 	}
 
+	function toggleChip(key: string) {
+		typeChips = typeChips.includes(key) ? typeChips.filter((k) => k !== key) : [...typeChips, key];
+	}
+	/** What "Create object" makes: the one picked type, else the space's Default type. */
+	const createType = $derived(typeChips.length === 1 ? typeChips[0] : spaceDefault);
+
 	/** Anytype: the search popup appends a `Create object "<filter>"` row. */
 	const canCreate = $derived(query.trim() !== "");
 	const rowCount = $derived(ordered.length + (canCreate ? 1 : 0));
@@ -129,7 +144,7 @@
 		if (!name) return;
 		onclose();
 		// Anytype: the create row targets the selected chip's type.
-		await createTyped(typeChip || spaceDefault, channelId, name);
+		await createTyped(createType, channelId, name);
 	}
 
 	function onKeydown(e: KeyboardEvent) {
@@ -248,17 +263,15 @@
 
 		<div class="chips">
 			{#if query.trim() === ""}
-				<button class="chip" class:on={typeChip === ""} onclick={() => (typeChip = "")}>All</button>
+				<button class="chip" class:on={typeChips.length === 0} onclick={() => (typeChips = [])}>All</button>
 				{#each chipTypes as c (c.key)}
-					<button class="chip" class:on={typeChip === c.key} onclick={() => (typeChip = typeChip === c.key ? "" : c.key)}>{c.label}</button>
+					<button class="chip" class:on={typeChips.includes(c.key)} onclick={() => toggleChip(c.key)}>{c.label}</button>
 				{/each}
 			{:else}
-				<!-- The types in this search, fewest matches first: a tap shows only that type (× shows them all again). -->
-				{#if typeChip}<button class="chip on" onclick={() => (typeChip = "")}>{typeIcon(typeChip)} {typeName(typeChip)} ×</button>{/if}
+				<!-- The types in this search, fewest matches first: each tap adds or removes a type from what shows; All shows every type again. -->
+				{#if typeChips.length > 0}<button class="chip" onclick={() => (typeChips = [])}>All</button>{/if}
 				{#each chipTypes as c (c.key)}
-					{#if !typeChip}
-						<button class="chip" onclick={() => (typeChip = c.key)}>{c.label} <span class="chip-count">{c.count}</span></button>
-					{/if}
+					<button class="chip" class:on={typeChips.includes(c.key)} onclick={() => toggleChip(c.key)}>{c.label} <span class="chip-count">{c.count}</span></button>
 				{/each}
 			{/if}
 		</div>
@@ -298,7 +311,7 @@
 				<button class="row create" class:selected={selected === ordered.length} onclick={() => void createFromQuery()} onmouseenter={() => (selected = ordered.length)}>
 					<span class="icon">＋</span>
 					<span class="texts"><span class="name">Create object "{query.trim()}"</span></span>
-					<span class="kind">{typeIcon(typeChip || spaceDefault)} {typeName(typeChip || spaceDefault)}</span>
+					<span class="kind">{typeIcon(createType)} {typeName(createType)}</span>
 				</button>
 			{/if}
 			{#if ordered.length === 0 && !searching && !canCreate}
