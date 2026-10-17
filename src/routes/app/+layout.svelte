@@ -5,6 +5,7 @@
 	import { activeSpace } from "$lib/space.svelte";
 	import { syncProgress, syncTip } from "$lib/sync-status";
 	import { space as spaceApi, note, fetchObject, fetchQuery, fetchAllQuery } from "$lib/api";
+	import { PIN_KEY, keyBetween } from "$lib/pins";
 	import { deletionBlocker } from "$lib/protected";
 	import { isImageIcon, objectIcon } from "$lib/icons";
 	import { layoutOf, discussionUI, store, refreshAll, connectEvents } from "$lib/data.svelte";
@@ -216,8 +217,9 @@
 		if (!objectSummary) return;
 		const ch = owningSpaceOf(objectSummary.channelId);
 		if (!ch) return;
-		const next = isPinned ? ch.pinnedIds.filter((x) => x !== objectSummary.id) : [...ch.pinnedIds, objectSummary.id];
-		await note.setField(ch.id, "pinnedIds", { valuesValue: { items: next.map((id) => ({ stringValue: id })) } });
+		// Only this object changes: its own position, after the space's last pin (lib/pins.ts).
+		if (isPinned) await note.deleteField(objectSummary.id, PIN_KEY);
+		else await note.setField(objectSummary.id, PIN_KEY, { stringValue: keyBetween(await pinKey(ch.pinnedIds.at(-1)), null) });
 		await refreshAll();
 	}
 
@@ -323,6 +325,12 @@
 		await navigator.clipboard.writeText(objectId);
 	}
 
+	/** A pinned object's position ("" for none, or no object). */
+	async function pinKey(id: string | undefined): Promise<string> {
+		if (!id) return "";
+		return (await fetchObject(id).catch(() => null))?.fields[PIN_KEY]?.stringValue ?? "";
+	}
+
 	/** Pinned objects of the current channel, in pinned order. */
 	const pinned = $derived.by(() => {
 		if (!current) return [];
@@ -332,7 +340,8 @@
 
 	// ── Widget reorder (Anytype sidebar/page/widget.tsx drag flow) ──
 	// Widgets drag whole; the hovered widget splits at its vertical
-	// midpoint into top/bottom (2px accent line), drop rewrites pinnedIds.
+	// midpoint into top/bottom (2px accent line); the drop gives only the
+	// dragged widget a new position between its new neighbours.
 	let widgetDragId = $state("");
 	let widgetOverId = $state("");
 	let widgetOverPos = $state<"top" | "bottom">("top");
@@ -353,8 +362,8 @@
 		if (!current || !dragged || !target || dragged === target) return;
 		const ids = current.pinnedIds.filter((x) => x !== dragged);
 		const at = ids.indexOf(target) + (pos === "bottom" ? 1 : 0);
-		ids.splice(at, 0, dragged);
-		await note.setField(current.id, "pinnedIds", { valuesValue: { items: ids.map((id) => ({ stringValue: id })) } });
+		const [before, after] = await Promise.all([pinKey(ids[at - 1]), ids[at] ? pinKey(ids[at]) : Promise.resolve(null)]);
+		await note.setField(dragged, PIN_KEY, { stringValue: keyBetween(before, after) });
 		await refreshAll();
 	}
 

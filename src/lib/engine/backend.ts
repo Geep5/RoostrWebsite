@@ -4,6 +4,7 @@
  * server. All state lives on-device; relays are the only network.
  */
 
+import { pinsBySpace } from "$lib/pins";
 import { SYSTEM_TYPES, type ObjectJSON, type ObjectSummary, type SpaceJSON, type RelationDefJSON, type ValueJSON } from "$lib/types";
 import type { ChangeJSON, PendingPublish, QueryBody } from "./contracts";
 import { decodeChange, encodeChange, changeId } from "./proto";
@@ -457,6 +458,8 @@ class WebBackend {
 		await this.ensure();
 		const out: SpaceJSON[] = [];
 		const keys = spaceKeyAll();
+		// Each pinned object carries its own position (lib/pins.ts).
+		const pins = pinsBySpace(this.states.values());
 		for (const o of this.states.values()) {
 			if (o.deleted || o.typeKey !== "channel") continue;
 			const members = (o.fields["members"]?.valuesValue?.items ?? [])
@@ -470,7 +473,7 @@ class WebBackend {
 				name: fstr(o.fields, "name"),
 				// An image icon (link or upload) wins over an emoji, as the daemon does.
 				icon: fstr(o.fields, "iconImage") || fstr(o.fields, "iconEmoji"),
-				pinnedIds: (o.fields["pinnedIds"]?.valuesValue?.items ?? []).map((i) => i.stringValue ?? "").filter(Boolean),
+				pinnedIds: pins.get(o.id) ?? [],
 				members,
 				keyId: o.fields["keyId"]?.intValue ?? 1,
 				createdAt: o.createdAt,

@@ -23,6 +23,7 @@ export const RESERVED_KEYS: Record<string, true> = {
 	viewRelations: true,
 	channel: true,
 	pinnedIds: true,
+	pin_order: true, // a pinned object's sidebar position (lib/pins.ts)
 	members: true,
 	keyId: true,
 };
