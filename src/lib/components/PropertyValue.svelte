@@ -121,8 +121,15 @@
 			? store.agents.filter((a) => !objectIds.includes(a.id) && (!spaceId || !a.channel || a.channel === spaceId)).map((a) => ({ id: a.id, name: a.name, typeKey: "agent", icon: a.icon }))
 			: store.summaries.filter((s) => !objectIds.some((id) => shownId(id) === s.id) && (!SYSTEM_TYPES.has(s.typeKey) || allowedTypeKeys.has(s.typeKey)));
 		if (!wantsAgents && allowedTypeKeys.size > 0) pool = pool.filter((s) => allowedTypeKeys.has(s.typeKey));
-		// A system prompt belongs to one space; an agent picks from its own.
-		if (spaceId && allowedTypeKeys.has("system_prompt")) pool = pool.filter((s) => "channelId" in s && s.channelId === spaceId);
+		// What an agent links (Skills, Tools, Credentials, its prompt) belongs to one space: the
+		// picker offers that space's own, plus objects in no space (personal, e.g. the Roostr Guide).
+		// A system prompt is always a space's own.
+		if (spaceId && allowedTypeKeys.size > 0 && !wantsAgents) {
+			pool = pool.filter((s) => {
+				const sp = "channelId" in s ? (s.channelId as string) : "";
+				return sp === spaceId || (!sp && !allowedTypeKeys.has("system_prompt"));
+			});
+		}
 		const matches = pool.filter((s) => !q || (s.name ?? "").toLowerCase().includes(q));
 		// A relation restricted to types (an agent's tools, skills, credentials,
 		// prompt) draws from a short list worth seeing whole (the menu scrolls);
