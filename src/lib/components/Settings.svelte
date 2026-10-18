@@ -630,7 +630,7 @@
 						<span class="plan-account">Signed in as <b>{plan.account}</b></span>
 					{/if}
 					{#if plan.signingIn}
-						<span class="hint plan-wait"><span class="desk-spin" aria-hidden="true"></span>A Chrome window opened on {planComputer(plan.thisComputer)} - sign in to Claude and press Authorize. It closes by itself.</span>
+						<span class="hint plan-wait"><span class="desk-spin" aria-hidden="true"></span>Sign in to Claude in the browser that opened on {planComputer(plan.thisComputer)} and press Authorize. If claude.ai shows a code instead, paste it below.</span>
 					{:else}
 						<button class="action" disabled={planBusy} onclick={() => void planAction("/claude-plan/start", { servedBy: planServer })}>{plan.account ? "Sign in again" : "Sign in with Claude"}</button>
 						{#if plan.account}<button class="subtle-btn" disabled={planBusy} onclick={() => void planAction("/claude-plan/signout")}>Sign out</button>{/if}
@@ -650,6 +650,9 @@
 				</label>
 				{#if plan.signInError}
 					<p class="hint error" role="alert">{plan.signInError}</p>
+				{/if}
+				{#if plan.signingIn || plan.signInError}
+					<!-- claude.ai shows a code when it can't hand it back by itself: it goes here, during the sign-in or after it gave up. -->
 					<form class="code-form" onsubmit={(e) => { e.preventDefault(); if (planCode.trim()) void planAction("/claude-plan/code", { code: planCode.trim() }).then(() => (planCode = "")); }}>
 						<input bind:value={planCode} placeholder="Paste the code from claude.ai" autocomplete="off" />
 						<button type="submit" disabled={planBusy}>Finish</button>
