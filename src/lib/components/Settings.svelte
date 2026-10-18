@@ -8,6 +8,7 @@
 	import { backend, isLocalBackend } from "$lib/client-backend";
 	import { myNpub } from "$lib/client-identity";
 	import { localFetch, harnessFetch, pairedSession, onPairingChange } from "$lib/local-transport";
+	import { fetchMachines, machineName, type MachineRow } from "$lib/serving";
 
 	// Compare only with the explicitly paired local daemon.
 	let paired = $state(pairedSession() !== null);
@@ -88,12 +89,64 @@
 		expires?: number;
 	}
 	let agentAuth = $state<{ anthropic: ProviderStatus; kimi: ProviderStatus } | null | undefined>(undefined);
-	let anthropicDraft = $state("");
 	let kimiDraft = $state("");
 	let agentSaved = $state("");
-	let loginPending = $state(false);
-	let loginCode = $state("");
 	let loginError = $state("");
+
+	// ── Claude plan, space-wide (harness claude-plan.ts) ──
+	interface PlanStatus {
+		thisComputer: string;
+		account: string;
+		expires: number;
+		servedBy: string;
+		signingIn: boolean;
+		signInError: string;
+		spaces: Array<{ id: string; name: string; credential: string; status: string; auth: string; error: string }>;
+	}
+	let plan = $state<PlanStatus | null>(null);
+	let planMachines = $state<MachineRow[]>([]);
+	/** The computer to keep the plan fresh before anyone signed in: this one, until changed. */
+	let planServer = $state("");
+	let planCode = $state("");
+	let planError = $state("");
+	let planBusy = $state(false);
+	let planPoll: ReturnType<typeof setTimeout> | undefined;
+
+	async function planCall(path: string, body?: Record<string, unknown>): Promise<void> {
+		planError = "";
+		try {
+			const res = await harnessFetch(path, body ? { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) } : undefined);
+			const out = (await res.json()) as PlanStatus & { error?: string };
+			if (!res.ok) throw new Error(out.error ?? `Claude plan: ${res.status}`);
+			plan = out;
+			if (!planServer) planServer = out.servedBy || out.thisComputer;
+			// Signing in: follow it until the window finishes (or stops and the paste box takes over).
+			clearTimeout(planPoll);
+			if (out.signingIn) planPoll = setTimeout(() => void planCall("/claude-plan"), 2000);
+		} catch (err) {
+			planError = err instanceof Error ? err.message : String(err);
+		}
+	}
+
+	async function loadPlan() {
+		if (!pairedSession()) {
+			plan = null;
+			return;
+		}
+		await planCall("/claude-plan");
+		planMachines = (await fetchMachines().catch(() => ({ machines: [] as MachineRow[] }))).machines;
+	}
+
+	async function planAction(path: string, body?: Record<string, unknown>) {
+		planBusy = true;
+		try {
+			await planCall(path, body);
+		} finally {
+			planBusy = false;
+		}
+	}
+
+	const planComputer = (id: string) => (id ? machineName(planMachines, id) : "this computer");
 
 	async function loadAgentAuth() {
 		loginError = "";
@@ -121,6 +174,7 @@
 			settingsError = err instanceof Error ? err.message : String(err);
 		}
 		await loadAgentAuth();
+		await loadPlan();
 	}
 
 
@@ -217,10 +271,9 @@
 			paired = pairedSession() !== null;
 			if (!paired) {
 				agentAuth = null;
-				anthropicDraft = "";
 				kimiDraft = "";
-				loginCode = "";
-				loginPending = false;
+				plan = null;
+				clearTimeout(planPoll);
 			}
 		});
 	});
@@ -235,39 +288,9 @@
 		try {
 			const res = await harnessFetch("/auth/key", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ provider, key: key.trim() }) });
 			if (!res.ok) throw new Error(`Credential update failed: ${res.status}`);
-			anthropicDraft = "";
 			kimiDraft = "";
 			await loadAgentAuth();
 			flashSaved(key.trim() ? "Saved" : "Cleared");
-		} catch (err) {
-			loginError = err instanceof Error ? err.message : String(err);
-		}
-	}
-
-	/** Plan sign-in: open claude.ai authorize page, then paste the code back. */
-	async function startLogin() {
-		loginError = "";
-		try {
-			const res = await harnessFetch("/auth/anthropic/start", { method: "POST" });
-			const out = (await res.json()) as { authUrl?: string; error?: string };
-			if (!res.ok || !out.authUrl) throw new Error(out.error ?? "Could not start login");
-			loginPending = true;
-			window.open(out.authUrl, "_blank", "noopener");
-		} catch (err) {
-			loginError = err instanceof Error ? err.message : String(err);
-		}
-	}
-
-	async function finishLogin() {
-		loginError = "";
-		try {
-			const res = await harnessFetch("/auth/anthropic/finish", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ code: loginCode.trim() }) });
-			const out = (await res.json()) as { ok?: boolean; error?: string };
-			if (!res.ok || !out.ok) throw new Error(out.error ?? "Exchange failed");
-			loginPending = false;
-			loginCode = "";
-			await loadAgentAuth();
-			flashSaved("Signed in");
 		} catch (err) {
 			loginError = err instanceof Error ? err.message : String(err);
 		}
@@ -595,6 +618,55 @@
 		</section>
 
 		<section>
+			<h3>Claude plan</h3>
+			{#if !paired}
+				<p class="hint">Pair with a computer under This machine first: the Claude sign-in opens in Chrome there.</p>
+			{:else if plan === null}
+				<p class="hint">{planError || "Checking…"}</p>
+			{:else}
+				<p class="hint">Your Claude plan, on the Anthropic credential of every space you own. Agents use the plan while it works and the credential's API key otherwise.</p>
+				<div class="plan-row">
+					{#if plan.account}
+						<span class="plan-account">Signed in as <b>{plan.account}</b></span>
+					{/if}
+					{#if plan.signingIn}
+						<span class="hint plan-wait"><span class="desk-spin" aria-hidden="true"></span>A Chrome window opened on {planComputer(plan.thisComputer)} - sign in to Claude and press Authorize. It closes by itself.</span>
+					{:else}
+						<button class="action" disabled={planBusy} onclick={() => void planAction("/claude-plan/start", { servedBy: planServer })}>{plan.account ? "Sign in again" : "Sign in with Claude"}</button>
+						{#if plan.account}<button class="subtle-btn" disabled={planBusy} onclick={() => void planAction("/claude-plan/signout")}>Sign out</button>{/if}
+					{/if}
+				</div>
+				<label class="plan-server">
+					Kept fresh by
+					<select
+						bind:value={planServer}
+						onchange={() => { if (plan?.account) void planAction("/claude-plan/serve", { machine: planServer }); }}
+					>
+						{#each planMachines as m (m.machineId)}
+							<option value={m.machineId}>{m.name}{m.machineId === plan.thisComputer ? " (this computer)" : ""}</option>
+						{/each}
+					</select>
+					<span class="hint">One always-on computer renews the plan for every space.</span>
+				</label>
+				{#if plan.signInError}
+					<p class="hint error" role="alert">{plan.signInError}</p>
+					<form class="code-form" onsubmit={(e) => { e.preventDefault(); if (planCode.trim()) void planAction("/claude-plan/code", { code: planCode.trim() }).then(() => (planCode = "")); }}>
+						<input bind:value={planCode} placeholder="Paste the code from claude.ai" autocomplete="off" />
+						<button type="submit" disabled={planBusy}>Finish</button>
+					</form>
+				{/if}
+				{#if plan.account}
+					<ul class="plan-spaces">
+						{#each plan.spaces as sp (sp.id)}
+							<li><span>{sp.name}</span><span class="hint" class:error={sp.status !== "active"}>{sp.status === "active" ? (sp.auth === "plan" ? "Plan" : "API key") : "Not working"}{sp.error ? ` - ${sp.error}` : ""}</span></li>
+						{/each}
+					</ul>
+				{/if}
+				{#if planError}<p class="hint error" role="alert">{planError}</p>{/if}
+			{/if}
+		</section>
+
+		<section>
 			<h3>Agent {agentSaved ? `· ${agentSaved}` : ""}</h3>
 			{#if agentAuth === undefined}
 				<p class="hint">Checking agent daemon…</p>
@@ -604,54 +676,7 @@
 				</p>
 				{#if paired}<button class="action subtle" onclick={() => void loadAgentAuth()}>Retry agent connection</button>{/if}
 			{:else}
-				<p class="hint">
-					Sign in with your Claude <b>Pro/Max plan</b> (recommended) or paste an API key.
-					Credentials live in <code>~/.glon/auth.json</code> (owner-only) and apply immediately.
-				</p>
-				<div class="provider">
-					<span class="pname">Anthropic</span>
-					{#if agentAuth.anthropic.mode === "plan"}
-						<code class="masked">Signed in with Claude plan</code>
-						<button onclick={() => void saveAgentKey("anthropic", "")}>Sign out</button>
-					{:else if agentAuth.anthropic.mode === "api_key"}
-						<code class="masked">API key set ({agentAuth.anthropic.masked})</code>
-						<button onclick={() => void saveAgentKey("anthropic", "")}>Clear</button>
-					{:else if loginPending}
-						<form
-							class="code-form"
-							onsubmit={(e) => {
-								e.preventDefault();
-								if (loginCode.trim()) void finishLogin();
-							}}
-						>
-							<input bind:value={loginCode} placeholder="Paste the code from claude.ai" autocomplete="off" />
-							<button type="submit">Finish</button>
-							<button type="button" class="subtle-btn" onclick={() => { loginPending = false; loginCode = ""; loginError = ""; }}>Cancel</button>
-						</form>
-					{:else}
-						<button class="action" onclick={() => void startLogin()}>Sign in with Claude</button>
-						{#if agentAuth.anthropic.mode === "claude_code"}
-							<span class="fallback">currently using your Claude Code login</span>
-						{:else if agentAuth.anthropic.mode === "env"}
-							<span class="fallback">currently using ANTHROPIC_API_KEY from the environment</span>
-						{/if}
-					{/if}
-				</div>
-				{#if loginPending}
-					<p class="hint">A claude.ai tab opened — approve access, copy the code it shows, and paste it above.</p>
-				{/if}
-				{#if agentAuth.anthropic.mode !== "plan" && agentAuth.anthropic.mode !== "api_key" && !loginPending}
-					<form
-						class="keyrow-form"
-						onsubmit={(e) => {
-							e.preventDefault();
-							if (anthropicDraft.trim()) void saveAgentKey("anthropic", anthropicDraft);
-						}}
-					>
-						<input bind:value={anthropicDraft} type="password" placeholder="or paste an API key: sk-ant-…" autocomplete="off" />
-						<button type="submit">Save</button>
-					</form>
-				{/if}
+				<p class="hint">Keys for this computer only (<code>~/.glon/auth.json</code>), for agents that list no credential of their own. Claude for your spaces is under Claude plan above.</p>
 				<div class="provider">
 					<span class="pname">Kimi (Moonshot)</span>
 					{#if agentAuth.kimi.mode === "api_key"}
@@ -707,18 +732,6 @@
 		color: var(--red);
 	}
 	.code-form,
-	.keyrow-form {
-		display: flex;
-		gap: 8px;
-		flex: 1;
-	}
-	.keyrow-form {
-		margin: 4px 0 10px 140px;
-	}
-	.keyrow-form input,
-	.code-form input {
-		flex: 1;
-	}
 	.subtle-btn {
 		color: var(--muted);
 	}
@@ -873,6 +886,37 @@
 	}
 	.desk-offline {
 		color: var(--muted);
+	}
+	.plan-row {
+		display: flex;
+		align-items: center;
+		gap: 10px;
+		flex-wrap: wrap;
+		margin: 6px 0;
+	}
+	.plan-server {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		flex-wrap: wrap;
+		margin: 6px 0;
+		font-size: 13px;
+	}
+	.plan-spaces {
+		list-style: none;
+		margin: 8px 0 0;
+		padding: 0;
+		font-size: 13px;
+	}
+	.plan-spaces li {
+		display: flex;
+		justify-content: space-between;
+		gap: 12px;
+		padding: 3px 0;
+		border-bottom: 1px solid var(--border);
+	}
+	.plan-spaces .hint {
+		margin: 0;
 	}
 	.desk-checking {
 		color: var(--muted);
