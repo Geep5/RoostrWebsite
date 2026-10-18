@@ -250,7 +250,7 @@
 	// ── Chat color (personal prefs object, synced to this key's devices) ──
 	let chatColorDraft = $state(store.chatColor);
 	let chatColorState = $state("");
-	onMount(() => void userPrefs.chatColor().then((c) => (store.chatColor = chatColorDraft = c)));
+	onMount(() => void userPrefs.read().then((p) => (store.chatColor = chatColorDraft = p.chatColor)));
 	async function saveChatColor(raw: string) {
 		if (!normalizeHex(raw)) {
 			chatColorState = "Use a hex color like #EDCF7F";

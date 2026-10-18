@@ -48,6 +48,8 @@ export const store = $state({
 	agents: [] as AgentRef[],
 	/** The user's own chat bubble color (Settings; synced on the personal stream). */
 	chatColor: DEFAULT_CHAT_COLOR,
+	/** This person's order of the space list (space id -> position), from their own preferences. */
+	spaceOrder: {} as Record<string, number>,
 	loaded: false,
 });
 
@@ -85,13 +87,13 @@ async function fetchAgents(): Promise<AgentRef[]> {
 }
 
 export async function refreshAll(): Promise<void> {
-	const [channels, summaries, relations, defs, agents, chatColor] = await Promise.all([
+	const [channels, summaries, relations, defs, agents, prefs] = await Promise.all([
 		fetchChannels(),
 		fetchObjects(),
 		fetchRelations(),
 		fetchDefs(),
 		fetchAgents(),
-		userPrefs.chatColor(),
+		userPrefs.read(),
 	]);
 	store.channels = channels;
 	store.summaries = summaries;
@@ -99,7 +101,8 @@ export async function refreshAll(): Promise<void> {
 	store.types = defs.types;
 	store.builtinIds = defs.builtinIds;
 	store.agents = agents;
-	store.chatColor = chatColor;
+	store.chatColor = prefs.chatColor;
+	store.spaceOrder = prefs.spaceOrder;
 	store.loaded = true;
 }
 

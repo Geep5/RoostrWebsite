@@ -139,8 +139,6 @@ export interface SpaceJSON {
 	/** Who administers the space: "" when this identity does, otherwise the
 	 * owner's hex pubkey. Owners delete a space for everyone; members leave. */
 	owner: string;
-	/** Drag-reorder position for the rail. Absent = fall back to createdAt. */
-	order?: number;
 }
 
 export interface RelationDefJSON {

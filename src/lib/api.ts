@@ -102,24 +102,40 @@ export const note = {
  * Nostr profile.
  */
 const USER_PREFS_ID = "__user_prefs__";
+/** Create-if-absent under the fixed id; channel "" keeps it personal. */
+const ensurePrefs = () => mutate("create", { id: USER_PREFS_ID, name: "Preferences", type_key: "user_prefs", fields: { channel: { stringValue: "" } } });
 export const userPrefs = {
-	/** The chat color, or DEFAULT_CHAT_COLOR when unset or unreadable. */
-	chatColor: async (): Promise<string> => {
+	/**
+	 * Everything the preferences hold: the chat color (DEFAULT_CHAT_COLOR when
+	 * unset) and the space list's order - this person's own position for each
+	 * space id, theirs alone even for a space shared with others.
+	 */
+	read: async (): Promise<{ chatColor: string; spaceOrder: Record<string, number> }> => {
 		try {
-			const prefs = await fetchObject(USER_PREFS_ID);
-			return normalizeHex(prefs.fields["chat_color"]?.stringValue ?? "") ?? DEFAULT_CHAT_COLOR;
+			const f = (await fetchObject(USER_PREFS_ID)).fields;
+			const entries = f["space_order"]?.mapValue?.entries ?? {};
+			const spaceOrder: Record<string, number> = {};
+			for (const [id, v] of Object.entries(entries)) {
+				const n = v.floatValue ?? v.intValue;
+				if (typeof n === "number") spaceOrder[id] = n;
+			}
+			return { chatColor: normalizeHex(f["chat_color"]?.stringValue ?? "") ?? DEFAULT_CHAT_COLOR, spaceOrder };
 		} catch {
-			return DEFAULT_CHAT_COLOR;
+			return { chatColor: DEFAULT_CHAT_COLOR, spaceOrder: {} };
 		}
 	},
 	/** Saves a hex chat color (the default stores as empty); throws on invalid hex. */
 	setChatColor: async (raw: string): Promise<string> => {
 		const hex = normalizeHex(raw);
 		if (!hex) throw new Error("Use a hex color like #EDCF7F");
-		// Create-if-absent under the fixed id; channel "" keeps it personal.
-		await mutate("create", { id: USER_PREFS_ID, name: "Preferences", type_key: "user_prefs", fields: { channel: { stringValue: "" } } });
+		await ensurePrefs();
 		await note.setField(USER_PREFS_ID, "chat_color", { stringValue: hex === DEFAULT_CHAT_COLOR ? "" : hex });
 		return hex;
+	},
+	/** Saves this person's space order (space id -> position). */
+	setSpaceOrder: async (order: Record<string, number>): Promise<void> => {
+		await ensurePrefs();
+		await note.setField(USER_PREFS_ID, "space_order", { mapValue: { entries: Object.fromEntries(Object.entries(order).map(([id, n]) => [id, { floatValue: n }])) } });
 	},
 };
 

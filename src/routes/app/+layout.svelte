@@ -4,7 +4,7 @@
 	import { page } from "$app/state";
 	import { activeSpace } from "$lib/space.svelte";
 	import { syncProgress, syncTip } from "$lib/sync-status";
-	import { space as spaceApi, note, fetchObject, fetchQuery, fetchAllQuery } from "$lib/api";
+	import { space as spaceApi, note, fetchObject, fetchQuery, fetchAllQuery, userPrefs } from "$lib/api";
 	import { PIN_KEY, keyBetween } from "$lib/pins";
 	import { deletionBlocker } from "$lib/protected";
 	import { isImageIcon, objectIcon } from "$lib/icons";
@@ -375,10 +375,12 @@
 	// whichever space you dragged to the top. So the user's order is a
 	// DISPLAY concern, applied here and nowhere else.
 	//
-	// Position is a float on the channel object, defaulting to createdAt so
-	// both live in one number space: an unordered vault already sorts
-	// correctly, and a drop only has to write the moved space's own field.
-	const orderOf = (c: SpaceJSON) => c.order ?? c.createdAt;
+	// Position is this person's own (their preferences' space_order, by
+	// space id) - never a field on the space, which a shared space's members
+	// would all overwrite. Absent, it is the space's createdAt, so both live in
+	// one number space: an unordered list already sorts correctly, and a drop
+	// only has to give the moved space a position.
+	const orderOf = (c: SpaceJSON) => store.spaceOrder[c.id] ?? c.createdAt;
 	const orderedSpaces = $derived([...channels].sort((a, b) => orderOf(a) - orderOf(b) || a.createdAt - b.createdAt));
 
 	let spaceDragId = $state("");
@@ -426,9 +428,37 @@
 		else if (next) position = orderOf(next) - 1000;
 		else if (before) position = orderOf(before) + 1000;
 		else return;
-		await note.setField(draggedId, "order", { floatValue: position });
-		await refreshAll();
+		store.spaceOrder = { ...store.spaceOrder, [draggedId]: position };
+		await userPrefs.setSpaceOrder(store.spaceOrder);
 	}
+
+	/**
+	 * The order this person set before it moved into their preferences lived
+	 * as an `order` field on each space they own: copy over what the
+	 * preferences lack, then clear it there - per page load, so a move cut
+	 * off midway finishes next time. Shared spaces were never theirs to write.
+	 */
+	let spaceOrderMoved = false;
+	async function moveSpaceOrder() {
+		if (spaceOrderMoved || !store.loaded) return;
+		spaceOrderMoved = true;
+		const found: Record<string, number> = {};
+		for (const c of store.channels.filter((c) => !c.owner)) {
+			const v = (await fetchObject(c.id).catch(() => null))?.fields["order"];
+			const n = v?.floatValue ?? v?.intValue;
+			if (typeof n === "number") found[c.id] = n;
+		}
+		if (Object.keys(found).length === 0) return;
+		const missing = Object.fromEntries(Object.entries(found).filter(([id]) => store.spaceOrder[id] === undefined));
+		if (Object.keys(missing).length > 0) {
+			store.spaceOrder = { ...missing, ...store.spaceOrder };
+			await userPrefs.setSpaceOrder(store.spaceOrder);
+		}
+		for (const id of Object.keys(found)) await note.deleteField(id, "order");
+	}
+	$effect(() => {
+		if (store.loaded) void moveSpaceOrder();
+	});
 
 	function spaceDragOver(e: DragEvent, id: string) {
 		if (!spaceDragId || spaceDragId === id) return;
