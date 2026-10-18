@@ -6,6 +6,8 @@ import type { SyncStatus } from "./engine/backend";
 import type { JoinRequest } from "./engine/sync";
 import type { NativeSettings } from "./local-backend";
 import { initCore } from "./engine/core";
+import { authorIdFor } from "./engine/keys";
+import { hexToBytes } from "@noble/hashes/utils.js";
 
 /**
  * The Swift host owns the key, store, relays and engine; this layer keeps no
@@ -127,14 +129,25 @@ export class IOSBackend {
 	async identity(): Promise<{ pubkey: string; npub: string }> {
 		const id = await call<unknown>("identity");
 		if (!isIdentity(id)) throw new Error("Invalid identity from the iOS host");
-		this.author = id.pubkey;
+		this.author = await this.chatAuthor();
 		this.npub = id.npub;
 		return id;
+	}
+	/**
+	 * The id this account's chat messages carry (authorIdFor: a hash of the
+	 * private key, the same on every device). Not the public key: comparing
+	 * against that, the phone took its own messages for someone else's - no
+	 * "You", no chat colour, on the left. The host has no call for it, so it
+	 * is derived from the exported key here; the key is not kept.
+	 */
+	private async chatAuthor(): Promise<string> {
+		const { hex } = await this.exportKey();
+		return authorIdFor({ sk: hexToBytes(hex) } as Parameters<typeof authorIdFor>[0]);
 	}
 	async fetchSettings(): Promise<NativeSettings> {
 		const id = await this.identity();
 		this.relayList = await call<string[]>("relays");
-		return { hasKey: true, relays: this.relays(), authorId: id.pubkey, npub: id.npub };
+		return { hasKey: true, relays: this.relays(), authorId: this.author, npub: id.npub };
 	}
 	exportKey(): Promise<{ nsec: string; hex: string }> { return call("exportKey"); }
 	importKey(key: string): Promise<void> { return call("importKey", key); }
