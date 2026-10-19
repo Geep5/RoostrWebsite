@@ -44,6 +44,11 @@ pub struct DiscussionOptions {
     /// Which conversation of the object; `"__discussion__"` is the human thread
     /// (the object's one merged chat).
     pub thread_id: String,
+    /// Inside the conversation drawer: messages in their own scroller, no
+    /// outer margins, 14px sides. An option rather than set after `new`:
+    /// the object may already be in the store, and `new` then lays out its
+    /// messages - landing at the newest only in a scroller of their own.
+    pub embedded: bool,
 }
 
 impl Default for DiscussionOptions {
@@ -52,6 +57,7 @@ impl Default for DiscussionOptions {
             full: false,
             page_mode: false,
             thread_id: DISCUSSION.into(),
+            embedded: false,
         }
     }
 }
@@ -109,8 +115,8 @@ pub struct Discussion {
     full: bool,
     page_mode: bool,
     thread_id: String,
-    /// Inside the conversation drawer: no outer margins, 14px sides.
-    pub(crate) embedded: bool,
+    /// Inside the conversation drawer (`DiscussionOptions::embedded`).
+    embedded: bool,
 
     object: Option<Arc<Object>>,
     messages: Rc<Vec<ChatMessage>>,
@@ -125,7 +131,6 @@ pub struct Discussion {
     list: ListState,
     fingerprints: Vec<u64>,
     landed_on: String,
-    following: Rc<std::cell::Cell<bool>>,
     seen_count: usize,
     focused_once: bool,
     /// A newly followed message to check once laid out (taller than the pane: show its top).
@@ -187,17 +192,6 @@ impl Discussion {
         });
         composer.update(cx, |state, cx| state.set_value(draft.clone(), window, cx));
         let list = ListState::new(1, ListAlignment::Top, px(600.));
-        let following = Rc::new(std::cell::Cell::new(true));
-        {
-            let following = following.clone();
-            let handle = list.clone();
-            list.set_scroll_handler(move |_, _, _| {
-                // Within a message or so of the end: the reader is following along.
-                let max = handle.max_offset_for_scrollbar().y;
-                let offset = -handle.scroll_px_offset_for_scrollbar().y;
-                following.set(max - offset < px(120.));
-            });
-        }
         let subscriptions = vec![
             cx.observe(&store, |this, _, cx| this.sync_object(cx)),
             cx.subscribe_in(&composer, window, Self::on_composer_event),
@@ -207,7 +201,7 @@ impl Discussion {
             full: options.full,
             page_mode: options.page_mode,
             thread_id,
-            embedded: false,
+            embedded: options.embedded,
             object: None,
             messages: Rc::new(Vec::new()),
             conversation: None,
@@ -220,7 +214,6 @@ impl Discussion {
             list,
             fingerprints: Vec::new(),
             landed_on: String::new(),
-            following,
             seen_count: 0,
             focused_once: false,
             tall_check: None,
@@ -335,8 +328,11 @@ impl Discussion {
             })
             .unwrap_or_else(|| "Exchange".into());
         self.messages = Rc::new(messages);
+        // Whether the reader was at the end, measured before the splice
+        // re-estimates the new rows' heights.
+        let at_end = self.at_end();
         self.sync_list();
-        self.follow_new_messages(cx);
+        self.follow_new_messages(at_end, cx);
         self.update_polling(cx);
         if !self.seeded {
             self.seeded = true;
@@ -408,9 +404,21 @@ impl Discussion {
         self.list.splice(n..n + 1, 1);
     }
 
+    /// Within a message or so of the end: the reader is following along.
+    /// Read from the list when needed, never from its scroll handler: the
+    /// list calls that with its state borrowed, so reading the offsets there
+    /// panicked on the first wheel or touch scroll (`RefCell already mutably
+    /// borrowed`), which aborted the desktop app and left the browser and iOS
+    /// apps taking no input at all.
+    fn at_end(&self) -> bool {
+        let max = self.list.max_offset_for_scrollbar().y;
+        let offset = -self.list.scroll_px_offset_for_scrollbar().y;
+        max - offset < px(120.)
+    }
+
     /// Land at the end once per opened thread; on new messages follow when the
     /// reader was at the end, and always for a reply to what you just sent.
-    fn follow_new_messages(&mut self, cx: &mut Context<Self>) {
+    fn follow_new_messages(&mut self, at_end: bool, cx: &mut Context<Self>) {
         if !self.own_scroller() {
             self.seen_count = self.messages.len();
             return;
@@ -436,11 +444,10 @@ impl Discussion {
         let newest = &self.messages[count - 1];
         let previous = count.checked_sub(2).map(|i| &self.messages[i]);
         let mine_before = previous.is_some_and(|p| p.author == self.me) && newest.author != self.me;
-        if !(self.page_mode || self.following.get() || mine_before || newest.author == self.me) {
+        if !(self.page_mode || at_end || mine_before || newest.author == self.me) {
             return;
         }
         self.list.set_follow_mode(FollowMode::Tail);
-        self.following.set(true);
         self.tall_check = Some(count - 1);
         let _ = cx;
     }
@@ -1744,7 +1751,8 @@ impl Discussion {
                 .map(|a| (a.name.clone(), a.icon.clone()))
                 .collect(),
         };
-        let text = render_markdown(("md", ix), &m.text, &md_theme, cx);
+        // Each message's lines read after the previous message's.
+        let text = render_markdown(("md", ix), &m.text, &md_theme, (ix as u64) << 24, cx);
         let bubble_el = div()
             .text_size(px(14.))
             .line_height(relative(1.45))
@@ -2969,13 +2977,18 @@ impl Render for Discussion {
         // Messages.
         if self.own_scroller() {
             root = root.child(
-                div().relative().flex_1().min_h_0().child(
-                    list(
-                        self.list.clone(),
-                        cx.processor(|this, ix, window, cx| this.render_item(ix, window, cx)),
-                    )
-                    .size_full(),
-                ),
+                div()
+                    .debug_selector(|| "chat-messages".into())
+                    .relative()
+                    .flex_1()
+                    .min_h_0()
+                    .child(
+                        list(
+                            self.list.clone(),
+                            cx.processor(|this, ix, window, cx| this.render_item(ix, window, cx)),
+                        )
+                        .size_full(),
+                    ),
             );
         } else {
             let items: Vec<AnyElement> = (0..=self.messages.len())

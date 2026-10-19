@@ -260,6 +260,12 @@ link opens the editor's Paste as menu, copied blocks paste as blocks. The
 pasteboard carries a string's metadata, a copied link and images. There is
 no Select (word) item, no selection handles and no loupe.
 
+Chat messages are selectable text, as the web view's DOM text was, on every
+platform: a mouse drag selects across lines and messages and ⌘C copies; on a
+touch screen a long press selects a word with gpui-kit's window text
+selection (`gpui_kit::base::TextSelection`), whose handles extend it and
+whose Copy / Select All menu sits over it (drawn by gpui-kit, not UIKit).
+
 ## Develop
 
 Every feature crate has an example that hosts its views against the daemon in

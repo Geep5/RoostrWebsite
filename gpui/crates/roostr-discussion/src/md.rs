@@ -1,9 +1,17 @@
 //! Chat message markdown (`renderMarkdown` + the Discussion's `.md` styles and
 //! `mentionPills`): `roostr_core::markdown` parses, this lays the blocks out
 //! and paints inline styles, links, object links and @agent mention pills.
+//! Every line takes part in the window text selection, as the web view's DOM
+//! text did: a drag selects across lines and messages, ⌘C copies, and on a
+//! touch screen a long press selects a word with handles and a Copy menu.
 
+use std::cell::Cell;
 use std::ops::Range;
 
+use gpui_kit::base::{
+    TextSelection, TextSelectionHandle, TextSelectionRegistration, TextSelectionRun, Theme,
+    TouchHandleLayout,
+};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use roostr_core::markdown::{Align, Block, Inline, TaskCheck, parse};
@@ -204,6 +212,7 @@ fn render_line(
     inline: &Inline,
     md: &MdTheme,
     names: &[(String, String)],
+    order: &Cell<u64>,
     cx: &App,
 ) -> AnyElement {
     let line = build_line(inline, md, names, cx);
@@ -211,17 +220,193 @@ fn render_line(
         // An empty line still takes a line's height (`<br>`).
         return div().child(" ").into_any_element();
     }
-    let styled = StyledText::new(line.text).with_runs(line.runs);
-    if line.clicks.is_empty() {
-        return styled.into_any_element();
+    let text = SharedString::from(line.text);
+    let styled = StyledText::new(text.clone()).with_runs(line.runs);
+    let layout = styled.layout().clone();
+    let element = if line.clicks.is_empty() {
+        styled.into_any_element()
+    } else {
+        let (ranges, targets): (Vec<Range<usize>>, Vec<Click>) = line.clicks.into_iter().unzip();
+        InteractiveText::new(id.clone(), styled)
+            .on_click(ranges, move |ix, _, cx| match &targets[ix] {
+                Click::Object(id) => nav::navigate(Route::Object(id.clone()), cx),
+                Click::Url(url) => cx.open_url(url),
+            })
+            .into_any_element()
+    };
+    SelectableLine::new(id, text, layout, element, order).into_any_element()
+}
+
+/// One laid-out line of message text in the window text selection: gpui-base's
+/// `SelectableText`, for text with styled runs and links (the line's own
+/// `StyledText` or `InteractiveText`, which it lays out and paints).
+struct SelectableLine {
+    id: ElementId,
+    text: SharedString,
+    layout: TextLayout,
+    element: AnyElement,
+    /// Reading order among the lines of the conversation.
+    order: u64,
+}
+
+impl SelectableLine {
+    /// `element` is laid out as `layout`, showing `text`; the line takes the
+    /// next reading position from `order`.
+    fn new(
+        id: ElementId,
+        text: SharedString,
+        layout: TextLayout,
+        element: AnyElement,
+        order: &Cell<u64>,
+    ) -> Self {
+        let this = Self {
+            id,
+            text,
+            layout,
+            element,
+            order: order.get(),
+        };
+        order.set(order.get() + 1);
+        this
     }
-    let (ranges, targets): (Vec<Range<usize>>, Vec<Click>) = line.clicks.into_iter().unzip();
-    InteractiveText::new(id, styled)
-        .on_click(ranges, move |ix, _, cx| match &targets[ix] {
-            Click::Object(id) => nav::navigate(Route::Object(id.clone()), cx),
-            Click::Url(url) => cx.open_url(url),
-        })
-        .into_any_element()
+}
+
+impl IntoElement for SelectableLine {
+    type Element = Self;
+
+    fn into_element(self) -> Self::Element {
+        self
+    }
+}
+
+impl Element for SelectableLine {
+    type RequestLayoutState = TextSelectionHandle;
+    type PrepaintState = (Hitbox, TouchHandleLayout);
+
+    fn id(&self) -> Option<ElementId> {
+        Some(self.id.clone())
+    }
+
+    fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        global_id: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, Self::RequestLayoutState) {
+        let handle = window.with_element_state(
+            global_id.expect("a selectable line has an id"),
+            |retained: Option<TextSelectionHandle>, _| {
+                let handle =
+                    retained.unwrap_or_else(|| TextSelectionHandle::new(self.text.clone(), cx));
+                (handle.clone(), handle)
+            },
+        );
+        handle.set_fallback_copy_text(self.text.clone(), cx);
+        (self.element.request_layout(window, cx), handle)
+    }
+
+    fn prepaint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        handle: &mut Self::RequestLayoutState,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Self::PrepaintState {
+        self.element.prepaint(window, cx);
+        let hitbox = window.insert_hitbox(bounds, HitboxBehavior::Normal);
+        let handles = handle.prepaint_touch_handles(window, cx);
+        (hitbox, handles)
+    }
+
+    fn paint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        handle: &mut Self::RequestLayoutState,
+        (hitbox, handles): &mut Self::PrepaintState,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let selected_before = TextSelection::selected_text(window, cx);
+        let projection = handle.update_runs(
+            &[
+                TextSelectionRun::new(self.text.clone(), self.layout.clone(), bounds)
+                    .with_document_order(self.order),
+            ],
+            cx,
+        );
+        if selected_before != TextSelection::selected_text(window, cx) {
+            window.refresh();
+        }
+        let line_height = self.layout.line_height();
+        let color = Theme::global(cx).tokens.colors.selection;
+        let mut edges = None;
+        for range in projection.ranges().iter().flatten() {
+            let (Some(start), Some(end)) = (
+                self.layout.position_for_index(range.start),
+                self.layout.position_for_index(range.end),
+            ) else {
+                continue;
+            };
+            for quad in selection_quads(start, end, bounds, line_height) {
+                window.paint_quad(fill(quad, color));
+            }
+            let caret = |at: Point<Pixels>| Bounds::new(at, size(px(0.), line_height));
+            edges = Some((caret(start), caret(end)));
+        }
+        let registration = TextSelectionRegistration::new(hitbox.clone(), bounds)
+            .with_document_order(self.order)
+            .with_text_bounds(vec![bounds])
+            .with_rendered_element(handle, window, cx);
+        let registration = match edges {
+            Some((start, end)) => registration.with_selection_edges(start, end),
+            None => registration,
+        };
+        handle.register(registration, window, cx);
+        // Links set the pointing hand over themselves as they paint.
+        window.set_cursor_style(CursorStyle::IBeam, hitbox);
+        self.element.paint(window, cx);
+        handle.paint_touch_handles(handles, theme::accent(), window, cx);
+    }
+}
+
+/// The highlight of `start..end` on a wrapped line: the first row from the
+/// start, full middle rows, the last row to the end.
+fn selection_quads(
+    start: Point<Pixels>,
+    end: Point<Pixels>,
+    bounds: Bounds<Pixels>,
+    line_height: Pixels,
+) -> Vec<Bounds<Pixels>> {
+    if start.y == end.y {
+        return vec![Bounds::from_corners(
+            start,
+            point(end.x, end.y + line_height),
+        )];
+    }
+    let mut quads = vec![Bounds::from_corners(
+        start,
+        point(bounds.right(), start.y + line_height),
+    )];
+    if end.y > start.y + line_height {
+        quads.push(Bounds::from_corners(
+            point(bounds.left(), start.y + line_height),
+            point(bounds.right(), end.y),
+        ));
+    }
+    quads.push(Bounds::from_corners(
+        point(bounds.left(), end.y),
+        point(end.x, end.y + line_height),
+    ));
+    quads
 }
 
 /// CSS vertical margins of one block (top, bottom).
@@ -241,6 +426,7 @@ fn lines(
     lines: &[Inline],
     md: &MdTheme,
     names: &[(String, String)],
+    order: &Cell<u64>,
     cx: &App,
 ) -> Div {
     div()
@@ -252,6 +438,7 @@ fn lines(
                 l,
                 md,
                 names,
+                order,
                 cx,
             )
         }))
@@ -263,10 +450,11 @@ fn render_block(
     block: &Block,
     md: &MdTheme,
     names: &[(String, String)],
+    order: &Cell<u64>,
     cx: &App,
 ) -> AnyElement {
     match block {
-        Block::Paragraph(ls) => lines(id, ix, ls, md, names, cx).into_any_element(),
+        Block::Paragraph(ls) => lines(id, ix, ls, md, names, order, cx).into_any_element(),
         Block::Heading { level, text } => div()
             .font_weight(FontWeight::BOLD)
             .text_size(px(match level {
@@ -279,6 +467,7 @@ fn render_block(
                 &bold(text),
                 md,
                 names,
+                order,
                 cx,
             ))
             .into_any_element(),
@@ -295,7 +484,7 @@ fn render_block(
                 .px(px(10.))
                 .py(px(2.))
                 .text_color(theme::muted())
-                .child(lines(id, ix, ls, &quote, names, cx))
+                .child(lines(id, ix, ls, &quote, names, order, cx))
                 .into_any_element()
         }
         Block::Code { lang, code } => div()
@@ -321,7 +510,18 @@ fn render_block(
                         .child(lang.to_uppercase()),
                 )
             })
-            .child(div().whitespace_nowrap().child(code.clone()))
+            .child(div().whitespace_nowrap().child({
+                let code = SharedString::from(code.clone());
+                let styled = StyledText::new(code.clone());
+                let layout = styled.layout().clone();
+                SelectableLine::new(
+                    ElementId::Name(format!("{id}-{ix}-code-text").into()),
+                    code,
+                    layout,
+                    styled.into_any_element(),
+                    order,
+                )
+            }))
             .into_any_element(),
         Block::List { ordered, items } => {
             let tasky = items.iter().any(|i| i.check.is_some());
@@ -331,6 +531,7 @@ fn render_block(
                     &item.text,
                     md,
                     names,
+                    order,
                     cx,
                 );
                 if tasky {
@@ -417,6 +618,7 @@ fn render_block(
                         &if head { bold(inline) } else { inline.clone() },
                         &theme_for,
                         names,
+                        order,
                         cx,
                     ))
             };
@@ -468,10 +670,13 @@ fn bold(inline: &Inline) -> Inline {
 }
 
 /// A message body: parsed markdown laid out with the chat's `.md` styles.
+/// Its lines take part in the window text selection in reading order from
+/// `order` (one message's lines after the previous message's).
 pub(crate) fn render_markdown(
     id: impl Into<ElementId>,
     src: &str,
     md: &MdTheme,
+    order: u64,
     cx: &App,
 ) -> AnyElement {
     let id: ElementId = id.into();
@@ -479,6 +684,7 @@ pub(crate) fn render_markdown(
     let mut names = md.mention_names.clone();
     names.sort_by_key(|(n, _)| std::cmp::Reverse(n.len()));
     let blocks = parse(src);
+    let order = Cell::new(order);
     let mut out = div().flex().flex_col().min_w_0();
     let mut prev_bottom = 0.;
     let count = blocks.len();
@@ -494,7 +700,7 @@ pub(crate) fn render_markdown(
         prev_bottom = bottom;
         let mut el = div()
             .mt(px(gap))
-            .child(render_block(&key, ix, block, md, &names, cx));
+            .child(render_block(&key, ix, block, md, &names, &order, cx));
         if ix + 1 == count {
             el = el.mb(px(bottom));
         }

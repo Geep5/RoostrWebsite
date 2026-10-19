@@ -94,18 +94,17 @@ impl ConversationDrawer {
                 if self.discussion.is_none() {
                     let id = self.object_id.clone();
                     self.discussion = Some(cx.new(|cx| {
-                        let mut d = Discussion::new(
+                        Discussion::new(
                             id,
                             DiscussionOptions {
                                 full: true,
                                 page_mode: false,
                                 thread_id: crate::chat::DISCUSSION.into(),
+                                embedded: true,
                             },
                             window,
                             cx,
-                        );
-                        d.embedded = true;
-                        d
+                        )
                     }));
                 }
             }

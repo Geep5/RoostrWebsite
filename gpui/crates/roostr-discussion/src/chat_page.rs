@@ -30,6 +30,7 @@ impl ChatPage {
                     full: true,
                     page_mode: true,
                     thread_id: DISCUSSION.into(),
+                    embedded: false,
                 },
                 window,
                 cx,

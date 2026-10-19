@@ -227,6 +227,7 @@ impl ObjectPage {
                             full: true,
                             page_mode: false,
                             thread_id: "__discussion__".into(),
+                            embedded: false,
                         },
                         window,
                         cx,

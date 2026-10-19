@@ -116,6 +116,7 @@ fn main() {
                         full,
                         page_mode: false,
                         thread_id,
+                        embedded: false,
                     },
                     window,
                     cx,
