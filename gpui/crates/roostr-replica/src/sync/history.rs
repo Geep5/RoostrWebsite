@@ -9,9 +9,12 @@
 //! reads its whole 1078 history (dual read); one holding bases reads the
 //! live deltas of the held current bases (`#b`), the vanish ledger, and a
 //! 1078 window bounded by ITS newest base's created_at minus one day -
-//! never another stream's floor.
+//! never another stream's floor. Older history the window leaves out is
+//! swept once per stream: every event the relay holds there minus those of
+//! objects holding a base (ids only, by NIP-77), so an object no computer
+//! has based yet is never cut off.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -24,7 +27,8 @@ use roostr_replica_store::HeldQuery;
 
 use super::{
     BASE_HASH_BATCH, BASE_LOOKBACK_S, CHECKPOINT_FETCH_BATCH, FETCH_BATCH, Inner,
-    MIN_PAGE_SPACING_MS, PAGE_LIMIT, PAGE_SPACING_MS, PAGE_TIMEOUT, VANISH_LOG_ID, now_ms, short,
+    MIN_PAGE_SPACING_MS, PAGE_LIMIT, PAGE_SPACING_MS, PAGE_TIMEOUT, UNBASED_SWEPT, VANISH_LOG_ID,
+    now_ms, short,
 };
 
 /// One relay stream filter, with the store scope of its held events.
@@ -41,6 +45,26 @@ enum Outcome {
     Incomplete,
     /// The relay does not reconcile this filter: walk it instead.
     Unsupported,
+}
+
+/// The ids one relay holds of objects holding a base, below the window.
+enum Covered {
+    Ids(HashSet<String>),
+    /// The relay does not reconcile: walk the range instead.
+    Unsupported,
+    Failed,
+}
+
+/// A blinded `h` tag (`core/wire.odin` blind): the first 16 hex of
+/// sha256(prefix ‖ utf8(id)), the prefix being the personal secret's bytes
+/// or a space key's hex text.
+pub(crate) fn blind(prefix: &[u8], id: &str) -> String {
+    use sha2::Digest as _;
+    let digest = sha2::Sha256::new()
+        .chain_update(prefix)
+        .chain_update(id.as_bytes())
+        .finalize();
+    hex::encode(&digest[..8])
 }
 
 /// What one history pass shares across its concurrent covers.
@@ -265,6 +289,12 @@ impl Inner {
             .collect();
         self.cover(&pass, &changes, resume_until, track_floor)
             .await?;
+        // Then what each bounded stream holds below its window.
+        let floors: HashMap<String, i64> = change_filters
+            .iter()
+            .filter_map(|sf| Some((sf.scope.clone(), floor_of(&sf.scope)?)))
+            .collect();
+        self.sweep_unbased(&pass, &change_filters, &floors).await?;
 
         // This device's unpublished writes whose object moved to a newer
         // base meanwhile rebase now.
@@ -364,7 +394,7 @@ impl Inner {
                     .negentropy_unsupported
                     .contains(relay.url());
                 if !unsupported {
-                    match self.reconcile_stream(index, pass, sf).await? {
+                    match self.reconcile_stream(index, pass, sf, None).await? {
                         Outcome::Complete => return Ok(()),
                         Outcome::Incomplete => {
                             pass.complete.store(false, Ordering::Relaxed);
@@ -374,7 +404,9 @@ impl Inner {
                     }
                 }
                 pass.walked.store(true, Ordering::Relaxed);
-                self.walk(index, pass, &sf.filter, resume, track).await
+                self.walk(index, pass, &sf.filter, pass.since, resume, track)
+                    .await
+                    .map(|_| ())
             })
         });
         for result in futures::future::join_all(jobs).await {
@@ -383,35 +415,36 @@ impl Inner {
         Ok(())
     }
 
-    /// The paged walk of one filter on one relay, newest first via `until`.
+    /// The paged walk of one filter on one relay, newest first via `until`,
+    /// from `since` at the oldest; true when it reached the end.
     async fn walk(
         self: &Arc<Self>,
         index: usize,
         pass: &Pass,
         filter: &Filter,
+        since: i64,
         resume: Option<i64>,
         track: bool,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<bool> {
         let relay = &self.relays[index];
         let mut until = resume;
         loop {
             if self.stopped() {
                 pass.complete.store(false, Ordering::Relaxed);
-                return Ok(());
+                return Ok(false);
             }
             // A relay that fails or stalls is this walk's problem; a STORE
             // failure (below, outside this guard) propagates.
             let started = now_ms();
             let mut page_filter = filter.clone().limit(PAGE_LIMIT);
-            page_filter.since =
-                Some(pass.since.max(filter.since.unwrap_or(0) as i64).max(0) as u64);
+            page_filter.since = Some(since.max(filter.since.unwrap_or(0) as i64).max(0) as u64);
             page_filter.until = until.map(|u| u.max(0) as u64);
             let page = match self.query_page(relay, page_filter).await {
                 Ok(page) => page,
                 Err(error) => {
                     pass.complete.store(false, Ordering::Relaxed);
                     self.emit_backfill(Some(format!("{}: {}", relay.url(), short(error, 100))));
-                    return Ok(());
+                    return Ok(false);
                 }
             };
             let len = page.len() as u64;
@@ -419,7 +452,7 @@ impl Inner {
             self.import_page(pass, page).await?;
             self.emit_progress();
             if len < PAGE_LIMIT {
-                return Ok(());
+                return Ok(true);
             }
             let oldest = oldest.unwrap_or(0);
             if until.is_some_and(|u| oldest >= u) {
@@ -428,7 +461,7 @@ impl Inner {
                     "{}: saturated same-timestamp history page",
                     relay.url()
                 )));
-                return Ok(());
+                return Ok(false);
             }
             until = Some(oldest);
             // Coverage is only as deep as the slowest concurrent walker.
@@ -488,13 +521,14 @@ impl Inner {
     }
 
     /// NIP-77 cover of one stream filter on one relay: reconcile the held
-    /// set, then fetch every needed id. `claimed` is shared by every stream
-    /// of one pass: an event in two streams is fetched once.
+    /// set, then fetch every needed id not in `skip`. `claimed` is shared by
+    /// every stream of one pass: an event in two streams is fetched once.
     async fn reconcile_stream(
         self: &Arc<Self>,
         index: usize,
         pass: &Pass,
         sf: &StreamFilter,
+        skip: Option<&HashSet<String>>,
     ) -> anyhow::Result<Outcome> {
         let relay = &self.relays[index];
         let held = self
@@ -504,7 +538,7 @@ impl Inner {
                 HeldQuery {
                     kinds: sf.filter.kinds.clone().unwrap_or_default(),
                     since: sf.filter.since.map(|s| s as i64),
-                    until: None,
+                    until: sf.filter.until.map(|u| u as i64),
                     b: sf.filter.tags.get(&'b').cloned(),
                 },
             )
@@ -559,6 +593,7 @@ impl Inner {
         let need: Vec<String> = {
             let mut claimed = pass.claimed.lock();
             need.into_iter()
+                .filter(|id| !skip.is_some_and(|skip| skip.contains(id)))
                 .filter(|id| claimed.insert(id.clone()))
                 .collect()
         };
@@ -609,6 +644,186 @@ impl Inner {
             return Ok(Outcome::Incomplete);
         }
         Ok(Outcome::Complete)
+    }
+
+    /// Each bounded stream's history below its window that no held base
+    /// covers. An object nobody has based (its computer offline, a harness
+    /// without the unbased fallback) can start before the window; without
+    /// this a fresh device never holds it. Per relay, the ids of every
+    /// event of an object holding a base are listed by NIP-77 (nothing
+    /// fetched), and the stream's reconcile fetches the rest. A stream is
+    /// swept up to its floor once every relay covered it; later passes
+    /// sweep only what the floor moved past.
+    async fn sweep_unbased(
+        self: &Arc<Self>,
+        pass: &Pass,
+        change_filters: &[StreamFilter],
+        floors: &HashMap<String, i64>,
+    ) -> anyhow::Result<()> {
+        if self.relays.is_empty() {
+            return Ok(());
+        }
+        let mut swept: BTreeMap<String, i64> = self
+            .store
+            .meta(UNBASED_SWEPT.to_string())
+            .await?
+            .and_then(|raw| serde_json::from_str(&raw).ok())
+            .unwrap_or_default();
+        // (the stream below its floor, swept since, floor)
+        let due: Vec<(StreamFilter, i64, i64)> = change_filters
+            .iter()
+            .filter_map(|sf| {
+                let floor = *floors.get(&sf.scope)?;
+                let from = swept.get(&sf.scope).copied().unwrap_or(0);
+                (from < floor).then(|| {
+                    let mut filter = sf.filter.clone().until(floor as u64);
+                    filter.since = (from > 0).then_some(from as u64);
+                    let scope = sf.scope.clone();
+                    (StreamFilter { scope, filter }, from, floor)
+                })
+            })
+            .collect();
+        if due.is_empty() {
+            return Ok(());
+        }
+        let tags = self.based_object_tags().await?;
+        let since = due.iter().map(|(_, from, _)| *from).min().unwrap_or(0);
+        let until = due.iter().map(|(_, _, floor)| *floor).max().unwrap_or(0);
+        let jobs = (0..self.relays.len()).map(|index| {
+            let (due, tags) = (&due, &tags);
+            async move {
+                let covered = if tags.is_empty() {
+                    Covered::Ids(HashSet::new())
+                } else {
+                    self.covered_ids(index, tags, since, until).await
+                };
+                let mut done = vec![false; due.len()];
+                for (i, (sf, from, floor)) in due.iter().enumerate() {
+                    if self.stopped() {
+                        break;
+                    }
+                    let walk = match &covered {
+                        Covered::Failed => continue,
+                        Covered::Unsupported => true,
+                        Covered::Ids(covered) => {
+                            match self
+                                .reconcile_stream(index, pass, sf, Some(covered))
+                                .await?
+                            {
+                                Outcome::Complete => {
+                                    done[i] = true;
+                                    false
+                                }
+                                Outcome::Incomplete => false,
+                                Outcome::Unsupported => true,
+                            }
+                        }
+                    };
+                    if walk {
+                        // No ids to subtract: read the whole range.
+                        done[i] = self
+                            .walk(index, pass, &sf.filter, *from, Some(*floor), false)
+                            .await?;
+                    }
+                }
+                anyhow::Ok(done)
+            }
+        });
+        let mut complete = vec![true; due.len()];
+        for result in futures::future::join_all(jobs).await {
+            for (all, done) in complete.iter_mut().zip(result?) {
+                *all &= done;
+            }
+        }
+        let mut advanced = false;
+        for ((sf, _, floor), complete) in due.iter().zip(complete) {
+            if complete {
+                swept.insert(sf.scope.clone(), *floor);
+                advanced = true;
+            } else {
+                pass.complete.store(false, Ordering::Relaxed);
+            }
+        }
+        if advanced {
+            self.store
+                .set_meta(
+                    UNBASED_SWEPT.to_string(),
+                    Some(serde_json::to_string(&swept)?),
+                )
+                .await?;
+        }
+        Ok(())
+    }
+
+    /// The blinded object tags (`h`) every held base's object may carry:
+    /// the personal one and one per installed shared space.
+    async fn based_object_tags(&self) -> anyhow::Result<Vec<String>> {
+        let objects = self.store.current_bases().await?;
+        let mut prefixes = vec![hex::decode(&self.secret_hex)?];
+        prefixes.extend(
+            self.state
+                .lock()
+                .shared
+                .values()
+                .map(|sp| sp.info.key_hex.as_bytes().to_vec()),
+        );
+        let mut tags: Vec<String> = objects
+            .keys()
+            .flat_map(|id| prefixes.iter().map(move |prefix| blind(prefix, id)))
+            .collect();
+        tags.sort();
+        tags.dedup();
+        Ok(tags)
+    }
+
+    /// The ids of every 1078 `relay` holds tagged with one of `tags`
+    /// (`created_at` in `since..=until`), listed by NIP-77 against an empty
+    /// set: nothing is fetched.
+    async fn covered_ids(&self, index: usize, tags: &[String], since: i64, until: i64) -> Covered {
+        let relay = &self.relays[index];
+        let mut ids = HashSet::new();
+        for chunk in tags.chunks(BASE_HASH_BATCH) {
+            if self.stopped() {
+                return Covered::Failed;
+            }
+            let mut filter = Filter::new()
+                .kinds([kinds::CHANGE])
+                .tag('h', chunk.iter().cloned())
+                .until(until.max(0) as u64);
+            if since > 0 {
+                filter = filter.since(since as u64);
+            }
+            let _negotiating = self.negotiations[index].lock().await;
+            if self
+                .state
+                .lock()
+                .negentropy_unsupported
+                .contains(relay.url())
+            {
+                return Covered::Unsupported;
+            }
+            let Ok(empty) = NegentropyStorage::from_hex(std::iter::empty()) else {
+                return Covered::Failed;
+            };
+            match relay.reconcile(&filter, empty, NEG_TIMEOUT).await {
+                Ok(reconciled) => {
+                    self.state.lock().relay_reached = true;
+                    ids.extend(reconciled.need);
+                }
+                Err(error) => {
+                    if error.relay_refused() {
+                        self.state
+                            .lock()
+                            .negentropy_unsupported
+                            .insert(relay.url().to_string());
+                        return Covered::Unsupported;
+                    }
+                    self.emit_backfill(Some(format!("{}: {}", relay.url(), short(&error, 100))));
+                    return Covered::Failed;
+                }
+            }
+        }
+        Covered::Ids(ids)
     }
 
     /// Settle every live event and import in flight; new arrivals extend

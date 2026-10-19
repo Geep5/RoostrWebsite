@@ -77,6 +77,9 @@ const PUBLISH_TIMEOUT: Duration = Duration::from_secs(10);
 /// A stream holding bases reads 1078 history back to its newest base's
 /// created_at minus this.
 const BASE_LOOKBACK_S: i64 = 86_400;
+/// Store meta: per stream scope, the unix second up to which its history
+/// below the window was swept for objects no base covers (JSON map).
+const UNBASED_SWEPT: &str = "unbased-swept";
 /// A device with no cursor yet subscribes live from this long before now.
 const LIVE_COLD_START_LOOKBACK_S: i64 = 300;
 /// Deafness watchdog period.

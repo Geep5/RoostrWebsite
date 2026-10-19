@@ -72,8 +72,7 @@ struct AgentPresence {
 
 /// Whether an agent's live state belongs in the chat of `object_id`.
 fn presence_belongs(p: &AgentPresence, object_id: &str, guests: &[String]) -> bool {
-    !object_id.is_empty()
-        && (p.surface == object_id || p.id == object_id || guests.iter().any(|g| *g == p.id))
+    !object_id.is_empty() && (p.surface == object_id || p.id == object_id || guests.contains(&p.id))
 }
 
 #[derive(Deserialize, Default)]

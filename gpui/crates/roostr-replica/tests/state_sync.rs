@@ -345,6 +345,9 @@ fn shape(f: &Filter) -> String {
     if let Some(since) = f.since {
         out += &format!(">{since}");
     }
+    if let Some(until) = f.until {
+        out += &format!("<{until}");
+    }
     out
 }
 
@@ -355,13 +358,22 @@ fn name_of(state: &Option<serde_json::Value>) -> Option<String> {
 }
 
 /// Which stream a filter reads and how: space filters always carry `#h`
-/// (the space tag), a personal one only for the vanish ledger.
+/// (the space tag), a personal one only for the vanish ledger; `based` is
+/// the id listing of objects holding a base (their object tags, one per
+/// stream key, so always more than one here).
 fn stream_shape(f: &Filter) -> String {
     let personal = f.authors.is_some();
+    let based = !personal && f.tags.get(&'h').is_some_and(|h| h.len() > 1);
     let kinds: Vec<String> = f.kinds.iter().flatten().map(u32::to_string).collect();
     format!(
-        "{}:{}{}{}{}",
-        if personal { "self" } else { "space" },
+        "{}:{}{}{}{}{}",
+        if personal {
+            "self"
+        } else if based {
+            "based"
+        } else {
+            "space"
+        },
         kinds.join(","),
         if f.tags.contains_key(&'b') { "#b" } else { "" },
         if personal && f.tags.contains_key(&'h') {
@@ -370,6 +382,7 @@ fn stream_shape(f: &Filter) -> String {
             ""
         },
         f.since.map(|s| format!(">{s}")).unwrap_or_default(),
+        f.until.map(|u| format!("<{u}")).unwrap_or_default(),
     )
 }
 
@@ -498,7 +511,8 @@ fn bases_first_then_live_deltas_and_a_bounded_window() {
         r.sync.await_first_walk().await;
         assert_eq!(r.host.passes.lock().last(), Some(&(true, true)));
 
-        // Bases, then checkpoints, then the #b deltas with the ledger stream, then the window.
+        // Bases, then checkpoints, then the #b deltas with the ledger stream, then the
+        // window, then the history below it: ids of the based objects' events, then the rest.
         let ledger = r
             .engine
             .blind_personal(&keys.secret_hex(), "__vanished__")
@@ -516,7 +530,24 @@ fn bases_first_then_live_deltas_and_a_bounded_window() {
         seen_middle.sort();
         assert_eq!(opens[0..2], ["31078".to_string(), "1079".to_string()]);
         assert_eq!(seen_middle, middle);
-        assert_eq!(opens[4..], [format!("1078>{BOUND_S}")]);
+        let mut object_tags = Vec::new();
+        for id in ["big", "doc"] {
+            object_tags.push(
+                r.engine
+                    .blind_personal(&keys.secret_hex(), id)
+                    .await
+                    .unwrap(),
+            );
+        }
+        object_tags.sort();
+        assert_eq!(
+            opens[4..],
+            [
+                format!("1078>{BOUND_S}"),
+                format!("1078#h:{}<{BOUND_S}", object_tags.join(",")),
+                format!("1078<{BOUND_S}"),
+            ]
+        );
         // Parts come by #c, not by id; history older than the window is never fetched.
         let gid = big_events.last().unwrap().tag("c").unwrap().to_string();
         let walks: Vec<String> = relay
@@ -865,6 +896,8 @@ fn a_space_holding_no_base_is_walked_whole_while_the_personal_stream_is_bounded(
             "self:1078#h".to_string(),
             format!("self:1078>{BOUND_S}"),
             "space:1078".to_string(),
+            format!("based:1078<{BOUND_S}"),
+            format!("self:1078<{BOUND_S}"),
         ];
         expected.sort();
         assert_eq!(change_opens(&relay), expected);
@@ -872,7 +905,8 @@ fn a_space_holding_no_base_is_walked_whole_while_the_personal_stream_is_bounded(
             changes(&*r.store, "sold").await,
             std::slice::from_ref(&old.id)
         );
-        // The personal stream stays bounded: pre-migration history of its based object.
+        // The personal stream stays bounded: pre-migration history of its based object
+        // is listed below the window, never fetched.
         assert!(changes(&*r.store, "doc").await.is_empty());
         assert_eq!(
             r.store.newest_base_by_stream().await.unwrap(),
@@ -883,7 +917,7 @@ fn a_space_holding_no_base_is_walked_whole_while_the_personal_stream_is_bounded(
 }
 
 #[test]
-fn a_personal_stream_holding_no_base_is_walked_whole_while_a_based_space_is_bounded() {
+fn a_personal_stream_holding_no_base_is_walked_whole_while_a_based_space_is_bounded_and_swept() {
     let _turn = ENGINE_TURN.lock();
     let relay = TestRelay::start();
     let keys = Keys::generate();
@@ -929,11 +963,14 @@ fn a_personal_stream_holding_no_base_is_walked_whole_while_a_based_space_is_boun
         r.sync.start().await.unwrap();
         r.sync.await_first_walk().await;
         assert_eq!(r.host.passes.lock().last(), Some(&(true, true)));
-        // No ledger reconcile: the whole personal walk already covers it.
+        // No ledger reconcile: the whole personal walk already covers it. Below the
+        // space's window: the based object's ids, then the space stream without them.
         let mut expected = vec![
             "self:1078".to_string(),
             "space:1078#b".to_string(),
             format!("space:1078>{BOUND_S}"),
+            format!("based:1078<{BOUND_S}"),
+            format!("space:1078<{BOUND_S}"),
         ];
         expected.sort();
         assert_eq!(change_opens(&relay), expected);
@@ -947,13 +984,141 @@ fn a_personal_stream_holding_no_base_is_walked_whole_while_a_based_space_is_boun
             changes(&*r.store, "snew").await,
             std::slice::from_ref(&recent.id)
         );
-        // Older than the space's window and without a base: compaction's unbased
-        // fallback owns it (docs/state-sync.md).
-        assert!(changes(&*r.store, "sold").await.is_empty());
+        // Older than the space's window and without a base: the sweep below the
+        // window fetches it; the based object's history there stays unfetched.
+        assert_eq!(
+            changes(&*r.store, "sold").await,
+            std::slice::from_ref(&unbased.id)
+        );
+        assert!(changes(&*r.store, "sdoc").await.is_empty());
         assert_eq!(
             r.store.newest_base_by_stream().await.unwrap(),
             HashMap::from([(tag, BASE_MS)])
         );
+        r.sync.stop();
+    });
+}
+
+/// A vault whose computer based one object but not two others, both created
+/// long before its newest base: what a fresh device must still show.
+struct Unbased {
+    /// Events of the based object, older than the window.
+    covered: Vec<Event>,
+    /// Events of the unbased objects, older than the window.
+    unbased: Vec<Event>,
+}
+
+impl Fixture {
+    async fn unbased_vault(&self, relay: &TestRelay) -> Unbased {
+        let c1 = self
+            .change("doc", vec![create_note(), set_name("v1")], &[], 100)
+            .await;
+        let c2 = self.change("doc", vec![set_name("v2")], &[&c1], 200).await;
+        let (base1, _) = self
+            .compact(&[], vec![c1.clone(), c2.clone()], BASE_MS)
+            .await;
+        let a1 = self
+            .change("agent", vec![create_note(), set_name("agent")], &[], 300)
+            .await;
+        let a2 = self
+            .change("agent", vec![set_name("agent v2")], &[&a1], 400)
+            .await;
+        // Created below the window, edited inside it.
+        let p1 = self
+            .change("pinned", vec![create_note(), set_name("pinned")], &[], 500)
+            .await;
+        let p2 = self
+            .change("pinned", vec![set_note("edited")], &[&p1], 600)
+            .await;
+        for event in self.base_events(&base1, BASE_S).await {
+            relay.insert(event);
+        }
+        let covered = vec![
+            self.delta_event(&c1, 1_700_000_000, None).await,
+            self.delta_event(&c2, 1_700_000_100, None).await,
+        ];
+        let unbased = vec![
+            self.delta_event(&a1, 1_700_000_200, None).await,
+            self.delta_event(&a2, 1_700_000_300, None).await,
+            self.delta_event(&p1, 1_700_000_400, None).await,
+        ];
+        for event in covered.iter().chain(&unbased) {
+            relay.insert(event.clone());
+        }
+        relay.insert(self.delta_event(&p2, BASE_S + 50, None).await);
+        Unbased { covered, unbased }
+    }
+
+    /// Every object of [`Fixture::unbased_vault`] in its newest state, and
+    /// only the unbased objects' old history fetched.
+    async fn assert_unbased_held(&self, relay: &TestRelay, vault: &Unbased) {
+        let r = &self.replica;
+        assert_eq!(
+            name_of(&r.state("agent").await).as_deref(),
+            Some("agent v2")
+        );
+        let pinned = r.state("pinned").await.unwrap();
+        assert_eq!(pinned["fields"]["name"]["stringValue"], "pinned");
+        assert_eq!(pinned["fields"]["note"]["stringValue"], "edited");
+        assert_eq!(name_of(&r.state("doc").await).as_deref(), Some("v2"));
+        let fetched: HashSet<String> = relay.world().id_fetches.iter().flatten().cloned().collect();
+        assert!(vault.unbased.iter().all(|e| fetched.contains(&e.id)));
+        assert!(vault.covered.iter().all(|e| !fetched.contains(&e.id)));
+        assert_eq!(
+            r.store.meta("unbased-swept".into()).await.unwrap(),
+            Some(format!("{{\"\":{BOUND_S}}}"))
+        );
+    }
+}
+
+#[test]
+fn an_object_no_base_covers_is_swept_from_below_the_window_once() {
+    let _turn = ENGINE_TURN.lock();
+    let relay = TestRelay::start();
+    let keys = Keys::generate();
+    block_on(async {
+        // Field report: a fresh iPhone missed an agent and a pinned object the
+        // browser showed. The browser had walked the whole stream before any base
+        // existed; the phone read a day below the newest base, and no computer had
+        // based those objects.
+        let f = Fixture::new(&keys, vec![relay.url.clone()]).await;
+        let vault = f.unbased_vault(&relay).await;
+        let r = &f.replica;
+        r.sync.start().await.unwrap();
+        r.sync.await_first_walk().await;
+        assert_eq!(r.host.passes.lock().last(), Some(&(true, true)));
+        f.assert_unbased_held(&relay, &vault).await;
+        // Swept once: the next pass lists nothing below the window again.
+        let (opens, fetches) = {
+            let world = relay.world();
+            (world.neg_filters.len(), world.id_fetches.len())
+        };
+        assert_eq!(another_pass(&r.sync, &r.host).await, (true, true));
+        let world = relay.world();
+        assert!(world.neg_filters[opens..].iter().all(|f| f.until.is_none()));
+        assert_eq!(world.id_fetches.len(), fetches);
+        drop(world);
+        r.sync.stop();
+    });
+}
+
+#[test]
+fn a_device_bootstrapped_before_the_sweep_fetches_what_its_window_missed() {
+    let _turn = ENGINE_TURN.lock();
+    let relay = TestRelay::start();
+    let keys = Keys::generate();
+    block_on(async {
+        // An install that finished its first walk without the sweep heals on the
+        // next pass (launch or foreground): nothing to log out of or reset.
+        let f = Fixture::new(&keys, vec![relay.url.clone()]).await;
+        let vault = f.unbased_vault(&relay).await;
+        let r = &f.replica;
+        r.store.set_bootstrapped().await.unwrap();
+        r.store.set_cursor(BASE_S as i64 + 50, None).await.unwrap();
+        r.sync.start().await.unwrap();
+        r.sync.await_first_walk().await;
+        assert_eq!(r.host.passes.lock().last(), Some(&(true, true)));
+        f.assert_unbased_held(&relay, &vault).await;
         r.sync.stop();
     });
 }

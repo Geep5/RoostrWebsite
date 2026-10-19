@@ -37,10 +37,15 @@ impl PinnedWidget {
     pub(crate) fn new(id: String, cx: &mut Context<Self>) -> Self {
         let store = Store::global(cx);
         let subscriptions = vec![
+            // Its rows are other objects: any of them may have synced in or
+            // changed since (a phone's first history walk runs under it), so
+            // every collection refresh - throttled, after commits - reloads it.
             cx.subscribe(&store, |this, _, event: &StoreEvent, cx| {
-                if let StoreEvent::Committed(oid) = event
-                    && *oid == this.id
-                {
+                let reload = match event {
+                    StoreEvent::Committed(oid) => *oid == this.id,
+                    StoreEvent::Refreshed | StoreEvent::Reconnected => true,
+                };
+                if reload {
                     this.load(cx);
                 }
             }),
