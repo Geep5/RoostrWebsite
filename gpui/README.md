@@ -235,7 +235,12 @@ on its own - the chat composer when a page opens - keeps focus without the
 keyboard until it is tapped; with a hardware keyboard attached it takes
 typing straight away. Return is the Enter key: bindings see it first (split
 a block, send a message, confirm a field) and only an unhandled Return types
-a newline. Dismissing the keyboard (swipe down, the iPad's hide key) ends
+a newline. Delete with the caret at the start of a field is the Backspace
+key, as the web view's `deleteContentBackward` was: a to-do, list item or
+heading turns into a paragraph, a paragraph joins the block above. Holding
+delete stops at a block's start, as it did in the web view (UIKit stops
+repeating with no text before the caret); the next press goes on.
+Dismissing the keyboard (swipe down, the iPad's hide key) ends
 editing, as it blurred the field in the web view: the editor then shows a
 remote edit to the block the caret was in, which it leaves alone while that
 block is being edited (BlockNode.svelte's rule, `sync_live_texts`). Once the

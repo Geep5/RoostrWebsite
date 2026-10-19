@@ -928,7 +928,7 @@ impl IosWindowState {
         }
     }
 
-    /// roostr: deliver an input event the text input view synthesized (the Return key).
+    /// roostr: deliver an input event the text input view synthesized (Return, delete at a field's start).
     pub(super) fn dispatch_input(&self, input: PlatformInput) -> Option<DispatchEventResult> {
         self.input_callback.with(|callback| callback(input))
     }

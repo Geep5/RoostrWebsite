@@ -299,7 +299,7 @@ define_class!(
             // newline.
             if text == "\n"
                 && self.with_handler(|handler| handler.marked_text_range().is_none()).unwrap_or(false)
-                && self.press_enter()
+                && self.press_key("enter", Some("\n"))
             {
                 return;
             }
@@ -307,6 +307,25 @@ define_class!(
         }
         #[unsafe(method(deleteBackward))]
         fn delete_backward(&self) {
+            // roostr: with the caret at the start of the field there is no
+            // text to delete, and the desktop's Backspace key has work
+            // left: the editor turns a to-do, list item or heading into a
+            // paragraph, or joins a paragraph to the block above (Svelte
+            // synthesized Backspace from `deleteContentBackward` there).
+            // Send the key, as hardware and the desktop do.
+            let at_start = self
+                .with_handler(|handler| {
+                    let selection = handler.selected_text_range(false)?;
+                    let start = handler.text_input_editable_range().map_or(0, |range| range.start);
+                    let composing = handler.marked_text_range().is_some();
+                    Some(crate::backspace_at_start(&selection.range, start, composing))
+                })
+                .flatten()
+                .unwrap_or(false);
+            if at_start {
+                self.press_key("backspace", None);
+                return;
+            }
             self.edit(|handler| {
                 let Some(selection) = handler.selected_text_range(false) else { return; };
                 let mut range = selection.range;
@@ -644,13 +663,13 @@ impl TextInputView {
             .flatten()
     }
 
-    /// roostr: dispatch the Enter key to GPUI; whether a binding or key
-    /// listener handled it (stopped propagation or prevented the default).
-    fn press_enter(&self) -> bool {
+    /// roostr: dispatch a key (Enter, Backspace) to GPUI; whether a binding
+    /// or key listener handled it (stopped propagation or prevented the default).
+    fn press_key(&self, key: &str, key_char: Option<&str>) -> bool {
         let keystroke = gpui::Keystroke {
             modifiers: gpui::Modifiers::default(),
-            key: "enter".into(),
-            key_char: Some("\n".into()),
+            key: key.into(),
+            key_char: key_char.map(Into::into),
         };
         self.ivars()
             .window
