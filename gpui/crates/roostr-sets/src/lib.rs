@@ -142,11 +142,13 @@ impl DataView {
     /// Forward a press on the page around the data view (its margins, the
     /// space below it) so the table's rubber band can start there, like the
     /// web's page-wide selection provider. Call it from the object page's
-    /// `on_mouse_down(MouseButton::Left, ..)` for presses that page chrome
-    /// (title, icon, meta, editors, buttons) did not handle. Presses with
-    /// cmd/ctrl/shift, other buttons, non-table views and the view's own
-    /// controls are ignored; a plain click (no drag) clears the selection.
-    /// The view takes keyboard focus so Escape clears the selection after.
+    /// `on_mouse_down(MouseButton::Left, ..)`. Presses with cmd/ctrl/shift,
+    /// other buttons, non-table views and the view's own controls are
+    /// ignored, and so are presses that focused something on their way up
+    /// (the title, a property field): the web provider leaves inputs alone,
+    /// and taking focus here would take it from the field just tapped. A
+    /// plain click (no drag) clears the selection. The view takes keyboard
+    /// focus so Escape clears the selection after.
     pub fn page_mouse_down(
         &mut self,
         event: &MouseDownEvent,
@@ -159,6 +161,7 @@ impl DataView {
             || m.control
             || m.shift
             || self.chrome_bounds.get().contains(&event.position)
+            || window.default_prevented()
         {
             return;
         }

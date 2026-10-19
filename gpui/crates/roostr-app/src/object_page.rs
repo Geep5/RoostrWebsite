@@ -481,6 +481,7 @@ impl Render for ObjectPage {
 
         let title = div()
             .id("title")
+            .debug_selector(|| "object-title".into())
             .flex_1()
             .min_w_0()
             .map(|d| {
@@ -629,13 +630,15 @@ impl Render for HomePage {
 #[cfg(all(test, not(target_family = "wasm")))]
 mod tests {
     // Explicit imports: the kit's glob would shadow `#[test]` with GPUI's.
+    use std::collections::HashMap;
+    use std::path::Path;
     use std::sync::Arc;
 
-    use gpui::{TestAppContext, VisualTestContext};
+    use gpui::{Modifiers, TestAppContext, VisualTestContext};
     use gpui_kit::component::input::TextareaState;
     use gpui_kit::{
-        AppContext as _, Context, Entity, FocusHandle, InteractiveElement as _, IntoElement,
-        ParentElement as _, Render, Styled as _, Window, div, px,
+        AppContext as _, Context, Entity, FocusHandle, Focusable as _, InteractiveElement as _,
+        IntoElement, ParentElement as _, Render, Styled as _, Window, div, px, size,
     };
     use parking_lot::Mutex;
     use roostr_core::io::{BoxFuture, BoxStream};
@@ -649,11 +652,14 @@ mod tests {
     use super::ObjectPage;
 
     const PAGE: &str = "page-1";
+    const QUERY: &str = "query-1";
 
-    /// A vault of one untitled page that keeps every mutation it is sent.
+    /// A vault of an untitled page and an untitled query that keeps every
+    /// mutation it is sent.
     #[derive(Default)]
-    struct OnePage {
-        name: Mutex<String>,
+    struct Vault {
+        /// Saved names by object id.
+        names: Mutex<HashMap<String, String>>,
         mutations: Mutex<Vec<(String, JsonMap)>>,
     }
 
@@ -661,9 +667,9 @@ mod tests {
         Box::pin(std::future::ready(value))
     }
 
-    impl Backend for OnePage {
+    impl Backend for Vault {
         fn describe(&self) -> String {
-            "one page".into()
+            "a page and a query".into()
         }
         fn settings(&self) -> BoxFuture<anyhow::Result<Settings>> {
             ready(Ok(Settings {
@@ -675,14 +681,18 @@ mod tests {
             ready(Ok(Vec::new()))
         }
         fn object(&self, id: &str) -> BoxFuture<anyhow::Result<Object>> {
-            let name = self.name.lock().clone();
-            let object = (id == PAGE).then(|| Object {
-                id: PAGE.into(),
-                type_key: "page".into(),
+            let type_key = match id {
+                PAGE => "page",
+                QUERY => "query",
+                _ => return ready(Err(anyhow::anyhow!("unknown object {id}"))),
+            };
+            let name = self.names.lock().get(id).cloned().unwrap_or_default();
+            ready(Ok(Object {
+                id: id.into(),
+                type_key: type_key.into(),
                 fields: [("name".to_string(), Value::string(name))].into(),
                 ..Object::default()
-            });
-            ready(object.ok_or_else(|| anyhow::anyhow!("unknown object {id}")))
+            }))
         }
         fn channels(&self) -> BoxFuture<anyhow::Result<Vec<Space>>> {
             ready(Ok(Vec::new()))
@@ -695,8 +705,9 @@ mod tests {
         }
         fn mutate(&self, action: &str, params: JsonMap) -> BoxFuture<anyhow::Result<JsonMap>> {
             if action == "set_field" && params["key"] == "name" {
+                let id = params["object_id"].as_str().unwrap_or("");
                 let name = params["value"]["stringValue"].as_str().unwrap_or("");
-                *self.name.lock() = name.to_string();
+                self.names.lock().insert(id.to_string(), name.to_string());
             }
             self.mutations.lock().push((action.to_string(), params));
             ready(Ok(JsonMap::new()))
@@ -733,6 +744,60 @@ mod tests {
         cx.update(|_, cx| title.read(cx).value().to_string())
     }
 
+    fn title_of(harness: &Entity<Harness>, cx: &mut VisualTestContext) -> Entity<TextareaState> {
+        cx.update(|_, cx| harness.read(cx).page.read(cx).title.clone())
+    }
+
+    fn focus_elsewhere(harness: &Entity<Harness>, cx: &mut VisualTestContext) {
+        cx.update(|window, cx| {
+            let elsewhere = harness.read(cx).elsewhere.clone();
+            window.focus(&elsewhere, cx);
+        });
+    }
+
+    /// Whether `object`'s name was ever saved as `name`.
+    fn saved(backend: &Vault, object: &str, name: &str) -> bool {
+        backend.mutations.lock().iter().any(|(action, params)| {
+            action == "set_field"
+                && params["object_id"] == object
+                && params["key"] == "name"
+                && params["value"]["stringValue"] == name
+        })
+    }
+
+    /// Start the app on `backend`, its device-local UI state in `dir`, and
+    /// open `id`'s page in an active window.
+    fn open<'a>(
+        id: &str,
+        backend: &Arc<Vault>,
+        dir: &Path,
+        cx: &'a mut TestAppContext,
+    ) -> (Entity<Harness>, &'a mut VisualTestContext) {
+        // The environment is the process's: tests set it and start their
+        // app (which reads it) one at a time.
+        static START: Mutex<()> = Mutex::new(());
+        {
+            let _one_at_a_time = START.lock();
+            // SAFETY: the only place these tests touch the environment, and
+            // no other thread of theirs reads it while the lock is held.
+            unsafe { std::env::set_var("ROOSTR_UI_STATE", dir.join("ui-state.json")) };
+            cx.update(|cx| {
+                gpui_kit::init(cx);
+                roostr_core::init(backend.clone(), None, cx);
+                crate::init(cx);
+            });
+        }
+        let id = id.to_string();
+        let (harness, cx) = cx.add_window_view(|window, cx| Harness {
+            page: cx.new(|cx| ObjectPage::new(id, window, cx)),
+            elsewhere: cx.focus_handle(),
+        });
+        // Focus events need the window active, as a window being typed in is.
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+        (harness, cx)
+    }
+
     /// A title typed into a new page and left at once is saved. Focus leaves
     /// the title a frame before the title hears its blur (which saves); a
     /// store refresh landing in between (a fresh vault's first sync brings
@@ -740,23 +805,9 @@ mod tests {
     #[gpui::test]
     fn title_left_mid_refresh_is_saved(cx: &mut TestAppContext) {
         let ui_state = tempfile::tempdir().unwrap();
-        // SAFETY: the crate's only test, before the app starts: nothing else
-        // reads the environment meanwhile.
-        unsafe { std::env::set_var("ROOSTR_UI_STATE", ui_state.path().join("ui-state.json")) };
-        let backend = Arc::new(OnePage::default());
-        cx.update(|cx| {
-            gpui_kit::init(cx);
-            roostr_core::init(backend.clone(), None, cx);
-            crate::init(cx);
-        });
-        let (harness, cx) = cx.add_window_view(|window, cx| Harness {
-            page: cx.new(|cx| ObjectPage::new(PAGE.into(), window, cx)),
-            elsewhere: cx.focus_handle(),
-        });
-        // Focus events need the window active, as a window being typed in is.
-        cx.update(|window, _| window.activate_window());
-        cx.run_until_parked();
-        let title = cx.update(|_, cx| harness.read(cx).page.read(cx).title.clone());
+        let backend = Arc::new(Vault::default());
+        let (harness, cx) = open(PAGE, &backend, ui_state.path(), cx);
+        let title = title_of(&harness, cx);
 
         cx.update(|window, cx| title.update(cx, |title, cx| title.focus(window, cx)));
         cx.run_until_parked();
@@ -771,15 +822,50 @@ mod tests {
         assert_eq!(text(&title, cx), "E2E Page", "the refresh took the draft");
         cx.run_until_parked();
 
-        let mutations = backend.mutations.lock().clone();
         assert!(
-            mutations
-                .iter()
-                .any(|(action, params)| action == "set_field"
-                    && params["key"] == "name"
-                    && params["value"]["stringValue"] == "E2E Page"),
-            "the title was never saved: {mutations:?}"
+            saved(&backend, PAGE, "E2E Page"),
+            "the title was never saved: {:?}",
+            backend.mutations.lock()
         );
         assert_eq!(text(&title, cx), "E2E Page");
+    }
+
+    /// A tap on a new query's title edits it, on a phone and on the desktop.
+    /// A press anywhere on a query's page arms its table's rubber band, which
+    /// focuses the view; a press the title took is the title's (the web's
+    /// selection provider leaves inputs alone) and keeps the focus there.
+    #[gpui::test]
+    fn query_title_takes_a_tap(cx: &mut TestAppContext) {
+        let ui_state = tempfile::tempdir().unwrap();
+        let backend = Arc::new(Vault::default());
+        let (harness, cx) = open(QUERY, &backend, ui_state.path(), cx);
+        let title = title_of(&harness, cx);
+        let title_focused = |cx: &mut VisualTestContext| {
+            cx.update(|window, cx| title.read(cx).focus_handle(cx).is_focused(window))
+        };
+
+        // iPhone 13 Pro Max portrait: the mobile layout.
+        cx.simulate_resize(size(px(428.), px(926.)));
+        cx.run_until_parked();
+        let at = cx.debug_bounds("object-title").expect("the title").center();
+        cx.simulate_click(at, Modifiers::none());
+        cx.run_until_parked();
+        assert!(title_focused(cx), "the tap left the title unfocused");
+        cx.simulate_input("Reading list");
+        assert_eq!(text(&title, cx), "Reading list");
+        focus_elsewhere(&harness, cx);
+        cx.run_until_parked();
+        assert!(
+            saved(&backend, QUERY, "Reading list"),
+            "the title was never saved: {:?}",
+            backend.mutations.lock()
+        );
+
+        cx.simulate_resize(size(px(1280.), px(800.)));
+        cx.run_until_parked();
+        let at = cx.debug_bounds("object-title").expect("the title").center();
+        cx.simulate_click(at, Modifiers::none());
+        cx.run_until_parked();
+        assert!(title_focused(cx), "the click left the title unfocused");
     }
 }
