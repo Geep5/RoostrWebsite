@@ -1,0 +1,17 @@
+[package]
+name = "roostr-site"
+description = "Website pages: landing, guide, privacy, join flow"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+roostr-core.workspace = true
+gpui-kit.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+# The decoder gpui itself uses (same version), to keep animated WebP frames
+# for the bundled landing hero.
+image = { version = "0.25", default-features = false, features = ["webp", "png"] }
+log.workspace = true
+web-time.workspace = true

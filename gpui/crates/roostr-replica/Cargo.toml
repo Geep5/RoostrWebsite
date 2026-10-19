@@ -1,0 +1,43 @@
+[package]
+name = "roostr-replica"
+description = "The daemon-less replica backend: the engine, an on-device change store and Nostr relay sync behind roostr_core::Backend"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+base64.workspace = true
+futures.workspace = true
+hex = "0.4"
+log.workspace = true
+parking_lot = "0.12"
+roostr-core.workspace = true
+roostr-engine.workspace = true
+roostr-nostr.workspace = true
+roostr-replica-store.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+uuid.workspace = true
+web-time.workspace = true
+
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+async-io = "2"
+dirs.workspace = true
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+wasm-bindgen.workspace = true
+wasm-bindgen-futures.workspace = true
+js-sys.workspace = true
+web-sys = { workspace = true, features = ["Storage", "Window"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[target.'cfg(not(target_family = "wasm"))'.dev-dependencies]
+async-net = "2"
+async-tungstenite = { version = "0.35", default-features = false, features = ["handshake", "futures-03-sink"] }
+
+[target.'cfg(target_family = "wasm")'.dev-dependencies]
+wasm-bindgen-test.workspace = true

@@ -3,8 +3,8 @@
   "compiler": "/opt/homebrew/bin/odin version dev-2026-07:819fdc7a8",
   "target": "js_wasm32",
   "artifact": "engine.wasm",
-  "sha256": "33466bfa4d0f0ae78af42efb3cdc114684185d43dbdf45033f8df76f328702f2",
-  "sourceFingerprint": "7d2d90509de16eb759f973efdac034021a87c4e436eb6b1be246cd1a02f0516f",
+  "sha256": "cfb9cb23e560187130015ccf06a7c2305cfb7c8ff5a749863db4237aad148ac5",
+  "sourceFingerprint": "dc5e55a48b336ebdcd1f2fe6940c758ca93f14bfb3cd362eb5fefeb59ab7a82a",
   "sourceFiles": {
     "abi/abi.odin": "34d035764a9dabadcd1a6ad474a36c27ba2a3a39d32273375af93e2d316b3507",
     "core/agent_message.odin": "b044ff123c05f19a4110961b02d02a0f289b27d88bfa729e398c72a4a39d1b23",
@@ -30,10 +30,6 @@
     "core/sync_session.odin": "1ed91ab28920ef1ddd5064f13fc78a0b6118f30a30db0d352068bca0a855e3ba",
     "core/wire.odin": "bc9d0bf6054451a9d7b2a1ef02667097c3323fd4b42d3254f5b0fd4c128fb79f",
     "wasm/main.odin": "007614b554da7e706c3f2740338357df67ba9f83bfe40c89d2021e0343359474",
-    "build-wasm.mjs": "4e18d064fcf6675efe3cd7ff13dfdce2883c8bd55f667757a065d0e33ca8a087"
-  },
-  "runtimeFiles": {
-    "src/lib/engine/core.ts": "f1fe138c99ba6deb76d9fe9067e3386c61d1a88aecd6234ab85567dfb8ea6496",
-    "src/lib/engine/odin-runtime.ts": "d3c8f6456b7b833a6cf4d71a7767c000e669697bfd2c8ba0c23845c1ac4df122"
+    "build-wasm.mjs": "b36dd50b296743e3075a7292edf26c3e9cf465734bfde5bd3dd30af3a55ef0fd"
   }
 }

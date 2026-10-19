@@ -1,0 +1,65 @@
+[package]
+name = "roostr-core"
+description = "Shared data layer, navigation and design system for the Roostr GPUI app"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+gpui-kit.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+futures.workspace = true
+log.workspace = true
+chrono.workspace = true
+rust-embed.workspace = true
+uuid.workspace = true
+base64.workspace = true
+regex.workspace = true
+fancy-regex.workspace = true
+percent-encoding.workspace = true
+web-time.workspace = true
+
+# Desktop: blocking HTTP on GPUI's background threads, files in the config dir.
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+ureq = { workspace = true, features = ["rustls"] }
+dirs.workspace = true
+gpui-pre-reqwest-client.workspace = true
+
+# Browser: fetch, localStorage, the JS clock and randomness; the owner key
+# signs the harness's pairing challenge.
+[target.'cfg(target_family = "wasm")'.dependencies]
+chrono = { workspace = true, features = ["wasmbind"] }
+uuid = { workspace = true, features = ["js"] }
+roostr-nostr.workspace = true
+wasm-bindgen.workspace = true
+wasm-bindgen-futures.workspace = true
+js-sys.workspace = true
+web-sys = { workspace = true, features = [
+    "AbortController",
+    "AbortSignal",
+    "Blob",
+    "BlobPropertyBag",
+    "Document",
+    "Element",
+    "Event",
+    "EventTarget",
+    "Headers",
+    "History",
+    "HtmlAnchorElement",
+    "HtmlElement",
+    "Location",
+    "ReadableStream",
+    "ReadableStreamDefaultReader",
+    "ReadableStreamReadResult",
+    "Request",
+    "RequestCredentials",
+    "RequestInit",
+    "RequestRedirect",
+    "Response",
+    "Storage",
+    "StorageEvent",
+    "Url",
+    "Window",
+] }

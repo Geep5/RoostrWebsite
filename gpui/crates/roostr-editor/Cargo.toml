@@ -1,0 +1,41 @@
+[package]
+name = "roostr-editor"
+description = "Block editor, file pages and file blocks"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif", "bmp", "tiff", "ico"] }
+roostr-core.workspace = true
+roostr-properties.workspace = true
+gpui-kit.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+log.workspace = true
+chrono.workspace = true
+futures.workspace = true
+uuid.workspace = true
+regex.workspace = true
+percent-encoding.workspace = true
+aes-gcm = "0.10"
+sha2 = "0.10"
+hex = "0.4"
+url = "2"
+unicode-segmentation = "1"
+oxc_allocator = "0.154"
+oxc_ast = "0.154"
+oxc_ast_visit = "0.154"
+oxc_diagnostics = "0.154"
+oxc_parser = "0.154"
+oxc_semantic = "0.154"
+oxc_span = "0.154"
+oxc_syntax = "0.154"
+
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+dirs.workspace = true
+
+# aes-gcm's key generation links getrandom 0.2, which needs its JS backend in a browser.
+[target.'cfg(target_family = "wasm")'.dependencies]
+getrandom-02 = { package = "getrandom", version = "0.2", features = ["js"] }

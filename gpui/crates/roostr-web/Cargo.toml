@@ -1,0 +1,38 @@
+[package]
+name = "roostr-web"
+description = "Roostr in a browser tab (wasm32-unknown-unknown): the desktop app's views over the browser's own replica, or the visitor's daemon paired by its one-use code"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+# Everything is browser-only; on a desktop target this crate is empty.
+[target.'cfg(target_family = "wasm")'.dependencies]
+roostr-core.workspace = true
+roostr-engine.workspace = true
+roostr-replica.workspace = true
+roostr-nostr.workspace = true
+roostr-app.workspace = true
+roostr-settings.workspace = true
+roostr-site.workspace = true
+roostr-shell.workspace = true
+gpui-kit.workspace = true
+anyhow.workspace = true
+futures.workspace = true
+log.workspace = true
+wasm-bindgen.workspace = true
+js-sys.workspace = true
+web-sys = { workspace = true, features = [
+    "Document",
+    "Element",
+    "Event",
+    "EventTarget",
+    "History",
+    "Location",
+    "PopStateEvent",
+    "Storage",
+    "VisibilityState",
+    "Window",
+] }

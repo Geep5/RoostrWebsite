@@ -1,0 +1,55 @@
+[package]
+name = "roostr-nostr"
+description = "Nostr for the daemon-less replica: keys, events, NIP-44, NIP-59 gift wraps, space keys, NIP-77 negentropy and the relay client"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+base64.workspace = true
+chacha20 = "0.9"
+futures.workspace = true
+getrandom-02 = { package = "getrandom", version = "0.2" }
+hex = "0.4"
+hkdf = "0.12"
+hmac = "0.12"
+k256 = { version = "0.13", default-features = false, features = ["arithmetic", "ecdh", "schnorr", "std"] }
+log.workspace = true
+parking_lot = "0.12"
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+web-time.workspace = true
+
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+async-io = "2"
+async-net = "2"
+async-tungstenite = { version = "0.35", default-features = false, features = ["handshake", "futures-03-sink"] }
+blocking = "1"
+futures-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
+ureq = { workspace = true, features = ["rustls"] }
+url = "2"
+webpki-roots = "1"
+
+# The browser's crypto.getRandomValues backs every key, nonce and aux rand.
+[target.'cfg(target_family = "wasm")'.dependencies]
+getrandom-02 = { package = "getrandom", version = "0.2", features = ["js"] }
+gloo-timers = { version = "0.3", features = ["futures"] }
+js-sys.workspace = true
+wasm-bindgen.workspace = true
+wasm-bindgen-futures.workspace = true
+web-sys = { workspace = true, features = [
+    "AbortSignal",
+    "BinaryType",
+    "Blob",
+    "CloseEvent",
+    "Event",
+    "Headers",
+    "MessageEvent",
+    "Request",
+    "RequestInit",
+    "Response",
+    "WebSocket",
+    "Window",
+    "WorkerGlobalScope",
+] }

@@ -1,0 +1,284 @@
+# Roostr for desktop (GPUI)
+
+A native port of this repository's Svelte UI — the `/app` workspace and the
+website pages (`/`, `/guide`, `/privacy`, `/j`) — built on
+[GPUI Kit](https://gpui-kit.com) 0.7.3. It runs in one of two modes, the
+Svelte app's two:
+
+- **Daemon** (the desktop default, the web app's local mode): the glon-odin
+  daemon owns storage, signing, replay and sync, and this app reads and
+  writes through its API; its harness serves the computer features (files,
+  credentials, capabilities, agent presence).
+- **Replica** (the browser default and the only mode on iOS, the web app's
+  browser mode, no daemon): `roostr-replica` keeps the vault on this device
+  — the shared Odin engine replays, queries and plans, a change store
+  (SQLite natively, IndexedDB in the browser) holds every change, and Nostr
+  relays are the only network. Same wire format as the Svelte browser
+  replica and the daemon, so one key's vault syncs across all of them.
+  Files are encrypted and uploaded to the relays' Blossom server; the other
+  computer features show "Roostr isn't running on this computer".
+
+Settings → "Where your vault lives" switches modes (the app relaunches, the
+tab reloads); the choice is kept per device.
+
+## Run
+
+### Daemon mode
+
+Start the daemon (and, for computer features, the harness) from the sibling
+`glonOdin` repository, as in its README. Then:
+
+```sh
+cd gpui
+cargo run --release -p roostr            # opens the workspace
+cargo run --release -p roostr -- /guide  # or any web path: /app/object/<id>, /app/graph, /
+```
+
+The app authenticates as the vault's own user with the daemon's service token
+(`$GLON_DATA/api-token`, mode 0600) — there is no browser pairing. For the
+harness it mints a UI session from that token, bound to the loopback origin
+`http://127.0.0.1:7390`, and keeps it for its 24 hours. A daemon that can't
+be reached offers the replica instead.
+
+### Replica mode
+
+```sh
+cargo run --release -p roostr -- --replica          # or ROOSTR_BACKEND=replica
+ROOSTR_REPLICA_DIR=/tmp/roostr-replica cargo run -p roostr -- --replica  # a throwaway replica
+```
+
+No daemon. A replica without a key opens on the sign-in gate (KeyGate.svelte:
+paste an `nsec`/hex key, or create an account). The replica lives in
+`$ROOSTR_REPLICA_DIR` (default `<data dir>/Roostr/replica`, i.e.
+`~/Library/Application Support/Roostr/replica` on macOS): `replica.sqlite`,
+and `local.json` (mode 0600) holding what the browser keeps in
+`localStorage` under the Svelte app's key names — the secret key
+(`roostr-key`), space keys (`roostr-space-keys`), relays (`roostr-relays`),
+invites sent, join requests. It is a file rather than the Keychain: an
+unsigned development build is a new binary to the Keychain after every
+rebuild and would prompt each time. Settings → "Log out on this device"
+erases the replica and the key once every change is published; "Reveal
+private key" shows the `nsec`. A fresh account's empty vault gets a Personal
+space once its first full history walk proves the vault empty.
+
+Building the desktop app compiles the engine from `../../glonOdin` (`odin` on
+`PATH`, or `ODIN`; `GLON_ODIN_DIR` for another checkout) - see
+`crates/roostr-engine/build.rs`.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `ROOSTR_BACKEND` | the saved choice, else `daemon` | `daemon` or `replica`; `--daemon`/`--replica` win over it |
+| `ROOSTR_REPLICA_DIR` | `<data dir>/Roostr/replica` | Replica mode's store and device-local file |
+| `GLON_DATA` | `~/.glon` | Vault directory holding `api-token` |
+| `ROOSTR_API` | `http://127.0.0.1:7333` | Daemon |
+| `ROOSTR_API_TOKEN` | — | Token instead of the file |
+| `ROOSTR_HARNESS` | `http://127.0.0.1:7334` | Harness |
+| `ROOSTR_UI_STATE` | `<config dir>/Roostr/ui-state.json` | Device-local UI state (the web app's `localStorage` keys) |
+| `RUST_LOG` | `warn` | Log filter (stderr) |
+
+The mode choice is `<config dir>/Roostr/mode` (`localStorage`
+`roostr-gpui.mode` in a browser).
+
+## Crates
+
+| Crate | Ports |
+|---|---|
+| `roostr-core` | Wire types, `Backend` trait + daemon/harness clients, the on-device `Account` (replica identity, profile, join requests), the mode choice, the global `Store` (`data.svelte.ts`), navigation and tabs, UI state, theme tokens, icons, and the shared `lib/*.ts` helpers |
+| `roostr-engine` | The shared Odin engine: a static library natively (built from `glonOdin`), the site's `engine.wasm` in the browser |
+| `roostr-replica-store` | The replica's change store: SQLite natively, IndexedDB (`roostr-replica`) in the browser, plus the one-time import of the Svelte app's IndexedDB `roostr` (`svelte_import`) |
+| `roostr-replica` | The daemon-less backend (`engine/backend.ts`, iOS `Backend.swift`): replay, query cache, mutations, shared spaces, identity and device-local storage; `sync/` is the relay sync (`sync.ts`, `SyncEngine.swift`) |
+| `roostr-nostr` | The replica's Nostr host side (`engine/{keys,negentropy,spacekeys,profile}.ts`, sync.ts' relay and gift-wrap code, the iOS `RoostrSync` equivalents): keys and BIP-340 signing, NIP-01 events, NIP-44, NIP-59, space keyring, NIP-77 negentropy, the relay client (native and browser websockets), NIP-11/Blossom discovery. `cargo test -p roostr-nostr -- --ignored` also checks Roostr's live relay |
+| `roostr-properties` | Property values and pickers, properties pane, object meta, type and property pages, repeat, credentials, capabilities, emoji picker |
+| `roostr-editor` | Block editor, slash/block menus, tables, links and mentions, spellcheck, tool-code lint, file blocks and the File page (harness + Blossom) |
+| `roostr-sets` | Query/set/collection/type views: controls, table, kanban, gallery, calendar, row menu |
+| `roostr-discussion` | Discussion, agent exchanges, chat & properties drawer, chat page |
+| `roostr-graph` | Schema/object graph |
+| `roostr-settings` | Settings, space page, install-computer card, identity gate, export |
+| `roostr-site` | Landing, guide, privacy and join pages |
+| `roostr-shell` | Space rail, sidebar, tab strip, header, search, New menu, pinned widgets; at a window 720pt wide or less (a phone in portrait), the mobile shell instead: Spaces list → space home → object, as the web app showed on phones |
+| `roostr-app` | What both front ends run: feature init, the page per route, the object page |
+| `roostr` | The desktop app: window, menus |
+| `roostr-web` | roostr.space (wasm): entry point, the website pages before any vault, replica or pairing gate, address-bar routing, `www/` page template and loader |
+| `roostr-ios` | The iPhone/iPad app (a static library the RoostrIOS Xcode host links): UIKit platform, Keychain/UserDefaults storage, reminders, lifecycle and network resume, deep links |
+
+Data flows one way: views read the `Store` (and re-render on its events);
+mutations go through `roostr_core::api`, and the backend's commit stream
+(the daemon's SSE, or the replica's own commits, relay imports and sync
+status) refreshes what changed.
+
+## Browser (roostr.space)
+
+The same app is all of roostr.space, at the URLs the Svelte site used: `/`,
+`/guide`, `/privacy`, `/j#r2.<blob>`, `/app/**` (the old `/gpui/` preview
+paths redirect there). The website pages show on their own, before any vault
+opens, each from its own HTML file carrying the Svelte site's title and
+link-preview tags; the join page opens in the workspace when the tab already
+has an identity (a replica key or a pairing), and otherwise asks to set one up
+first. A workspace route starts the vault. The tab title follows the route
+with the Svelte pages' strings (`Route::title`: `<name> — glon` on an object
+page, tracking its saved name, `Graph — Roostr`, `Roostr` for the home and
+chats), and a loaded URL that already names its route keeps its query
+(`/j?utm=x#r2.…`, `/app/graph?focus=<id>`). By default the tab is its own
+replica, like the Svelte app in browser mode: the engine (`engine.wasm` +
+`engine-core.json` at the site root, hash-checked), the IndexedDB database
+`roostr-replica`, and the identity in `localStorage` `roostr-key` - the
+Svelte app's own entry on the same origin, so a key it saved opens here
+without signing in again (its space keys, relays and invite bookkeeping too:
+`roostr-space-keys`, `roostr-relays`, …).
+
+The Svelte app's own replica, IndexedDB `roostr`, is imported into
+`roostr-replica` once, on the replica's first start for the key, before its
+first sync (`roostr_replica_store::svelte_import`): every change (bytes,
+JSON, base tag, rebased mark), checkpoint, base, held relay event and
+publication record, the walk's cursor, floors and replay groups when this
+store has none yet, and every unpublished change, which the outbox then
+publishes. The replay memo (`states`) is not carried; the replica replays
+anyway. It imports only the stored key's vault - the Svelte app deleted the
+database on every identity change, so it belongs to that key; it must also
+hold a change authored by the key - and stamps it (`gpui-import` in its
+`meta`) so no later identity, nor this one after a logout, imports it again.
+The Svelte database is otherwise left as it was. A visitor without one never
+gets one (`indexedDB.databases()`, else an open that aborts its upgrade). A
+failed import logs a warning and retries on the next start; it never keeps
+the replica from starting.
+
+The alternative is the daemon and harness on the visitor's own computer, like
+the hosted Svelte app in paired mode ("Pair with Roostr on this computer
+instead" on the sign-in gate, or Settings → "Where your vault lives"): the
+tab pairs with the daemon's one-use code (`POST /api/pair`) or - "Sign in
+with a Nostr key instead" - by signing the harness's one-use challenge with
+the vault owner key (`GET /pair/challenge`, a NIP-98 kind-27235 event to
+`POST /pair/owner`, signed by `roostr-nostr`). It keeps the session in
+`localStorage` (`roostr-local-pairing`, the Svelte app's key and shape) until
+it expires, and sends it as a bearer token to both; a 401 drops it. A key
+that paired is kept as the hosted Svelte app keeps its key (`localStorage`
+`roostr-key`, hex) when the origin holds none yet, and the gate offers it
+again in one click. The commit stream is a streamed `fetch`. A tab that
+paired before keeps pairing until a mode is chosen. A page served with
+`<meta name="roostr-mode" content="daemon">` defaults a tab that has neither
+chosen nor paired to this mode, as the Svelte app's `dev:local` build did.
+
+```sh
+rustup target add wasm32-unknown-unknown
+scripts/build-web.sh          # → web-dist/, the whole site
+```
+
+The script builds with the `web` profile (size-optimized, fat LTO,
+stripped) and installs the `wasm-bindgen` CLI matching `Cargo.lock` into
+`target/tools/` when the one on `PATH` differs; it first checks
+`../static/engine.wasm` against `engine-core.json`. `web-dist/` has one page
+per website route (`index.html`, `guide.html`, `privacy.html`, `j.html`) and
+`200.html` for every other path; serve it at the root with `/<path>` answered
+by `<path>`, `<path>.html`, else `200.html` (the Dockerfile and Caddyfile at
+the repository root do, from brotli/gzip copies made at image build). Any
+loopback origin (`http://localhost:<port>`, `http://127.0.0.1:<port>`) may
+pair, so a local static server works for development. glonOdin's
+`bun run service install --web <this repo>` (its `harness/src/web.ts`)
+builds `web-dist/` when it is missing or stale and serves it that way on
+`http://127.0.0.1:5190`, with the daemon-mode tag in every page. UI state
+lives in `localStorage` under `roostr-gpui.ui-state`.
+
+Emoji: the build ships Twemoji (`crates/roostr-core/fonts/TwemojiMozilla.ttf`,
+a COLR font, CC-BY 4.0 - see its license file) as `web-dist/fonts/`; the app
+fetches it after it starts and draws every emoji, graph labels included, in
+it. Until it arrives, and for emoji newer than it, the browser's own emoji
+font stands in. The desktop uses Apple Color Emoji.
+
+Not in the browser yet: anything that opens a file dialog (adding files and
+images, a custom icon or avatar) - GPUI's web platform has no file picker;
+dropping files from the desktop. Exports and file downloads are browser
+downloads; "open" shows a file in a new tab.
+
+GPUI's web platform is `vendor/gpui-pre-web`, gpui-pre-web 0.3.9 patched in
+through `[patch.crates-io]`: once the last finger lifts, the pointer moves
+off the canvas, so hover (and a `[data-tip]` tooltip) ends with the touch
+instead of staying on the control last tapped. The change is marked
+`roostr:`.
+
+## iOS
+
+`crates/roostr-ios` is the iOS app; the sibling `RoostrIOS` repository is
+its Xcode host (XcodeGen spec, icon, a C `main`) and builds it from this
+workspace - see its README for building, running and what lives where (the
+Swift app's Keychain items, `UserDefaults` relay list and
+`Application Support/Roostr/roostr.sqlite`, so an update keeps the vault).
+
+```sh
+rustup target add aarch64-apple-ios-sim aarch64-apple-ios
+CARGO_PROFILE_DEV_DEBUG=line-tables-only cargo build -p roostr-ios --target aarch64-apple-ios-sim
+cargo clippy -p roostr-ios --target aarch64-apple-ios-sim
+```
+
+GPUI's UIKit platform is `vendor/gpui-pre-ios`, a vendored gpui-pre-ios
+0.3.9: that snapshot is newer than the gpui-pre 0.3.9 core it pins and
+does not build against it, and it gains a document picker for
+`prompt_for_paths`. `vendor/gpui-pre-apple` (patched in for every target
+through `[patch.crates-io]`) changes iOS only: every font falls back to the
+bundled Twemoji (`crates/roostr-core/fonts/TwemojiMozilla.ttf`, the web
+build's emoji), drawn in color. Both mark their changes `roostr:`.
+
+Layout follows the web view the Svelte app ran in: the window content sits
+inside the safe area and above the on-screen keyboard; ≤720pt wide (iPhone
+portrait) is the mobile shell, wider (landscape, iPad) the desktop layout;
+touch shows hover-only controls at rest and long presses lift blocks and
+spaces (`roostr_core::layout`).
+
+Text input follows iOS WebKit too. Focus raises the on-screen keyboard only
+from the person: a tap on a field, focus the tap itself moves (Reply, a
+menu's search box), a field the app focuses under a tap just made (the line
+a tap on an empty page creates), or one input handing focus to the next
+while the keyboard is up (Enter splitting a block). A field the app focuses
+on its own - the chat composer when a page opens - keeps focus without the
+keyboard until it is tapped; with a hardware keyboard attached it takes
+typing straight away. Return is the Enter key: bindings see it first (split
+a block, send a message, confirm a field) and only an unhandled Return types
+a newline. Dismissing the keyboard (swipe down, the iPad's hide key) ends
+editing, as it blurred the field in the web view: the editor then shows a
+remote edit to the block the caret was in, which it leaves alone while that
+block is being edited (BlockNode.svelte's rule, `sync_live_texts`). Once the
+last finger lifts, the pointer leaves the window, so nothing stays hovered
+and no tooltip lingers after a tap.
+
+## Develop
+
+Every feature crate has an example that hosts its views against the daemon in
+the environment. Develop against a throwaway vault on its own port, never your
+own: `scripts/seed-test-vault.sh` fills it with sample data covering every view
+(it refuses to run unless `GLON_DATA` is set and is not `~/.glon`, and reruns
+add nothing).
+
+```sh
+mkdir -p /tmp/roostr-test
+GLON_DATA=/tmp/roostr-test ../../glonOdin/glon-odin serve 7399 &
+export GLON_DATA=/tmp/roostr-test ROOSTR_API=http://127.0.0.1:7399
+scripts/seed-test-vault.sh
+cargo run -p roostr-editor --example editor -- seed-page-showcase
+cargo run -p roostr                      # the whole app on the test vault
+```
+
+Checks: `cargo test --workspace`, `cargo clippy --workspace --examples`,
+`cargo fmt --all --check`.
+
+Browser tests (IndexedDB, the Svelte vault import) run in a real browser:
+serve `../static` (`engine.wasm`, `engine-core.json`) with CORS at
+`http://127.0.0.1:8787/` (or set `ROOSTR_ENGINE_TEST_BASE` at build time), then
+`CHROMEDRIVER=<chromedriver> CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER=wasm-bindgen-test-runner
+cargo test --target wasm32-unknown-unknown -p roostr-replica-store` (and
+`-p roostr-replica --test svelte_import_web`), with the `wasm-bindgen-test-runner`
+matching `Cargo.lock` (`target/tools/` after `scripts/build-web.sh`); a
+`webdriver.json` in the crate directory picks the Chrome binary when it differs
+from the driver's.
+
+## Differences from the web app
+
+Platform-driven only; behavior and visuals otherwise follow the Svelte source.
+
+- Embedded players (YouTube, Vimeo, Spotify) show a poster card that opens the
+  link in the browser; PDFs, video and audio open in the system viewer.
+- Settings → "Disconnect this app" quits instead of unpairing a browser;
+  exports are written to `~/Downloads`; `prompt()`/`confirm()` are in-app or
+  native dialogs.
+- Graph: CSS blend modes and backdrop blur have no GPUI equivalent; the radial
+  background is stepped.
+- Inline code marks keep the block's font size and mentions use a solid
+  underline (GPUI text runs have no per-run size or dotted underline).

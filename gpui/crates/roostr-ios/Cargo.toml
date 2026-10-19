@@ -1,0 +1,57 @@
+[package]
+name = "roostr-ios"
+description = "Roostr on iPhone and iPad: the desktop app's views over this device's replica, on GPUI's UIKit platform"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+# The Xcode host (the RoostrIOS repository) links `libroostr_ios.a` and calls
+# `roostr_main` from its one-line C `main`.
+[lib]
+crate-type = ["staticlib", "rlib"]
+
+# Everything is iOS-only; on other targets this crate is empty.
+[target.'cfg(target_os = "ios")'.dependencies]
+roostr-core.workspace = true
+roostr-app.workspace = true
+roostr-shell.workspace = true
+roostr-engine.workspace = true
+roostr-replica.workspace = true
+roostr-replica-store.workspace = true
+gpui-kit.workspace = true
+# Vendored: see vendor/gpui-pre-ios/Cargo.toml.
+gpui_ios = { package = "gpui-pre-ios", path = "../../vendor/gpui-pre-ios", features = ["runtime_shaders"] }
+anyhow.workspace = true
+futures.workspace = true
+log.workspace = true
+serde_json.workspace = true
+env_logger = "0.11"
+hex = "0.4"
+parking_lot = "0.12"
+security-framework = "3"
+block2 = "0.6"
+objc2 = "0.6"
+objc2-foundation = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "block2",
+    "NSArray",
+    "NSDictionary",
+    "NSError",
+    "NSObject",
+    "NSString",
+    "NSUserDefaults",
+    "NSValue",
+] }
+objc2-user-notifications = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "bitflags",
+    "block2",
+    "UNNotification",
+    "UNNotificationContent",
+    "UNNotificationRequest",
+    "UNNotificationResponse",
+    "UNNotificationSettings",
+    "UNNotificationSound",
+    "UNNotificationTrigger",
+    "UNUserNotificationCenter",
+] }

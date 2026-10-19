@@ -1,0 +1,169 @@
+{
+  "generator": "nostr-tools 2.25.0",
+  "keys": [
+    {
+      "secret": "0000000000000000000000000000000000000000000000000000000000000001",
+      "pubkey": "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+      "npub": "npub10xlxvlhemja6c4dqv22uapctqupfhlxm9h8z3k2e72q4k9hcz7vqpkge6d",
+      "nsec": "nsec1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqsmhltgl",
+      "authorId": "c386d8e8d07342f2"
+    },
+    {
+      "secret": "7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f",
+      "pubkey": "142715675faf8da1ecc4d51e0b9e539fa0d52fdd96ed60dbe99adb15d6b05ad9",
+      "npub": "npub1zsn32e6l47x6rmxy650qh8jnn7sd2t7ajmkkpklfntd3t44sttvsgg5m7h",
+      "nsec": "nsec10alh7lml0alh7lml0alh7lml0alh7lml0alh7lml0alh7lml0alsj7rpl0",
+      "authorId": "587078d635168058"
+    },
+    {
+      "secret": "fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364140",
+      "pubkey": "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+      "npub": "npub10xlxvlhemja6c4dqv22uapctqupfhlxm9h8z3k2e72q4k9hcz7vqpkge6d",
+      "nsec": "nsec1lllllllllllllllllllllllll6a2ah8x4ay2qwal6f0ge5pkg9qq7ae6fg",
+      "authorId": "6d9c072b5b7aeab7"
+    },
+    {
+      "secret": "c4d6f2a1b0e9d8c7b6a5f4e3d2c1b0a9f8e7d6c5b4a3f2e1d0c9b8a7f6e5d4c3",
+      "pubkey": "f5d2239fe5ad537df1d129171b579e7d67b5b9064267552b63dfd410bbad09bb",
+      "npub": "npub17hfz88l944fhmuw39yt3k4u704nmtwgxgfn422mrml2ppwadpxas6e0597",
+      "nsec": "nsec1cnt09gdsa8vv0d497n3a9sds48uw04k9kj3l9cwsexu20ah96npsd9d5hj",
+      "authorId": "42d483075f9bcf76"
+    }
+  ],
+  "events": [
+    {
+      "secret": "0000000000000000000000000000000000000000000000000000000000000001",
+      "aux": "0101010101010101010101010101010101010101010101010101010101010101",
+      "event": {
+        "kind": 1,
+        "created_at": 1700000000,
+        "tags": [],
+        "content": "",
+        "pubkey": "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        "id": "1868e8ad4ca66b7a9bb6ddaaecde6e5cc5d11682e87abb650a6ce8853854ef05",
+        "sig": "aa510a3cb198906e279be9aabc04321a224c214955dcb5cdf9d9a9a711c3120c2eb9c9894a38a7e7e2a302a8e892f3fd9426361a486375a7aab0f9c23a538030"
+      },
+      "finalizedSig": "9faa4f9f7f884aa61afc28d656c22fd465ef53ad679980ea056129398a35876a4f0b7fbe02eaf18cecdddd88c27f302ffa4a8e454a9ef7e76fdb294ca5287ff4"
+    },
+    {
+      "secret": "7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f",
+      "aux": "1212121212121212121212121212121212121212121212121212121212121212",
+      "event": {
+        "kind": 27235,
+        "created_at": 1760000000,
+        "tags": [
+          [
+            "u",
+            "http://127.0.0.1:7333/api/pair"
+          ],
+          [
+            "method",
+            "POST"
+          ],
+          [
+            "challenge",
+            "c0ffee"
+          ],
+          [
+            "origin",
+            "https://roostr.space"
+          ]
+        ],
+        "content": "",
+        "pubkey": "142715675faf8da1ecc4d51e0b9e539fa0d52fdd96ed60dbe99adb15d6b05ad9",
+        "id": "22dc4df095b877b7125d3bccd631d8d42b80f2c395534e815e54db1012b2cd8b",
+        "sig": "87f67f0806bc71385f094228ca854378d8b280849fd414618329b08d8105dee8b92794e060b89f7f0aa3891521d64f7eba9e208183fdc7096986b3de419ab51c"
+      },
+      "finalizedSig": "9d046def3384b245d6ecaa8fe00ccac1bdc85bd4d23f8dbb1010f0bf8c26dca34de1d03295af1764c1d3a3ba76f56b11c5c95624585f4fcafb470458188d5fa7"
+    },
+    {
+      "secret": "fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364140",
+      "aux": "2323232323232323232323232323232323232323232323232323232323232323",
+      "event": {
+        "kind": 1078,
+        "created_at": 1700000001,
+        "tags": [
+          [
+            "h",
+            "0123456789abcdef"
+          ],
+          [
+            "c",
+            "gid",
+            "0",
+            "2"
+          ],
+          [
+            "b",
+            "abababababababababababababababababababababababababababababababab"
+          ]
+        ],
+        "content": "AgAAAAAA/+==",
+        "pubkey": "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        "id": "012fab43db6914c3662a072cc9bf95ab3d08e044220b023910cee0f0b3da45b7",
+        "sig": "da14d641b1aedfc6fae88c2264cc545fe141072e12e69b66b37df157bdbcec38b2cb31ce1831dc4207adfd67a2e74f8d578cc60081a1d5cd2c480637f22794ff"
+      },
+      "finalizedSig": "73876b4feba97a76bbc45eb03402dd762db054c18dbcd6c974aad69698e714bec1fac0513ceb89c761bfb31d4cdaec7db8c46e744b2b2ef0e8dfcd073e2a14c1"
+    },
+    {
+      "secret": "c4d6f2a1b0e9d8c7b6a5f4e3d2c1b0a9f8e7d6c5b4a3f2e1d0c9b8a7f6e5d4c3",
+      "aux": "3434343434343434343434343434343434343434343434343434343434343434",
+      "event": {
+        "kind": 0,
+        "created_at": 1700000002,
+        "tags": [],
+        "content": "{\"name\":\"Ünïcode ✓\",\"picture\":\"data:image/jpeg;base64,/9j/\"}",
+        "pubkey": "f5d2239fe5ad537df1d129171b579e7d67b5b9064267552b63dfd410bbad09bb",
+        "id": "c3ee7c3ac308acde9bcbe160878909e7aeadb99deb302cddc66c1b16d3beac98",
+        "sig": "89619af71a27f58418bb4f3379c99647e7d9a1e90c85b700aedb467ae00d29c8caaad6ad9ffc9cac8b51519d71666af26c29179d41738514e25a099eb1b35201"
+      },
+      "finalizedSig": "e59ad1f367a1b78ab26333bef23aeda001c62b8c29744353c8354b0e09b0b324cddbe2bb611738c774d427ad00742e8a042f4e535c7cf0596cd88fd7027d8607"
+    },
+    {
+      "secret": "0000000000000000000000000000000000000000000000000000000000000001",
+      "aux": "4545454545454545454545454545454545454545454545454545454545454545",
+      "event": {
+        "kind": 1,
+        "created_at": 1700000003,
+        "tags": [
+          [
+            "t",
+            "a\u0000b\u0001\u001f"
+          ]
+        ],
+        "content": "quote \" backslash \\ slash / nl \n cr \r tab \t bs \b ff \f nul \u0000 us \u001f del  ä 🎉   ",
+        "pubkey": "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        "id": "17ded5b7282b3952b6cf6be8cedd2dee45fb35540b9f4a8589f7a8244fcfad60",
+        "sig": "ef2d619b5db3680e63ab468ffbab818461867b6f99d10cf3a3e94d50abb46328c104272cc22691327d8dd31417394b66d2828c74bbf67afd59b00b92a7c08387"
+      },
+      "finalizedSig": "d0eb065f69b88cb95ad21a02c77a8372a6124072cf617b3f05f9427d70a53057a1c4e93f5076b555b1a47162e86b3924e39aed5566817e945209fb5fa445d0ad"
+    },
+    {
+      "secret": "7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f",
+      "aux": "5656565656565656565656565656565656565656565656565656565656565656",
+      "event": {
+        "kind": 24242,
+        "created_at": 1700000004,
+        "tags": [
+          [
+            "t",
+            "upload"
+          ],
+          [
+            "x",
+            "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+          ],
+          [
+            "expiration",
+            "1700000604"
+          ]
+        ],
+        "content": "Upload résumé.pdf",
+        "pubkey": "142715675faf8da1ecc4d51e0b9e539fa0d52fdd96ed60dbe99adb15d6b05ad9",
+        "id": "90bbde601e637f16996646ca8f0cb361b2b55c9d0a1023cd28f4cd0713bd4cd8",
+        "sig": "2eafb30eadfb3749192e37447e0184bb6000694976f5959d06d2390a8f460de8547400c7704fb2169ffad8501b54ab7694d30489fe95e0cea274f5a6f0300b59"
+      },
+      "finalizedSig": "a7c66336a3d53f6ed5a743c5fef5622852a923bcc7eaefb297a34e7d620fcc7d8766b641e5aa96b3d59239282bc72f87c0f360e3ec758c2c8a82ef15136d31b8"
+    }
+  ]
+}

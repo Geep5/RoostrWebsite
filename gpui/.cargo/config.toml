@@ -1,0 +1,4 @@
+# The browser build: the workspace's deep render trees need more than
+# wasm-ld's default 1 MiB stack (as gpui-kit's own web gallery does).
+[target.wasm32-unknown-unknown]
+rustflags = ["-C", "link-arg=-zstack-size=8388608"]

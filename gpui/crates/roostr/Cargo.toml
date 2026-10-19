@@ -1,0 +1,15 @@
+[package]
+name = "roostr"
+description = "Roostr desktop app (GPUI)"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+roostr-core.workspace = true
+roostr-app.workspace = true
+roostr-shell.workspace = true
+roostr-replica.workspace = true
+futures.workspace = true
+gpui-kit.workspace = true
+env_logger = "0.11"

@@ -6,18 +6,23 @@
 	# key and outbox live in that origin's storage and must not be orphaned.
 	@legacy {
 		header_regexp host Host ^(getroostr\.fly\.dev|www\.roostr\.space)$
-		not path /app /app/* /engine.wasm /engine-core.json /_app/*
+		not path /app /app/* /main.js /roostr_web.js /roostr_web_bg.wasm /engine.wasm /engine-core.json /fonts/*
 	}
 	redir @legacy https://roostr.space{uri} permanent
-	# Hashed bundles are immutable; everything else (HTML shell, engine,
-	# manifest) revalidates so a new build never runs against a cached core.
-	handle /_app/immutable/* {
-		header Cache-Control "public, max-age=31536000, immutable"
-		file_server
-	}
+	# The app was previewed under /gpui/ before it served the whole site.
+	redir /gpui /{?query} permanent
+	@preview path_regexp preview ^/gpui(/.*)$
+	redir @preview {re.preview.1}{?query} permanent
+	# Each website page has its own HTML (its title and link-preview tags);
+	# every other path - the workspace, /app/** - gets 200.html, and the app
+	# routes from the address bar. Nothing is content-hashed, so everything
+	# revalidates: a new build never runs a cached module against a new
+	# engine. The build ships brotli and gzip copies of the large files.
 	handle {
 		header Cache-Control "no-cache"
 		try_files {path} {path}.html {path}/index.html /200.html
-		file_server
+		file_server {
+			precompressed br gzip
+		}
 	}
 }

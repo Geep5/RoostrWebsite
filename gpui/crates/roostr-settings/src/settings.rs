@@ -1,0 +1,2095 @@
+//! The Settings modal (`Settings.svelte`) as the local-mode web app shows
+//! it: profile, chat colour, Nostr identity, relays, the desktop sync check,
+//! the spellcheck dictionary, export, the Claude plan and agent keys.
+
+use std::sync::Arc;
+use std::time::Duration;
+
+use futures::FutureExt as _;
+use gpui_kit::component::WindowExt as _;
+use gpui_kit::component::color_picker::{ColorPicker, ColorPickerEvent, ColorPickerState};
+use gpui_kit::component::input::{InputEvent, InputState};
+use gpui_kit::prelude::FluentBuilder as _;
+use gpui_kit::*;
+use roostr_core::color::{DEFAULT_CHAT_COLOR, hex, normalize_hex};
+use roostr_core::harness::harness;
+use roostr_core::io;
+use roostr_core::profile as nostr_profile;
+use roostr_core::serving::{MachineRow, fetch_machines, machine_name};
+use roostr_core::ui::data_url_image;
+use roostr_core::{Store, UiState, api, theme};
+use serde_json::{Value as Json, json};
+
+use crate::export::{ExportFormat, export_all};
+use crate::local::{self, AgentAuth, PlanStatus, with_status};
+use crate::profile;
+use crate::widgets::{Btn, FieldStyle, Select, Span, field, h3, hint, rich, spinner, switch};
+
+/// The editor's "Add to dictionary" list (web localStorage `spell-ignore`).
+const IGNORE_KEY: &str = "spell-ignore";
+/// Gives up on a desktop that doesn't answer, so the check never sits on "Checking…" for good.
+const DESK_TIMEOUT: Duration = Duration::from_secs(15);
+/// Follow a Claude sign-in this often until it finishes.
+const PLAN_POLL: Duration = Duration::from_millis(2000);
+const FLASH: Duration = Duration::from_millis(1500);
+const BUILD_STAMP: &str = env!("ROOSTR_BUILD_STAMP");
+
+/// Relays offered as toggles: ours on by default, public ones off.
+const KNOWN_RELAYS: &[(&str, &str, &str)] = &[
+    (
+        "wss://roostr-relay.fly.dev",
+        "Roostr relay",
+        "self-hosted default",
+    ),
+    ("wss://relay.damus.io", "Damus", "public"),
+    ("wss://nos.lol", "nos.lol", "public"),
+    (
+        "wss://relay.nostr.band",
+        "nostr.band",
+        "public aggregator - often read-only",
+    ),
+];
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Desk {
+    Idle,
+    Checking,
+    Match,
+    Differ,
+    Offline,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Menu {
+    Export,
+    PlanServer,
+}
+
+/// The settings panel (the modal's content).
+pub struct Settings {
+    focus: FocusHandle,
+    scroll: ScrollHandle,
+    settings_error: SharedString,
+    desk: Desk,
+    desk_detail: SharedString,
+
+    // Nostr identity
+    npub: String,
+    copied: &'static str,
+    importing: bool,
+    confirm_logout: bool,
+    /// Replica mode: the revealed private key ("" = hidden).
+    nsec: SharedString,
+    import_draft: Entity<InputState>,
+    import_error: SharedString,
+
+    // Relays
+    relays: Vec<String>,
+    new_relay: Entity<InputState>,
+    save_state: &'static str,
+
+    // Agent credentials: `None` while checking, `Some(None)` when unavailable.
+    agent_auth: Option<Option<AgentAuth>>,
+    kimi_draft: Entity<InputState>,
+    agent_saved: &'static str,
+    login_error: SharedString,
+
+    // Claude plan
+    plan: Option<PlanStatus>,
+    plan_machines: Vec<MachineRow>,
+    /// The computer to keep the plan fresh: this one, until changed.
+    plan_server: String,
+    plan_code: Entity<InputState>,
+    plan_error: SharedString,
+    plan_busy: bool,
+    plan_poll: Option<Task<()>>,
+
+    // Profile
+    profile_picture: String,
+    profile_image: Option<Arc<Image>>,
+    profile_name: Entity<InputState>,
+    /// The name as last saved, so an unchanged field never republishes the profile.
+    saved_name: String,
+    avatar_busy: bool,
+    avatar_state: SharedString,
+
+    // Chat colour
+    chat_color_draft: Entity<InputState>,
+    chat_color_state: SharedString,
+    swatch: Entity<ColorPickerState>,
+
+    // Dictionary
+    ignored: Vec<String>,
+
+    // Export
+    export_format: ExportFormat,
+    exporting: bool,
+    export_note: SharedString,
+
+    open_menu: Option<Menu>,
+    /// The mobile sheet's drag-to-close: how far it is pulled down, where
+    /// the finger started while it drags, and the pull it springs back from
+    /// (each spring-back a new animation).
+    sheet_y: Pixels,
+    sheet_drag: Option<Pixels>,
+    sheet_spring: Option<Pixels>,
+    sheet_springs: u64,
+    _subscriptions: Vec<Subscription>,
+}
+
+fn input(window: &mut Window, cx: &mut Context<Settings>, placeholder: &str) -> Entity<InputState> {
+    let placeholder = placeholder.to_string();
+    cx.new(|cx| InputState::new(window, cx).placeholder(placeholder))
+}
+
+fn to_hex(color: Hsla) -> String {
+    let rgba = Rgba::from(color);
+    let c = |v: f32| (v.clamp(0., 1.) * 255.).round() as u8;
+    format!("#{:02X}{:02X}{:02X}", c(rgba.r), c(rgba.g), c(rgba.b))
+}
+
+impl Settings {
+    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let cached = nostr_profile::cached(cx);
+        let name = cached.name.clone().unwrap_or_default();
+        let chat_color = Store::global(cx).read(cx).chat_color.clone();
+        let import_draft = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("nsec1… or 64-char hex")
+                .masked(true)
+        });
+        let kimi_draft = cx.new(|cx| InputState::new(window, cx).placeholder("sk-…").masked(true));
+        let new_relay = input(window, cx, "wss://relay.example.com");
+        let plan_code = input(window, cx, "Paste the code from claude.ai");
+        let profile_name = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("Your name")
+                .default_value(name.clone())
+        });
+        let chat_color_draft = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(DEFAULT_CHAT_COLOR)
+                .default_value(chat_color.clone())
+        });
+        let swatch_color = hex(&chat_color)
+            .or_else(|| hex(DEFAULT_CHAT_COLOR))
+            .unwrap_or(theme::white());
+        let swatch = cx.new(|cx| ColorPickerState::new(window, cx).default_value(swatch_color));
+
+        let subscriptions = vec![
+            cx.subscribe_in(
+                &import_draft,
+                window,
+                |this, state, event: &InputEvent, _, cx| {
+                    if let InputEvent::PressEnter { .. } = event
+                        && !state.read(cx).value().trim().is_empty()
+                    {
+                        this.import_key(cx);
+                    }
+                },
+            ),
+            cx.subscribe_in(
+                &new_relay,
+                window,
+                |this, _, event: &InputEvent, window, cx| {
+                    if let InputEvent::PressEnter { .. } = event {
+                        this.add_relay(window, cx);
+                    }
+                },
+            ),
+            cx.subscribe_in(
+                &kimi_draft,
+                window,
+                |this, state, event: &InputEvent, window, cx| {
+                    if let InputEvent::PressEnter { .. } = event {
+                        let key = state.read(cx).value().to_string();
+                        if !key.trim().is_empty() {
+                            this.save_agent_key("kimi", key, window, cx);
+                        }
+                    }
+                },
+            ),
+            cx.subscribe_in(
+                &plan_code,
+                window,
+                |this, state, event: &InputEvent, window, cx| {
+                    if let InputEvent::PressEnter { .. } = event {
+                        this.submit_plan_code(state.clone(), window, cx);
+                    }
+                },
+            ),
+            // `onchange`: Enter blurs the field, and leaving it saves.
+            cx.subscribe_in(
+                &profile_name,
+                window,
+                |this, _, event: &InputEvent, window, cx| match event {
+                    InputEvent::PressEnter { .. } => this.focus.focus(window, cx),
+                    InputEvent::Blur => this.save_name(cx),
+                    _ => {}
+                },
+            ),
+            cx.subscribe_in(
+                &chat_color_draft,
+                window,
+                |this, state, event: &InputEvent, window, cx| match event {
+                    InputEvent::PressEnter { .. } => this.focus.focus(window, cx),
+                    InputEvent::Blur => {
+                        let raw = state.read(cx).value().to_string();
+                        this.save_chat_color(raw, window, cx);
+                    }
+                    InputEvent::Change => cx.notify(),
+                    _ => {}
+                },
+            ),
+            cx.subscribe_in(
+                &swatch,
+                window,
+                |this, _, event: &ColorPickerEvent, window, cx| {
+                    if let ColorPickerEvent::Change(Some(color)) = event {
+                        this.save_chat_color(to_hex(*color), window, cx);
+                    }
+                },
+            ),
+        ];
+
+        let mut this = Self {
+            focus: cx.focus_handle(),
+            scroll: ScrollHandle::new(),
+            settings_error: SharedString::default(),
+            desk: Desk::Idle,
+            desk_detail: SharedString::default(),
+            npub: String::new(),
+            copied: "",
+            importing: false,
+            confirm_logout: false,
+            nsec: SharedString::default(),
+            import_draft,
+            import_error: SharedString::default(),
+            relays: Vec::new(),
+            new_relay,
+            save_state: "",
+            agent_auth: None,
+            kimi_draft,
+            agent_saved: "",
+            login_error: SharedString::default(),
+            plan: None,
+            plan_machines: Vec::new(),
+            plan_server: String::new(),
+            plan_code,
+            plan_error: SharedString::default(),
+            plan_busy: false,
+            plan_poll: None,
+            profile_image: cached.picture.as_deref().and_then(data_url_image),
+            profile_picture: cached.picture.unwrap_or_default(),
+            profile_name,
+            saved_name: name,
+            avatar_busy: false,
+            avatar_state: SharedString::default(),
+            chat_color_draft,
+            chat_color_state: SharedString::default(),
+            swatch,
+            ignored: Self::read_ignored(cx),
+            export_format: ExportFormat::Markdown,
+            exporting: false,
+            export_note: SharedString::default(),
+            open_menu: None,
+            sheet_y: px(0.),
+            sheet_drag: None,
+            sheet_spring: None,
+            sheet_springs: 0,
+            _subscriptions: subscriptions,
+        };
+        this.load_profile(window, cx);
+        this.load(cx);
+        this
+    }
+
+    fn paired(cx: &App) -> bool {
+        harness(cx).is_some()
+    }
+
+    /// Clear `field` after the 1.5 s flash.
+    fn flash(cx: &mut Context<Self>, clear: impl FnOnce(&mut Self) + 'static) {
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(FLASH).await;
+            let _ = this.update(cx, |this, cx| {
+                clear(this);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    // ------------------------------------------------------------- load
+
+    fn load(&mut self, cx: &mut Context<Self>) {
+        self.settings_error = SharedString::default();
+        let backend = Store::global(cx).read(cx).backend();
+        let task = io::spawn(cx, backend.settings());
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| {
+                match result {
+                    Ok(settings) => {
+                        this.relays = settings.relays;
+                        this.npub = settings.npub.unwrap_or_default();
+                    }
+                    Err(error) => this.settings_error = error.to_string().into(),
+                }
+                this.load_agent_auth(cx);
+                this.load_plan(cx);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn load_profile(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.avatar_state = SharedString::default();
+        let task = nostr_profile::fetch(cx);
+        cx.spawn_in(window, async move |this, cx| {
+            let result = task.await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                match result {
+                    Ok(p) => this.apply_profile(p, window, cx),
+                    Err(error) => this.avatar_state = error.to_string().into(),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn apply_profile(
+        &mut self,
+        p: nostr_profile::Profile,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.profile_picture = p.picture.unwrap_or_default();
+        self.profile_image = data_url_image(&self.profile_picture);
+        self.saved_name = p.name.unwrap_or_default();
+        let name = self.saved_name.clone();
+        self.profile_name
+            .update(cx, |s, cx| s.set_value(name, window, cx));
+    }
+
+    fn read_ignored(cx: &App) -> Vec<String> {
+        let mut words: Vec<String> = UiState::get(cx, IGNORE_KEY).unwrap_or_default();
+        words.sort();
+        words.dedup();
+        words
+    }
+
+    // ------------------------------------------------------------- profile
+
+    fn pick_avatar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if io::WEB {
+            self.avatar_state = io::NO_FILE_PICKER.into();
+            cx.notify();
+            return;
+        }
+        let paths = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: None,
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(Ok(Some(paths))) = paths.await else {
+                return;
+            };
+            let Some(path) = paths.into_iter().next() else {
+                return;
+            };
+            let _ = this.update(cx, |this, cx| {
+                this.avatar_busy = true;
+                this.avatar_state = "saving…".into();
+                cx.notify();
+            });
+            let picture = cx
+                .background_spawn(async move { profile::image_to_avatar(&path) })
+                .await;
+            let result = match picture {
+                Ok(picture) => match cx.update(|_, cx| {
+                    nostr_profile::save(nostr_profile::patch("picture", &picture), cx)
+                }) {
+                    Ok(task) => task.await,
+                    Err(error) => Err(error),
+                },
+                Err(error) => Err(error),
+            };
+            let _ = this.update_in(cx, |this, window, cx| {
+                match result {
+                    Ok(p) => {
+                        this.apply_profile(p, window, cx);
+                        this.avatar_state = "saved".into();
+                    }
+                    Err(error) => this.avatar_state = error.to_string().into(),
+                }
+                this.avatar_busy = false;
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn save_profile(&mut self, patch: Json, saving: bool, cx: &mut Context<Self>) {
+        self.avatar_busy = true;
+        if saving {
+            self.avatar_state = "saving…".into();
+        }
+        cx.notify();
+        let task = nostr_profile::save(patch, cx);
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| {
+                match result {
+                    Ok(p) => {
+                        this.profile_picture = p.picture.unwrap_or_default();
+                        this.profile_image = data_url_image(&this.profile_picture);
+                        this.saved_name = p.name.unwrap_or_default();
+                        this.avatar_state = "saved".into();
+                    }
+                    Err(error) => this.avatar_state = error.to_string().into(),
+                }
+                this.avatar_busy = false;
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn save_name(&mut self, cx: &mut Context<Self>) {
+        let name = self.profile_name.read(cx).value().trim().to_string();
+        if name == self.saved_name {
+            return;
+        }
+        self.save_profile(nostr_profile::patch("name", &name), true, cx);
+    }
+
+    // ------------------------------------------------------------- chat colour
+
+    fn save_chat_color(&mut self, raw: String, window: &mut Window, cx: &mut Context<Self>) {
+        if normalize_hex(&raw).is_none() {
+            self.chat_color_state = "Use a hex color like #EDCF7F".into();
+            cx.notify();
+            return;
+        }
+        self.chat_color_state = "saving…".into();
+        cx.notify();
+        let task = api::user_prefs::set_chat_color(&raw, cx);
+        cx.spawn_in(window, async move |this, cx| {
+            let result = task.await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                match result {
+                    Ok(hex_value) => {
+                        Store::global(cx).update(cx, |store, cx| {
+                            store.chat_color = hex_value.clone();
+                            cx.notify();
+                        });
+                        this.chat_color_draft
+                            .update(cx, |s, cx| s.set_value(hex_value.clone(), window, cx));
+                        if let Some(color) = hex(&hex_value) {
+                            this.swatch
+                                .update(cx, |s, cx| s.set_value(color, window, cx));
+                        }
+                        this.chat_color_state = "saved".into();
+                    }
+                    Err(error) => this.chat_color_state = error.to_string().into(),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    // ------------------------------------------------------------- identity
+
+    fn copy(&mut self, text: String, label: &'static str, cx: &mut Context<Self>) {
+        cx.write_to_clipboard(ClipboardItem::new_string(text));
+        self.copied = label;
+        cx.notify();
+        Self::flash(cx, |this| this.copied = "");
+    }
+
+    fn import_key(&mut self, cx: &mut Context<Self>) {
+        self.import_error = SharedString::default();
+        let key = self.import_draft.read(cx).value().trim().to_string();
+        let task = api::settings::import_key(&key, cx);
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| match result {
+                Ok(_) => {
+                    // The web reloads the page: close Settings and reopen the vault under the new identity.
+                    this.importing = false;
+                    if let Some(window) = cx.active_window() {
+                        let _ = window.update(cx, |_, window, cx| window.close_dialog(cx));
+                    }
+                    Store::global(cx).update(cx, |store, cx| store.reconnect(cx));
+                }
+                Err(error) => {
+                    this.import_error = error.to_string().into();
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn cancel_import(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.importing = false;
+        self.import_draft
+            .update(cx, |s, cx| s.set_value("", window, cx));
+        self.import_error = SharedString::default();
+        cx.notify();
+    }
+
+    /// Replica mode: "Log out on this device" (api.ts `settings.logout`).
+    fn log_out(&mut self, cx: &mut Context<Self>) {
+        self.settings_error = SharedString::default();
+        let Some(account) = roostr_core::account::account(cx) else {
+            return;
+        };
+        let task = io::spawn(cx, account.logout());
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| match result {
+                Ok(()) => {
+                    if let Some(window) = cx.active_window() {
+                        let _ = window.update(cx, |_, window, cx| window.close_dialog(cx));
+                    }
+                    // No key now: the vault reopens on the sign-in gate.
+                    Store::global(cx).update(cx, |store, cx| store.reconnect(cx));
+                }
+                Err(error) => {
+                    this.settings_error = error.to_string().into();
+                    this.confirm_logout = false;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Replica mode: "Reveal private key" and, revealed, the nsec to copy.
+    fn render_reveal(&self, identity: Div, cx: &mut Context<Self>) -> Div {
+        if self.nsec.is_empty() {
+            return identity.child(div().mt(px(6.)).mb(px(6.)).flex().child(
+                Btn::action("reveal-key", "Reveal private key").on_click(cx.listener(
+                    |this, _, _, cx| {
+                        match roostr_core::account::account(cx).map(|a| a.export_key()) {
+                            Some(Ok((nsec, _))) => this.nsec = nsec.into(),
+                            Some(Err(error)) => this.settings_error = error.to_string().into(),
+                            None => {}
+                        }
+                        cx.notify();
+                    },
+                )),
+            ));
+        }
+        let nsec = self.nsec.to_string();
+        identity
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .mt(px(10.))
+                    .mb(px(4.))
+                    .text_size(px(12.))
+                    .font_weight(FontWeight::MEDIUM)
+                    .child("Private key")
+                    .child(
+                        div()
+                            .text_size(px(11.))
+                            .font_weight(FontWeight::NORMAL)
+                            .font_family(theme::fonts::MONO)
+                            .text_color(theme::muted())
+                            .child("nsec"),
+                    )
+                    .child(
+                        div()
+                            .px(px(8.))
+                            .rounded_full()
+                            .border_1()
+                            .border_color(theme::red())
+                            .text_color(theme::red())
+                            .text_size(px(10.))
+                            .line_height(px(16.))
+                            .child("SECRET"),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .mb(px(6.))
+                    .child(
+                        div()
+                            .id("nsec-code")
+                            .flex_1()
+                            .min_w_0()
+                            .overflow_x_scroll()
+                            .px(px(10.))
+                            .py(px(7.))
+                            .rounded(px(8.))
+                            .bg(theme::bg())
+                            .border_1()
+                            .border_color(theme::border())
+                            .font_family(theme::fonts::MONO)
+                            .text_size(px(11.))
+                            .whitespace_nowrap()
+                            .child(self.nsec.clone()),
+                    )
+                    .child(
+                        Btn::small("copy-nsec", if self.copied == "nsec" { "Copied" } else { "Copy" })
+                            .on_click(cx.listener(move |this, _, _, cx| this.copy(nsec.clone(), "nsec", cx))),
+                    ),
+            )
+            .child(p(
+                "Paste this nsec into \"Sign in with existing key\" on another Roostr to log in as you.",
+            ))
+            .child(
+                div().mt(px(6.)).flex().child(
+                    Btn::action("hide-key", "Hide").subtle().on_click(cx.listener(|this, _, _, cx| {
+                        this.nsec = SharedString::default();
+                        cx.notify();
+                    })),
+                ),
+            )
+    }
+
+    // ------------------------------------------------------------- relays
+
+    fn save_relays(&mut self, next: Vec<String>, cx: &mut Context<Self>) {
+        self.settings_error = SharedString::default();
+        let task = api::settings::set_relays(&next, cx);
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| {
+                match result {
+                    Ok(_) => {
+                        Store::global(cx).update(cx, |store, _| {
+                            if let Some(settings) = store.settings.as_mut() {
+                                settings.relays = next.clone();
+                            }
+                        });
+                        this.relays = next;
+                        this.save_state = "Saved";
+                        Self::flash(cx, |this| this.save_state = "");
+                    }
+                    Err(error) => this.settings_error = error.to_string().into(),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn add_relay(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let mut v = self.new_relay.read(cx).value().trim().to_string();
+        if v.is_empty() {
+            return;
+        }
+        if !v.starts_with("wss://") && !v.starts_with("ws://") {
+            v = format!("wss://{v}");
+        }
+        if !self.relays.contains(&v) {
+            let mut next = self.relays.clone();
+            next.push(v);
+            self.save_relays(next, cx);
+        }
+        self.new_relay
+            .update(cx, |s, cx| s.set_value("", window, cx));
+    }
+
+    fn toggle_relay(&mut self, url: &str, on: bool, cx: &mut Context<Self>) {
+        let mut next: Vec<String> = self.relays.iter().filter(|r| *r != url).cloned().collect();
+        if on {
+            next.push(url.to_string());
+        }
+        self.save_relays(next, cx);
+    }
+
+    // ------------------------------------------------------------- desktop check
+
+    /// Compare the vault fingerprint the daemon reports with this app's view
+    /// of it. In native mode both refer to the one daemon.
+    fn check_desktop(&mut self, cx: &mut Context<Self>) {
+        self.desk = Desk::Checking;
+        self.desk_detail = "Asking the desktop for its fingerprint…".into();
+        cx.notify();
+        let backend = Store::global(cx).read(cx).backend();
+        let remote = io::spawn(cx, backend.sync_digest());
+        let timeout = cx.background_executor().timer(DESK_TIMEOUT);
+        cx.spawn(async move |this, cx| {
+            let remote = futures::select! {
+                r = remote.fuse() => r,
+                _ = timeout.fuse() => Err(anyhow::anyhow!(
+                    "the desktop didn't answer within {} s - is Roostr running on it?",
+                    DESK_TIMEOUT.as_secs()
+                )),
+            };
+            let num = |m: &serde_json::Map<String, Json>, k: &str| m.get(k).and_then(Json::as_i64).unwrap_or(0);
+            let remote = match remote {
+                Ok(remote) => remote,
+                Err(error) => {
+                    let _ = this.update(cx, |this, cx| {
+                        this.desk = Desk::Offline;
+                        this.desk_detail = error.to_string().into();
+                        cx.notify();
+                    });
+                    return;
+                }
+            };
+            let (r_objects, r_changes) = (num(&remote, "objects"), num(&remote, "changes"));
+            let _ = this.update(cx, |this, cx| {
+                this.desk_detail = format!("Desktop has {r_changes} changes. Counting this device's…").into();
+                cx.notify();
+            });
+            let local = io::spawn_async(cx, backend.sync_digest()).await;
+            let _ = this.update(cx, |this, cx| {
+                match local {
+                    Ok(local) => {
+                        let digest = |m: &serde_json::Map<String, Json>| m.get("digest").and_then(Json::as_str).unwrap_or("").to_string();
+                        let (l_objects, l_changes) = (num(&local, "objects"), num(&local, "changes"));
+                        if digest(&local) == digest(&remote) {
+                            this.desk = Desk::Match;
+                            this.desk_detail = format!("identical — {r_objects} objects, {r_changes} changes").into();
+                        } else {
+                            this.desk = Desk::Differ;
+                            let who = if l_changes < r_changes {
+                                "this device is behind"
+                            } else if l_changes > r_changes {
+                                "the desktop is behind"
+                            } else {
+                                "same size, different content"
+                            };
+                            this.desk_detail = format!(
+                                "desktop {r_objects}/{r_changes} · here {l_objects}/{l_changes} (objects/changes) — {who}"
+                            )
+                            .into();
+                        }
+                    }
+                    Err(error) => {
+                        this.desk = Desk::Offline;
+                        this.desk_detail = error.to_string().into();
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    // ------------------------------------------------------------- dictionary / export
+
+    fn unignore(&mut self, word: &str, cx: &mut Context<Self>) {
+        let word = word.to_lowercase();
+        let mut words: Vec<String> = UiState::get(cx, IGNORE_KEY).unwrap_or_default();
+        words.retain(|w| *w != word);
+        UiState::set(cx, IGNORE_KEY, &words);
+        self.ignored = Self::read_ignored(cx);
+        cx.notify();
+    }
+
+    fn run_export(&mut self, cx: &mut Context<Self>) {
+        self.exporting = true;
+        self.export_note = SharedString::default();
+        cx.notify();
+        let backend = Store::global(cx).read(cx).backend();
+        let format = self.export_format;
+        let (tx, mut rx) = futures::channel::mpsc::unbounded::<(usize, usize)>();
+        let task = io::spawn(
+            cx,
+            export_all(backend, format, move |done, total| {
+                let _ = tx.unbounded_send((done, total));
+            }),
+        );
+        cx.spawn(async move |this, cx| {
+            use futures::StreamExt as _;
+            let mut task = task.fuse();
+            let result = loop {
+                futures::select! {
+                    progress = rx.next() => if let Some((done, total)) = progress {
+                        let _ = this.update(cx, |this, cx| {
+                            this.export_note = format!("Preparing {done}/{total}…").into();
+                            cx.notify();
+                        });
+                    },
+                    result = task => break result,
+                }
+            };
+            let _ = this.update(cx, |this, cx| {
+                this.export_note = match result {
+                    Ok(n) => format!("Exported {n} objects.").into(),
+                    Err(error) => error.to_string().into(),
+                };
+                this.exporting = false;
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    // ------------------------------------------------------------- Claude plan
+
+    fn plan_call(
+        &mut self,
+        path: &'static str,
+        body: Option<Json>,
+        cx: &mut Context<Self>,
+    ) -> Task<()> {
+        self.plan_error = SharedString::default();
+        let task: Task<anyhow::Result<PlanStatus>> = match body {
+            Some(body) => local::post(path, body, cx),
+            None => local::get(path, cx),
+        };
+        cx.spawn(async move |this, cx| {
+            let result = task
+                .await
+                .map_err(|e| with_status(e, |s| format!("Claude plan: {s}")));
+            let _ = this.update(cx, |this, cx| {
+                match result {
+                    Ok(plan) => {
+                        if this.plan_server.is_empty() {
+                            this.plan_server = if plan.served_by.is_empty() {
+                                plan.this_computer.clone()
+                            } else {
+                                plan.served_by.clone()
+                            };
+                        }
+                        // Signing in: follow it until the window finishes (or stops and the paste box takes over).
+                        this.plan_poll = plan.signing_in.then(|| {
+                            cx.spawn(async move |this, cx| {
+                                cx.background_executor().timer(PLAN_POLL).await;
+                                let Ok(task) = this.update(cx, |this, cx| {
+                                    this.plan_call("/claude-plan", None, cx)
+                                }) else {
+                                    return;
+                                };
+                                task.await;
+                            })
+                        });
+                        this.plan = Some(plan);
+                    }
+                    Err(error) => this.plan_error = error.to_string().into(),
+                }
+                cx.notify();
+            });
+        })
+    }
+
+    fn load_plan(&mut self, cx: &mut Context<Self>) {
+        if !Self::paired(cx) {
+            self.plan = None;
+            return;
+        }
+        let call = self.plan_call("/claude-plan", None, cx);
+        cx.spawn(async move |this, cx| {
+            call.await;
+            let Ok(machines) = this.update(cx, |_, cx| fetch_machines(cx)) else {
+                return;
+            };
+            let machines = machines.await.map(|(_, m)| m).unwrap_or_default();
+            let _ = this.update(cx, |this, cx| {
+                this.plan_machines = machines;
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn plan_action(
+        &mut self,
+        path: &'static str,
+        body: Option<Json>,
+        cx: &mut Context<Self>,
+    ) -> Task<()> {
+        self.plan_busy = true;
+        cx.notify();
+        let call = self.plan_call(path, body, cx);
+        cx.spawn(async move |this, cx| {
+            call.await;
+            let _ = this.update(cx, |this, cx| {
+                this.plan_busy = false;
+                cx.notify();
+            });
+        })
+    }
+
+    fn submit_plan_code(
+        &mut self,
+        state: Entity<InputState>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let code = state.read(cx).value().trim().to_string();
+        if code.is_empty() {
+            return;
+        }
+        let action = self.plan_action("/claude-plan/code", Some(json!({ "code": code })), cx);
+        cx.spawn_in(window, async move |_, cx| {
+            action.await;
+            let _ = cx.update(|window, cx| state.update(cx, |s, cx| s.set_value("", window, cx)));
+        })
+        .detach();
+    }
+
+    fn plan_computer(&self, id: &str) -> String {
+        if id.is_empty() {
+            "this computer".into()
+        } else {
+            machine_name(&self.plan_machines, id)
+        }
+    }
+
+    // ------------------------------------------------------------- agent keys
+
+    fn load_agent_auth(&mut self, cx: &mut Context<Self>) {
+        self.login_error = SharedString::default();
+        if !Self::paired(cx) {
+            self.agent_auth = Some(None);
+            return;
+        }
+        let task: Task<anyhow::Result<AgentAuth>> = local::get("/auth/status", cx);
+        cx.spawn(async move |this, cx| {
+            let result = task
+                .await
+                .map_err(|e| with_status(e, |s| format!("Agent credentials: {s}")));
+            let _ = this.update(cx, |this, cx| {
+                match result {
+                    Ok(auth) => this.agent_auth = Some(Some(auth)),
+                    Err(error) => {
+                        this.agent_auth = Some(None);
+                        this.login_error = error.to_string().into();
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn save_agent_key(
+        &mut self,
+        provider: &'static str,
+        key: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.login_error = SharedString::default();
+        let key = key.trim().to_string();
+        let task: Task<anyhow::Result<Json>> =
+            local::post("/auth/key", json!({ "provider": provider, "key": key }), cx);
+        let draft = self.kimi_draft.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            let result = task
+                .await
+                .map_err(|e| with_status(e, |s| format!("Credential update failed: {s}")));
+            let _ = this.update_in(cx, |this, window, cx| {
+                match result {
+                    Ok(_) => {
+                        draft.update(cx, |s, cx| s.set_value("", window, cx));
+                        this.load_agent_auth(cx);
+                        this.agent_saved = if key.is_empty() { "Cleared" } else { "Saved" };
+                        Self::flash(cx, |this| this.agent_saved = "");
+                    }
+                    Err(error) => this.login_error = error.to_string().into(),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn set_menu(&mut self, menu: Menu, open: bool, cx: &mut Context<Self>) {
+        self.open_menu = if open {
+            Some(menu)
+        } else {
+            self.open_menu.filter(|m| *m != menu)
+        };
+        cx.notify();
+    }
+}
+
+impl Focusable for Settings {
+    fn focus_handle(&self, _: &App) -> FocusHandle {
+        self.focus.clone()
+    }
+}
+
+// ----------------------------------------------------------------- render
+
+fn section(title: impl Into<SharedString>) -> Div {
+    div()
+        .mt(px(14.))
+        .px(px(16.))
+        .pt(px(14.))
+        .pb(px(16.))
+        .rounded(px(10.))
+        .bg(theme::panel())
+        .border_1()
+        .border_color(theme::border())
+        .child(h3(title).mb(px(6.)))
+}
+
+/// `.hint` with its bottom margin (10px).
+fn p(text: impl Into<SharedString>) -> Div {
+    hint(text).mb(px(10.))
+}
+
+/// `.hint.error`: in the web stylesheet `.hint` comes after `.error`, so
+/// these messages draw muted like any hint.
+fn error_p(text: impl Into<SharedString>) -> Div {
+    p(text)
+}
+
+fn modal_field() -> FieldStyle {
+    FieldStyle::modal()
+}
+
+impl Render for Settings {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let paired = Self::paired(cx);
+        let narrow = roostr_core::layout::is_mobile(window);
+        let this = cx.entity();
+
+        let header = div()
+            .relative()
+            .flex()
+            .justify_between()
+            .items_center()
+            .mb(px(8.))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .text_size(px(17.))
+                    .line_height(px(21.))
+                    .font_weight(FontWeight::BOLD)
+                    .child(div().text_size(px(15.)).child("⚙️"))
+                    .child("Settings"),
+            )
+            .when(!narrow, |d| {
+                d.child(Btn::x("close-settings").on_click(|_, window, cx| window.close_dialog(cx)))
+            })
+            .when(narrow, |d| d.child(self.sheet_grip(cx)));
+
+        // ── Profile
+        let avatar = match (&self.profile_image, self.profile_picture.is_empty()) {
+            (Some(image), _) => img(image.clone())
+                .size(px(56.))
+                .rounded_full()
+                .flex_none()
+                .into_any_element(),
+            (None, false) => img(SharedString::from(self.profile_picture.clone()))
+                .size(px(56.))
+                .rounded_full()
+                .flex_none()
+                .into_any_element(),
+            (None, true) => div()
+                .size(px(56.))
+                .flex_none()
+                .rounded_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(theme::hover())
+                .border_1()
+                .border_color(theme::border())
+                .text_size(px(22.))
+                .child("⚙")
+                .into_any_element(),
+        };
+        let has_picture = !self.profile_picture.is_empty();
+        let profile = section("Profile")
+            .child(p(
+                "Your name and avatar (your Nostr profile), synced to every device holding this key. The avatar also shows on the Spaces screen.",
+            ))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(12.))
+                    .child(avatar)
+                    .child(field(&self.profile_name, modal_field(), window, cx).flex_1().min_w(px(120.)).max_w(px(220.)))
+                    .child(
+                        Btn::action("pick-avatar", if has_picture { "Change picture" } else { "Upload picture" })
+                            .disabled(self.avatar_busy)
+                            .on_click(cx.listener(|this, _, window, cx| this.pick_avatar(window, cx))),
+                    )
+                    .when(has_picture, |d| {
+                        d.child(
+                            Btn::small("remove-avatar", "Remove")
+                                .disabled(self.avatar_busy)
+                                .on_click(cx.listener(|this, _, _, cx| this.save_profile(nostr_profile::patch("picture", ""), false, cx))),
+                        )
+                    })
+                    .when(!self.avatar_state.is_empty(), |d| d.child(hint(self.avatar_state.clone()).min_w_0())),
+            );
+
+        // ── Chat colour
+        let draft = self.chat_color_draft.read(cx).value().to_string();
+        let not_default = normalize_hex(&draft).as_deref() != Some(DEFAULT_CHAT_COLOR);
+        let chat = section("Chat color")
+            .child(p(
+                "Your message bubbles and send button, on every device holding this key. Text on it switches to dark or white to stay readable.",
+            ))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(12.))
+                    .child(
+                        div()
+                            .flex_none()
+                            .w(px(40.))
+                            .h(px(32.))
+                            .p(px(2.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(px(6.))
+                            .bg(theme::panel())
+                            .border_1()
+                            .border_color(theme::border())
+                            .child(ColorPicker::new(&self.swatch).accessibility_label("Chat color picker")),
+                    )
+                    .child(field(&self.chat_color_draft, modal_field(), window, cx).flex_1().max_w(px(220.)))
+                    .when(not_default, |d| {
+                        d.child(Btn::small("reset-color", "Reset").on_click(cx.listener(|this, _, window, cx| {
+                            this.save_chat_color(DEFAULT_CHAT_COLOR.to_string(), window, cx)
+                        })))
+                    })
+                    .when(!self.chat_color_state.is_empty(), |d| d.child(hint(self.chat_color_state.clone()).min_w_0())),
+            );
+
+        // ── Nostr identity
+        let mut identity = section("Nostr identity").child(p(
+            "This key encrypts and signs everything you sync. Anyone holding it has your full identity — export it only to back it up or to log in on another device.",
+        ));
+        if !self.npub.is_empty() {
+            let npub = self.npub.clone();
+            identity = identity
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(8.))
+                        .mt(px(10.))
+                        .mb(px(4.))
+                        .text_size(px(12.))
+                        .font_weight(FontWeight::MEDIUM)
+                        .child("Public key")
+                        .child(
+                            div()
+                                .text_size(px(11.))
+                                .font_weight(FontWeight::NORMAL)
+                                .font_family(theme::fonts::MONO)
+                                .text_color(theme::muted())
+                                .child("npub"),
+                        )
+                        .child(
+                            div()
+                                .px(px(8.))
+                                .rounded_full()
+                                .border_1()
+                                .border_color(rgba(0x35b57f73))
+                                .text_color(rgb(0x35b57f))
+                                .text_size(px(10.))
+                                .line_height(px(16.))
+                                .child("SHAREABLE"),
+                        ),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(8.))
+                        .mb(px(6.))
+                        .child(
+                            div()
+                                .id("npub-code")
+                                .flex_1()
+                                .min_w_0()
+                                .overflow_x_scroll()
+                                .px(px(10.))
+                                .py(px(7.))
+                                .rounded(px(8.))
+                                .bg(theme::bg())
+                                .border_1()
+                                .border_color(theme::border())
+                                .font_family(theme::fonts::MONO)
+                                .text_size(px(11.))
+                                .whitespace_nowrap()
+                                .child(npub.clone()),
+                        )
+                        .child(
+                            Btn::small(
+                                "copy-npub",
+                                if self.copied == "npub" {
+                                    "Copied"
+                                } else {
+                                    "Copy"
+                                },
+                            )
+                            .on_click(cx.listener(
+                                move |this, _, _, cx| this.copy(npub.clone(), "npub", cx),
+                            )),
+                        ),
+                );
+        }
+        let replica = roostr_core::mode::current(cx) == roostr_core::mode::Mode::Replica;
+        if replica {
+            identity = self.render_reveal(identity, cx);
+        } else {
+            identity = identity.child(
+                div().text_size(px(12.)).line_height(px(18.)).mb(px(10.)).child(rich(
+                    &[
+                        Span::Plain("Back up the native private key only from the operator's terminal on this computer: "),
+                        Span::Code("./glon-odin key-export"),
+                        Span::Plain(
+                            " (run from the native installation directory). Keep the output secret; this app cannot request or reveal it.",
+                        ),
+                    ],
+                    theme::muted(),
+                    window,
+                )),
+            );
+        }
+        if !self.importing {
+            identity = identity
+                .child(
+                    div().mt(px(6.)).flex().child(
+                        Btn::action("import-key", "Sign in with existing key…").subtle().on_click(cx.listener(|this, _, window, cx| {
+                            this.importing = true;
+                            this.import_draft.focus_handle(cx).focus(window, cx);
+                            cx.notify();
+                        })),
+                    ),
+                )
+                .when(!replica, |d| {
+                    d.child(p(
+                        "Replaces this machine's daemon identity for every paired tab; the previous identity's shared-space authority is revoked.",
+                    ))
+                })
+                .child(
+                    div().mt(px(6.)).flex().child(
+                        Btn::action("logout", match (self.confirm_logout, replica, io::WEB) {
+                            (true, true, _) => "Erase local copy & sign out?",
+                            (false, true, _) => "Log out on this device",
+                            (true, false, false) => "Disconnect this app?",
+                            (false, false, false) => "Disconnect this app",
+                            (true, false, true) => "Disconnect this browser?",
+                            (false, false, true) => "Unpair this browser",
+                        })
+                            .subtle()
+                            .when(self.confirm_logout, Btn::armed)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                if !this.confirm_logout {
+                                    this.confirm_logout = true;
+                                    cx.notify();
+                                    return;
+                                }
+                                if replica {
+                                    this.log_out(cx);
+                                    return;
+                                }
+                                // Disconnecting the only client of a native app is quitting it;
+                                // a browser tab drops its pairing and returns to the pairing gate.
+                                #[cfg(target_family = "wasm")]
+                                roostr_core::web::unpair();
+                                #[cfg(not(target_family = "wasm"))]
+                                cx.quit();
+                            })),
+                    ),
+                )
+                .when(self.confirm_logout, |d| {
+                    d.child(p(match (replica, io::WEB) {
+                        (true, _) => "Removes this device's key and its local replica only after pending changes are published. Your encrypted history stays on your relays — log in with any nsec afterwards.",
+                        (false, true) => "Disconnects this browser only. The native key, local data, and running daemon are not erased.",
+                        (false, false) => "Disconnects this app only. The native key, local data, and running daemon are not erased.",
+                    }))
+                });
+        } else {
+            identity = identity
+                .child(div().text_size(px(12.)).line_height(px(18.)).mb(px(10.)).child(rich(
+                    &[
+                        Span::Bold("Replaces this device's identity."),
+                        Span::Plain(
+                            " Paste the nsec from your other device — after the sync daemon connects, your objects will backfill from the relays.",
+                        ),
+                    ],
+                    theme::muted(),
+                    window,
+                )))
+                .child(
+                    div()
+                        .flex()
+                        .gap(px(8.))
+                        .mt(px(6.))
+                        .child(field(&self.import_draft, modal_field(), window, cx).flex_1())
+                        .child(Btn::small("import-submit", "Import").on_click(cx.listener(|this, _, _, cx| {
+                            if !this.import_draft.read(cx).value().trim().is_empty() {
+                                this.import_key(cx);
+                            }
+                        })))
+                        .child(Btn::small("import-cancel", "Cancel").on_click(cx.listener(|this, _, window, cx| this.cancel_import(window, cx)))),
+                )
+                .when(!self.import_error.is_empty(), |d| d.child(error_p(self.import_error.clone()).mt(px(10.))));
+        }
+
+        // ── Relays
+        let mut relays = section(if self.save_state.is_empty() {
+            "Relays".to_string()
+        } else {
+            format!("Relays · {}", self.save_state)
+        })
+        .child(p(
+            "Where your encrypted changes sync. Your data stays local until relays are configured.",
+        ));
+        for (ix, (url, label, note)) in KNOWN_RELAYS.iter().enumerate() {
+            let on = self.relays.iter().any(|r| r == url);
+            let row_this = this.clone();
+            relays = relays.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(10.))
+                    .mb(px(6.))
+                    .px(px(10.))
+                    .py(px(6.))
+                    .rounded(px(8.))
+                    .bg(theme::bg())
+                    .border_1()
+                    .border_color(theme::border())
+                    .font_family(theme::fonts::MONO)
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .gap(px(1.))
+                            .child(div().text_size(px(13.)).line_height(px(16.)).child(*label))
+                            .child(
+                                div()
+                                    .text_size(px(11.))
+                                    .line_height(px(14.))
+                                    .text_color(theme::muted())
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .text_ellipsis()
+                                    .child(format!(
+                                        "{} · {note}",
+                                        url.trim_start_matches("wss://")
+                                    )),
+                            ),
+                    )
+                    .child(switch(("relay-switch", ix), on, move |on, _, cx| {
+                        row_this.update(cx, |this, cx| this.toggle_relay(url, on, cx))
+                    })),
+            );
+        }
+        for r in self
+            .relays
+            .iter()
+            .filter(|r| !KNOWN_RELAYS.iter().any(|(u, _, _)| u == *r))
+        {
+            let url = r.clone();
+            relays = relays.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .mb(px(6.))
+                    .px(px(10.))
+                    .py(px(6.))
+                    .rounded(px(8.))
+                    .bg(theme::bg())
+                    .border_1()
+                    .border_color(theme::border())
+                    .font_family(theme::fonts::MONO)
+                    .text_size(px(13.))
+                    .child(r.clone())
+                    .child(
+                        Btn::x(SharedString::from(format!("remove-relay-{r}"))).on_click(
+                            cx.listener(move |this, _, _, cx| {
+                                let next =
+                                    this.relays.iter().filter(|x| **x != url).cloned().collect();
+                                this.save_relays(next, cx);
+                            }),
+                        ),
+                    ),
+            );
+        }
+        if self.relays.is_empty() {
+            relays =
+                relays.child(hint("No relays enabled - nothing syncs until one is on.").my(px(4.)));
+        }
+        relays = relays.child(
+            div()
+                .flex()
+                .gap(px(8.))
+                .mt(px(8.))
+                .child(field(&self.new_relay, modal_field(), window, cx).flex_1())
+                .child(
+                    Btn::small("add-relay", "Add")
+                        .on_click(cx.listener(|this, _, window, cx| this.add_relay(window, cx))),
+                ),
+        );
+
+        // ── Where the vault lives
+        let vault = section("Where your vault lives")
+            .child(p(if replica {
+                if io::WEB {
+                    "In this browser: its own replica syncs end-to-end encrypted over your relays, no daemon needed. Roostr running on this computer can be paired instead."
+                } else {
+                    "On this device: its own replica syncs end-to-end encrypted over your relays, no daemon needed. The glon-odin daemon on this computer can serve the app instead."
+                }
+            } else if io::WEB {
+                "Paired with Roostr running on this computer. This browser can keep its own replica instead, synced over your relays without a daemon."
+            } else {
+                "Served by the glon-odin daemon on this computer. This app can keep its own replica instead, synced over your relays without a daemon."
+            }))
+            .child(
+                div().mt(px(6.)).flex().child(
+                    Btn::action(
+                        "switch-mode",
+                        match (replica, io::WEB) {
+                            (true, true) => "Pair with Roostr on this computer",
+                            (true, false) => "Use the daemon on this computer",
+                            (false, true) => "Use this browser's own replica",
+                            (false, false) => "Use this device's own replica",
+                        },
+                    )
+                    .subtle()
+                    .on_click(move |_, _, cx| {
+                        roostr_core::mode::switch(
+                            if replica {
+                                roostr_core::mode::Mode::Daemon
+                            } else {
+                                roostr_core::mode::Mode::Replica
+                            },
+                            cx,
+                        )
+                    }),
+                ),
+            );
+
+        // ── Desktop sync check
+        let checking = self.desk == Desk::Checking;
+        let desk_color = match self.desk {
+            Desk::Match => theme::green(),
+            Desk::Differ => theme::orange(),
+            _ => theme::muted(),
+        };
+        let desk = section("Desktop sync check")
+            .child(p(
+                "Compare the active vault fingerprint with the explicitly paired local daemon. Equal digests mean identical change sets; in native mode both refer to that daemon.",
+            ))
+            .child(
+                div().flex().mt(px(8.)).child(
+                    Btn::small("compare", if checking { "Checking…" } else { "Compare" })
+                        .when(checking, |b| b.leading(spinner(theme::fg())))
+                        .disabled(!paired || checking)
+                        .on_click(cx.listener(|this, _, _, cx| this.check_desktop(cx))),
+                ),
+            )
+            .when(!paired, |d| {
+                d.child(p("Pair with a desktop under This machine first - until then there is nothing to compare with.").mt(px(8.)))
+            })
+            .when(paired && self.desk != Desk::Idle, |d| d.child(p(self.desk_detail.clone()).mt(px(8.)).text_color(desk_color)));
+
+        // ── Dictionary
+        let mut dictionary =
+            section("Dictionary").child(p("Words you added to the dictionary from the editor's spellcheck. Remove one to flag it again."));
+        if self.ignored.is_empty() {
+            dictionary =
+                dictionary.child(hint("Nothing added yet — right-click a flagged word and choose \"Add to dictionary\".").my(px(4.)));
+        } else {
+            dictionary = dictionary.child(div().flex().flex_wrap().gap(px(6.)).children(
+                self.ignored.iter().map(|w| {
+                    let word = w.clone();
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(2.))
+                        .pl(px(12.))
+                        .pr(px(4.))
+                        .py(px(2.))
+                        .rounded_full()
+                        .bg(theme::bg())
+                        .border_1()
+                        .border_color(theme::border())
+                        .font_family(theme::fonts::MONO)
+                        .text_size(px(13.))
+                        .child(w.clone())
+                        .child(
+                            Btn::x(SharedString::from(format!("unignore-{w}")))
+                                .tooltip("Remove")
+                                .on_click(
+                                    cx.listener(move |this, _, _, cx| this.unignore(&word, cx)),
+                                ),
+                        )
+                }),
+            ));
+        }
+
+        // ── Export
+        let formats = vec![
+            (
+                "markdown".to_string(),
+                SharedString::from(ExportFormat::Markdown.label()),
+            ),
+            (
+                "json".to_string(),
+                SharedString::from(ExportFormat::Json.label()),
+            ),
+        ];
+        let selected_format = if self.export_format == ExportFormat::Markdown {
+            "markdown"
+        } else {
+            "json"
+        };
+        let export = section("Export")
+            .child(p(
+                "Download everything as a zip — one file per object, grouped by type. Markdown for reading and portability; JSON for a complete structural backup (fields, blocks, provenance).",
+            ))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(10.))
+                    .child(
+                        Select::new("export-format", formats, selected_format, self.open_menu == Some(Menu::Export))
+                            .on_open({
+                                let this = this.clone();
+                                move |open, _, cx| this.update(cx, |this, cx| this.set_menu(Menu::Export, open, cx))
+                            })
+                            .on_pick({
+                                let this = this.clone();
+                                move |value, _, cx| {
+                                    this.update(cx, |this, cx| {
+                                        this.export_format = if value == "json" { ExportFormat::Json } else { ExportFormat::Markdown };
+                                        cx.notify();
+                                    })
+                                }
+                            }),
+                    )
+                    .child(
+                        Btn::action("export", if self.exporting { "Exporting…" } else { "Export everything" })
+                            .disabled(self.exporting)
+                            .on_click(cx.listener(|this, _, _, cx| this.run_export(cx))),
+                    )
+                    .when(!self.export_note.is_empty(), |d| d.child(hint(self.export_note.clone()))),
+            );
+
+        // ── Claude plan
+        let mut plan_section = section("Claude plan");
+        if !paired {
+            plan_section = plan_section.child(p("Pair with a computer under This machine first: the Claude sign-in opens in Chrome there."));
+        } else if let Some(plan) = self.plan.clone() {
+            plan_section = plan_section.child(p(
+                "Your Claude plan, on the Anthropic credential of every space you own. Agents use the plan while it works and the credential's API key otherwise.",
+            ));
+            let mut row = div()
+                .flex()
+                .flex_wrap()
+                .items_center()
+                .gap(px(10.))
+                .my(px(6.));
+            if !plan.account.is_empty() {
+                row = row.child(div().text_size(px(13.)).child(rich(
+                    &[Span::Plain("Signed in as "), Span::Bold(&plan.account)],
+                    theme::fg(),
+                    window,
+                )));
+            }
+            if plan.signing_in {
+                row = row.child(
+                    div().flex().items_start().text_size(px(12.)).line_height(px(18.)).text_color(theme::muted()).child(spinner(theme::muted())).child(
+                        format!(
+                            "Sign in to Claude in the browser that opened on {} and press Authorize. If claude.ai shows a code instead, paste it below.",
+                            self.plan_computer(&plan.this_computer)
+                        ),
+                    ),
+                );
+            } else {
+                row = row.child(
+                    Btn::action(
+                        "plan-sign-in",
+                        if plan.account.is_empty() {
+                            "Sign in with Claude"
+                        } else {
+                            "Sign in again"
+                        },
+                    )
+                    .disabled(self.plan_busy)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        let server = this.plan_server.clone();
+                        this.plan_action(
+                            "/claude-plan/start",
+                            Some(json!({ "servedBy": server })),
+                            cx,
+                        )
+                        .detach();
+                    })),
+                );
+                if !plan.account.is_empty() {
+                    row = row.child(
+                        Btn::small("plan-sign-out", "Sign out")
+                            .subtle()
+                            .disabled(self.plan_busy)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.plan_action("/claude-plan/signout", None, cx).detach()
+                            })),
+                    );
+                }
+            }
+            plan_section = plan_section.child(row);
+            let machines: Vec<(String, SharedString)> = self
+                .plan_machines
+                .iter()
+                .map(|m| {
+                    let this_one = if m.machine_id == plan.this_computer {
+                        " (this computer)"
+                    } else {
+                        ""
+                    };
+                    (m.machine_id.clone(), format!("{}{this_one}", m.name).into())
+                })
+                .collect();
+            let has_account = !plan.account.is_empty();
+            plan_section = plan_section.child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap(px(8.))
+                    .my(px(6.))
+                    .text_size(px(13.))
+                    .child("Kept fresh by")
+                    .child(
+                        Select::new(
+                            "plan-server",
+                            machines,
+                            self.plan_server.clone(),
+                            self.open_menu == Some(Menu::PlanServer),
+                        )
+                        .on_open({
+                            let this = this.clone();
+                            move |open, _, cx| {
+                                this.update(cx, |this, cx| {
+                                    this.set_menu(Menu::PlanServer, open, cx)
+                                })
+                            }
+                        })
+                        .on_pick({
+                            let this = this.clone();
+                            move |machine, _, cx| {
+                                let machine = machine.to_string();
+                                this.update(cx, |this, cx| {
+                                    this.plan_server = machine.clone();
+                                    if has_account {
+                                        this.plan_action(
+                                            "/claude-plan/serve",
+                                            Some(json!({ "machine": machine })),
+                                            cx,
+                                        )
+                                        .detach();
+                                    }
+                                    cx.notify();
+                                })
+                            }
+                        }),
+                    )
+                    .child(hint(
+                        "One always-on computer renews the plan for every space.",
+                    )),
+            );
+            if !plan.sign_in_error.is_empty() {
+                plan_section = plan_section.child(error_p(plan.sign_in_error.clone()));
+            }
+            if plan.signing_in || !plan.sign_in_error.is_empty() {
+                // claude.ai shows a code when it can't hand it back by itself: it goes here.
+                let code = self.plan_code.clone();
+                plan_section = plan_section.child(
+                    div()
+                        .flex()
+                        .gap(px(8.))
+                        .mt(px(8.))
+                        .child(field(&self.plan_code, modal_field(), window, cx).flex_1())
+                        .child(
+                            Btn::small("plan-finish", "Finish")
+                                .subtle()
+                                .disabled(self.plan_busy)
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.submit_plan_code(code.clone(), window, cx)
+                                })),
+                        ),
+                );
+            }
+            if has_account {
+                plan_section = plan_section.child(
+                    div()
+                        .mt(px(8.))
+                        .flex()
+                        .flex_col()
+                        .text_size(px(13.))
+                        .children(plan.spaces.iter().map(|sp| {
+                            let active = sp.status == "active";
+                            let mut state = if active {
+                                if sp.auth == "plan" {
+                                    "Plan".to_string()
+                                } else {
+                                    "API key".to_string()
+                                }
+                            } else {
+                                "Not working".to_string()
+                            };
+                            if !sp.error.is_empty() {
+                                state.push_str(&format!(" - {}", sp.error));
+                            }
+                            div()
+                                .id(SharedString::from(format!("plan-space-{}", sp.id)))
+                                .flex()
+                                .justify_between()
+                                .gap(px(12.))
+                                .py(px(3.))
+                                .border_b_1()
+                                .border_color(theme::border())
+                                .child(sp.name.clone())
+                                // `.hint.error` draws muted (see `error_p`).
+                                .child(hint(state))
+                        })),
+                );
+            }
+            if !self.plan_error.is_empty() {
+                plan_section = plan_section.child(error_p(self.plan_error.clone()));
+            }
+        } else {
+            plan_section = plan_section.child(p(if self.plan_error.is_empty() {
+                SharedString::from("Checking…")
+            } else {
+                self.plan_error.clone()
+            }));
+        }
+
+        // ── Agent
+        let mut agent = section(if self.agent_saved.is_empty() {
+            "Agent".to_string()
+        } else {
+            format!("Agent · {}", self.agent_saved)
+        });
+        match &self.agent_auth {
+            None => agent = agent.child(p("Checking agent daemon…")),
+            Some(None) => {
+                agent = agent.child(p(if paired {
+                    "The paired agent daemon is unavailable. Start the local harness to manage credentials."
+                } else {
+                    "Pair under This machine to manage agent credentials. Browser data and relay chat remain available without pairing."
+                }));
+                if paired {
+                    agent = agent.child(
+                        div().mt(px(6.)).flex().child(
+                            Btn::action("retry-agent", "Retry agent connection")
+                                .subtle()
+                                .on_click(cx.listener(|this, _, _, cx| this.load_agent_auth(cx))),
+                        ),
+                    );
+                }
+            }
+            Some(Some(auth)) => {
+                agent = agent.child(div().text_size(px(12.)).line_height(px(18.)).mb(px(10.)).child(rich(
+                    &[
+                        Span::Plain("Keys for this computer only ("),
+                        Span::Code("~/.glon/auth.json"),
+                        Span::Plain("), for agents that list no credential of their own. Claude for your spaces is under Claude plan above."),
+                    ],
+                    theme::muted(),
+                    window,
+                )));
+                let mut provider = div().flex().items_center().gap(px(10.)).py(px(6.)).child(
+                    div()
+                        .flex_none()
+                        .w(px(130.))
+                        .text_size(px(13.))
+                        .child("Kimi (Moonshot)"),
+                );
+                if auth.kimi.mode == "api_key" {
+                    provider = provider
+                        .child(
+                            div()
+                                .font_family(theme::fonts::MONO)
+                                .text_size(px(12.))
+                                .text_color(theme::muted())
+                                .child(format!(
+                                    "API key set ({})",
+                                    auth.kimi.masked.clone().unwrap_or_default()
+                                )),
+                        )
+                        .child(Btn::small("clear-kimi", "Clear").on_click(cx.listener(
+                            |this, _, window, cx| {
+                                this.save_agent_key("kimi", String::new(), window, cx)
+                            },
+                        )));
+                } else {
+                    provider = provider.child(
+                        div()
+                            .flex_1()
+                            .flex()
+                            .gap(px(8.))
+                            .child(field(&self.kimi_draft, modal_field(), window, cx).flex_1())
+                            .child(Btn::small("save-kimi", "Save").on_click(cx.listener(
+                                |this, _, window, cx| {
+                                    let key = this.kimi_draft.read(cx).value().to_string();
+                                    if !key.trim().is_empty() {
+                                        this.save_agent_key("kimi", key, window, cx);
+                                    }
+                                },
+                            ))),
+                    );
+                }
+                agent = agent.child(provider);
+            }
+        }
+        if !self.login_error.is_empty() {
+            agent = agent.child(error_p(self.login_error.clone()));
+        }
+
+        let content = vec![
+            header.into_any_element(),
+            div()
+                .when(!self.settings_error.is_empty(), |d| {
+                    d.child(error_p(self.settings_error.clone()))
+                })
+                .into_any_element(),
+            profile.into_any_element(),
+            chat.into_any_element(),
+            identity.into_any_element(),
+            relays.into_any_element(),
+            // The iOS app is replica-only: there is no daemon to switch to.
+            div()
+                .when(!cfg!(target_os = "ios"), |d| d.child(vault))
+                .into_any_element(),
+            desk.into_any_element(),
+            dictionary.into_any_element(),
+            export.into_any_element(),
+            plan_section.into_any_element(),
+            agent.into_any_element(),
+            div()
+                .mt(px(14.))
+                .mx(px(2.))
+                .text_size(px(11.))
+                .text_color(theme::muted())
+                .opacity(0.7)
+                .text_center()
+                .child(format!("Build {BUILD_STAMP}"))
+                .into_any_element(),
+        ];
+
+        if !narrow {
+            return div()
+                .id("settings")
+                .track_focus(&self.focus)
+                .key_context("Settings")
+                .w_full()
+                .max_h(roostr_core::layout::viewport(window).height * 0.8)
+                .overflow_y_scroll()
+                .track_scroll(&self.scroll)
+                .pt(px(18.))
+                .px(px(22.))
+                .pb(px(22.))
+                .text_color(theme::fg())
+                .text_size(px(13.))
+                .children(content)
+                .into_any_element();
+        }
+
+        // ≤720px: a bottom sheet - pinned to the bottom edge, full width,
+        // rounded top, a grabber bar and drag-to-close; the × hides (the
+        // sheet IS the affordance). `max-height: calc(100dvh - max(48px,
+        // env(safe-area-inset-top) + 32px))`, the inset being 0 inside the
+        // host's safe area.
+        let viewport = roostr_core::layout::viewport(window);
+        let sheet = div()
+            .id("settings")
+            .track_focus(&self.focus)
+            .key_context("Settings")
+            .relative()
+            .top(self.sheet_y)
+            .w_full()
+            .max_h(viewport.height - px(48.))
+            .flex()
+            .flex_col()
+            .bg(theme::panel())
+            .border_t_1()
+            .border_l_1()
+            .border_r_1()
+            .border_color(theme::border())
+            .rounded_t(px(18.))
+            .shadow(roostr_core::ui::modal_shadow())
+            .occlude()
+            .text_color(theme::fg())
+            .text_size(px(13.))
+            // `.grab-zone`: sticky - the grabber never scrolls away with the
+            // content, it IS the close affordance.
+            .child(
+                div()
+                    .relative()
+                    .flex_none()
+                    .flex()
+                    .justify_center()
+                    .pt(px(10.))
+                    .pb(px(6.))
+                    .child(
+                        div()
+                            .w(px(40.))
+                            .h(px(4.))
+                            .rounded(px(2.))
+                            .bg(theme::border()),
+                    )
+                    .child(self.sheet_grip(cx)),
+            )
+            .child(
+                div()
+                    .id("settings-scroll")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .track_scroll(&self.scroll)
+                    .px(px(22.))
+                    .pb(px(22.))
+                    .children(content),
+            );
+        let sheet = match self.sheet_spring {
+            // Springing back from a pull short of the threshold.
+            Some(from) => sheet
+                .with_animation(
+                    ElementId::NamedInteger("sheet-spring".into(), self.sheet_springs),
+                    Animation::new(Duration::from_millis(180))
+                        .with_easing(gpui_kit::base::animation::cubic_bezier(0.25, 0.1, 0.25, 1.)),
+                    move |sheet, delta| sheet.top(from * (1. - delta)),
+                )
+                .into_any_element(),
+            None => sheet.into_any_element(),
+        };
+        // The dialog lends its backdrop, focus and Escape; the sheet places
+        // itself against the window's bottom edge.
+        div()
+            .child(
+                deferred(
+                    anchored().position(point(px(0.), px(0.))).child(
+                        div()
+                            .w(viewport.width)
+                            .h(viewport.height)
+                            .flex()
+                            .flex_col()
+                            .justify_end()
+                            .child(sheet),
+                    ),
+                )
+                .with_priority(1),
+            )
+            .into_any_element()
+    }
+}
+
+impl Settings {
+    /// The grab zone and header's touch drag (`sheetStart`/`sheetMove`/
+    /// `sheetEnd`): pull the sheet down past 110px to close it, else it
+    /// springs back. Content scrolling is untouched - the drag starts only
+    /// here.
+    fn sheet_grip(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let this = cx.entity().downgrade();
+        canvas(
+            |bounds, window, _| window.insert_hitbox(bounds, HitboxBehavior::Normal),
+            move |_, hitbox, window, _| {
+                let this = this.clone();
+                window.on_mouse_event(move |ev: &TouchDragEvent, phase, window, cx| {
+                    if phase != DispatchPhase::Bubble {
+                        return;
+                    }
+                    let Some(this) = this.upgrade() else {
+                        return;
+                    };
+                    match ev.phase {
+                        TouchPhase::Started => {
+                            if hitbox.is_hovered(window) {
+                                window.prevent_default();
+                                this.update(cx, |s, cx| {
+                                    s.sheet_drag = Some(ev.start_position.y);
+                                    s.sheet_spring = None;
+                                    cx.notify();
+                                });
+                            }
+                        }
+                        TouchPhase::Moved => this.update(cx, |s, cx| {
+                            if let Some(start) = s.sheet_drag {
+                                s.sheet_y = (ev.position.y - start).max(px(0.));
+                                cx.notify();
+                            }
+                        }),
+                        TouchPhase::Ended | TouchPhase::Cancelled => {
+                            let close = this.update(cx, |s, cx| {
+                                if s.sheet_drag.take().is_none() {
+                                    return false;
+                                }
+                                if s.sheet_y > px(110.) {
+                                    return true;
+                                }
+                                if s.sheet_y > px(0.) {
+                                    s.sheet_spring = Some(s.sheet_y);
+                                    s.sheet_springs += 1;
+                                }
+                                s.sheet_y = px(0.);
+                                cx.notify();
+                                false
+                            });
+                            if close {
+                                window.close_dialog(cx);
+                            }
+                        }
+                    }
+                });
+            },
+        )
+        .absolute()
+        .inset_0()
+    }
+}
+
+/// Open Settings as a modal over the window (580px); at ≤720px, a bottom
+/// sheet (see the narrow branch of its render).
+pub fn open_settings(window: &mut Window, cx: &mut App) {
+    let settings = cx.new(|cx| Settings::new(window, cx));
+    window.open_dialog(cx, move |dialog, window, _| {
+        let dialog = dialog
+            .close_button(false)
+            // Enter in a field submits that field's form (web <form>), never the whole modal.
+            .on_ok(|_, _, _| false)
+            .p_0()
+            .gap_0()
+            .child(settings.clone());
+        if roostr_core::layout::is_mobile(window) {
+            // The sheet draws itself; the dialog's own surface stays empty.
+            dialog
+                .w(px(0.))
+                .min_h(px(0.))
+                .border_0()
+                .bg(transparent_black())
+        } else {
+            dialog
+                .w(px(580.))
+                .bg(theme::panel())
+                .border_color(theme::border())
+                .rounded(theme::radius::modal())
+                .shadow(roostr_core::ui::modal_shadow())
+        }
+    });
+}

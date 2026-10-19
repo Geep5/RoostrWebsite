@@ -1,0 +1,627 @@
+//! The history pass (sync.ts `backfill`/`walkHistory`, SyncEngine.swift
+//! `walkHistory`).
+//!
+//! Per relay and stream: NIP-77 against the held set, every needed id
+//! fetched with `REQ {ids}`; a relay that refuses NEG-OPEN is walked
+//! backwards page by page via `until` instead (paced against its own cost).
+//! Order (`docs/state-sync.md`): bases (31078) and their 1080 parts by
+//! `#c`; legacy 1079 checkpoints; then deltas. A stream holding no base
+//! reads its whole 1078 history (dual read); one holding bases reads the
+//! live deltas of the held current bases (`#b`), the vanish ledger, and a
+//! 1078 window bounded by ITS newest base's created_at minus one day -
+//! never another stream's floor.
+
+use std::collections::HashSet;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
+
+use parking_lot::Mutex;
+use roostr_nostr::negentropy::NegentropyStorage;
+use roostr_nostr::relay::NEG_TIMEOUT;
+use roostr_nostr::{Event, Filter, RelayError, kinds};
+use roostr_replica_store::HeldQuery;
+
+use super::{
+    BASE_HASH_BATCH, BASE_LOOKBACK_S, CHECKPOINT_FETCH_BATCH, FETCH_BATCH, Inner,
+    MIN_PAGE_SPACING_MS, PAGE_LIMIT, PAGE_SPACING_MS, PAGE_TIMEOUT, VANISH_LOG_ID, now_ms, short,
+};
+
+/// One relay stream filter, with the store scope of its held events.
+#[derive(Clone)]
+struct StreamFilter {
+    scope: String,
+    filter: Filter,
+}
+
+/// How one stream on one relay was covered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Outcome {
+    Complete,
+    Incomplete,
+    /// The relay does not reconcile this filter: walk it instead.
+    Unsupported,
+}
+
+/// What one history pass shares across its concurrent covers.
+struct Pass {
+    seen: Mutex<HashSet<String>>,
+    /// Ids claimed by some stream's fetch: fetched once per pass.
+    claimed: Mutex<HashSet<String>>,
+    complete: AtomicBool,
+    /// Some relay/filter fell back to the paged walk.
+    walked: AtomicBool,
+    covered_until: Mutex<Option<i64>>,
+    since: i64,
+}
+
+fn pace(started: i64) -> Duration {
+    let took = (now_ms() - started).max(0) as u64;
+    Duration::from_millis(PAGE_SPACING_MS.min(MIN_PAGE_SPACING_MS.max(took)))
+}
+
+impl Inner {
+    /// One history pass at a time; true only when EVERY relay covered
+    /// every stream. A reconcile always covers the whole stream;
+    /// `since`/`resume_until` only shape the fallback walk.
+    pub(super) async fn backfill(
+        self: &Arc<Self>,
+        since: i64,
+        resume_until: Option<i64>,
+    ) -> anyhow::Result<bool> {
+        let _guard = self.backfill_lock.lock().await;
+        self.state.lock().pass = Some((0, 0));
+        let result = self.walk_history(since, resume_until).await;
+        let result = match result {
+            Ok(complete) => {
+                if !self.stopped() {
+                    self.emit_live_status(); // the pass's final count, unthrottled
+                }
+                Ok(complete)
+            }
+            Err(error) => {
+                self.record_replay_fault(1).await;
+                let _ = self.persist_cursor().await;
+                Err(error)
+            }
+        };
+        self.state.lock().pass = None;
+        result
+    }
+
+    async fn walk_history(
+        self: &Arc<Self>,
+        since: i64,
+        resume_until: Option<i64>,
+    ) -> anyhow::Result<bool> {
+        self.state.lock().history_complete = false;
+        self.ensure_session().await?;
+        // A full-history walk persists its progress page by page; the floor
+        // only means something while bootstrapping.
+        let track_floor = since <= 1;
+        // An unresolved group may be missing fragments older than any
+        // observed part: repair scans need full history.
+        let (since, checkpoint) = {
+            let mut st = self.state.lock();
+            let base = if st.replay_groups.is_empty() {
+                since
+            } else {
+                0
+            };
+            let since = base.min(st.discarded_chunk_floor);
+            st.discarded_chunk_floor = st.discarded_chunk_floor.min(since);
+            (since, st.replay_fault_generation)
+        };
+        self.persist_cursor().await?;
+        let pass = Pass {
+            seen: Mutex::new(HashSet::new()),
+            claimed: Mutex::new(HashSet::new()),
+            complete: AtomicBool::new(!self.relays.is_empty()),
+            walked: AtomicBool::new(false),
+            covered_until: Mutex::new(resume_until),
+            since,
+        };
+
+        let pk = self.pk.clone();
+        let mut base_filters = vec![StreamFilter {
+            scope: String::new(),
+            filter: Filter::new().kinds([kinds::BASE]).authors([pk.clone()]),
+        }];
+        let mut checkpoint_filters = vec![StreamFilter {
+            scope: String::new(),
+            filter: Filter::new()
+                .kinds([kinds::CHECKPOINT])
+                .authors([pk.clone()]),
+        }];
+        let mut change_filters = vec![StreamFilter {
+            scope: String::new(),
+            filter: Filter::new().kinds([kinds::CHANGE]).authors([pk.clone()]),
+        }];
+        let tags: Vec<String> = self
+            .state
+            .lock()
+            .shared
+            .values()
+            .map(|sp| sp.tag.clone())
+            .collect();
+        for tag in tags {
+            base_filters.push(StreamFilter {
+                scope: tag.clone(),
+                filter: Filter::new().kinds([kinds::BASE]).tag('h', [tag.clone()]),
+            });
+            checkpoint_filters.push(StreamFilter {
+                scope: tag.clone(),
+                filter: Filter::new()
+                    .kinds([kinds::CHECKPOINT, kinds::DELETION])
+                    .tag('h', [tag.clone()]),
+            });
+            change_filters.push(StreamFilter {
+                scope: tag.clone(),
+                filter: Filter::new().kinds([kinds::CHANGE]).tag('h', [tag]),
+            });
+        }
+
+        // Bases first: every object renders from its base as soon as it lands.
+        self.cover(&pass, &base_filters, None, false).await?;
+        // A split base's 31078 names its parts' group: fetch what is missing.
+        let gids: Vec<String> = self.state.lock().open_base_groups.drain().collect();
+        if !gids.is_empty() {
+            let fetches = self.relays.iter().map(|relay| {
+                let gids = &gids;
+                let pass = &pass;
+                async move {
+                    for chunk in gids.chunks(CHECKPOINT_FETCH_BATCH) {
+                        if self.stopped() {
+                            pass.complete.store(false, Ordering::Relaxed);
+                            return Ok(());
+                        }
+                        let filter = Filter::new()
+                            .kinds([kinds::BASE_PART])
+                            .tag('c', chunk.iter().cloned());
+                        match self.query_page(relay, filter).await {
+                            Ok(page) => self.import_page(pass, page).await?,
+                            Err(error) => {
+                                pass.complete.store(false, Ordering::Relaxed);
+                                self.emit_backfill(Some(format!(
+                                    "{}: {}",
+                                    relay.url(),
+                                    short(error, 100)
+                                )));
+                                return Ok(());
+                            }
+                        }
+                    }
+                    anyhow::Ok(())
+                }
+            });
+            for result in futures::future::join_all(fetches).await {
+                result?;
+            }
+        }
+        self.cover(&pass, &checkpoint_filters, None, false).await?;
+        self.state.lock().checkpoints_loaded = true;
+        self.emit_live_status();
+
+        // Per stream, never global: one stream's newest base says nothing
+        // about another's unbased objects.
+        let newest = self.store.newest_base_by_stream().await?;
+        let floor_of = |scope: &str| {
+            newest
+                .get(scope)
+                .map(|at| (at / 1000 - BASE_LOOKBACK_S).max(1))
+        };
+        let bounded: Vec<&StreamFilter> = change_filters
+            .iter()
+            .filter(|sf| floor_of(&sf.scope).is_some())
+            .collect();
+        if !bounded.is_empty() {
+            // A bounded stream's live deltas of every held current base, and
+            // the vanish ledger's whole stream when the personal one is bounded.
+            let mut hashes: Vec<String> = self
+                .store
+                .current_bases()
+                .await?
+                .into_values()
+                .map(|base| base.hash)
+                .collect::<HashSet<_>>()
+                .into_iter()
+                .collect();
+            hashes.sort();
+            let mut delta_filters = Vec::new();
+            for chunk in hashes.chunks(BASE_HASH_BATCH) {
+                for sf in &bounded {
+                    delta_filters.push(StreamFilter {
+                        scope: sf.scope.clone(),
+                        filter: sf.filter.clone().tag('b', chunk.iter().cloned()),
+                    });
+                }
+            }
+            if floor_of("").is_some() {
+                let ledger = self
+                    .engine
+                    .blind_personal(&self.secret_hex, VANISH_LOG_ID)
+                    .await?;
+                delta_filters.push(StreamFilter {
+                    scope: String::new(),
+                    filter: Filter::new()
+                        .kinds([kinds::CHANGE])
+                        .authors([pk.clone()])
+                        .tag('h', [ledger]),
+                });
+            }
+            self.cover(&pass, &delta_filters, None, false).await?;
+        }
+        // Then each stream's 1078s: since its floor when it holds bases,
+        // else whole - a pre-migration vault syncs exactly as before.
+        let changes: Vec<StreamFilter> = change_filters
+            .iter()
+            .map(|sf| match floor_of(&sf.scope) {
+                None => sf.clone(),
+                Some(floor) => StreamFilter {
+                    scope: sf.scope.clone(),
+                    filter: sf.filter.clone().since(floor as u64),
+                },
+            })
+            .collect();
+        self.cover(&pass, &changes, resume_until, track_floor)
+            .await?;
+
+        // This device's unpublished writes whose object moved to a newer
+        // base meanwhile rebase now.
+        let owed: Vec<String> = self
+            .store
+            .pending_publishes()
+            .await?
+            .into_iter()
+            .map(|p| p.object_id)
+            .collect();
+        {
+            let _import = self.import_lock.lock().await;
+            self.rebase_orphans(owed).await?;
+        }
+        let covered = if pass.walked.load(Ordering::Relaxed) {
+            since
+        } else {
+            0
+        };
+        // Events mid-flight are not a fault: let them land, then judge.
+        self.drain_inflight().await;
+        let complete = pass.complete.load(Ordering::Relaxed);
+        // Every relay answered for every filter and nothing faulted: a
+        // checkpoint group still open is missing parts no relay holds, so the
+        // engine retires it (a change group stays until a covering repair).
+        let clean = {
+            let st = self.state.lock();
+            complete && !st.stopped && st.replay_fault_generation == checkpoint
+        };
+        if clean && self.session_open() {
+            let result = self
+                .engine
+                .retire(if covered <= 1 { 0 } else { covered })
+                .await?;
+            if let Some(groups) = result.replay_groups {
+                self.state.lock().replay_groups = groups.into_iter().collect();
+            }
+        }
+        let history_complete = {
+            let mut st = self.state.lock();
+            st.history_complete = complete
+                && !st.stopped
+                && st.replay_groups.is_empty()
+                && st.replay_fault_generation == checkpoint
+                && covered <= st.discarded_chunk_floor;
+            if st.history_complete {
+                st.discarded_chunk_floor = i64::MAX;
+            }
+            st.history_complete
+        };
+        if history_complete {
+            if track_floor {
+                self.store.set_bootstrap_floor(None).await?;
+            }
+        } else {
+            self.record_replay_fault(since).await;
+        }
+        self.persist_cursor().await?;
+        // Restore the obligation if a new group or fault appeared while the
+        // repaired cursor was committing.
+        self.drain_inflight().await;
+        let regressed = {
+            let st = self.state.lock();
+            !st.history_complete
+                || st.stopped
+                || !st.replay_groups.is_empty()
+                || st.replay_fault_generation != checkpoint
+        };
+        if history_complete && regressed {
+            self.record_replay_fault(since).await;
+            self.persist_cursor().await?;
+        }
+        let (stopped, complete, reachable) = {
+            let st = self.state.lock();
+            (st.stopped, st.history_complete, st.relay_reached)
+        };
+        if !stopped {
+            self.host.on_history_pass(complete, reachable);
+        }
+        Ok(complete)
+    }
+
+    /// Every relay × filter at once: reconcile, or walk where the relay
+    /// does not reconcile. Store failures propagate.
+    async fn cover(
+        self: &Arc<Self>,
+        pass: &Pass,
+        filters: &[StreamFilter],
+        resume: Option<i64>,
+        track: bool,
+    ) -> anyhow::Result<()> {
+        let jobs = self.relays.iter().enumerate().flat_map(|(index, relay)| {
+            filters.iter().map(move |sf| async move {
+                let unsupported = self
+                    .state
+                    .lock()
+                    .negentropy_unsupported
+                    .contains(relay.url());
+                if !unsupported {
+                    match self.reconcile_stream(index, pass, sf).await? {
+                        Outcome::Complete => return Ok(()),
+                        Outcome::Incomplete => {
+                            pass.complete.store(false, Ordering::Relaxed);
+                            return Ok(());
+                        }
+                        Outcome::Unsupported => {}
+                    }
+                }
+                pass.walked.store(true, Ordering::Relaxed);
+                self.walk(index, pass, &sf.filter, resume, track).await
+            })
+        });
+        for result in futures::future::join_all(jobs).await {
+            result?;
+        }
+        Ok(())
+    }
+
+    /// The paged walk of one filter on one relay, newest first via `until`.
+    async fn walk(
+        self: &Arc<Self>,
+        index: usize,
+        pass: &Pass,
+        filter: &Filter,
+        resume: Option<i64>,
+        track: bool,
+    ) -> anyhow::Result<()> {
+        let relay = &self.relays[index];
+        let mut until = resume;
+        loop {
+            if self.stopped() {
+                pass.complete.store(false, Ordering::Relaxed);
+                return Ok(());
+            }
+            // A relay that fails or stalls is this walk's problem; a STORE
+            // failure (below, outside this guard) propagates.
+            let started = now_ms();
+            let mut page_filter = filter.clone().limit(PAGE_LIMIT);
+            page_filter.since =
+                Some(pass.since.max(filter.since.unwrap_or(0) as i64).max(0) as u64);
+            page_filter.until = until.map(|u| u.max(0) as u64);
+            let page = match self.query_page(relay, page_filter).await {
+                Ok(page) => page,
+                Err(error) => {
+                    pass.complete.store(false, Ordering::Relaxed);
+                    self.emit_backfill(Some(format!("{}: {}", relay.url(), short(error, 100))));
+                    return Ok(());
+                }
+            };
+            let len = page.len() as u64;
+            let oldest = page.iter().map(|e| e.created_at as i64).min();
+            self.import_page(pass, page).await?;
+            self.emit_progress();
+            if len < PAGE_LIMIT {
+                return Ok(());
+            }
+            let oldest = oldest.unwrap_or(0);
+            if until.is_some_and(|u| oldest >= u) {
+                pass.complete.store(false, Ordering::Relaxed);
+                self.emit_backfill(Some(format!(
+                    "{}: saturated same-timestamp history page",
+                    relay.url()
+                )));
+                return Ok(());
+            }
+            until = Some(oldest);
+            // Coverage is only as deep as the slowest concurrent walker.
+            if track {
+                let floor = {
+                    let mut covered = pass.covered_until.lock();
+                    let next = covered.map_or(oldest, |c| c.min(oldest));
+                    *covered = Some(next);
+                    next
+                };
+                self.store.set_bootstrap_floor(Some(floor)).await?;
+            }
+            roostr_nostr::sleep(super::history::pace(started)).await;
+        }
+    }
+
+    /// `REQ` until a real EOSE: a timeout or CLOSED is an error, never a
+    /// short page.
+    pub(super) async fn query_page(
+        &self,
+        relay: &roostr_nostr::Relay,
+        filter: Filter,
+    ) -> Result<Vec<Event>, RelayError> {
+        let result = relay.query(vec![filter], PAGE_TIMEOUT).await;
+        if result.is_ok() {
+            self.state.lock().relay_reached = true;
+        }
+        result
+    }
+
+    /// Ingest a page (oldest first, checkpoints and bases ahead of changes
+    /// within one second) and import what completed.
+    async fn import_page(
+        self: &Arc<Self>,
+        pass: &Pass,
+        mut page: Vec<Event>,
+    ) -> anyhow::Result<()> {
+        page.sort_by(|a, b| {
+            a.created_at
+                .cmp(&b.created_at)
+                .then(b.kind.cmp(&a.kind))
+                .then(a.id.cmp(&b.id))
+        });
+        let mut batch = Vec::new();
+        for event in page {
+            if !pass.seen.lock().insert(event.id.clone()) {
+                continue;
+            }
+            if let Some(item) = self.ingest_event(&event).await? {
+                batch.push(item);
+            }
+        }
+        if !batch.is_empty() {
+            self.import_batch(batch, true).await?;
+        }
+        Ok(())
+    }
+
+    /// NIP-77 cover of one stream filter on one relay: reconcile the held
+    /// set, then fetch every needed id. `claimed` is shared by every stream
+    /// of one pass: an event in two streams is fetched once.
+    async fn reconcile_stream(
+        self: &Arc<Self>,
+        index: usize,
+        pass: &Pass,
+        sf: &StreamFilter,
+    ) -> anyhow::Result<Outcome> {
+        let relay = &self.relays[index];
+        let held = self
+            .store
+            .held_events(
+                sf.scope.clone(),
+                HeldQuery {
+                    kinds: sf.filter.kinds.clone().unwrap_or_default(),
+                    since: sf.filter.since.map(|s| s as i64),
+                    until: None,
+                    b: sf.filter.tags.get(&'b').cloned(),
+                },
+            )
+            .await?;
+        let need = {
+            // One negotiation at a time per relay (relays cap NEG sessions).
+            let _negotiating = self.negotiations[index].lock().await;
+            if self
+                .state
+                .lock()
+                .negentropy_unsupported
+                .contains(relay.url())
+            {
+                return Ok(Outcome::Unsupported);
+            }
+            let storage = match NegentropyStorage::from_hex(
+                held.iter()
+                    .map(|h| (h.created_at.max(0) as u64, h.id.as_str())),
+            ) {
+                Ok(storage) => storage,
+                Err(error) => {
+                    self.emit_backfill(Some(format!("held set: {error}")));
+                    return Ok(Outcome::Incomplete);
+                }
+            };
+            match relay.reconcile(&sf.filter, storage, NEG_TIMEOUT).await {
+                Ok(reconciled) => {
+                    self.state.lock().relay_reached = true;
+                    reconciled.need
+                }
+                Err(error) => {
+                    if !matches!(error.error, RelayError::Transport(_)) {
+                        self.state.lock().relay_reached = true;
+                    }
+                    if error.relay_refused() {
+                        // Don't ask this relay again this session.
+                        self.state
+                            .lock()
+                            .negentropy_unsupported
+                            .insert(relay.url().to_string());
+                        return Ok(Outcome::Unsupported);
+                    }
+                    if !error.answered {
+                        // No socket, or failed before any answer: walk this filter.
+                        return Ok(Outcome::Unsupported);
+                    }
+                    self.emit_backfill(Some(format!("{}: {}", relay.url(), short(&error, 100))));
+                    return Ok(Outcome::Incomplete);
+                }
+            }
+        };
+        let need: Vec<String> = {
+            let mut claimed = pass.claimed.lock();
+            need.into_iter()
+                .filter(|id| claimed.insert(id.clone()))
+                .collect()
+        };
+        if let Some((_, expected)) = self.state.lock().pass.as_mut() {
+            *expected += need.len() as u64;
+        }
+        let kinds = sf.filter.kinds.as_deref().unwrap_or_default();
+        let batch = if kinds.contains(&kinds::CHECKPOINT) || kinds.contains(&kinds::BASE) {
+            CHECKPOINT_FETCH_BATCH
+        } else {
+            FETCH_BATCH
+        };
+        let mut missing = 0usize;
+        let chunks: Vec<&[String]> = need.chunks(batch).collect();
+        for (i, ids) in chunks.iter().enumerate() {
+            if self.stopped() {
+                return Ok(Outcome::Incomplete);
+            }
+            let started = now_ms();
+            let filter = Filter::new()
+                .ids(ids.iter().cloned())
+                .limit(ids.len() as u64);
+            let page = match self.query_page(relay, filter).await {
+                Ok(page) => page,
+                Err(error) => {
+                    self.emit_backfill(Some(format!("{}: {}", relay.url(), short(error, 100))));
+                    return Ok(Outcome::Incomplete);
+                }
+            };
+            let mut wanted: HashSet<&str> = ids.iter().map(String::as_str).collect();
+            let page: Vec<Event> = page
+                .into_iter()
+                .filter(|e| wanted.remove(e.id.as_str()))
+                .collect();
+            // A needed id the relay doesn't return is asked again next run.
+            missing += wanted.len();
+            self.import_page(pass, page).await?;
+            self.emit_progress();
+            if i + 1 < chunks.len() {
+                roostr_nostr::sleep(pace(started)).await;
+            }
+        }
+        if missing > 0 {
+            self.emit_backfill(Some(format!(
+                "{}: {missing} reconciled events not returned",
+                relay.url()
+            )));
+            return Ok(Outcome::Incomplete);
+        }
+        Ok(Outcome::Complete)
+    }
+
+    /// Settle every live event and import in flight; new arrivals extend
+    /// the wait, they never fault.
+    pub(super) async fn drain_inflight(&self) {
+        loop {
+            {
+                let st = self.state.lock();
+                if st.stopped || (st.active_live_events == 0 && st.active_imports == 0) {
+                    return;
+                }
+            }
+            roostr_nostr::sleep(Duration::from_millis(20)).await;
+        }
+    }
+}

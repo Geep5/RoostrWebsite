@@ -1,0 +1,28 @@
+[package]
+name = "roostr-settings"
+description = "Settings, space management, install-computer card, identity gates"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+roostr-core.workspace = true
+gpui-kit.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+log.workspace = true
+chrono.workspace = true
+futures.workspace = true
+base64 = "0.22"
+getrandom = "0.3"
+image = { version = "0.25", default-features = false, features = ["bmp", "gif", "jpeg", "png", "tiff", "webp"] }
+
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+dirs.workspace = true
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+getrandom = { version = "0.3", features = ["wasm_js"] }
+
+[build-dependencies]
+chrono.workspace = true

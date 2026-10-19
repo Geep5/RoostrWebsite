@@ -1,0 +1,29 @@
+[package]
+name = "roostr-app"
+description = "The Roostr app shared by the desktop binary and the browser build: feature init, the page per route, the object page"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+roostr-core.workspace = true
+roostr-properties.workspace = true
+roostr-editor.workspace = true
+roostr-sets.workspace = true
+roostr-discussion.workspace = true
+roostr-graph.workspace = true
+roostr-settings.workspace = true
+roostr-site.workspace = true
+roostr-shell.workspace = true
+gpui-kit.workspace = true
+
+# The object page's tests drive it in GPUI's headless test windows: the GPUI
+# under gpui-kit, with its test platform (gpui-kit's own `test-support` also
+# names gpui-fast, whose macOS crate pins a conflicting `cocoa`).
+[target.'cfg(not(target_family = "wasm"))'.dev-dependencies]
+gpui = { package = "gpui-pre", version = "=0.3.9", features = ["test-support"] }
+anyhow.workspace = true
+futures.workspace = true
+parking_lot = "0.12"
+serde_json.workspace = true
+tempfile = "3"

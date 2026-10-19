@@ -1,6 +1,5 @@
-node_modules
-build
-.svelte-kit
 .git
 .DS_Store
 *.log
+gpui/target
+gpui/web-dist

@@ -1,0 +1,78 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+default-members = ["crates/roostr"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace.dependencies]
+roostr-core = { path = "crates/roostr-core" }
+roostr-properties = { path = "crates/roostr-properties" }
+roostr-editor = { path = "crates/roostr-editor" }
+roostr-sets = { path = "crates/roostr-sets" }
+roostr-discussion = { path = "crates/roostr-discussion" }
+roostr-graph = { path = "crates/roostr-graph" }
+roostr-settings = { path = "crates/roostr-settings" }
+roostr-site = { path = "crates/roostr-site" }
+roostr-shell = { path = "crates/roostr-shell" }
+roostr-app = { path = "crates/roostr-app" }
+roostr-nostr = { path = "crates/roostr-nostr" }
+roostr-engine = { path = "crates/roostr-engine" }
+roostr-replica-store = { path = "crates/roostr-replica-store" }
+roostr-replica = { path = "crates/roostr-replica" }
+gpui-kit = "0.7.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+ureq = { version = "3", default-features = false, features = ["json"] }
+dirs = "6"
+log = "0.4"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+futures = "0.3"
+rust-embed = "8"
+uuid = { version = "1", features = ["v4"] }
+base64 = "0.22"
+regex = "1"
+fancy-regex = "0.16"
+percent-encoding = "2"
+gpui-pre-reqwest-client = "0.3.9"
+web-time = "1"
+# Browser build (wasm32-unknown-unknown). wasm-bindgen must match the
+# `wasm-bindgen` CLI that scripts/build-web.sh runs (it reads Cargo.lock).
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+web-sys = "0.3"
+wasm-bindgen-test = "0.3"
+sha2 = "0.10"
+
+# Decoding the landing page's 60-frame WebP takes ~15 s unoptimized; a few
+# seconds of extra first build buys an instant hero in debug builds.
+[profile.dev.package.image-webp]
+opt-level = 3
+
+[profile.dev.package.zune-jpeg]
+opt-level = 3
+
+[profile.dev.package.png]
+opt-level = 3
+
+# The browser build (scripts/build-web.sh): one size-optimized, stripped
+# module - 28 MB (7.7 MB brotli) against 35 MB (8.7 MB) at opt-level 3. The
+# desktop keeps the plain release profile.
+[profile.web]
+inherits = "release"
+opt-level = "s"
+lto = "fat"
+codegen-units = 1
+strip = true
+
+# The iOS app's emoji fallback and color rasterization (iOS-only changes; see
+# vendor/gpui-pre-apple/Cargo.toml), and the browser's touch hover (see
+# vendor/gpui-pre-web/Cargo.toml).
+[patch.crates-io]
+gpui-pre-apple = { path = "vendor/gpui-pre-apple" }
+gpui-pre-web = { path = "vendor/gpui-pre-web" }

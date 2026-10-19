@@ -1,0 +1,20 @@
+[package]
+name = "roostr-properties"
+description = "Property values, panes, pickers, type/property pages, credentials and capabilities"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+roostr-core.workspace = true
+gpui-kit.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+log.workspace = true
+chrono.workspace = true
+regex.workspace = true
+uuid.workspace = true
+base64.workspace = true
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif"] }
+iana-time-zone = "0.1"

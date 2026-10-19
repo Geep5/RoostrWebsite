@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="none">
+  <defs>
+    <mask id="clock-mask">
+      <rect width="16" height="16" fill="white"/>
+      <path d="M8 4.2V8l2.6 1.6" stroke="black" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+    </mask>
+  </defs>
+  <circle cx="8" cy="8" r="8" fill="currentColor" mask="url(#clock-mask)"/>
+</svg>

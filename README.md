@@ -1,151 +1,94 @@
-# Roostr UI
+# Roostr
 
-The single Svelte UI for Roostr's browser-offline and native-daemon modes. The
-application routes live under `/app`; the root website and `/j` join flow share
-this build. The old `glonOdin/app` mirror has been retired.
+Roostr's app and website, in Rust on [GPUI](https://gpui-kit.com). One
+workspace (`gpui/`) builds the desktop app and, compiled to WebAssembly, all of
+roostr.space: the landing (`/`), the guide (`/guide`), the privacy policy
+(`/privacy`), the space join page (`/j#r2.<blob>`) and the workspace
+(`/app`, `/app/object/<id>`, `/app/graph`, `/app/chat/<id>`).
+
+| Path | What |
+|---|---|
+| `gpui/` | The Cargo workspace - crates, `scripts/build-web.sh`, and its own [README](gpui/README.md) (modes, crates, development) |
+| `static/` | The shared Odin engine (`engine.wasm` + `engine-core.json`), the files the site's pages link (`favicon.png`, `logo.png`, `manifest.json`, `robots.txt`), and fonts, images and spelling dictionaries the crates embed |
+| `Dockerfile`, `Caddyfile`, `fly.toml` | The roostr.space image: builds the web app, serves it with Caddy on Fly |
 
 ## Run
 
-```sh
-npm install
-npm run dev          # browser-owned identity, IndexedDB and Nostr synchronization
-npm run dev:local    # paired local Odin daemon; http://127.0.0.1:5190/app
-```
-
-Backend selection is explicit: `VITE_ROOSTR_BACKEND=local` selects the local
-adapter. Pairing a browser-mode page with a machine grants access to its harness
-controls; it does not replace the browser's identity or switch its vault.
-
-Files (pasted/dropped images, `/file`, File pages) live on Blossom, served by
-RoostrRelay on its own origin (the first configured relay whose NIP-11 lists
-`blossom`, else `https://roostr-relay.fly.dev`): each file is encrypted under a
-fresh key (AES-256-GCM, 4 MiB frames, `src/lib/blossom.ts`), uploaded with a
-kind-24242 authorization, and its File object records `blob_sha256`,
-`blob_key` and `blob_url`, so every host opens it - this tab, the iOS app
-(which signs the upload authorization over its `signEvent` bridge) and the
-computers. With a Roostr computer paired to this tab (and always in local
-mode) the harness adds the file instead, keeping it in its peer-to-peer store
-too. Files from before Blossom carry only `file_hash`: their bytes come from
-the harness on this computer, which the hosted app pairs with by proof of
-ownership - the tab signs a one-use, origin-bound harness challenge with the
-vault key it already holds, and only the computer whose identity is that key
-accepts (see glonOdin README, API).
-
-For local mode, start the daemon, independent sync service and agent harness
-from the sibling `glonOdin` repository - once, as a service that starts at
-boot and restarts crashed programs (`--web` runs this app's `npm run
-dev:local` too):
+The desktop app, against the glonOdin daemon or as its own replica:
 
 ```sh
-# glonOdin repository
-odin build src -o:speed -out:glon-odin
-cd harness && bun install
-bun run service install --web ../../RoostrWebsite
+cd gpui
+cargo run --release -p roostr                 # the workspace
+cargo run --release -p roostr -- --replica    # no daemon: this device's own replica
+cargo run --release -p roostr -- /guide       # any site path
 ```
 
-Pair with the one-use code `bun run pair` (in `glonOdin/harness`) prints to
-`bun run service logs`. Sessions are bound to the requesting Origin and expire
-after 24 hours or a daemon restart.
-Bearer tokens travel in request headers, including streamed SSE; they are not
-placed in URLs. Browser sessions cannot export the native private key. The
-operator-only `glon-odin key-export` command is for explicit private recovery.
+The browser build:
+
+```sh
+rustup target add wasm32-unknown-unknown
+gpui/scripts/build-web.sh     # → gpui/web-dist/
+```
+
+`web-dist/` is the whole site. Serve it at the root with every unknown path
+answered by `200.html` (`/guide` by `guide.html`, and so on) - the Caddyfile
+does exactly that, so the quickest local server is the production image:
+
+```sh
+docker build -t roostr-web .
+docker run --rm -p 8080:8080 roostr-web     # http://localhost:8080
+```
+
+By default a tab is its own replica: the engine, IndexedDB `roostr-replica`,
+and the identity in `localStorage` `roostr-key`. The website pages show on
+their own; "Open Roostr" starts the vault. A tab can pair with the daemon and
+harness on its own computer instead (see the gpui README, "Browser (roostr.space)").
 
 ## Shared Odin engine
 
-Browser protobuf/hash, replay, queries, ordinary mutation planning and the
-relay receive session (chunk reassembly, cursor high-water mark, replay-group
-bookkeeping via the `sync` method) use the same Odin sources as the native
-daemon, compiled to WebAssembly. IndexedDB, network transport and DOM
-integration remain platform adapters.
+Protobuf and hashing, replay, queries, mutation planning, the relay receive
+session and shared-space authority run in the same Odin sources as the
+glonOdin daemon and the iOS app. The desktop links them natively (built from
+the sibling `glonOdin` checkout by `gpui/crates/roostr-engine/build.rs`); the
+browser loads `static/engine.wasm`, checked against the sha256 in
+`static/engine-core.json` both at build time (`build-web.sh`) and when the
+tab loads it.
 
-History sync uses NIP-77 (Negentropy V1, `src/lib/engine/negentropy.ts`): per
-relay and stream filter (self `authors:[pk]`, each space `#h`) the relay events
-this device holds — the IndexedDB `relay-events` store — are reconciled against
-the relay's set, and only the missing ids are fetched with `REQ {ids}` and
-imported. History is complete once every needed id came back and imported
-cleanly. Relays that answer `NEG-OPEN` with `NEG-ERR`/`NOTICE` or silence get
-the older paged `until` walk.
-
-Sync follows glonOdin `docs/state-sync.md`: bases (kind 31078, split ones'
-kind-1080 parts by `#c`) first, then legacy 1079 checkpoints, then deltas. With
-no base on the relays the whole kind-1078 history is covered as before (dual
-read). The floor is per stream (personal, each space): a stream holding no base
-is still walked whole; one holding bases reads only the live deltas of the held
-current bases (`#b`) plus a 1078 window from ITS newest base's created_at minus
-a day - a global floor would skip another stream's unbased objects. An object's
-state is the core's `replay_from_base`; local deltas carry `["b", base]`, and
-orphans of this identity's writable objects are rebased by the core and
-published. The browser never compacts: computers do.
+After changing the shared Odin sources, regenerate and commit both files (needs
+Odin and Node):
 
 ```sh
-npm run build:core   # requires Odin and sibling ../glonOdin
-npm run verify:core
-npm run check
-npm run build
+node ../glonOdin/build-wasm.mjs .
 ```
 
-`build:core` emits `static/engine.wasm` and `static/engine-core.json`. Commit both
-after changing the shared sources/runtime. The production build verifies their
-hashes and needs no sibling checkout or Odin installation; the static artifacts
-are deployable through the existing Docker/Fly pipeline. Do not hand-edit the
-manifest to bypass verification.
+Never hand-edit the manifest to get past the check.
 
-Browser local changes enter a durable outbox before publication. Exact signed
-retry events survive reload. Logout refuses unpublished work unless it is
-explicitly exported. Clearing browser storage is not a safe way to discard an
-outbox or reset the shared dataset.
+Sync follows glonOdin `docs/state-sync.md`: NIP-77 negentropy against each
+relay per stream (personal, each space), bases first, then legacy
+checkpoints, then deltas, with a per-stream floor. Local changes enter a
+durable outbox before they are published; logging out refuses while any are
+unpublished.
 
-## Object exchanges
-
-An object's discussion pane shows exchanges from that object's mailbox. **New
-exchange** selects object agents; selecting several creates a group by
-delivering to each object's own history. **Reply to all** preserves the
-audience; **Private** starts a separate exchange. Delivery and local processing
-status are displayed separately. The shared exchange ID is a UI grouping key,
-not a shared conversation object.
-
-A Capability page is one catalog skill on one computer: its Status, Error,
-Served by, Key and last Check are written by that computer's harness. In a tab
-paired with that computer the Status popover stages Install / Check / Switch
-off / Switch on / Uninstall as mailbox requests on the capability, and lists
-its waiting requests with Approve / Reject; approval runs on that computer.
-What the software is and how agents use it lives on its Skill object.
-
-A Credential page (New → Credential) is one login for one service. Pasted keys
-and saved logins are on the credential, readable by everyone in its space; sign
-in from any of your computers. Connect runs on the computer this tab is paired
-with: it opens the Chrome sign-in window there (a Google account: `gws auth
-login` and its browser window) and saves the login on the credential - a
-website sign-in as one Cookie property per cookie (`cookie_<name>`, masked like
-a key; its editor shows the value) plus Cookie details (`cookie_meta`), a
-Google account as its client and refresh-token keys. The computer in its
-Served by keeps it: it tries a login made elsewhere on the site and keeps the
-status current, saying plainly when a site refuses a login made on another
-computer. Check now works from any device: it writes `check_requested` (epoch
-ms) on the credential, that computer runs the check and stamps `checked_at`,
-and the Status (pane, table popover, cell) says "Checking on <computer>…" until
-it does - or, after a minute, that the computer hasn't answered; a tab paired
-with that computer asks it straight. Disconnect stops a sign-in
-running on this computer; the saved login stays and keeps working until the
-site refuses it (clear its Cookie / key properties to remove it). Agents list
-the credentials they may use in their Credentials property.
-
-## Verification
+## Check
 
 ```sh
-bun test scripts/core-abi.test.ts scripts/sync-authority.test.ts scripts/local-transport.test.ts scripts/negentropy.test.ts scripts/sync-negentropy.test.ts
-bun run scripts/parity-codec.ts
-bun run scripts/parity-replay-fixtures.ts
-bun run scripts/parity-query-fixtures.ts
-bun run scripts/parity-mutation-fixtures.ts
-bun run scripts/parity-wire.ts
-bun run scripts/parity-authority.ts
-bun run scripts/parity-serving.ts
+cd gpui
+cargo test --workspace
+cargo clippy --workspace --all-targets
+cargo clippy -p roostr-web --target wasm32-unknown-unknown
+cargo fmt --all --check
 ```
 
-For a running local daemon, `scripts/parity-replay.ts` and `scripts/parity-query.ts`
-compare the real vault using the local service credential. These operator tools
-need the sibling harness source and respect `GLON_DATA` / `GLON_API`.
+## Deploy
 
-Deploy with `fly deploy --remote-only`. Default production mode is browser-offline;
-local machine control always requires explicit pairing.
+```sh
+fly deploy --remote-only
+```
+
+The image (`Dockerfile`) builds `gpui/web-dist/` with a pinned nightly (on
+wasm, gpui builds `parking_lot` with its `nightly` feature), checks the engine,
+precompresses the large files (brotli and gzip) and serves them with Caddy:
+no-cache everywhere (nothing is content-hashed), 301s from the old `/gpui/`
+preview paths and from `getroostr.fly.dev` / `www.roostr.space` to
+`roostr.space` - except the workspace and its files, since a browser vault's
+key and outbox live in that origin's storage.
