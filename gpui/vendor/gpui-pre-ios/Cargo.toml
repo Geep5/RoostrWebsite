@@ -78,6 +78,7 @@ features = [
     "NSEnumerator",
     "NSError",
     "NSGeometry",
+    "NSNotification",
     "NSNull",
     "NSObjCRuntime",
     "NSObject",

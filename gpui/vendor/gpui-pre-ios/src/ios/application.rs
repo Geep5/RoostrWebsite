@@ -4,17 +4,18 @@ use objc2::{
     ClassType, DefinedClass, MainThreadMarker, MainThreadOnly, Message, define_class, extern_class,
     extern_methods, msg_send,
     rc::{Allocated, Retained},
-    runtime::AnyObject,
+    runtime::{AnyObject, ProtocolObject},
     sel,
 };
 use objc2_foundation::{
-    NSDictionary, NSObject, NSObjectProtocol, NSRunLoop, NSRunLoopCommonModes, NSSet, NSString,
+    NSDictionary, NSNotification, NSNotificationCenter, NSObject, NSObjectProtocol, NSRunLoop,
+    NSRunLoopCommonModes, NSSet, NSString,
 };
 use objc2_quartz_core::CADisplayLink;
 use objc2_ui_kit::{
     UIApplication, UIApplicationDelegate, UIApplicationLaunchOptionsKey, UIOpenURLContext, UIScene,
-    UISceneConfiguration, UISceneConnectionOptions, UISceneDelegate, UISceneSession, UIWindowScene,
-    UIWindowSceneDelegate,
+    UISceneConfiguration, UISceneConnectionOptions, UISceneDelegate, UISceneSession,
+    UISceneWillConnectNotification, UIWindowScene, UIWindowSceneDelegate,
 };
 use std::{
     cell::{Cell, RefCell},
@@ -202,6 +203,40 @@ define_class!(
             let this = this.set_ivars(platform);
             unsafe { msg_send![super(this), init] }
         }
+
+        // roostr: a scene session restored from the app this one replaced (the
+        // SwiftUI app, on an upgraded install) keeps that app's delegate class.
+        // UIKit asks `application:configurationForConnectingSceneSession:` only
+        // for new sessions, so the restored scene connects to SwiftUI's
+        // `AppSceneDelegate`, which hosts nothing (a black screen) and traps
+        // ("Missing scene item!") when UIKit saves the scene's restoration
+        // state on backgrounding. Destroying the session does not help: the
+        // system reconnects the same one. UIKit posts this notification right
+        // after the delegate's `scene:willConnectToSession:options:`; GPUI's
+        // scene delegate takes such a scene over here, on every launch, as
+        // the session keeps its configuration. GPUI's delegate implements no
+        // `stateRestorationActivityForScene:`, so UIKit saves no state for it.
+        #[unsafe(method(sceneWillConnect:))]
+        fn scene_will_connect(&self, notification: &NSNotification) {
+            let Some(scene) = notification
+                .object()
+                .and_then(|object| object.downcast::<UIWindowScene>().ok())
+            else {
+                return;
+            };
+            let ours = scene
+                .delegate()
+                .is_some_and(|delegate| delegate.isKindOfClass(SceneDelegate::class()));
+            if ours {
+                return;
+            }
+            log::warn!("taking over a window scene restored with another scene delegate");
+            let delegate: Retained<SceneDelegate> =
+                unsafe { msg_send![SceneDelegate::alloc(self.mtm()), init] };
+            scene.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
+            // The connection options went to the replaced delegate.
+            delegate.connect(&scene, None);
+        }
     }
 
     unsafe impl UIApplicationDelegate for AppDelegate {
@@ -211,6 +246,15 @@ define_class!(
             _application: &UIApplication,
             _options: Option<&NSDictionary<UIApplicationLaunchOptionsKey, AnyObject>>,
         ) -> bool {
+            // roostr: see `sceneWillConnect:`; scenes connect after launch.
+            unsafe {
+                NSNotificationCenter::defaultCenter().addObserver_selector_name_object(
+                    self,
+                    sel!(sceneWillConnect:),
+                    Some(UISceneWillConnectNotification),
+                    None,
+                );
+            }
             // GPUI's launch callback runs when a scene is ready to host its window.
             true
         }
@@ -287,37 +331,9 @@ define_class!(
             _session: &UISceneSession,
             options: &SceneConnectionOptions,
         ) {
-            let Some(scene) = scene.downcast_ref::<UIWindowScene>() else {
-                return;
-            };
-            let Some(platform) = self.ivars().upgrade() else {
-                return;
-            };
-            let application = &platform.application;
-            if application.window_scene().is_some() {
-                log::error!("GPUI iOS currently supports one connected window scene");
-                return;
+            if let Some(scene) = scene.downcast_ref::<UIWindowScene>() {
+                self.connect(scene, options.url_contexts());
             }
-            *application.scene.borrow_mut() = Some(scene.retain());
-            application.finish_launching();
-            // UIKit can reconnect a scene without restarting the Rust application.
-            application.with_windows(|window| window.attach_to_scene(scene));
-            if let Some(contexts) = options.url_contexts() {
-                application.open_urls(&contexts);
-            }
-
-            application.stop_display_link();
-            let display_link = unsafe {
-                let display_link =
-                    CADisplayLink::displayLinkWithTarget_selector(self, sel!(renderFrame:));
-                display_link.setPaused(true);
-                display_link.addToRunLoop_forMode(
-                    &NSRunLoop::mainRunLoop(),
-                    NSRunLoopCommonModes,
-                );
-                display_link
-            };
-            *application.display_link.borrow_mut() = Some(display_link);
         }
 
         #[unsafe(method(sceneDidDisconnect:))]
@@ -371,6 +387,38 @@ define_class!(
 );
 
 impl SceneDelegate {
+    fn connect(
+        &self,
+        scene: &UIWindowScene,
+        url_contexts: Option<Retained<NSSet<UIOpenURLContext>>>,
+    ) {
+        let Some(platform) = self.ivars().upgrade() else {
+            return;
+        };
+        let application = &platform.application;
+        if application.window_scene().is_some() {
+            log::error!("GPUI iOS currently supports one connected window scene");
+            return;
+        }
+        *application.scene.borrow_mut() = Some(scene.retain());
+        application.finish_launching();
+        // UIKit can reconnect a scene without restarting the Rust application.
+        application.with_windows(|window| window.attach_to_scene(scene));
+        if let Some(contexts) = url_contexts {
+            application.open_urls(&contexts);
+        }
+
+        application.stop_display_link();
+        let display_link = unsafe {
+            let display_link =
+                CADisplayLink::displayLinkWithTarget_selector(self, sel!(renderFrame:));
+            display_link.setPaused(true);
+            display_link.addToRunLoop_forMode(&NSRunLoop::mainRunLoop(), NSRunLoopCommonModes);
+            display_link
+        };
+        *application.display_link.borrow_mut() = Some(display_link);
+    }
+
     fn platform_for_scene(&self, scene: &UIScene) -> Option<Rc<IosPlatformState>> {
         let platform = self.ivars().upgrade()?;
         let owns_scene = platform

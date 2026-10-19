@@ -212,10 +212,13 @@ cargo clippy -p roostr-ios --target aarch64-apple-ios-sim
 GPUI's UIKit platform is `vendor/gpui-pre-ios`, a vendored gpui-pre-ios
 0.3.9: that snapshot is newer than the gpui-pre 0.3.9 core it pins and
 does not build against it, and it gains a document picker for
-`prompt_for_paths`. `vendor/gpui-pre-apple` (patched in for every target
-through `[patch.crates-io]`) changes iOS only: every font falls back to the
-bundled Twemoji (`crates/roostr-core/fonts/TwemojiMozilla.ttf`, the web
-build's emoji), drawn in color. Both mark their changes `roostr:`.
+`prompt_for_paths`. It also takes over a window scene UIKit restores with
+another app's scene delegate: an update over the SwiftUI app restores that
+app's scene session, whose SwiftUI `AppSceneDelegate` would show a black
+screen and crash on backgrounding. `vendor/gpui-pre-apple` (patched in for
+every target through `[patch.crates-io]`) changes iOS only: every font
+falls back to the bundled Twemoji (`crates/roostr-core/fonts/TwemojiMozilla.ttf`,
+the web build's emoji), drawn in color. Both mark their changes `roostr:`.
 
 Layout follows the web view the Svelte app ran in: the window content sits
 inside the safe area and above the on-screen keyboard; ≤720pt wide (iPhone
