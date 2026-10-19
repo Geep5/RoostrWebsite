@@ -41,6 +41,8 @@ pub use dispatcher::WebDispatcher;
 #[cfg(target_family = "wasm")]
 pub use display::WebDisplay;
 #[cfg(target_family = "wasm")]
+pub use events::keystroke_modifiers;
+#[cfg(target_family = "wasm")]
 pub use gpui_wgpu::WebBackendPreference;
 #[cfg(target_family = "wasm")]
 pub use http_client::{FetchCredentials, FetchHttpClient};

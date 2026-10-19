@@ -1,10 +1,15 @@
 # Zed's `gpui_web` as published in gpui-pre-web 0.3.9, vendored (and patched
-# in through the workspace's [patch.crates-io]) so a touch ends hover: GPUI
-# keeps a lifted finger's position as the pointer, so the control under the
-# last tap stayed hovered (and its `[data-tip]` tooltip on screen) after the
-# touch. Once the last finger lifts, the pointer now moves off the canvas.
-# The change is marked `roostr:` in src/events.rs; mouse and pen input
-# behave as published.
+# in through the workspace's [patch.crates-io]) for two changes, marked
+# `roostr:` in src/events.rs:
+# - A touch ends hover: GPUI keeps a lifted finger's position as the pointer,
+#   so the control under the last tap stayed hovered (and its `[data-tip]`
+#   tooltip on screen) after the touch. Once the last finger lifts, the
+#   pointer now moves off the canvas.
+# - In a Mac browser Command is the `secondary` key: GPUI parses `secondary-`
+#   bindings as Control on wasm, so Command-C, -A, -Z... matched nothing.
+#   Command and Control trade places in keyboard and pointer events there
+#   (not the wheel, where Control is a trackpad pinch); Command-V stays the
+#   browser's paste.
 
 [package]
 edition = "2024"

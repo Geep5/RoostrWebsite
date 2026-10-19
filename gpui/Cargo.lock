@@ -6785,6 +6785,7 @@ dependencies = [
  "roostr-shell",
  "roostr-site",
  "wasm-bindgen",
+ "wasm-bindgen-test",
  "web-sys",
 ]
 

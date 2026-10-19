@@ -727,7 +727,8 @@ impl WebWindowInner {
         self.listen_input("keydown", move |event: JsValue| {
             let event: web_sys::KeyboardEvent = event.unchecked_into();
 
-            let modifiers = modifiers_from_keyboard_event(&event, this.is_mac);
+            let dom_modifiers = modifiers_from_keyboard_event(&event);
+            let modifiers = command_as_secondary(dom_modifiers, this.is_mac);
             let capslock = capslock_from_keyboard_event(&event);
 
             if this.update_modifiers(modifiers, capslock) {
@@ -744,7 +745,7 @@ impl WebWindowInner {
             }
 
             let is_held = event.repeat();
-            let key_char = compute_key_char(&event, &key, &modifiers);
+            let key_char = compute_key_char(&event, &key, &dom_modifiers);
 
             // The software keyboard must edit the mirror itself: cancelling
             // keydown prevents iOS from updating its autocorrect context and
@@ -761,7 +762,7 @@ impl WebWindowInner {
             }
 
             let keystroke = Keystroke {
-                modifiers,
+                modifiers: keystroke_modifiers(dom_modifiers, &key, this.is_mac),
                 key,
                 key_char: key_char.clone(),
             };
@@ -785,7 +786,7 @@ impl WebWindowInner {
                 return;
             }
 
-            if keystroke_inserts_text(&modifiers, this.is_mac)
+            if keystroke_inserts_text(&dom_modifiers, this.is_mac)
                 && let Some(text) = key_char
             {
                 this.with_input_handler(|handler| {
@@ -806,7 +807,8 @@ impl WebWindowInner {
         self.listen_input("keyup", move |event: JsValue| {
             let event: web_sys::KeyboardEvent = event.unchecked_into();
 
-            let modifiers = modifiers_from_keyboard_event(&event, this.is_mac);
+            let dom_modifiers = modifiers_from_keyboard_event(&event);
+            let modifiers = command_as_secondary(dom_modifiers, this.is_mac);
             let capslock = capslock_from_keyboard_event(&event);
 
             if this.update_modifiers(modifiers, capslock) {
@@ -822,10 +824,10 @@ impl WebWindowInner {
                 return;
             }
 
-            let key_char = compute_key_char(&event, &key, &modifiers);
+            let key_char = compute_key_char(&event, &key, &dom_modifiers);
 
             let keystroke = Keystroke {
-                modifiers,
+                modifiers: keystroke_modifiers(dom_modifiers, &key, this.is_mac),
                 key,
                 key_char,
             };
@@ -1285,7 +1287,9 @@ fn dom_mouse_button_to_gpui(button: i16) -> MouseButton {
     }
 }
 
-fn modifiers_from_keyboard_event(event: &web_sys::KeyboardEvent, _is_mac: bool) -> Modifiers {
+/// The keys a keyboard event holds, as the DOM reports them (Command, the
+/// Meta key, is `platform`).
+fn modifiers_from_keyboard_event(event: &web_sys::KeyboardEvent) -> Modifiers {
     Modifiers {
         control: event.ctrl_key(),
         alt: event.alt_key(),
@@ -1295,17 +1299,22 @@ fn modifiers_from_keyboard_event(event: &web_sys::KeyboardEvent, _is_mac: bool) 
     }
 }
 
-fn modifiers_from_mouse_event(event: &web_sys::PointerEvent, _is_mac: bool) -> Modifiers {
+fn modifiers_from_mouse_event(event: &web_sys::PointerEvent, is_mac: bool) -> Modifiers {
     let mouse_event: &web_sys::MouseEvent = event.as_ref();
-    Modifiers {
-        control: mouse_event.ctrl_key(),
-        alt: mouse_event.alt_key(),
-        shift: mouse_event.shift_key(),
-        platform: mouse_event.meta_key(),
-        function: false,
-    }
+    command_as_secondary(
+        Modifiers {
+            control: mouse_event.ctrl_key(),
+            alt: mouse_event.alt_key(),
+            shift: mouse_event.shift_key(),
+            platform: mouse_event.meta_key(),
+            function: false,
+        },
+        is_mac,
+    )
 }
 
+/// roostr: as the DOM reports them, not through [`command_as_secondary`]: a
+/// trackpad pinch arrives as a Control wheel, which stays Control (zoom).
 fn modifiers_from_wheel_event(event: &web_sys::MouseEvent, _is_mac: bool) -> Modifiers {
     Modifiers {
         control: event.ctrl_key(),
@@ -1314,6 +1323,41 @@ fn modifiers_from_wheel_event(event: &web_sys::MouseEvent, _is_mac: bool) -> Mod
         platform: event.meta_key(),
         function: false,
     }
+}
+
+/// roostr: the modifiers GPUI sees for a keyboard or pointer event whose
+/// DOM modifiers are `dom` (Command as `platform`).
+///
+/// GPUI resolves a binding's `secondary-` (copy, cut, select all, undo,
+/// bold, ...) when it parses it, by the target it was compiled for: Control
+/// on wasm. In a Mac browser - an iPad's too, whose Safari reports a Mac -
+/// the person's secondary key is Command, so there Command and Control
+/// trade places: Command-C is `secondary-c`, as in the desktop app, where it
+/// did nothing before. Control-C then reads as `cmd-c`, which a browser
+/// keymap leaves unbound.
+fn command_as_secondary(dom: Modifiers, is_mac: bool) -> Modifiers {
+    if !is_mac {
+        return dom;
+    }
+    Modifiers {
+        control: dom.platform,
+        platform: dom.control,
+        ..dom
+    }
+}
+
+/// roostr: the modifiers of the keystroke GPUI matches for `key` pressed
+/// with `dom` held: [`command_as_secondary`], except that Command-V (with
+/// Shift too) stays as the DOM reports it, unbound, so it remains the
+/// browser's paste. Its `paste` event hands the text and images to the
+/// focused input (`register_paste`) with no permission prompt, where GPUI's
+/// Paste would read `navigator.clipboard` (a prompt) or, in the editor, the
+/// synchronous clipboard, always empty in a browser.
+pub fn keystroke_modifiers(dom: Modifiers, key: &str, is_mac: bool) -> Modifiers {
+    if is_mac && key == "v" && dom.platform && !dom.control {
+        return dom;
+    }
+    command_as_secondary(dom, is_mac)
 }
 
 fn capslock_from_keyboard_event(event: &web_sys::KeyboardEvent) -> Capslock {

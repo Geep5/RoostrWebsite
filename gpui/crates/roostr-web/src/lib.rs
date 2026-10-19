@@ -74,9 +74,11 @@ pub fn run(base: String) -> Result<(), JsValue> {
         // Fonts (Inter as the UI, IBM Plex Sans for `.SystemUIFont`) and the
         // palette, before the first window measures any text.
         theme::init(cx);
+        // `secondary`: Command in a Mac browser (vendor/gpui-pre-web), Control
+        // elsewhere.
         cx.bind_keys([
-            KeyBinding::new("cmd-,", OpenSettings, None),
-            KeyBinding::new("cmd-n", NewObject, None),
+            KeyBinding::new("secondary-,", OpenSettings, None),
+            KeyBinding::new("secondary-n", NewObject, None),
         ]);
         let base = base.trim_end_matches('/').to_string();
         load_emoji_font(&base, cx);

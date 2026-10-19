@@ -36,3 +36,6 @@ web-sys = { workspace = true, features = [
     "VisibilityState",
     "Window",
 ] }
+
+[target.'cfg(target_family = "wasm")'.dev-dependencies]
+wasm-bindgen-test.workspace = true

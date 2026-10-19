@@ -190,10 +190,18 @@ dropping files from the desktop. Exports and file downloads are browser
 downloads; "open" shows a file in a new tab.
 
 GPUI's web platform is `vendor/gpui-pre-web`, gpui-pre-web 0.3.9 patched in
-through `[patch.crates-io]`: once the last finger lifts, the pointer moves
-off the canvas, so hover (and a `[data-tip]` tooltip) ends with the touch
-instead of staying on the control last tapped. The change is marked
-`roostr:`.
+through `[patch.crates-io]`, its changes marked `roostr:`. Once the last
+finger lifts, the pointer moves off the canvas, so hover (and a `[data-tip]`
+tooltip) ends with the touch instead of staying on the control last tapped.
+In a Mac browser (an iPad's too) Command is the `secondary` key, as on the
+desktop: GPUI parses `secondary-c` as Control on wasm, so Command and Control
+trade places in keyboard and pointer events there (`keystroke_modifiers`;
+not the wheel, where Control is a trackpad pinch). Command-C, -X, -A, -Z,
+-B... act as on the desktop; Command-V stays the browser's paste, whose
+`paste` event hands the text to the focused field without a permission
+prompt. A browser keymap binds `secondary-`, never `cmd-`
+(`cargo test --target wasm32-unknown-unknown -p roostr-web` with
+`wasm-bindgen-test-runner` checks the mapping).
 
 ## iOS
 

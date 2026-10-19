@@ -71,9 +71,17 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("alt-down", PageDown, Some(CONTEXT)),
         KeyBinding::new("space", PageDown, Some(CONTEXT)),
         KeyBinding::new("home", ScrollHome, Some(CONTEXT)),
-        KeyBinding::new("cmd-up", ScrollHome, Some(CONTEXT)),
         KeyBinding::new("end", ScrollEnd, Some(CONTEXT)),
+        // Command-Up/Down, as macOS scrolls a page. In a browser Command is
+        // GPUI's `secondary` key on a Mac (vendor/gpui-pre-web).
+        #[cfg(not(target_family = "wasm"))]
+        KeyBinding::new("cmd-up", ScrollHome, Some(CONTEXT)),
+        #[cfg(not(target_family = "wasm"))]
         KeyBinding::new("cmd-down", ScrollEnd, Some(CONTEXT)),
+        #[cfg(target_family = "wasm")]
+        KeyBinding::new("secondary-up", ScrollHome, Some(CONTEXT)),
+        #[cfg(target_family = "wasm")]
+        KeyBinding::new("secondary-down", ScrollEnd, Some(CONTEXT)),
     ]);
 }
 
