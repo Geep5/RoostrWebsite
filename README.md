@@ -23,12 +23,19 @@ cargo run --release -p roostr -- --replica    # no daemon: this device's own rep
 cargo run --release -p roostr -- /guide       # any site path
 ```
 
-The browser build:
+The browser build needs the nightly the `Dockerfile` pins (on wasm, gpui builds
+`parking_lot` with its `nightly` feature; stable fails in `wasm_thread` with
+E0554). Pin it for this folder only, so your default toolchain stays as it is:
 
 ```sh
-rustup target add wasm32-unknown-unknown
-gpui/scripts/build-web.sh     # → gpui/web-dist/
+rustup toolchain install nightly-2026-06-04 --profile minimal --target wasm32-unknown-unknown
+rustup override set nightly-2026-06-04 --path gpui
+gpui/scripts/build-web.sh     # → gpui/web-dist/ (first build a few minutes)
 ```
+
+Keep the date in step with `RUST_TOOLCHAIN` in the `Dockerfile`. A Roostr
+service started with `--web <this repo>` runs this build itself whenever
+`web-dist/` is older than its sources, so the override must be set there too.
 
 `web-dist/` is the whole site. Serve it at the root with every unknown path
 answered by `200.html` (`/guide` by `guide.html`, and so on) - the Caddyfile
