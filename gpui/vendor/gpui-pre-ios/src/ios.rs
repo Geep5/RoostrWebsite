@@ -1,6 +1,7 @@
 //! UIKit-backed implementation details for the iOS GPUI platform.
 
 mod application;
+mod clipboard;
 mod display;
 mod events;
 mod platform;

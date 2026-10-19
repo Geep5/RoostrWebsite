@@ -31,8 +31,8 @@ use objc2_foundation::{
     NSBundle, NSDictionary, NSNotification, NSNotificationCenter, NSObjectProtocol, NSString, NSURL,
 };
 use objc2_ui_kit::{
-    UIApplication, UIPasteboard, UIScreenModeDidChangeNotification, UITraitEnvironment,
-    UIUserInterfaceStyle, UIViewController,
+    UIApplication, UIScreenModeDidChangeNotification, UITraitEnvironment, UIUserInterfaceStyle,
+    UIViewController,
 };
 #[allow(deprecated)]
 // Match UIScreen enumeration, including displays without a connected scene.
@@ -417,17 +417,11 @@ impl Platform for IosPlatform {
     }
 
     fn write_to_clipboard(&self, item: ClipboardItem) {
-        let pasteboard = UIPasteboard::generalPasteboard();
-        if let Some(text) = item.text() {
-            unsafe { pasteboard.setString(Some(&NSString::from_str(&text))) };
-        }
+        super::clipboard::write(&item);
     }
 
     fn read_from_clipboard(&self) -> Option<ClipboardItem> {
-        let pasteboard = UIPasteboard::generalPasteboard();
-        Some(ClipboardItem::new_string(
-            unsafe { pasteboard.string() }?.to_string(),
-        ))
+        super::clipboard::read()
     }
 
     fn write_credentials(&self, url: &str, username: &str, password: &[u8]) -> Task<Result<()>> {

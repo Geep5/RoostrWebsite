@@ -837,7 +837,7 @@ fn contains_range(outer: &Range<usize>, inner: &Range<usize>) -> bool {
     outer.start <= inner.start && inner.start <= inner.end && inner.end <= outer.end
 }
 
-fn document_range(handler: &mut PlatformInputHandler) -> Option<Range<usize>> {
+pub(super) fn document_range(handler: &mut PlatformInputHandler) -> Option<Range<usize>> {
     handler
         .text_input_editable_range()
         .or_else(|| handler.text_length_utf16().map(|length| 0..length))

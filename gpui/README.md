@@ -242,6 +242,19 @@ block is being edited (BlockNode.svelte's rule, `sync_live_texts`). Once the
 last finger lifts, the pointer leaves the window, so nothing stays hovered
 and no tooltip lingers after a tap.
 
+The edit menu is UIKit's (`UIEditMenuInteraction`), as it was in the web
+view: a finger held still for half a second on the focused
+field puts the caret under it (or keeps a selection it lands on) and the
+menu opens when it lifts; a tap that leaves the caret where it was, or a
+tap on the selection, toggles it. GPUI never sees that hold, so an input's
+own long press does not run there; holds elsewhere (a block not being
+edited, the edited block's gutter) still lift. Cut, Copy, Paste and Select
+All - and a hardware keyboard's ⌘X ⌘C ⌘V ⌘A - send the key binding the
+desktop gives them (`secondary-v`...), so a paste lands where ⌘V's does: a
+link opens the editor's Paste as menu, copied blocks paste as blocks. The
+pasteboard carries a string's metadata, a copied link and images. There is
+no Select (word) item, no selection handles and no loupe.
+
 ## Develop
 
 Every feature crate has an example that hosts its views against the daemon in

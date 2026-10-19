@@ -22,14 +22,22 @@ use gpui::{
 };
 use gpui_apple::metal_renderer::{Context as MetalContext, MetalRenderer};
 use objc2::rc::Retained;
-use objc2::runtime::AnyClass;
+use objc2::runtime::{AnyClass, AnyObject, ProtocolObject, Sel};
+use objc2::sel;
 use objc2::{ClassType, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send};
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
-use objc2_foundation::{NSNotification, NSNotificationCenter, NSObjectProtocol, NSSet, NSValue};
+use objc2_foundation::{
+    NSNotification, NSNotificationCenter, NSNumber, NSObjectNSDelayedPerforming, NSObjectProtocol,
+    NSSet, NSValue,
+};
 use objc2_quartz_core::CAMetalLayer;
 use objc2_ui_kit::{
     NSValueUIGeometryExtensions, UIKeyboardFrameEndUserInfoKey,
     UIKeyboardWillChangeFrameNotification, UIKeyboardWillHideNotification, UIStatusBarStyle,
+};
+use objc2_ui_kit::{
+    UIEditMenuConfiguration, UIEditMenuInteraction, UIEditMenuInteractionAnimating,
+    UIEditMenuInteractionDelegate,
 };
 use objc2_ui_kit::{
     UIEvent, UIScreen, UITouch, UITraitCollection, UITraitEnvironment, UIUserInterfaceStyle,
@@ -57,6 +65,46 @@ const PARKED_POINTER: Point<Pixels> = Point {
 struct KeyboardDismissTouch {
     id: TouchId,
     start_position: Point<Pixels>,
+}
+
+/// roostr: how long a finger rests on the focused text input before the
+/// press is a hold (GPUI's long press, UIKit's text loupe).
+const TEXT_PRESS_HOLD: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// roostr: a finger on the focused text input; see `route_text_press`.
+#[derive(Clone)]
+enum TextPress {
+    /// Down, still and held back from GPUI; `generation` names its hold timer.
+    Pending {
+        started: TouchEvent,
+        generation: usize,
+    },
+    /// Held: the edit menu opens at `at` when it lifts.
+    Held { id: TouchId, at: Point<Pixels> },
+}
+
+/// roostr: the edit menu's commands (`UIResponderStandardEditActions`).
+/// Select (a word) is left out: gpui-pre 0.3.9's inputs cannot be told
+/// what to select.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum EditCommand {
+    Cut,
+    Copy,
+    Paste,
+    SelectAll,
+}
+
+impl EditCommand {
+    fn from_selector(action: Sel) -> Option<Self> {
+        [
+            (sel!(cut:), Self::Cut),
+            (sel!(copy:), Self::Copy),
+            (sel!(paste:), Self::Paste),
+            (sel!(selectAll:), Self::SelectAll),
+        ]
+        .into_iter()
+        .find_map(|(selector, command)| (selector == action).then_some(command))
+    }
 }
 
 /// Global storage for the current status bar style.
@@ -183,6 +231,71 @@ define_class!(
             self.handle_touches(touches, event);
         }
 
+        // roostr: the edit menu's commands, and the hardware keyboard's
+        // ⌘X ⌘C ⌘V ⌘A, which UIKit sends up the responder chain from the
+        // text input view (a subview) when it is the first responder.
+        #[unsafe(method(canPerformAction:withSender:))]
+        fn can_perform_action(&self, action: Sel, sender: Option<&AnyObject>) -> bool {
+            match EditCommand::from_selector(action) {
+                Some(command) => self
+                    .ivars()
+                    .with_window(|window| window.can_perform(command))
+                    .unwrap_or(false),
+                None => unsafe { msg_send![super(self), canPerformAction: action, withSender: sender] },
+            }
+        }
+
+        #[unsafe(method(cut:))]
+        fn cut(&self, _sender: Option<&AnyObject>) {
+            self.perform(EditCommand::Cut);
+        }
+
+        #[unsafe(method(copy:))]
+        fn copy(&self, _sender: Option<&AnyObject>) {
+            self.perform(EditCommand::Copy);
+        }
+
+        #[unsafe(method(paste:))]
+        fn paste(&self, _sender: Option<&AnyObject>) {
+            self.perform(EditCommand::Paste);
+        }
+
+        #[unsafe(method(selectAll:))]
+        fn select_all(&self, _sender: Option<&AnyObject>) {
+            self.perform(EditCommand::SelectAll);
+        }
+
+        // roostr: a text press's hold timer.
+        #[unsafe(method(roostrTextPressHeld:))]
+        fn text_press_held(&self, generation: &NSNumber) {
+            let generation = generation.as_usize();
+            self.ivars()
+                .with_window(|window| window.text_press_held(generation));
+        }
+    }
+
+    unsafe impl UIEditMenuInteractionDelegate for MetalView {
+        #[unsafe(method(editMenuInteraction:willPresentMenuForConfiguration:animator:))]
+        fn edit_menu_will_present(
+            &self,
+            _interaction: &UIEditMenuInteraction,
+            _configuration: &UIEditMenuConfiguration,
+            _animator: &ProtocolObject<dyn UIEditMenuInteractionAnimating>,
+        ) {
+            self.ivars()
+                .with_window(|window| window.edit_menu_shown.set(true));
+        }
+
+        #[unsafe(method(editMenuInteraction:willDismissMenuForConfiguration:animator:))]
+        fn edit_menu_will_dismiss(
+            &self,
+            _interaction: &UIEditMenuInteraction,
+            _configuration: &UIEditMenuConfiguration,
+            _animator: &ProtocolObject<dyn UIEditMenuInteractionAnimating>,
+        ) {
+            self.ivars()
+                .with_window(|window| window.edit_menu_shown.set(false));
+        }
     }
 );
 
@@ -190,6 +303,10 @@ impl MetalView {
     fn new(frame: CGRect, main_thread: MainThreadMarker) -> Retained<Self> {
         let this = Self::alloc(main_thread).set_ivars(WindowReference::default());
         unsafe { msg_send![super(this), initWithFrame: frame] }
+    }
+
+    fn perform(&self, command: EditCommand) {
+        self.ivars().with_window(|window| window.perform(command));
     }
 
     fn handle_touches(&self, touches: &NSSet<UITouch>, event: Option<&UIEvent>) {
@@ -263,6 +380,16 @@ pub(crate) struct IosWindowState {
     tap_candidate: Cell<Option<(TouchId, Point<Pixels>)>>,
     /// roostr: fingers down.
     touches_down: Cell<usize>,
+    /// roostr: a finger on the focused text input; see `route_text_press`.
+    text_press: RefCell<Option<TextPress>>,
+    text_press_generation: Cell<usize>,
+    /// roostr: the edit menu (Cut, Copy, Paste, Select All) over the
+    /// focused text input, whether it is up, whether it was when the
+    /// current touch began, and where it last opened.
+    edit_menu: Retained<UIEditMenuInteraction>,
+    edit_menu_shown: Cell<bool>,
+    edit_menu_was_open: Cell<bool>,
+    edit_menu_point: Cell<Point<Pixels>>,
     /// Current mouse position (from touch)
     mouse_position: Cell<Point<Pixels>>,
     /// Current modifiers
@@ -314,6 +441,14 @@ impl IosWindow {
         // Enable user interaction on the Metal view for touch handling
         view.setUserInteractionEnabled(true);
         view.setMultipleTouchEnabled(true);
+
+        // roostr: the edit menu over the focused text input; the view
+        // answers for its commands (see `canPerformAction:withSender:`).
+        let edit_menu = UIEditMenuInteraction::initWithDelegate(
+            UIEditMenuInteraction::alloc(main_thread),
+            Some(ProtocolObject::from_ref(&*view)),
+        );
+        view.addInteraction(ProtocolObject::from_ref(&*edit_menu));
 
         let view_controller = ViewController::new(main_thread);
         view_controller.setView(Some(&view));
@@ -372,6 +507,12 @@ impl IosWindow {
             keyboard_height: Cell::new(0.),
             tap_candidate: Cell::new(None),
             touches_down: Cell::new(0),
+            text_press: RefCell::new(None),
+            text_press_generation: Cell::new(0),
+            edit_menu,
+            edit_menu_shown: Cell::new(false),
+            edit_menu_was_open: Cell::new(false),
+            edit_menu_point: Cell::new(Point::default()),
             mouse_position: Cell::new(PARKED_POINTER),
             modifiers: Cell::new(Modifiers::default()),
             renderer: Mutex::new(renderer),
@@ -479,6 +620,11 @@ impl IosWindowState {
         let mut completes_tap = false;
         match phase {
             TouchPhase::Started => {
+                if self.touches_down.get() == 0 {
+                    // roostr: a touch closes the edit menu; whether it was
+                    // open decides what a tap on the caret does.
+                    self.edit_menu_was_open.set(self.dismiss_edit_menu());
+                }
                 self.touches_down.set(self.touches_down.get() + 1);
                 if self.tap_candidate.get().is_none() {
                     self.tap_candidate.set(Some((id, position)));
@@ -501,27 +647,284 @@ impl IosWindowState {
                 }
             }
         }
-        let dispatch = || {
-            self.input_callback
-                .with(|callback| callback(PlatformInput::Touch(event)))
-        };
-        if completes_tap {
-            // A tap on the field that already has focus (its keyboard
-            // dismissed, or never raised by an autofocus) brings the keyboard
-            // up, if the field is still there once the tap is handled; a tap
-            // that navigates to a field under the same point does not.
-            let on_focused_field = self.tap_targets_text_input(position);
-            self.text_input_view.during_user_gesture(position, dispatch);
-            if on_focused_field && self.tap_targets_text_input(position) {
-                self.show_keyboard();
-            }
-        } else {
-            dispatch();
+        if let Some(withheld) = self.route_text_press(&event) {
+            self.deliver_touch(event, withheld, completes_tap);
         }
         if matches!(phase, TouchPhase::Ended | TouchPhase::Cancelled)
             && self.touches_down.get() == 0
         {
             self.park_pointer();
+        }
+    }
+
+    /// Hands a touch to GPUI, after the start of it that a text press held
+    /// back (`withheld`).
+    fn deliver_touch(&self, event: TouchEvent, withheld: Option<TouchEvent>, completes_tap: bool) {
+        let position = event.position;
+        if completes_tap && withheld.is_some() && self.selection_contains(position) {
+            // roostr: as in UIKit, a tap on the selection toggles the edit
+            // menu over it; GPUI would collapse it to a caret.
+            if !self.edit_menu_was_open.get() {
+                self.show_edit_menu(position);
+            }
+            return;
+        }
+        let dispatch = move || {
+            self.input_callback.with(|callback| {
+                if let Some(started) = withheld {
+                    callback(PlatformInput::Touch(started));
+                }
+                callback(PlatformInput::Touch(event))
+            })
+        };
+        if !completes_tap {
+            dispatch();
+            return;
+        }
+        // A tap on the field that already has focus (its keyboard
+        // dismissed, or never raised by an autofocus) brings the keyboard
+        // up, if the field is still there once the tap is handled; a tap
+        // that navigates to a field under the same point does not.
+        let on_focused_field = self.tap_targets_text_input(position);
+        // roostr: and a tap that leaves the caret where it was (on the
+        // caret, anywhere in an empty field) while typing toggles the edit
+        // menu, as in UIKit.
+        let caret = (on_focused_field && self.text_input_view.isFirstResponder())
+            .then(|| self.collapsed_selection())
+            .flatten();
+        self.text_input_view.during_user_gesture(position, dispatch);
+        if on_focused_field && self.tap_targets_text_input(position) {
+            self.show_keyboard();
+            if caret.is_some()
+                && caret == self.collapsed_selection()
+                && !self.edit_menu_was_open.get()
+            {
+                self.show_edit_menu(position);
+            }
+        }
+    }
+
+    /// roostr: UIKit's press-and-hold in the focused text input. A finger
+    /// that comes down on it is held back from GPUI until it is a tap (it
+    /// lifts), a pan (it moves past the touch slop) or a hold (it stays put
+    /// for [`TEXT_PRESS_HOLD`]). A hold puts the caret under the finger,
+    /// keeps a selection it lands on, and opens the edit menu where the
+    /// finger lifts; GPUI never sees it, so an input's own long press (a
+    /// word selection, a block lift) does not start there. Returns `None`
+    /// when GPUI is not to see `event`, else the held-back start to deliver
+    /// before it.
+    fn route_text_press(&self, event: &TouchEvent) -> Option<Option<TouchEvent>> {
+        let press = self.text_press.borrow().clone();
+        match press {
+            None if event.phase == TouchPhase::Started
+                && self.touches_down.get() == 1
+                && self.tap_targets_text_input(event.position) =>
+            {
+                let generation = self.text_press_generation.get().wrapping_add(1);
+                self.text_press_generation.set(generation);
+                *self.text_press.borrow_mut() = Some(TextPress::Pending {
+                    started: event.clone(),
+                    generation,
+                });
+                let generation = NSNumber::new_usize(generation);
+                unsafe {
+                    self.view.performSelector_withObject_afterDelay(
+                        sel!(roostrTextPressHeld:),
+                        Some(&generation),
+                        TEXT_PRESS_HOLD.as_secs_f64(),
+                    );
+                }
+                None
+            }
+            Some(TextPress::Pending { started, .. }) if started.id == event.id => {
+                match event.phase {
+                    TouchPhase::Moved
+                        if self
+                            .tap_candidate
+                            .get()
+                            .is_some_and(|(tap, _)| tap == event.id) =>
+                    {
+                        None
+                    }
+                    TouchPhase::Cancelled => {
+                        self.text_press.replace(None);
+                        None
+                    }
+                    _ => {
+                        self.text_press.replace(None);
+                        Some(Some(started))
+                    }
+                }
+            }
+            // Another finger: the held-back one is GPUI's after all.
+            Some(TextPress::Pending { started, .. }) => {
+                self.text_press.replace(None);
+                Some(Some(started))
+            }
+            Some(TextPress::Held { id, at }) if id == event.id => {
+                match event.phase {
+                    TouchPhase::Started | TouchPhase::Moved => {}
+                    TouchPhase::Ended => {
+                        self.text_press.replace(None);
+                        if self.tap_targets_text_input(at) {
+                            self.show_edit_menu(at);
+                        }
+                    }
+                    TouchPhase::Cancelled => {
+                        self.text_press.replace(None);
+                    }
+                }
+                None
+            }
+            _ => Some(None),
+        }
+    }
+
+    /// roostr: the finger of text press `generation` stayed put.
+    fn text_press_held(&self, generation: usize) {
+        let started = match &*self.text_press.borrow() {
+            Some(TextPress::Pending {
+                started,
+                generation: pending,
+            }) if *pending == generation => started.clone(),
+            _ => return,
+        };
+        let at = started.position;
+        *self.text_press.borrow_mut() = Some(TextPress::Held { id: started.id, at });
+        // Lifting this finger is no tap.
+        self.tap_candidate.set(None);
+        if self.selection_contains(at) {
+            return;
+        }
+        // The caret goes where a tap there would put it.
+        let up = TouchEvent {
+            phase: TouchPhase::Ended,
+            ..started
+        };
+        let on_focused_field = self.tap_targets_text_input(at);
+        self.text_input_view.during_user_gesture(at, || {
+            self.input_callback.with(|callback| {
+                callback(PlatformInput::Touch(started));
+                callback(PlatformInput::Touch(up))
+            })
+        });
+        if on_focused_field && self.tap_targets_text_input(at) {
+            self.show_keyboard();
+        }
+    }
+
+    /// roostr: the focused input's caret, when nothing is selected.
+    fn collapsed_selection(&self) -> Option<usize> {
+        self.with_input_handler(|handler| {
+            handler
+                .selected_text_range(false)
+                .filter(|selection| selection.range.is_empty())
+                .map(|selection| selection.range.start)
+        })
+        .flatten()
+    }
+
+    /// roostr: whether `position` is on the focused input's selection.
+    fn selection_contains(&self, position: Point<Pixels>) -> bool {
+        self.with_input_handler(|handler| {
+            let Some(selection) = handler.selected_text_range(false) else {
+                return false;
+            };
+            !selection.range.is_empty()
+                && handler
+                    .bounds_for_range(selection.range)
+                    .is_some_and(|bounds| bounds.dilate(px(4.)).contains(&position))
+        })
+        .unwrap_or(false)
+    }
+
+    /// roostr: opens the edit menu with what applies to the focused input
+    /// (see [`EditCommand`]), pointing at its caret or selection as UIKit's
+    /// does; at `touch` when the input cannot say where that is.
+    fn show_edit_menu(&self, touch: Point<Pixels>) {
+        let Some(main_thread) = MainThreadMarker::new() else {
+            return;
+        };
+        self.edit_menu_point.set(touch);
+        let at = self
+            .with_input_handler(|handler| {
+                let selection = handler.selected_text_range(false)?.range;
+                let collapsed = selection.is_empty();
+                let bounds = handler.bounds_for_range(selection)?;
+                let x = if collapsed {
+                    bounds.left()
+                } else {
+                    bounds.center().x
+                };
+                Some(gpui::point(x, bounds.top()))
+            })
+            .flatten()
+            .unwrap_or(touch);
+        let configuration = unsafe {
+            UIEditMenuConfiguration::configurationWithIdentifier_sourcePoint(
+                None,
+                CGPoint::new(f64::from(at.x), f64::from(at.y)),
+                main_thread,
+            )
+        };
+        self.edit_menu
+            .presentEditMenuWithConfiguration(&configuration);
+    }
+
+    /// roostr: closes the edit menu; whether it was open.
+    fn dismiss_edit_menu(&self) -> bool {
+        let shown = self.edit_menu_shown.get();
+        if shown {
+            self.edit_menu.dismissMenu();
+        }
+        shown
+    }
+
+    /// roostr: whether the edit menu offers `command` for the focused input.
+    fn can_perform(&self, command: EditCommand) -> bool {
+        self.with_input_handler(|handler| {
+            if !handler.query_accepts_text_input() {
+                return false;
+            }
+            let selection = handler
+                .selected_text_range(false)
+                .map(|selection| selection.range);
+            let selected = selection.as_ref().is_some_and(|range| !range.is_empty());
+            match command {
+                EditCommand::Cut | EditCommand::Copy => selected,
+                EditCommand::Paste => super::clipboard::has_content(),
+                EditCommand::SelectAll => super::text_input::document_range(handler)
+                    .is_some_and(|document| !document.is_empty() && selection != Some(document)),
+            }
+        })
+        .unwrap_or(false)
+    }
+
+    /// roostr: runs an edit menu command, or its hardware-keyboard shortcut,
+    /// as the key binding GPUI apps give it on the desktop (`secondary-v` and
+    /// so on), so a paste goes where ⌘V's would: the editor turns a link
+    /// into a bookmark or a link, copied blocks into blocks.
+    fn perform(&self, command: EditCommand) {
+        let key = match command {
+            EditCommand::Cut => "x",
+            EditCommand::Copy => "c",
+            EditCommand::Paste => "v",
+            EditCommand::SelectAll => "a",
+        };
+        let keystroke = gpui::Keystroke {
+            modifiers: Modifiers::secondary_key(),
+            key: key.into(),
+            key_char: None,
+        };
+        self.dispatch_input(PlatformInput::KeyDown(gpui::KeyDownEvent {
+            keystroke: keystroke.clone(),
+            is_held: false,
+            prefer_character_input: false,
+        }));
+        self.dispatch_input(PlatformInput::KeyUp(gpui::KeyUpEvent { keystroke }));
+        // The menu stays up over what Select All selected.
+        if command == EditCommand::SelectAll && self.edit_menu_shown.get() {
+            self.show_edit_menu(self.edit_menu_point.get());
         }
     }
 
@@ -984,6 +1387,13 @@ impl PlatformWindow for IosWindow {
     }
 
     fn text_input_state_changed(&self, change: TextInputStateChange) {
+        // roostr: typing, or leaving the field, closes the edit menu.
+        if matches!(
+            change,
+            TextInputStateChange::FocusLost | TextInputStateChange::ContentChanged
+        ) {
+            self.dismiss_edit_menu();
+        }
         self.text_input_view.state_changed(change);
     }
 
