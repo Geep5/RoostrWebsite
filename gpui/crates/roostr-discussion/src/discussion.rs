@@ -70,6 +70,12 @@ struct AgentPresence {
     ts: i64,
 }
 
+/// Whether an agent's live state belongs in the chat of `object_id`.
+fn presence_belongs(p: &AgentPresence, object_id: &str, guests: &[String]) -> bool {
+    !object_id.is_empty()
+        && (p.surface == object_id || p.id == object_id || guests.iter().any(|g| *g == p.id))
+}
+
 #[derive(Deserialize, Default)]
 #[serde(default)]
 struct StatusBody {
@@ -524,14 +530,27 @@ impl Discussion {
         }));
     }
 
+    /// The harness reports every agent; this chat shows only its own: one
+    /// whose turn runs on this object, the agent whose page this is, or one on
+    /// the object's Agent list (a recurring object's runs live in the agent's
+    /// own transcript, so its surface is the agent, not the object).
+    fn presence_here(&self) -> impl Iterator<Item = &AgentPresence> {
+        let (object_id, guests) = match &self.object {
+            Some(o) => (o.id.as_str(), guest_agents(&o.fields)),
+            None => ("", vec![]),
+        };
+        self.presence
+            .iter()
+            .filter(move |p| presence_belongs(p, object_id, &guests))
+    }
+
     fn agent_working(&self) -> Option<&AgentPresence> {
-        self.presence.iter().find(|p| p.state == "working")
+        self.presence_here().find(|p| p.state == "working")
     }
 
     fn agent_error(&self) -> Option<&AgentPresence> {
         let now = chrono::Utc::now().timestamp_millis();
-        self.presence
-            .iter()
+        self.presence_here()
             .find(|p| p.state == "error" && now - p.ts < 15 * 60_000)
     }
 
@@ -3038,5 +3057,39 @@ impl Render for Discussion {
 impl Focusable for Discussion {
     fn focus_handle(&self, cx: &App) -> FocusHandle {
         self.composer.read(cx).focus_handle(cx)
+    }
+}
+
+#[cfg(test)]
+mod presence_tests {
+    use super::{AgentPresence, presence_belongs};
+
+    fn failing(id: &str, surface: &str) -> AgentPresence {
+        AgentPresence {
+            id: id.into(),
+            surface: surface.into(),
+            state: "error".into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn an_agents_error_shows_only_where_that_agent_belongs() {
+        let importer = failing("importer", "importer"); // a scheduled run: its surface is its own transcript
+        let guests = vec!["importer".to_string()];
+        assert!(
+            presence_belongs(&importer, "task", &guests),
+            "the recurring task it is on"
+        );
+        assert!(presence_belongs(&importer, "importer", &[]), "its own page");
+        assert!(
+            !presence_belongs(&importer, "other-agent", &[]),
+            "another agent's chat"
+        );
+        assert!(
+            presence_belongs(&failing("writer", "card"), "card", &[]),
+            "the object its turn runs on"
+        );
+        assert!(!presence_belongs(&importer, "", &guests), "no object open");
     }
 }
