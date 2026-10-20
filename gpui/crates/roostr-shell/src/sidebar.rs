@@ -573,8 +573,10 @@ impl Workspace {
     }
 
     fn section_add(id: &'static str, tip: &'static str) -> Stateful<Div> {
+        let group = SharedString::from(format!("section-add:{id}"));
         div()
             .id(id)
+            .group(group.clone())
             .relative()
             .flex_none()
             .size(px(20.))
@@ -583,13 +585,16 @@ impl Workspace {
             .items_center()
             .justify_center()
             .rounded(theme::radius::xs())
-            .text_size(px(12.))
-            .line_height(px(12.))
-            .text_color(theme::muted())
             .opacity(0.5)
             .cursor_pointer()
-            .hover(|s| s.opacity(1.).bg(theme::hl_med()).text_color(theme::fg()))
-            .child("＋")
+            .hover(|s| s.opacity(1.).bg(theme::hl_med()))
+            .child(
+                svg()
+                    .path(Glyph::Plus.path())
+                    .size(px(12.))
+                    .text_color(theme::muted())
+                    .group_hover(group, |s| s.text_color(theme::fg())),
+            )
             .tooltip(crate::tip(tip))
     }
 

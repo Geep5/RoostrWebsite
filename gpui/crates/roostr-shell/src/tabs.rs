@@ -326,6 +326,7 @@ impl Workspace {
         strip.child(
             div()
                 .id("tab-new")
+                .group("tab-new")
                 .flex_none()
                 .size(px(26.))
                 .ml(px(4.))
@@ -333,11 +334,15 @@ impl Workspace {
                 .items_center()
                 .justify_center()
                 .rounded(theme::radius::sm())
-                .text_color(theme::muted())
-                .text_size(px(14.))
                 .cursor_pointer()
-                .hover(|s| s.bg(theme::hl_med()).text_color(theme::fg()))
-                .child("＋")
+                .hover(|s| s.bg(theme::hl_med()))
+                .child(
+                    svg()
+                        .path(Glyph::Plus.path())
+                        .size(px(14.))
+                        .text_color(theme::muted())
+                        .group_hover("tab-new", |s| s.text_color(theme::fg())),
+                )
                 .map(|d| self.data_tip(d, "tip-new-tab", "New tab", cx))
                 .on_click(|_, _, cx| roostr_core::nav::open_tab(Route::Home, false, cx)),
         )

@@ -6505,6 +6505,7 @@ dependencies = [
  "rust-embed",
  "serde",
  "serde_json",
+ "ttf-parser",
  "ureq",
  "uuid",
  "wasm-bindgen",

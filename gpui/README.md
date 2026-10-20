@@ -184,6 +184,14 @@ fetches it after it starts and draws every emoji, graph labels included, in
 it. Until it arrives, and for emoji newer than it, the browser's own emoji
 font stands in. The desktop uses Apple Color Emoji.
 
+Symbols: the browser lays text out only in its bundled fonts, so UI symbols
+Inter, IBM Plex Sans and JetBrains Mono lack (`▨` `◍` `⌕` `☐` `＋` …) come
+from `crates/roostr-core/fonts/RoostrSymbols.ttf`, a 4 KB subset of Noto Sans
+Math / Symbols / Symbols 2 (OFL; fullwidth `＋` `＠` are its `+` `@` centred
+on a full em). `roostr-core`'s `glyph_coverage` test fails on any non-emoji
+character in a source literal no bundled font draws: add it to the subset
+(fontTools) or draw a `Glyph` instead.
+
 Not in the browser yet: anything that opens a file dialog (adding files and
 images, a custom icon or avatar) - GPUI's web platform has no file picker;
 dropping files from the desktop. Exports and file downloads are browser

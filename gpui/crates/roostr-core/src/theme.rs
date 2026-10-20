@@ -167,6 +167,11 @@ static MONO_TTF: &[u8] = include_bytes!("../fonts/JetBrainsMono-Regular.ttf");
 /// that family has to exist before the first window opens.
 #[cfg(target_family = "wasm")]
 static SYSTEM_UI_TTF: &[u8] = include_bytes!("../fonts/IBMPlexSans-Regular.ttf");
+/// The symbols the UI draws that Inter, IBM Plex Sans and JetBrains Mono lack
+/// (`▨` `◍` `⌕` `☐` `＋` …): a 4 KB Noto subset the text system falls back to.
+/// Desktop and iOS fall back to the system's fonts instead.
+#[cfg(target_family = "wasm")]
+static SYMBOLS_TTF: &[u8] = include_bytes!("../fonts/RoostrSymbols.ttf");
 
 /// Marks the bundled fonts as registered: [`init`] runs before the browser's
 /// pairing gate and again with the app.
@@ -177,8 +182,14 @@ impl gpui_kit::Global for FontsLoaded {}
 /// The fonts the browser build ships, for layout outside GPUI's text
 /// system (the graph's SVG labels).
 #[cfg(target_family = "wasm")]
-pub fn bundled_font_data() -> [&'static [u8]; 4] {
-    [INTER_TTF, ARCHIVO_BLACK_TTF, MONO_TTF, SYSTEM_UI_TTF]
+pub fn bundled_font_data() -> [&'static [u8]; 5] {
+    [
+        INTER_TTF,
+        ARCHIVO_BLACK_TTF,
+        MONO_TTF,
+        SYSTEM_UI_TTF,
+        SYMBOLS_TTF,
+    ]
 }
 
 fn bundled_fonts() -> Vec<std::borrow::Cow<'static, [u8]>> {

@@ -4,6 +4,7 @@
 
 use std::collections::HashMap;
 
+use gpui_kit::component::IconNamed as _;
 use gpui_kit::component::input::{InputEvent, TextareaState};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -540,6 +541,7 @@ impl TypePanel {
         grid = grid.child(
             div()
                 .id("tg-new")
+                .group("tg-new")
                 .w(card_w)
                 .min_h(px(140.))
                 .flex()
@@ -557,7 +559,13 @@ impl TypePanel {
                 .cursor_pointer()
                 .hover(|s| s.text_color(theme::fg()).border_color(theme::muted()))
                 .on_click(cx.listener(|this, _, _, cx| this.add_template(cx)))
-                .child(div().text_size(px(22.)).child("＋"))
+                .child(
+                    svg()
+                        .path(roostr_core::Glyph::Plus.path())
+                        .size(px(22.))
+                        .text_color(theme::muted())
+                        .group_hover("tg-new", |s| s.text_color(theme::fg())),
+                )
                 .child("New template"),
         );
         let size = window.viewport_size();

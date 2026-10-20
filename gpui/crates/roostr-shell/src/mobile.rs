@@ -1374,11 +1374,13 @@ impl Workspace {
             .flex()
             .items_center()
             .justify_center()
-            .text_color(theme::muted())
-            .text_size(px(17.))
-            .line_height(px(17.))
             .cursor_pointer()
-            .child("＋")
+            .child(
+                svg()
+                    .path(Glyph::Plus.path())
+                    .size(px(17.))
+                    .text_color(theme::muted()),
+            )
     }
 
     /// Screen 2: a space's home - its pinned objects as cards, Recently
@@ -1784,13 +1786,16 @@ impl Workspace {
                             .bg(theme::panel())
                             .border_1()
                             .border_color(theme::border())
-                            .text_color(theme::fg())
-                            .text_size(px(22.))
                             .flex()
                             .items_center()
                             .justify_center()
                             .cursor_pointer()
-                            .child("＋")
+                            .child(
+                                svg()
+                                    .path(Glyph::Plus.path())
+                                    .size(px(22.))
+                                    .text_color(theme::fg()),
+                            )
                             .map(|d| self.data_tip(d, "tip-m-compose", "New object", cx))
                             .on_click(cx.listener(|this, _, window, cx| {
                                 if this.create_menu.is_some() {

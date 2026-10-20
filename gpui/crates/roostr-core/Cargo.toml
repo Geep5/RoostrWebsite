@@ -64,3 +64,6 @@ web-sys = { workspace = true, features = [
     "Url",
     "Window",
 ] }
+
+[dev-dependencies]
+ttf-parser = "0.25"
