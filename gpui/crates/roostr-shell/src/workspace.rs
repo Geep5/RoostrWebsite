@@ -168,7 +168,10 @@ pub struct Workspace {
     side_tween: Tween,
     pane_tween: Tween,
     // Sidebar.
-    pub(crate) widget_collapsed: HashMap<String, bool>,
+    /// Folds this device asked for that the pinned objects don't show yet.
+    pub(crate) pin_folds: HashMap<String, crate::pin_collapse::PendingFold>,
+    /// The legacy device-local `widget-collapsed` folds still to migrate.
+    pub(crate) legacy_folds: HashMap<String, bool>,
     pub(crate) section_collapsed: HashMap<String, bool>,
     pub(crate) pinned_views: HashMap<String, Entity<PinnedWidget>>,
     pub(crate) create_menu: Option<Entity<CreateMenu>>,
@@ -203,7 +206,7 @@ pub struct Workspace {
     // Mobile shell (`isMobile`).
     /// A space card was tapped open: its home shows instead of the Spaces list.
     pub(crate) mobile_space_open: bool,
-    /// `mCollapsed`: folded pinned cards and sections of the space home.
+    /// `mCollapsed`: folded sections of the space home (pinned cards fold on the object).
     pub(crate) mobile_collapsed: HashMap<String, bool>,
     /// The space card held up for a reorder (`spaceLiftId`).
     pub(crate) space_lift: Option<String>,
@@ -275,7 +278,7 @@ impl Workspace {
             .unwrap_or(SIDE_DEFAULT);
         let nav_hidden = UiState::get::<serde_json::Value>(cx, "nav-hidden")
             .is_some_and(|v| v.as_str() == Some("1") || v.as_bool() == Some(true));
-        let widget_collapsed = UiState::get(cx, "widget-collapsed").unwrap_or_default();
+        let legacy_folds = crate::pin_collapse::legacy_folds(cx);
         let section_collapsed = UiState::get(cx, "section-collapsed").unwrap_or_default();
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
@@ -298,7 +301,8 @@ impl Workspace {
             rail_tween: Tween::new(if nav_hidden { 0. } else { rail_width }),
             side_tween: Tween::new(if nav_hidden { 0. } else { side_width }),
             pane_tween: Tween::new(0.),
-            widget_collapsed,
+            pin_folds: HashMap::new(),
+            legacy_folds,
             section_collapsed,
             pinned_views: HashMap::new(),
             create_menu: None,
@@ -418,6 +422,7 @@ impl Workspace {
             self.space_order_moved = true;
             self.move_space_order(cx);
         }
+        self.migrate_pin_folds(cx);
         // Pinned widgets of spaces no longer pinned are dropped.
         if let Some(space) = Self::current_space(cx) {
             self.pinned_views

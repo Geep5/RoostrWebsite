@@ -1,6 +1,6 @@
 //! Device-local UI state: the native counterpart of the web app's
 //! `localStorage` keys (`rail-width`, `side-width`, `nav-hidden`,
-//! `widget-collapsed`, `section-collapsed`, `glon.channel`,
+//! `section-collapsed`, `glon.channel`,
 //! `roostr.tabs.spaces`, `disc-drawer-w`, ...). One JSON object in the
 //! platform config dir, rewritten on every change. Never synced.
 //!

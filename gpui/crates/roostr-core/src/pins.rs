@@ -2,6 +2,8 @@
 //! pinned object carries its own sidebar position (`pin_order`, a sortable
 //! text key), so pinning, unpinning or moving writes only that object. A
 //! space's pin list (`Space::pinned_ids`) is built by whoever lists spaces.
+//! Whether its widget is folded is on the object too (`pin_collapsed`, a
+//! bool; absent = open), so it follows the vault to every device and member.
 
 use std::collections::HashMap;
 
@@ -13,6 +15,13 @@ use crate::store::Store;
 use crate::types::{Fields, Object, QueryRow, Space, Value, field_str};
 
 pub const PIN_KEY: &str = "pin_order";
+/// A pinned object's widget is folded in the sidebar and on the space home.
+pub const COLLAPSED_KEY: &str = "pin_collapsed";
+
+/// Whether `fields` mark a pinned widget folded (`None` = not set).
+pub fn collapsed(fields: &Fields) -> Option<bool> {
+    fields.get(COLLAPSED_KEY).and_then(|v| v.bool_value)
+}
 
 const DIGITS: &[u8] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
 

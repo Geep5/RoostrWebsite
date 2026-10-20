@@ -263,11 +263,8 @@ impl Workspace {
     }
 
     fn flip_widget(&mut self, id: &str, cx: &mut Context<Self>) {
-        let collapsed = !self.widget_collapsed.get(id).copied().unwrap_or(false);
-        self.widget_collapsed.insert(id.to_string(), collapsed);
         self.flip_arrow(format!("widget:{id}"));
-        UiState::set(cx, "widget-collapsed", &self.widget_collapsed);
-        cx.notify();
+        self.toggle_pin_collapsed(id, cx);
     }
 
     fn flip_section(&mut self, key: &str, cx: &mut Context<Self>) {
@@ -299,7 +296,7 @@ impl Workspace {
         let mut out = Vec::new();
         for p in pinned {
             let id = p.id.clone();
-            let collapsed = self.widget_collapsed.get(&id).copied().unwrap_or(false);
+            let collapsed = self.pin_collapsed(&id, cx);
             let icon = object_icon(Store::global(cx).read(cx), &p.icon, &p.type_key, &active);
             let name = if p.name.is_empty() {
                 "Untitled".to_string()

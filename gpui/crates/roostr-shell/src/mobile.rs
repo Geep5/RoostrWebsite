@@ -1094,7 +1094,7 @@ impl Workspace {
             .child(self.pull_to_sync(&self.mobile_home_scroll));
         for p in pinned {
             let id = p.id.clone();
-            let collapsed = self.mobile_collapsed.get(&id).copied().unwrap_or(false);
+            let collapsed = self.pin_collapsed(&id, cx);
             let icon = object_icon(Store::global(cx).read(cx), &p.icon, &p.type_key, &active);
             let name = if p.name.is_empty() {
                 "Untitled".to_string()
@@ -1165,7 +1165,7 @@ impl Workspace {
                             .child(
                                 m_chev(crate::eid("m-wcard-chev", &id), !collapsed).on_click(
                                     cx.listener(move |this, _, _, cx| {
-                                        this.flip_mobile(&flip_id, cx)
+                                        this.toggle_pin_collapsed(&flip_id, cx)
                                     }),
                                 ),
                             ),

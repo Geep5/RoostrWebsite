@@ -23,7 +23,8 @@ pub const RESERVED_KEYS: &[&str] = &[
     "viewRelations",
     "channel",
     "pinnedIds",
-    "pin_order", // a pinned object's sidebar position (pins.rs)
+    "pin_order",     // a pinned object's sidebar position (pins.rs)
+    "pin_collapsed", // a pinned object's widget is folded (pins.rs)
     "members",
     "keyId",
 ];

@@ -19,6 +19,7 @@ mod create_menu;
 mod header;
 mod mobile;
 mod modal;
+mod pin_collapse;
 mod pinned;
 mod rail;
 mod search;
