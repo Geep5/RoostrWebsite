@@ -10,6 +10,9 @@ pub mod ios;
 #[cfg(target_os = "ios")]
 pub use ios::{IosPlatform, current_platform};
 
+#[cfg_attr(not(target_os = "ios"), allow(dead_code))]
+mod pasted_image;
+
 /// roostr: whether the on-screen keyboard's delete is the Backspace key
 /// rather than a text edit: a caret at the start of the editable text,
 /// outside a composition. Outside `ios` so the host's tests run it.

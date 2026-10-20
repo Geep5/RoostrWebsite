@@ -457,6 +457,18 @@ impl Editor {
         let Some(item) = cx.read_from_clipboard() else {
             return;
         };
+        self.paste_item(item, window, cx);
+    }
+
+    /// A paste of `item` (`onPasteText`, Editor.svelte's window paste): into
+    /// the block being edited, else - copied blocks, with blocks selected -
+    /// after the selection.
+    pub(crate) fn paste_item(
+        &mut self,
+        item: ClipboardItem,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let slice = clipboard_blocks(&item);
         if let Some(id) = self.active.clone() {
             self.paste_into(&id, item, slice, window, cx);

@@ -131,10 +131,7 @@ impl FileBlock {
                 .background_spawn(async move {
                     let (bytes, fetched) = result?;
                     let kind = if mime.is_empty() { fetched } else { mime };
-                    let dims = image::ImageReader::new(Cursor::new(&bytes))
-                        .with_guessed_format()
-                        .ok()
-                        .and_then(|r| r.into_dimensions().ok());
+                    let dims = shown_dimensions(&bytes);
                     anyhow::Ok((bytes, kind, dims))
                 })
                 .await;
@@ -433,5 +430,66 @@ impl Render for FileBlock {
                 })
                 .child(format!("📎 {name}")),
         )
+    }
+}
+
+/// The size an image shows at: its pixel size turned by its EXIF
+/// orientation, as GPUI draws it (and a browser's `<img>` did). A phone
+/// stores a portrait photo sideways, so its pixel size alone would lay it
+/// out landscape and the drawn image would spill over the blocks below.
+fn shown_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
+    use image::ImageDecoder as _;
+    use image::metadata::Orientation;
+    let mut decoder = image::ImageReader::new(Cursor::new(bytes))
+        .with_guessed_format()
+        .ok()?
+        .into_decoder()
+        .ok()?;
+    let (width, height) = decoder.dimensions();
+    let turned = matches!(
+        decoder.orientation(),
+        Ok(Orientation::Rotate90
+            | Orientation::Rotate270
+            | Orientation::Rotate90FlipH
+            | Orientation::Rotate270FlipH)
+    );
+    Some(if turned {
+        (height, width)
+    } else {
+        (width, height)
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::shown_dimensions;
+
+    /// A 4×2 JPEG, with an EXIF orientation when `orientation` is given.
+    fn jpeg(orientation: Option<u8>) -> Vec<u8> {
+        let mut out = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new(&mut out)
+            .encode(&[128; 4 * 2 * 3], 4, 2, image::ExtendedColorType::Rgb8)
+            .unwrap();
+        let Some(orientation) = orientation else {
+            return out;
+        };
+        // APP1 "Exif": a big-endian TIFF header and one IFD entry, 0x0112 SHORT.
+        let mut app1 = vec![0xFF, 0xE1, 0x00, 0x22];
+        app1.extend_from_slice(b"Exif\0\0MM\0\x2A\0\0\0\x08\0\x01");
+        app1.extend_from_slice(&[0x01, 0x12, 0x00, 0x03, 0, 0, 0, 1, 0, orientation, 0, 0]);
+        app1.extend_from_slice(&[0, 0, 0, 0]);
+        out.splice(2..2, app1);
+        out
+    }
+
+    #[test]
+    fn a_sideways_stored_photo_shows_portrait() {
+        assert_eq!(shown_dimensions(&jpeg(None)), Some((4, 2)));
+        // The camera's portrait photo: stored landscape, shown turned a quarter.
+        assert_eq!(shown_dimensions(&jpeg(Some(6))), Some((2, 4)));
+        assert_eq!(shown_dimensions(&jpeg(Some(8))), Some((2, 4)));
+        // Upside down keeps its shape.
+        assert_eq!(shown_dimensions(&jpeg(Some(3))), Some((4, 2)));
+        assert_eq!(shown_dimensions(b"not an image"), None);
     }
 }

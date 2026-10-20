@@ -1817,6 +1817,16 @@ impl EntityInputHandler for Editor {
         cx.notify();
     }
 
+    /// The browser's own paste (its `paste` event; ⌘V stays the browser's):
+    /// as the Paste action's, so an image becomes a File block and a link
+    /// opens "Paste as" there too, not only the text.
+    fn paste(&mut self, item: ClipboardItem, window: &mut Window, cx: &mut Context<Self>) {
+        if self.read_only {
+            return;
+        }
+        self.paste_item(item, window, cx);
+    }
+
     fn replace_and_mark_text_in_range(
         &mut self,
         range_utf16: Option<Range<usize>>,

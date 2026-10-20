@@ -283,9 +283,20 @@ own long press does not run there; holds elsewhere (a block not being
 edited, the edited block's gutter) still lift. Cut, Copy, Paste and Select
 All - and a hardware keyboard's ⌘X ⌘C ⌘V ⌘A - send the key binding the
 desktop gives them (`secondary-v`...), so a paste lands where ⌘V's does: a
-link opens the editor's Paste as menu, copied blocks paste as blocks. The
-pasteboard carries a string's metadata, a copied link and images. There is
-no Select (word) item, no selection handles and no loupe.
+link opens the editor's Paste as menu, copied blocks paste as blocks, and
+an image - every image, when several photos were copied - becomes a File
+block (uploaded to Blossom), ahead of the link Safari copies with it. The
+pasteboard carries a string's metadata, a copied link and images. PNG,
+JPEG, GIF, WebP, BMP, ICO and SVG paste as they are; an image GPUI cannot
+draw - Safari's Copy of a photo puts its HEIC on the pasteboard, which
+UIKit's `hasImages` does not even count - is redrawn upright and pasted as
+JPEG, or PNG when it has transparency (`gpui-pre-ios` `pasted_image`). An
+image's layout follows its EXIF orientation, as GPUI draws it, so the
+sideways-stored JPEG of a portrait photo no longer spills over the blocks
+below. In the browser the editor takes the browser's own paste event the
+same way (images, Paste as, copied blocks), not only its text. The chat
+composer is text only, as the Svelte textarea was. There is no Select
+(word) item, no selection handles and no loupe.
 
 Chat messages are selectable text, as the web view's DOM text was, on every
 platform: a mouse drag selects across lines and messages and ⌘C copies; on a

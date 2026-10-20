@@ -1,42 +1,54 @@
 //! roostr: the general pasteboard as GPUI's clipboard. The published crate
 //! moved plain strings only; this keeps what the desktop platforms keep: a
 //! string's metadata (an app's own copy, Roostr's copied blocks), a copied
-//! link and images.
+//! link and images - every item's, so a copy of several photos pastes them
+//! all.
 
+use std::ptr::NonNull;
+
+use block2::RcBlock;
 use gpui::{ClipboardEntry, ClipboardItem, ClipboardString, Image, ImageFormat};
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
-use objc2_foundation::{NSArray, NSData, NSDictionary, NSString};
-use objc2_ui_kit::UIPasteboard;
+use objc2::{AllocAnyThread as _, Message as _};
+use objc2_core_foundation::{CGPoint, CGRect, CGSize};
+use objc2_core_graphics::{CGImage, CGImageAlphaInfo};
+use objc2_foundation::{NSArray, NSData, NSDictionary, NSIndexSet, NSString};
+use objc2_ui_kit::{
+    UIGraphicsImageRenderer, UIGraphicsImageRendererContext, UIGraphicsImageRendererFormat,
+    UIGraphicsImageRendererFormatRange, UIImage, UIPasteboard,
+};
+
+use crate::pasted_image::{AS_IS, PastedImage, converted_format, pasted_image};
 
 /// The pasteboard type of GPUI's plain text.
 const TEXT_TYPE: &str = "public.utf8-plain-text";
 /// The pasteboard type of a string's metadata, as UTF-8 next to its text.
 const METADATA_TYPE: &str = "dev.zed.gpui.clipboard-metadata";
-/// Image types a paste reads as they are; any other image (a photo's HEIC)
-/// is read as PNG.
-const IMAGE_TYPES: [(&str, ImageFormat); 7] = [
-    ("public.png", ImageFormat::Png),
-    ("public.jpeg", ImageFormat::Jpeg),
-    ("com.compuserve.gif", ImageFormat::Gif),
-    ("org.webmproject.webp", ImageFormat::Webp),
-    ("public.tiff", ImageFormat::Tiff),
-    ("com.microsoft.bmp", ImageFormat::Bmp),
-    ("public.svg-image", ImageFormat::Svg),
-];
+/// The quality a converted photo is encoded at.
+const JPEG_QUALITY: f64 = 0.9;
 
+/// The pasteboard type an image is copied under.
 fn image_type(format: ImageFormat) -> Option<&'static str> {
-    IMAGE_TYPES
-        .iter()
-        .find(|(_, candidate)| *candidate == format)
-        .map(|(uti, _)| *uti)
+    match format {
+        ImageFormat::Tiff => Some("public.tiff"),
+        _ => AS_IS
+            .iter()
+            .find(|(_, candidate)| *candidate == format)
+            .map(|(uti, _)| *uti),
+    }
 }
 
-/// Whether the pasteboard holds anything a paste can use. Asking does not
-/// read it, so iOS shows no paste prompt.
+/// Whether the pasteboard holds anything a paste can use. Asking reads only
+/// its types, so iOS shows no paste prompt.
 pub(super) fn has_content() -> bool {
     let pasteboard = UIPasteboard::generalPasteboard();
-    unsafe { pasteboard.hasStrings() || pasteboard.hasURLs() || pasteboard.hasImages() }
+    let listed =
+        unsafe { pasteboard.hasStrings() || pasteboard.hasURLs() || pasteboard.hasImages() };
+    listed
+        || item_types(&pasteboard)
+            .iter()
+            .any(|types| pasted_image(types).is_some())
 }
 
 /// Replaces the pasteboard's contents with one item holding every entry.
@@ -71,9 +83,9 @@ pub(super) fn write(item: &ClipboardItem) {
     unsafe { UIPasteboard::generalPasteboard().setItems(&NSArray::from_retained_slice(&[item])) };
 }
 
-/// The pasteboard's text (or link) with its metadata, and its image. Reading
-/// another app's copy outside the edit menu's Paste and ⌘V shows iOS's paste
-/// prompt.
+/// The pasteboard's text (or link) with its metadata, and its images.
+/// Reading another app's copy outside the edit menu's Paste and ⌘V shows
+/// iOS's paste prompt.
 pub(super) fn read() -> Option<ClipboardItem> {
     let pasteboard = UIPasteboard::generalPasteboard();
     let mut entries = Vec::new();
@@ -96,25 +108,98 @@ pub(super) fn read() -> Option<ClipboardItem> {
             .and_then(|data| String::from_utf8(data.to_vec()).ok());
         entries.push(ClipboardEntry::String(ClipboardString { text, metadata }));
     }
-    if unsafe { pasteboard.hasImages() }
-        && let Some(image) = read_image(&pasteboard)
-    {
-        entries.push(ClipboardEntry::Image(image));
+    let images = read_images(&pasteboard);
+    if images.is_empty() {
+        // An image under a type neither list names: UIKit's own reading.
+        if unsafe { pasteboard.hasImages() }
+            && let Some(image) = unsafe { pasteboard.image() }.and_then(|image| converted(&image))
+        {
+            entries.push(ClipboardEntry::Image(image));
+        }
+    } else {
+        entries.extend(images.into_iter().map(ClipboardEntry::Image));
     }
     (!entries.is_empty()).then_some(ClipboardItem { entries })
 }
 
-fn read_image(pasteboard: &UIPasteboard) -> Option<Image> {
-    for (uti, format) in IMAGE_TYPES {
-        if contains(pasteboard, uti)
-            && let Some(data) = pasteboard.dataForPasteboardType(&NSString::from_str(uti))
-        {
-            return Some(Image::from_bytes(format, data.to_vec()));
-        }
+/// Every item's image, in pasteboard order.
+fn read_images(pasteboard: &UIPasteboard) -> Vec<Image> {
+    item_types(pasteboard)
+        .iter()
+        .enumerate()
+        .filter_map(|(index, types)| {
+            let (uti, format) = match pasted_image(types)? {
+                PastedImage::AsIs(uti, format) => (uti, Some(format)),
+                PastedImage::Convert(uti) => (uti, None),
+            };
+            let item = NSIndexSet::indexSetWithIndex(index);
+            let data = pasteboard
+                .dataForPasteboardType_inItemSet(&NSString::from_str(uti), Some(&item))?
+                .firstObject()?;
+            match format {
+                Some(format) => Some(Image::from_bytes(format, data.to_vec())),
+                None => converted(&*UIImage::imageWithData(&data)?),
+            }
+        })
+        .collect()
+}
+
+/// Each item's types. Asking does not read the items.
+fn item_types(pasteboard: &UIPasteboard) -> Vec<Vec<String>> {
+    pasteboard
+        .pasteboardTypesForItemSet(None)
+        .map(|items| {
+            items
+                .iter()
+                .map(|types| types.iter().map(|uti| uti.to_string()).collect())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// An image GPUI cannot draw - a photo's HEIC - drawn upright at its pixel
+/// size in sRGB and encoded as [`converted_format`] says. Drawing applies
+/// its orientation, so the bytes need no EXIF orientation to show the right
+/// way up anywhere.
+fn converted(image: &UIImage) -> Option<Image> {
+    let has_alpha = unsafe { image.CGImage() }.is_some_and(|cg| {
+        !matches!(
+            CGImage::alpha_info(Some(&cg)),
+            CGImageAlphaInfo::None
+                | CGImageAlphaInfo::NoneSkipLast
+                | CGImageAlphaInfo::NoneSkipFirst
+        )
+    });
+    let format = converted_format(has_alpha);
+    let (points, scale) = unsafe { (image.size(), image.scale()) };
+    let size = CGSize::new(
+        (points.width * scale).round(),
+        (points.height * scale).round(),
+    );
+    if size.width < 1. || size.height < 1. {
+        return None;
     }
-    let image = unsafe { pasteboard.image() }?;
-    let png = image.png_representation()?;
-    Some(Image::from_bytes(ImageFormat::Png, png.to_vec()))
+    let renderer_format = UIGraphicsImageRendererFormat::new();
+    renderer_format.setScale(1.);
+    renderer_format.setOpaque(!has_alpha);
+    renderer_format.setPreferredRange(UIGraphicsImageRendererFormatRange::Standard);
+    let renderer = UIGraphicsImageRenderer::initWithSize_format(
+        UIGraphicsImageRenderer::alloc(),
+        size,
+        &renderer_format,
+    );
+    let image = image.retain();
+    let draw = RcBlock::new(move |_: NonNull<UIGraphicsImageRendererContext>| {
+        image.drawInRect(CGRect::new(CGPoint::ZERO, size));
+    });
+    let actions = RcBlock::as_ptr(&draw);
+    let data = unsafe {
+        match format {
+            ImageFormat::Png => renderer.PNGDataWithActions(actions),
+            _ => renderer.JPEGDataWithCompressionQuality_actions(JPEG_QUALITY, actions),
+        }
+    };
+    Some(Image::from_bytes(format, data.to_vec()))
 }
 
 /// Whether the pasteboard has `uti`, without reading it.

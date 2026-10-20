@@ -66,6 +66,12 @@ version = "0.6"
 version = "0.3.2"
 default-features = true
 
+# roostr: a pasted image's alpha (clipboard.rs).
+[target.'cfg(target_os = "ios")'.dependencies.objc2-core-graphics]
+version = "0.3.2"
+features = ["std", "CGImage"]
+default-features = false
+
 [target.'cfg(target_os = "ios")'.dependencies.objc2-foundation]
 version = "0.3.2"
 features = [
@@ -78,6 +84,7 @@ features = [
     "NSEnumerator",
     "NSError",
     "NSGeometry",
+    "NSIndexSet",
     "NSNotification",
     "NSNull",
     "NSObjCRuntime",
@@ -114,12 +121,15 @@ features = [
     "block2",
     "objc2-quartz-core",
     "objc2-core-foundation",
+    "objc2-core-graphics",
     "NSText",
     "UIApplication",
     "UIDocumentPickerViewController",
     "UIEditMenuInteraction",
     "UIEvent",
     "UIGeometry",
+    "UIGraphicsImageRenderer",
+    "UIGraphicsRenderer",
     "UIImage",
     "UIInteraction",
     "UIInterface",
