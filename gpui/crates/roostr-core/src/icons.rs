@@ -302,6 +302,14 @@ mod tests {
                 .unwrap()
                 .unwrap_or_else(|| panic!("missing {path}"));
             assert!(bytes.starts_with(b"<svg"), "{path} is not an svg");
+            // Compiled into the binary (borrowed), not read from the source
+            // tree at run time (owned): a debug build without rust-embed's
+            // debug-embed reads `assets/` from disk, which a browser tab or a
+            // phone does not have, and drew every icon blank.
+            assert!(
+                matches!(bytes, Cow::Borrowed(_)),
+                "{path} is read from disk, not embedded"
+            );
         }
     }
 }

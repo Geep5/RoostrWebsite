@@ -35,7 +35,10 @@ dirs = "6"
 log = "0.4"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 futures = "0.3"
-rust-embed = "8"
+# debug-embed: compile the assets in for every profile. Without it a debug
+# build reads them from the source tree at run time, which a browser tab
+# (`build-web.sh --debug`) or a phone cannot: every icon drew blank.
+rust-embed = { version = "8", features = ["debug-embed"] }
 uuid = { version = "1", features = ["v4"] }
 base64 = "0.22"
 regex = "1"
