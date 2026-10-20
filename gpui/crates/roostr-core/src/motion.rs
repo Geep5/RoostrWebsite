@@ -79,7 +79,7 @@ impl From<Tween> for Transition {
 
 /// Hover reveal of row handles and actions (`opacity 0.1s ease`).
 pub const HOVER_REVEAL: Tween = Tween::ease(100);
-/// Fades: tooltips, drawer-tab opacity, chevrons, menus appearing (`0.12s ease`).
+/// Fades: tooltips, drawer tabs, chevrons, menus appearing (`0.12s ease`).
 pub const FADE: Tween = Tween::ease(120);
 /// Controls: switch knob and track, section and sort arrows, hover colours (`0.15s ease`).
 pub const CONTROL: Tween = Tween::ease(150);

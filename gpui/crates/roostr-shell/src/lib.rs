@@ -15,6 +15,7 @@
 //! - [`set_pane`]: the object page's right pane (ConversationDrawer).
 //! - Actions [`Search`], [`NewObject`], [`OpenSettings`] for the app menu.
 
+mod back_swipe;
 mod create_menu;
 mod header;
 mod list_motion;

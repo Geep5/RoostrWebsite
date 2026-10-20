@@ -42,6 +42,18 @@ const SIDE_MIN: f32 = 180.;
 const SIDE_MAX: f32 = 480.;
 /// Resting on a drawer tab this long toggles it.
 const DWELL: Duration = Duration::from_millis(700);
+/// A drawer tab's hit area: its width with a mouse, and on a touch screen.
+const DRAWER_TAB_W: f32 = 16.;
+const DRAWER_TAB_TOUCH_W: f32 = 24.;
+
+/// How far a drawer tab's hit area reaches past the 16px slot it is placed in.
+fn drawer_tab_spill() -> f32 {
+    if roostr_core::layout::is_touch() {
+        (DRAWER_TAB_TOUCH_W - DRAWER_TAB_W) / 2.
+    } else {
+        0.
+    }
+}
 /// `[data-tip]` appears after this much hover (`animation: tip-in 0.12s ease 0.4s`),
 /// then fades in over [`motion::FADE`].
 const TIP_DELAY: Duration = Duration::from_millis(400);
@@ -167,6 +179,8 @@ pub struct Workspace {
     pub(crate) pull: Rc<std::cell::Cell<Option<f32>>>,
     pub(crate) mobile_spaces_scroll: ScrollHandle,
     pub(crate) mobile_home_scroll: ScrollHandle,
+    /// The phone's push/pop slide and back swipe.
+    pub(crate) back: crate::back_swipe::BackSwipe,
     /// The route shown before the latest navigation event (`here` when the space changes).
     pub(crate) shown_route: Route,
     _subscriptions: Vec<Subscription>,
@@ -288,6 +302,7 @@ impl Workspace {
             space_lift: None,
             card_bounds: Rc::default(),
             pull: Rc::default(),
+            back: Default::default(),
             mobile_spaces_scroll: ScrollHandle::new(),
             mobile_home_scroll: ScrollHandle::new(),
             shown_route: nav.read(cx).route().clone(),
@@ -776,55 +791,28 @@ impl Workspace {
             DwellTab::Nav => "nav-drawer",
             DwellTab::Pane => "pane-drawer",
         };
-        // `opacity: 0.55`, 1 on hover (`transition: opacity 0.12s ease`).
         let hover_key = match which {
             DwellTab::Nav => "nav-drawer-hover",
             DwellTab::Pane => "pane-drawer-hover",
         };
+        // A slim pill on an invisible hit area: a hairline at rest that
+        // thickens and darkens on hover (`transition: 0.12s ease`). The hit
+        // area is wider and taller on a touch screen.
         let (hover, hover_state) = motion::hover(hover_key, motion::FADE, window, cx);
-        // A grip: two columns of dots, muted until the handle is hovered.
-        let dot = move || {
-            div()
-                .size(px(3.))
-                .rounded_full()
-                .bg(theme::muted())
-                .group_hover(id, |s| s.bg(theme::fg()))
+        let touch = roostr_core::layout::is_touch();
+        let (hit_w, hit_h) = if touch {
+            (DRAWER_TAB_TOUCH_W, 96.)
+        } else {
+            (DRAWER_TAB_W, 72.)
         };
-        let grip = div()
+        let pill_h = 32. + 8. * hover;
+        let pill = div()
             .relative()
-            .flex()
-            .gap(px(3.))
-            .children((0..2).map(move |_| {
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(3.))
-                    .children((0..4).map(move |_| dot()))
-            }));
-        div()
-            .id(id)
-            .group(id)
-            .absolute()
-            .top(relative(0.5))
-            .mt(px(-49.))
-            .w(px(if open { 16. } else { 15. }))
-            .h(px(98.))
-            .flex()
-            .items_center()
-            .justify_center()
-            .bg(theme::bg())
-            .border_color(theme::border())
-            .cursor_pointer()
-            .opacity(0.55 + 0.45 * hover)
+            .w(px(3. + 1. * hover))
+            .h(px(pill_h))
+            .rounded_full()
             .overflow_hidden()
-            .hover(|s| s.border_color(theme::accent()))
-            .map(|d| match (which, open) {
-                (DwellTab::Nav, true) | (DwellTab::Pane, true) => d.border_1().rounded_full(),
-                (DwellTab::Nav, false) => d.border_t_1().border_r_1().border_b_1().rounded_r_full(),
-                (DwellTab::Pane, false) => {
-                    d.border_t_1().border_l_1().border_b_1().rounded_l_full()
-                }
-            })
+            .bg(motion::mix(theme::border(), theme::muted(), hover))
             .when_some(fill, |d, fill| {
                 d.child(
                     div()
@@ -833,10 +821,26 @@ impl Workspace {
                         .right_0()
                         .bottom_0()
                         .h(relative(fill))
-                        .bg(theme::accent().opacity(0.45)),
+                        .bg(theme::accent()),
                 )
+            });
+        div()
+            .id(id)
+            .absolute()
+            .top(relative(0.5))
+            .mt(px(-hit_h / 2.))
+            .w(px(hit_w))
+            .h(px(hit_h))
+            .flex()
+            .items_center()
+            // Shut, the pill sits a few px in from the window edge.
+            .map(|d| match (which, open) {
+                (_, true) => d.justify_center(),
+                (DwellTab::Nav, false) => d.justify_start().pl(px(4.)),
+                (DwellTab::Pane, false) => d.justify_end().pr(px(4.)),
             })
-            .child(grip)
+            .cursor_pointer()
+            .child(pill)
             .tooltip(crate::tip(tip))
             .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
                 motion::HoverMotion::set(&hover_state, *hovered, cx);
@@ -928,7 +932,7 @@ impl Workspace {
         let nav_tab_left = if self.nav_hidden {
             0.
         } else {
-            rail_col + side_col + 3. - 8.
+            rail_col + side_col + 3. - 8. - drawer_tab_spill()
         };
         // The drawer dwell fill grows frame by frame.
         if self.dwell.is_some() {
@@ -1038,7 +1042,7 @@ impl Workspace {
             )
             .when(pane_available, |d| {
                 let right = if pane_open {
-                    (pane_col + 3. - 8.).max(0.)
+                    (pane_col + 3. - 8. - drawer_tab_spill()).max(0.)
                 } else {
                     0.
                 };

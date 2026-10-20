@@ -22,6 +22,7 @@ use roostr_core::types::{ObjectSummary, RelationDef, Space, SyncPhase, Value};
 use roostr_core::{Glyph, PaneState, theme, ui};
 
 use crate::PaneHost;
+use crate::back_swipe::{self, Phase, Screen, Track};
 use crate::list_motion;
 use crate::pinned::PinnedWidget;
 use crate::rail::commit_space_move;
@@ -239,30 +240,66 @@ fn paint_sync_ring(bounds: Bounds<Pixels>, start: f32, arc: f32, window: &mut Wi
 }
 
 impl Workspace {
-    /// `.m-shell`: the screen for the route at a phone width.
+    /// `.m-shell`: the screen for the route at a phone width, sliding over
+    /// its parent while it is pushed, popped or swiped back
+    /// ([`crate::back_swipe`]).
     pub(crate) fn render_mobile(
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let route = Navigator::global(cx).read(cx).route().clone();
-        // The full-screen chat brings its own header and keyboard fit.
-        if matches!(route, Route::Chat(_)) {
-            return self.page(&route, window, cx).into_any_element();
-        }
-        let body = match &route {
-            Route::Graph { .. } => self.render_m_graph(&route, window, cx),
-            Route::Object(id) => self.render_m_object(id, &route, window, cx),
-            _ => {
-                if self.mobile_space_open
-                    && let Some(current) = Self::current_space(cx)
-                {
-                    self.render_m_space_home(&current, window, cx)
-                } else {
-                    self.render_m_spaces(cx)
-                }
-            }
+        let screen = self.mobile_screen(&route, cx);
+        let width = f32::from(window.viewport_size().width);
+        self.back_observe(&screen, width, cx);
+        let offset = self.back_offset(width, window, cx);
+        let under = if offset > 0. {
+            self.back_under(&screen, cx)
+        } else {
+            None
         };
+        let body = self.render_screen(&screen, &route, window, cx);
+        let under = under.map(|under| {
+            let progress = (offset / width).clamp(0., 1.);
+            div()
+                .absolute()
+                .top_0()
+                .bottom_0()
+                .left(px(-(width - offset) * back_swipe::PARALLAX))
+                .w(px(width))
+                .flex()
+                .flex_col()
+                .bg(theme::bg())
+                .line_height(relative(1.2))
+                .child(self.render_screen(&under, &route, window, cx))
+                .child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .bg(black().opacity(back_swipe::DIM * (1. - progress))),
+                )
+        });
+        let chat = matches!(screen, Screen::Chat(_));
+        let top = div()
+            .relative()
+            .left(px(offset))
+            .flex_1()
+            .min_h_0()
+            .w_full()
+            .flex()
+            .flex_col()
+            .bg(theme::bg())
+            .when(!chat, |d| d.line_height(relative(1.2)))
+            .when(offset > 0., |d| {
+                d.occlude().shadow(vec![BoxShadow {
+                    color: black().opacity(0.18),
+                    offset: point(px(-2.), px(0.)),
+                    blur_radius: px(12.),
+                    spread_radius: px(0.),
+                    inset: false,
+                }])
+            })
+            .child(body);
         // On a phone the chat & properties pane is a full-screen sheet over
         // the object (`.disc-drawer` @media 720).
         let pane = PaneState::global(cx).read(cx);
@@ -290,12 +327,285 @@ impl Workspace {
             .size_full()
             .flex()
             .flex_col()
+            .overflow_hidden()
             .bg(theme::bg())
             .text_color(theme::fg())
-            .line_height(relative(1.2))
-            .child(body)
+            .children(under)
+            .child(top)
+            // Under the sheet, which takes its own pans.
+            .when(cfg!(target_os = "ios"), |d| {
+                d.child(self.back_swipe_listener(cx))
+            })
             .children(sheet)
             .into_any_element()
+    }
+
+    /// The phone screen `route` shows.
+    fn mobile_screen(&self, route: &Route, cx: &App) -> Screen {
+        match route {
+            Route::Object(id) => Screen::Object(id.clone()),
+            Route::Chat(id) => Screen::Chat(id.clone()),
+            Route::Graph { .. } | Route::Site(_) => Screen::Other,
+            Route::Home => match Self::current_space(cx) {
+                Some(space) if self.mobile_space_open => Screen::Home(space.id),
+                _ => Screen::Spaces,
+            },
+        }
+    }
+
+    /// The screen `screen` goes back to: an object to its space's home, a
+    /// chat object's chat likewise, any other chat to its object, a space
+    /// home to the Spaces list.
+    fn mobile_parent(screen: &Screen, cx: &App) -> Option<Screen> {
+        let home = |id: &str| {
+            let owning = {
+                let store = Store::global(cx).read(cx);
+                store
+                    .summary(id)
+                    .and_then(|s| store.space(&s.channel_id))
+                    .map(|s| s.id.clone())
+            };
+            Some(
+                owning
+                    .or_else(|| Self::current_space(cx).map(|s| s.id))
+                    .map_or(Screen::Spaces, Screen::Home),
+            )
+        };
+        match screen {
+            Screen::Spaces | Screen::Other => None,
+            Screen::Home(_) => Some(Screen::Spaces),
+            Screen::Object(id) => home(id),
+            Screen::Chat(id) => {
+                let chat_object = Store::global(cx)
+                    .read(cx)
+                    .summary(id)
+                    .is_some_and(|s| s.type_key == "chat");
+                if chat_object {
+                    home(id)
+                } else {
+                    Some(Screen::Object(id.clone()))
+                }
+            }
+        }
+    }
+
+    /// A phone screen's content: its header and page.
+    fn render_screen(
+        &mut self,
+        screen: &Screen,
+        route: &Route,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        match screen {
+            Screen::Spaces => self.render_m_spaces(cx),
+            Screen::Home(id) => {
+                let space = Store::global(cx).read(cx).space(id).cloned();
+                match space.or_else(|| Self::current_space(cx)) {
+                    Some(space) => self.render_m_space_home(&space, window, cx),
+                    None => self.render_m_spaces(cx),
+                }
+            }
+            Screen::Object(id) => self.render_m_object(id, &Route::Object(id.clone()), window, cx),
+            // The full-screen chat brings its own header and keyboard fit.
+            Screen::Chat(id) => div()
+                .flex_1()
+                .min_h_0()
+                .flex()
+                .flex_col()
+                .child(self.page(&Route::Chat(id.clone()), window, cx))
+                .into_any_element(),
+            Screen::Other => self.render_m_graph(route, window, cx),
+        }
+    }
+
+    /// Whether the phone screens slide (a touch screen, motion allowed).
+    fn mobile_motion(cx: &App) -> bool {
+        layout::is_touch() && !motion::reduced(cx)
+    }
+
+    /// A newly shown screen: slides in over the screen it was opened from;
+    /// anything else (a pop landing, a jump) cancels the motion.
+    fn back_observe(&mut self, screen: &Screen, width: f32, cx: &App) {
+        let Some(prev) = self.back.shown.replace(screen.clone()) else {
+            return;
+        };
+        if prev == *screen {
+            return;
+        }
+        let push =
+            Self::mobile_motion(cx) && Self::mobile_parent(screen, cx).as_ref() == Some(&prev);
+        self.back.offset = motion::ValueState::new(if push { f64::from(width) } else { 0. });
+        self.back.phase = if push {
+            Phase::Pushing(prev)
+        } else {
+            Phase::Idle
+        };
+    }
+
+    /// The top screen's offset this frame; a pop that has slid off goes back.
+    fn back_offset(&mut self, width: f32, window: &mut Window, cx: &mut Context<Self>) -> f32 {
+        let spring = motion::release_spring(back_swipe::SETTLE);
+        let instant = motion::Transition::Instant;
+        let (target, transition) = match &self.back.phase {
+            Phase::Idle => (0., instant),
+            Phase::Tracking(_) if motion::reduced(cx) => (0., instant),
+            Phase::Tracking(track) => (track.offset.min(width), instant),
+            Phase::Popping => (width, spring),
+            Phase::Popped => (width, instant),
+            Phase::Returning | Phase::Pushing(_) => (0., spring),
+        };
+        let frame = self
+            .back
+            .offset
+            .frame(f64::from(target), transition, window, cx);
+        if !frame.is_animating() {
+            match self.back.phase {
+                Phase::Popping => {
+                    self.back.phase = Phase::Popped;
+                    cx.defer_in(window, |this, _, cx| this.mobile_pop(cx));
+                }
+                Phase::Returning | Phase::Pushing(_) => self.back.phase = Phase::Idle,
+                _ => {}
+            }
+        }
+        frame.value() as f32
+    }
+
+    /// The screen showing under the top one while it moves.
+    fn back_under(&self, screen: &Screen, cx: &App) -> Option<Screen> {
+        match &self.back.phase {
+            Phase::Idle => None,
+            Phase::Pushing(from) => Some(from.clone()),
+            Phase::Tracking(_) | Phase::Popping | Phase::Popped | Phase::Returning => {
+                Self::mobile_parent(screen, cx)
+            }
+        }
+    }
+
+    /// A back button: slide the screen off to its parent, or go at once.
+    fn mobile_back(&mut self, cx: &mut Context<Self>) {
+        let route = Navigator::global(cx).read(cx).route().clone();
+        let screen = self.mobile_screen(&route, cx);
+        if Self::mobile_motion(cx)
+            && matches!(self.back.phase, Phase::Idle)
+            && Self::mobile_parent(&screen, cx).is_some()
+        {
+            self.back.phase = Phase::Popping;
+            cx.notify();
+        } else {
+            self.mobile_pop(cx);
+        }
+    }
+
+    /// Show the current screen's parent (`mobileBackToSpace` for an object:
+    /// its space home, the pinned-cards frame, not history - one more back
+    /// reaches the Spaces list).
+    fn mobile_pop(&mut self, cx: &mut Context<Self>) {
+        let route = Navigator::global(cx).read(cx).route().clone();
+        let screen = self.mobile_screen(&route, cx);
+        match Self::mobile_parent(&screen, cx) {
+            Some(Screen::Spaces) => self.mobile_space_open = false,
+            Some(Screen::Home(space)) => {
+                Navigator::global(cx).update(cx, |nav, cx| nav.use_space(&space, cx));
+                self.mobile_space_open = true;
+                navigate(Route::Home, cx);
+            }
+            Some(Screen::Object(id)) => navigate(Route::Object(id), cx),
+            Some(Screen::Chat(_) | Screen::Other) | None => {}
+        }
+        cx.notify();
+    }
+
+    /// iOS's interactive pop: a pan from the left edge drags the screen
+    /// back ([`back_swipe`]). Listens in the capture phase, ahead of the
+    /// page's scrollers, and keeps the pans it takes (and their fling).
+    fn back_swipe_listener(&self, cx: &Context<Self>) -> impl IntoElement + use<> {
+        let this = cx.entity().downgrade();
+        canvas(
+            |bounds, window, _| window.insert_hitbox(bounds, HitboxBehavior::Normal),
+            move |_, hitbox, window, _| {
+                let this = this.clone();
+                window.on_mouse_event(move |e: &ScrollWheelEvent, phase, window, cx| {
+                    if phase != DispatchPhase::Capture {
+                        return;
+                    }
+                    let here = hitbox.should_handle_scroll(window);
+                    let ours = this
+                        .update(cx, |this, cx| this.back_pan(e, here, window, cx))
+                        .unwrap_or(false);
+                    if ours {
+                        cx.stop_propagation();
+                    }
+                });
+            },
+        )
+        .absolute()
+        .inset_0()
+    }
+
+    /// One step of a touch pan: true when it is the back swipe's.
+    fn back_pan(
+        &mut self,
+        e: &ScrollWheelEvent,
+        here: bool,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let ScrollDelta::Pixels(delta) = e.delta else {
+            return false;
+        };
+        let dx = f32::from(delta.x);
+        let now = web_time::Instant::now();
+        match e.touch_phase {
+            TouchPhase::Started => {
+                self.back.swallow = false;
+                let route = Navigator::global(cx).read(cx).route().clone();
+                let screen = self.mobile_screen(&route, cx);
+                let takes = here
+                    && matches!(self.back.phase, Phase::Idle)
+                    && self.space_lift.is_none()
+                    && back_swipe::claims(e.position, delta)
+                    && Self::mobile_parent(&screen, cx).is_some();
+                if !takes {
+                    return false;
+                }
+                let mut track = Track::default();
+                track.push(now, dx);
+                self.back.phase = Phase::Tracking(track);
+            }
+            TouchPhase::Moved => {
+                if self.back.swallow {
+                    return true;
+                }
+                let Phase::Tracking(track) = &mut self.back.phase else {
+                    return false;
+                };
+                track.push(now, dx);
+            }
+            TouchPhase::Ended | TouchPhase::Cancelled => {
+                if self.back.swallow {
+                    // The fling's last step.
+                    self.back.swallow = false;
+                    return true;
+                }
+                let Phase::Tracking(track) = &mut self.back.phase else {
+                    return false;
+                };
+                track.push(now, dx);
+                let width = f32::from(window.viewport_size().width);
+                let back = e.touch_phase == TouchPhase::Ended
+                    && back_swipe::commits(track.offset, width, track.velocity(now));
+                self.back.phase = if back {
+                    Phase::Popping
+                } else {
+                    Phase::Returning
+                };
+                self.back.swallow = e.touch_phase == TouchPhase::Ended;
+            }
+        }
+        cx.notify();
+        true
     }
 
     /// `.m-main`: the route's page, scrolling under the header.
@@ -358,7 +668,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let (path_icon, path_name, graph) = self.header_path(cx);
+        let (path_icon, path_name, graph) = self.header_path(route, cx);
         let (relation, summary, space) = {
             let store = Store::global(cx).read(cx);
             let relation = store.relations.iter().any(|r| r.id == id);
@@ -439,28 +749,12 @@ impl Workspace {
                             .debug_selector(|| "m-back".into())
                             .child(back_glyph())
                             .map(|d| self.data_tip(d, "tip-m-back", "Space home", cx))
-                            .on_click(cx.listener(|this, _, _, cx| this.mobile_back_to_space(cx))),
+                            .on_click(cx.listener(|this, _, _, cx| this.mobile_back(cx))),
                     )
                     .children(actions),
             )
             .child(self.render_m_main(route, window, cx))
             .into_any_element()
-    }
-
-    /// `mobileBackToSpace`: to the object's space home (the pinned-cards
-    /// frame), not history - one more tap reaches the Spaces list.
-    fn mobile_back_to_space(&mut self, cx: &mut Context<Self>) {
-        let owning = Self::open_object_id(cx).and_then(|id| {
-            let store = Store::global(cx).read(cx);
-            let channel = store.summary(&id)?.channel_id.clone();
-            store.space(&channel).map(|s| s.id.clone())
-        });
-        if let Some(space) = owning {
-            Navigator::global(cx).update(cx, |nav, cx| nav.use_space(&space, cx));
-        }
-        self.mobile_space_open = true;
-        navigate(Route::Home, cx);
-        cx.notify();
     }
 
     /// `.m-sync`: the sync dot as a button - green when synced, a pulsing
@@ -1394,10 +1688,7 @@ impl Workspace {
                         m_btn("m-spaces")
                             .child(back_glyph())
                             .map(|d| self.data_tip(d, "tip-m-spaces", "Spaces", cx))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.mobile_space_open = false;
-                                cx.notify();
-                            })),
+                            .on_click(cx.listener(|this, _, _, cx| this.mobile_back(cx))),
                     )
                     .child(div().flex_1())
                     .child(

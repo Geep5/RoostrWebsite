@@ -307,6 +307,20 @@ indicators (sync pulse, typing dots, spinners) stay on gpui's
 keys and clicks from their first frame and close at once; nothing animates on
 load or on changes arriving from sync, except a new chat message.
 
+On a touch screen the phone shell's screens slide as a navigation stack
+(`roostr-shell/src/back_swipe.rs`): opening a space, an object or a chat
+slides it in from the right over the screen it came from, and a back button
+slides it off again, the screen beneath riding in from 30% left and
+brightening, both on a 300ms release spring. In the iOS app a pan from the
+left 20pt drags the screen back with the finger (UIKit's interactive pop):
+let go past a third of the width, or flicked right, and it goes back (an
+object to its space home, a space home to the Spaces list), otherwise it
+springs back. The pan is taken in the capture phase ahead of the page's
+scrollers, so a pan starting anywhere else still scrolls tables and moves
+through the editor. The web shell leaves the left edge to the browser's
+own back gesture. Under reduced motion the screens swap at once and a swipe
+goes back on release without following the finger.
+
 Each front end follows the OS "reduce motion" setting live
 (`NSWorkspace` on macOS, `UIAccessibility` on iOS, `prefers-reduced-motion`
 in a browser); with it on every transition snaps to its end and the loops

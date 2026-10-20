@@ -167,7 +167,8 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> Div {
         let object_id = Self::open_object_id(cx);
-        let (path_icon, path_name, graph_path) = self.header_path(cx);
+        let route = Navigator::global(cx).read(cx).route().clone();
+        let (path_icon, path_name, graph_path) = self.header_path(&route, cx);
         let (has_more, pane_available, pane_open, count) = {
             let store = Store::global(cx).read(cx);
             let has_more = object_id.as_ref().is_some_and(|id| {
@@ -323,12 +324,12 @@ impl Workspace {
             .child(right)
     }
 
-    /// `headerPath`: (icon, name, is the graph).
-    pub(crate) fn header_path(&self, cx: &App) -> (String, String, bool) {
+    /// `headerPath` of `route`: (icon, name, is the graph).
+    pub(crate) fn header_path(&self, route: &Route, cx: &App) -> (String, String, bool) {
         let store = Store::global(cx).read(cx);
         let active = Navigator::global(cx).read(cx).space().to_string();
         let current = Self::current_space(cx);
-        match Navigator::global(cx).read(cx).route() {
+        match route {
             Route::Object(id) => {
                 if let Some(s) = store.summary(id) {
                     let name = if s.name.is_empty() {
