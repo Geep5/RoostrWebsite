@@ -117,6 +117,10 @@ pub struct Discussion {
     thread_id: String,
     /// Inside the conversation drawer (`DiscussionOptions::embedded`).
     embedded: bool,
+    /// The window the composer is in. The default tag lands after the
+    /// object's agents load and is written here, whether or not the platform
+    /// reports this window as the active one at that moment.
+    window: AnyWindowHandle,
 
     object: Option<Arc<Object>>,
     messages: Rc<Vec<ChatMessage>>,
@@ -202,6 +206,7 @@ impl Discussion {
             page_mode: options.page_mode,
             thread_id,
             embedded: options.embedded,
+            window: window.window_handle(),
             object: None,
             messages: Rc::new(Vec::new()),
             conversation: None,
@@ -1178,9 +1183,7 @@ impl Discussion {
         let text = format!("@{} ", pick.agent_name);
         self.tagged = vec![pick];
         let caret = text.len();
-        let Some(window) = cx.active_window() else {
-            return;
-        };
+        let window = self.window;
         let this = cx.entity().downgrade();
         cx.defer(move |cx| {
             let _ = window.update(cx, |_, window, cx| {

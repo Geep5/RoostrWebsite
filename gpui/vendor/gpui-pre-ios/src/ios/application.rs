@@ -1,5 +1,5 @@
 use super::{CallbackSlot, platform::IosPlatformState, window::IosWindowState};
-use gpui::{AppLifecyclePhase, WindowVisibility};
+use gpui::{AnyWindowHandle, AppLifecyclePhase, WindowVisibility};
 use objc2::{
     ClassType, DefinedClass, MainThreadMarker, MainThreadOnly, Message, define_class, extern_class,
     extern_methods, msg_send,
@@ -97,6 +97,22 @@ impl IosApplicationState {
         self.windows
             .borrow_mut()
             .retain(|entry| !entry.ptr_eq(&window));
+    }
+
+    /// roostr: the window UIKit made key, else the newest open one. A scene
+    /// shows one window, the one in use, as the browser's single window is.
+    pub(super) fn active_window(&self) -> Option<AnyWindowHandle> {
+        let windows: Vec<Rc<IosWindowState>> = self
+            .windows
+            .borrow()
+            .iter()
+            .filter_map(Weak::upgrade)
+            .collect();
+        windows
+            .iter()
+            .find(|window| window.is_key())
+            .or(windows.last())
+            .map(|window| window.handle())
     }
 
     pub(super) fn with_windows(&self, mut callback: impl FnMut(&IosWindowState)) {

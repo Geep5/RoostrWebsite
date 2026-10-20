@@ -238,10 +238,10 @@ impl Platform for IosPlatform {
         Some(Rc::new(IosDisplay::main()))
     }
 
+    // roostr: the published crate always answered None, so whatever acts on
+    // `cx.active_window()` (an alert, closing a dialog) did nothing on iOS.
     fn active_window(&self) -> Option<AnyWindowHandle> {
-        // iOS typically has one active window
-        // This would need to track the current key window
-        None
+        self.0.application.active_window()
     }
 
     fn open_window(

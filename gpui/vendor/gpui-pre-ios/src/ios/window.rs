@@ -332,6 +332,9 @@ impl std::ops::Deref for IosWindow {
 #[allow(clippy::type_complexity)]
 pub(crate) struct IosWindowState {
     platform: Weak<IosPlatformState>,
+    /// roostr: GPUI's handle for this window, which the platform's
+    /// `active_window` names.
+    handle: AnyWindowHandle,
     keyboard_observers:
         RefCell<Vec<Retained<objc2::runtime::ProtocolObject<dyn NSObjectProtocol>>>>,
     /// The UIWindow object
@@ -400,7 +403,7 @@ pub(crate) struct IosWindowState {
 impl IosWindow {
     #[allow(deprecated)] // Window construction can precede scene connection.
     pub fn new(
-        _handle: AnyWindowHandle,
+        handle: AnyWindowHandle,
         _params: WindowParams,
         platform: &Rc<IosPlatformState>,
     ) -> anyhow::Result<Self> {
@@ -479,6 +482,7 @@ impl IosWindow {
 
         let state = IosWindowState {
             platform: Rc::downgrade(platform),
+            handle,
             keyboard_observers: RefCell::default(),
             display_id: Cell::new(IosDisplay::from_screen(window.screen()).id()),
             display_changed_callback: CallbackSlot::default(),
@@ -538,6 +542,14 @@ impl IosWindow {
 }
 
 impl IosWindowState {
+    pub(super) fn handle(&self) -> AnyWindowHandle {
+        self.handle
+    }
+
+    pub(super) fn is_key(&self) -> bool {
+        self.window.isKeyWindow()
+    }
+
     pub(super) fn attach_to_scene(&self, scene: &UIWindowScene) {
         self.window.setWindowScene(Some(scene));
         self.window.makeKeyAndVisible();
