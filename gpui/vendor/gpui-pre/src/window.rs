@@ -1287,6 +1287,11 @@ pub struct Window {
     /// roostr: a listener asked to free the pan being dispatched from its
     /// axis lock; see [`Window::pan_touch_freely`].
     touch_pan_freed: bool,
+    /// roostr: the rails of the wheel or trackpad gesture in progress.
+    wheel_rails: crate::WheelRails,
+    /// roostr: the axis the wheel event being dispatched is held to; see
+    /// [`Window::wheel_rail`].
+    wheel_rail: Option<crate::Axis>,
     long_press_timer: Option<Task<()>>,
     long_press_capture: Option<EntityId>,
     pub(crate) refreshing: bool,
@@ -2190,6 +2195,8 @@ impl Window {
             touch_prediction_enabled: true,
             dispatching_touch_pan: false,
             touch_pan_freed: false,
+            wheel_rails: crate::WheelRails::default(),
+            wheel_rail: None,
             long_press_timer: None,
             long_press_capture: None,
             refreshing: false,
@@ -3436,6 +3443,18 @@ impl Window {
     pub fn pan_touch_freely(&mut self) {
         if self.dispatching_touch_pan {
             self.touch_pan_freed = true;
+        }
+    }
+
+    /// roostr: the axis a scroll container holds the wheel or trackpad event
+    /// being dispatched to, by the gesture's scroll rails
+    /// ([`WheelRails`](crate::WheelRails)); `None` lets it move on both axes.
+    /// A touch pan has its own axis lock and is not railed.
+    pub(crate) fn wheel_rail(&self) -> Option<crate::Axis> {
+        if self.dispatching_touch_pan {
+            None
+        } else {
+            self.wheel_rail
         }
     }
 
@@ -5673,6 +5692,11 @@ impl Window {
             PlatformInput::ScrollWheel(scroll_wheel) => {
                 self.mouse_position = scroll_wheel.position;
                 self.modifiers = scroll_wheel.modifiers;
+                // roostr: judge the gesture's rail once per event, so every
+                // scroller under the pointer agrees on it.
+                let delta = crate::wheel_scroll_delta(&scroll_wheel, self.line_height());
+                let now = cx.background_executor().now();
+                self.wheel_rail = self.wheel_rails.rail(delta, scroll_wheel.touch_phase, now);
                 PlatformInput::ScrollWheel(scroll_wheel)
             }
             PlatformInput::Pinch(pinch) => {

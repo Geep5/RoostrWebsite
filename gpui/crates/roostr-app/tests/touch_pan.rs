@@ -1,10 +1,12 @@
-//! A touch pan keeps to one axis (vendor/gpui-pre). Field report (iPhone,
-//! build 51): scrolling down a query also panned its table sideways. A pan
-//! was already locked to the axis it started on, but a scroller that scrolls
-//! on one axis only (the table's horizontal strip, under the page's vertical
-//! scroll) turned the other axis into its own, as it does for a mouse wheel.
-//! Now a swipe down scrolls the page and leaves the strip, a swipe sideways
-//! scrolls the strip and leaves the page, the wheel still turns the strip,
+//! A pan keeps to one axis (vendor/gpui-pre), by touch, wheel or trackpad.
+//! Field reports: scrolling down a query also panned its table sideways -
+//! on the iPhone (build 51), then on the web with a wheel and a trackpad. A
+//! touch pan was already locked to the axis it started on, but a scroller
+//! that scrolls on one axis only (the table's horizontal strip, under the
+//! page's vertical scroll) turned the other axis into its own. Now a swipe
+//! or a wheel down scrolls the page and leaves the strip, a swipe sideways
+//! (or Shift+wheel) scrolls the strip and leaves the page, a trackpad swipe
+//! down that drifts sideways keeps to the page (a browser's scroll rails),
 //! and a surface that pans in 2D (the graph) frees its pans from the lock.
 #![cfg(not(target_family = "wasm"))]
 
@@ -119,18 +121,91 @@ fn a_swipe_sideways_over_the_strip_scrolls_only_the_strip(cx: &mut TestAppContex
     assert!(strip.x < px(-150.), "the strip scrolls sideways: {strip:?}");
 }
 
-#[gpui::test]
-fn a_wheel_still_turns_the_strip(cx: &mut TestAppContext) {
-    let (view, cx) = open(cx);
+fn wheel(cx: &mut VisualTestContext, delta: ScrollDelta, modifiers: Modifiers) {
     cx.simulate_event(ScrollWheelEvent {
         position: point(px(300.), px(250.)),
-        delta: ScrollDelta::Pixels(point(px(0.), px(-50.))),
-        modifiers: Modifiers::none(),
+        delta,
+        modifiers,
         touch_phase: TouchPhase::Moved,
     });
+}
+
+/// A browser's trackpad stream (no phases): `steps` events 16ms apart.
+fn trackpad(cx: &mut VisualTestContext, step: Point<Pixels>, steps: usize) {
+    for _ in 0..steps {
+        wheel(cx, ScrollDelta::Pixels(step), Modifiers::none());
+        cx.executor().advance_clock(Duration::from_millis(16));
+    }
     cx.run_until_parked();
-    let (_, strip) = offsets(&view, cx);
-    assert_eq!(strip, point(px(-50.), px(0.)));
+}
+
+#[gpui::test]
+fn a_vertical_wheel_over_the_strip_scrolls_only_the_page(cx: &mut TestAppContext) {
+    let (view, cx) = open(cx);
+    // A mouse wheel natively (lines) and in a browser (pixels).
+    wheel(cx, ScrollDelta::Lines(point(0., -3.)), Modifiers::none());
+    cx.executor().advance_clock(Duration::from_millis(300));
+    wheel(
+        cx,
+        ScrollDelta::Pixels(point(px(0.), px(-100.))),
+        Modifiers::none(),
+    );
+    cx.run_until_parked();
+    let (page, strip) = offsets(&view, cx);
+    assert_eq!(strip, Point::default(), "the strip stays put");
+    assert_eq!(page.x, px(0.));
+    assert!(page.y < px(-100.), "the page scrolls down: {page:?}");
+}
+
+#[gpui::test]
+fn shift_and_the_wheel_scroll_the_strip(cx: &mut TestAppContext) {
+    let (view, cx) = open(cx);
+    wheel(cx, ScrollDelta::Lines(point(0., -3.)), Modifiers::shift());
+    cx.run_until_parked();
+    let (page, strip) = offsets(&view, cx);
+    assert_eq!(page, Point::default(), "the page stays put");
+    assert_eq!(strip.y, px(0.));
+    assert!(strip.x < px(0.), "the strip scrolls sideways: {strip:?}");
+}
+
+#[gpui::test]
+fn a_trackpad_swipe_down_that_drifts_sideways_scrolls_only_the_page(cx: &mut TestAppContext) {
+    let (view, cx) = open(cx);
+    // Down, a pixel right for every three or four down.
+    trackpad(cx, point(px(-2.), px(-7.)), 30);
+    let (page, strip) = offsets(&view, cx);
+    assert_eq!(strip, Point::default(), "the strip stays put");
+    assert_eq!(page, point(px(0.), px(-210.)), "the page takes all of it");
+}
+
+#[gpui::test]
+fn a_trackpad_swipe_sideways_scrolls_only_the_strip(cx: &mut TestAppContext) {
+    let (view, cx) = open(cx);
+    trackpad(cx, point(px(-7.), px(2.)), 30);
+    let (page, strip) = offsets(&view, cx);
+    assert_eq!(page, Point::default(), "the page stays put");
+    assert_eq!(strip, point(px(-210.), px(0.)));
+}
+
+#[gpui::test]
+fn a_wheel_over_the_canvas_is_not_railed(cx: &mut TestAppContext) {
+    let (view, cx) = open(cx);
+    for _ in 0..10 {
+        cx.simulate_event(ScrollWheelEvent {
+            position: point(px(300.), px(600.)),
+            delta: ScrollDelta::Pixels(point(px(-2.), px(-7.))),
+            modifiers: Modifiers::none(),
+            touch_phase: TouchPhase::Moved,
+        });
+        cx.executor().advance_clock(Duration::from_millis(16));
+    }
+    cx.run_until_parked();
+    let panned = view.read_with(cx, |p, _| p.panned.get());
+    assert_eq!(
+        panned,
+        point(px(-20.), px(-70.)),
+        "the gesture's whole path"
+    );
 }
 
 #[gpui::test]

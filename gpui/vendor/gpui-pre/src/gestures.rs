@@ -33,7 +33,7 @@ fn dominant_axis(delta: Point<Pixels>) -> Axis {
     }
 }
 
-fn lock_delta_to_axis(delta: &mut Point<Pixels>, axis: Axis) {
+pub(crate) fn lock_delta_to_axis(delta: &mut Point<Pixels>, axis: Axis) {
     match axis {
         Axis::Vertical => delta.x = Pixels::ZERO,
         Axis::Horizontal => delta.y = Pixels::ZERO,
@@ -121,6 +121,100 @@ impl OngoingScroll {
         self.axis = axis;
         if let Some(axis) = axis {
             lock_delta_to_axis(delta, axis);
+        }
+    }
+}
+
+/// roostr: the scroll a wheel or trackpad event asks of a scroll container.
+/// With Shift held, a mouse wheel that only turns vertically scrolls
+/// horizontally, as a browser and every desktop does. A shifted wheel that
+/// already arrives horizontal (macOS, and Chrome, send it so) and a trackpad's
+/// precise deltas are left as they are.
+pub fn wheel_scroll_delta(event: &ScrollWheelEvent, line_height: Pixels) -> Point<Pixels> {
+    let delta = event.delta.pixel_delta(line_height);
+    if event.modifiers.shift && !event.delta.precise() && delta.x.is_zero() {
+        point(delta.y, Pixels::ZERO)
+    } else {
+        delta
+    }
+}
+
+/// roostr: how long a wheel or trackpad gesture may pause before the next
+/// event starts a new one (where the platform reports no phases, as a
+/// browser does not).
+const WHEEL_GESTURE_IDLE: Duration = Duration::from_millis(200);
+/// roostr: the movement over which a wheel gesture's direction is judged.
+const WHEEL_RAIL_SEGMENT: Pixels = px(12.);
+/// roostr: how much further along one axis than the other a segment must
+/// move to run on that axis's rail (within about 27 degrees of it).
+const WHEEL_RAIL_RATIO: f32 = 2.;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+enum WheelRail {
+    /// The gesture has not moved a segment yet.
+    #[default]
+    Undecided,
+    /// It scrolls on this axis alone.
+    Locked(Axis),
+    /// It moves diagonally, on both axes.
+    Free,
+}
+
+/// roostr: a browser's scroll rails for the wheel and the trackpad. A
+/// gesture that moves clearly more along one axis than the other (twice as
+/// far) scrolls on that axis only: a trackpad swipe down that drifts a little
+/// sideways scrolls the page down, and leaves a horizontal strip under the
+/// pointer where it is. A diagonal gesture runs free, on both axes. The
+/// direction is judged every 12px of movement, so a gesture that turns
+/// clearly sideways switches rails, while a diagonal wobble keeps the rail it
+/// is on. A gesture starts with [`TouchPhase::Started`] or after 200ms
+/// without events; its momentum keeps its rail. The window rails every wheel
+/// event it dispatches, for the scroll containers under the pointer.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct WheelRails {
+    last_event: Option<Instant>,
+    /// Movement since the direction was last judged.
+    segment: Point<Pixels>,
+    rail: WheelRail,
+}
+
+impl WheelRails {
+    /// Takes the next wheel event's delta (see [`wheel_scroll_delta`]) and
+    /// returns the axis to hold it to, or `None` to let it move on both.
+    pub fn rail(
+        &mut self,
+        delta: Point<Pixels>,
+        touch_phase: TouchPhase,
+        now: Instant,
+    ) -> Option<Axis> {
+        if touch_phase == TouchPhase::Started
+            || self
+                .last_event
+                .is_none_or(|last| now.duration_since(last) >= WHEEL_GESTURE_IDLE)
+        {
+            *self = Self::default();
+        }
+        if !delta.x.is_zero() || !delta.y.is_zero() {
+            self.last_event = Some(now);
+            self.segment += delta;
+            let (x, y) = (self.segment.x.abs(), self.segment.y.abs());
+            if x.max(y) >= WHEEL_RAIL_SEGMENT {
+                if y >= x * WHEEL_RAIL_RATIO {
+                    self.rail = WheelRail::Locked(Axis::Vertical);
+                } else if x >= y * WHEEL_RAIL_RATIO {
+                    self.rail = WheelRail::Locked(Axis::Horizontal);
+                } else if self.rail == WheelRail::Undecided {
+                    self.rail = WheelRail::Free;
+                }
+                self.segment = Point::default();
+            }
+        }
+        match self.rail {
+            // Until it has moved a segment, each small step keeps to the
+            // axis it moves further along.
+            WheelRail::Undecided => Some(dominant_axis(delta)),
+            WheelRail::Locked(axis) => Some(axis),
+            WheelRail::Free => None,
         }
     }
 }

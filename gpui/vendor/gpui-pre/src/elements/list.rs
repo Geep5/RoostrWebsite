@@ -1601,7 +1601,11 @@ impl Element for List {
         window.on_mouse_event(move |event: &ScrollWheelEvent, phase, window, cx| {
             if phase == DispatchPhase::Bubble && hitbox_id.should_handle_scroll(window) {
                 accumulated_scroll_delta = accumulated_scroll_delta.coalesce(event.delta);
-                let pixel_delta = accumulated_scroll_delta.pixel_delta(px(20.));
+                let mut pixel_delta = accumulated_scroll_delta.pixel_delta(px(20.));
+                // roostr: the gesture's scroll rails, as a div scroller's.
+                if let Some(axis) = window.wheel_rail() {
+                    crate::lock_delta_to_axis(&mut pixel_delta, axis);
+                }
                 list_state.0.borrow_mut().scroll(
                     &scroll_top,
                     height,

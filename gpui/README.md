@@ -249,12 +249,19 @@ Touch scrolling follows WebKit's directional lock, on the phone and in a
 mobile browser alike: a pan keeps, with its fling, to the axis it first moved
 further along, so a swipe down a query scrolls the page and leaves the
 table's columns where they are, and the table (a board's columns, the tab
-strip) scrolls sideways only under a mostly sideways swipe. The graph canvas
-alone pans on both axes (`Window::pan_touch_freely`). This lives in GPUI's
-core, `vendor/gpui-pre` (gpui-pre 0.3.9 patched in through
-`[patch.crates-io]`, changes marked `roostr:`): its recognizer already locked
-each pan, but a scroller that scrolls on one axis only took the other axis
-as its own, as it rightly does for a mouse wheel - which it still does.
+strip) scrolls sideways only under a mostly sideways swipe. The wheel and
+the trackpad scroll as in a browser, on the web and the desktop alike: a
+scroller takes only the axes it scrolls on, so a wheel down over the table
+scrolls the page (Shift+wheel scrolls the table sideways), and a trackpad
+gesture runs on a browser's scroll rails - one that moves clearly more along
+one axis (twice as far) scrolls on that axis alone, so a swipe down that
+drifts sideways leaves the table where it is, while a diagonal one moves
+both. The graph canvas alone pans on both axes (`Window::pan_touch_freely`;
+its wheel listener gets the wheel unrailed). This lives in GPUI's core,
+`vendor/gpui-pre` (gpui-pre 0.3.9 patched in through `[patch.crates-io]`,
+changes marked `roostr:`): its recognizer already locked each pan, but a
+scroller that scrolls on one axis only took the other axis as its own, under
+a swipe, a wheel and a trackpad alike.
 
 Text input follows iOS WebKit too. Focus raises the on-screen keyboard only
 from the person: a tap on a field, focus the tap itself moves (Reply, a

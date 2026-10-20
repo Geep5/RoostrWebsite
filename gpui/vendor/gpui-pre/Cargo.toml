@@ -1,16 +1,23 @@
 # Zed's `gpui` as published in gpui-pre 0.3.9, vendored (and patched in
 # through the workspace's [patch.crates-io]) for one change, marked `roostr:`
-# in src/gestures.rs, src/window.rs and src/elements/div.rs:
-# - A touch pan scrolls along one axis, as iOS and WebKit scroll views do. The
-#   portable recognizer already locked each pan (and its fling) to the axis it
-#   started on, but a scroll container that scrolls on one axis only turned
-#   the other axis into its own - a wheel affordance (a mouse wheel turns a
-#   horizontal-only strip) - so a straight-down swipe over a query's table also
-#   panned the table sideways. A touch pan no longer crosses axes; the wheel
-#   and trackpad keep the remap. A surface that pans freely (the graph canvas)
-#   opts out of the lock with `Window::pan_touch_freely`.
+# in src/gestures.rs, src/window.rs, src/elements/div.rs and
+# src/elements/list.rs: a pan scrolls along one axis, as a browser's and iOS's
+# scroll views do.
+# - A scroll container takes only the axes it scrolls on. Upstream, one that
+#   scrolls on one axis only turned the other axis into its own (a vertical
+#   wheel or swipe turned a horizontal-only strip), so scrolling down over a
+#   query's table also panned the table sideways. Shift turns a mouse wheel
+#   sideways instead, as in a browser.
+# - A touch pan keeps (with its fling) to the axis it started on - the
+#   portable recognizer's own lock. A surface that pans freely (the graph
+#   canvas) opts out of it with `Window::pan_touch_freely`.
+# - A wheel or trackpad gesture runs on a browser's scroll rails
+#   (`WheelRails`): moving clearly more along one axis, it scrolls on that
+#   axis only; a diagonal one runs free. Wheel listeners of their own (the
+#   graph canvas) get the event as it came.
 # The examples and their manifest entries are left out; tests/touch_pan_axis.rs
-# covers the axis decision (`cargo test -p gpui-pre --test touch_pan_axis`).
+# and tests/wheel_rails.rs cover the axis decisions
+# (`cargo test -p gpui-pre --test touch_pan_axis --test wheel_rails`).
 
 [package]
 edition = "2024"
@@ -90,6 +97,10 @@ path = "src/gpui.rs"
 [[test]]
 name = "touch_pan_axis"
 path = "tests/touch_pan_axis.rs"
+
+[[test]]
+name = "wheel_rails"
+path = "tests/wheel_rails.rs"
 
 [dependencies.accesskit]
 version = "0.24.0"

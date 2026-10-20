@@ -3340,7 +3340,14 @@ impl Interactivity {
                 if phase == DispatchPhase::Bubble && hitbox.should_handle_scroll(window) {
                     let mut scroll_offset = scroll_offset.borrow_mut();
                     let old_scroll_offset = *scroll_offset;
-                    let mut delta = event.delta.pixel_delta(line_height);
+                    // roostr: Shift turns a mouse wheel sideways, and the
+                    // gesture's rails hold a wheel or trackpad scroll to the
+                    // axis it clearly moves along; a touch pan is locked to
+                    // its own axis already.
+                    let mut delta = crate::wheel_scroll_delta(event, line_height);
+                    if let Some(axis) = window.wheel_rail() {
+                        crate::lock_delta_to_axis(&mut delta, axis);
+                    }
 
                     if restrict_scroll_to_axis
                         && event.delta.precise()
@@ -3351,20 +3358,18 @@ impl Interactivity {
                             .filter(&mut delta, event.touch_phase);
                     }
 
-                    // A wheel turns a scroller that scrolls on one axis only
-                    // whichever way it rolls. roostr: a touch pan does not:
-                    // it is locked to the axis the finger moved along, so a
-                    // swipe down over a horizontal strip scrolls the page
-                    // down and leaves the strip where it is.
-                    let cross_axis = !restrict_scroll_to_axis && !window.is_dispatching_touch_pan();
+                    // roostr: a scroller takes the axes it scrolls on and
+                    // leaves the others to the scrollers around it, as a
+                    // browser's overflow does. A vertical wheel over a
+                    // horizontal strip (a table under a scrolling page)
+                    // scrolls the page and leaves the strip where it is;
+                    // Shift+wheel, or a sideways swipe, scrolls the strip.
                     let mut delta_x = match overflow.x {
-                        Overflow::Scroll if !delta.x.is_zero() => delta.x,
-                        Overflow::Scroll if cross_axis && overflow.y != Overflow::Scroll => delta.y,
+                        Overflow::Scroll => delta.x,
                         _ => Pixels::ZERO,
                     };
                     let mut delta_y = match overflow.y {
-                        Overflow::Scroll if !delta.y.is_zero() => delta.y,
-                        Overflow::Scroll if cross_axis && overflow.x != Overflow::Scroll => delta.x,
+                        Overflow::Scroll => delta.y,
                         _ => Pixels::ZERO,
                     };
                     if !allow_concurrent_scroll && !delta_x.is_zero() && !delta_y.is_zero() {
