@@ -237,6 +237,17 @@ portrait) is the mobile shell, wider (landscape, iPad) the desktop layout;
 touch shows hover-only controls at rest and long presses lift blocks and
 spaces (`roostr_core::layout`).
 
+Touch scrolling follows WebKit's directional lock, on the phone and in a
+mobile browser alike: a pan keeps, with its fling, to the axis it first moved
+further along, so a swipe down a query scrolls the page and leaves the
+table's columns where they are, and the table (a board's columns, the tab
+strip) scrolls sideways only under a mostly sideways swipe. The graph canvas
+alone pans on both axes (`Window::pan_touch_freely`). This lives in GPUI's
+core, `vendor/gpui-pre` (gpui-pre 0.3.9 patched in through
+`[patch.crates-io]`, changes marked `roostr:`): its recognizer already locked
+each pan, but a scroller that scrolls on one axis only took the other axis
+as its own, as it rightly does for a mouse wheel - which it still does.
+
 Text input follows iOS WebKit too. Focus raises the on-screen keyboard only
 from the person: a tap on a field, focus the tap itself moves (Reply, a
 menu's search box), a field the app focuses under a tap just made (the line

@@ -75,9 +75,11 @@ strip = true
 
 # The iOS app's emoji fallback and color rasterization (iOS-only changes; see
 # vendor/gpui-pre-apple/Cargo.toml), the browser's touch hover (see
-# vendor/gpui-pre-web/Cargo.toml), and gpui-motion's clock on wasm (see
-# vendor/gpui-motion-kit/Cargo.toml).
+# vendor/gpui-pre-web/Cargo.toml), gpui-motion's clock on wasm (see
+# vendor/gpui-motion-kit/Cargo.toml), and touch pans that keep to one axis
+# (see vendor/gpui-pre/Cargo.toml).
 [patch.crates-io]
+gpui-pre = { path = "vendor/gpui-pre" }
 gpui-pre-apple = { path = "vendor/gpui-pre-apple" }
 gpui-pre-web = { path = "vendor/gpui-pre-web" }
 gpui-motion-kit = { path = "vendor/gpui-motion-kit" }

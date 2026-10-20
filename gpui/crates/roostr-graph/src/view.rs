@@ -1063,6 +1063,9 @@ impl Render for GraphView {
                     window.on_mouse_event(move |e: &ScrollWheelEvent, phase, window, cx| {
                         if phase == DispatchPhase::Bubble && h4.is_hovered(window) {
                             if roostr_core::layout::is_touch() {
+                                // The canvas pans on both axes; a touch pan
+                                // is otherwise locked to the one it started on.
+                                window.pan_touch_freely();
                                 let delta = e.delta.pixel_delta(px(50.));
                                 let _ = v4.update(cx, |this, cx| this.on_pan(delta, cx));
                             } else {
