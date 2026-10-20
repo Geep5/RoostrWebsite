@@ -1,0 +1,237 @@
+From: Roostr <noreply@roostr.space>
+Subject: [PATCH] Kit adapter: store epochs as web_time::Instant so wasm32 builds
+
+gpui-pre's executor clock (`cx.background_executor().now()`) returns
+`web_time::Instant`. On native targets that is a re-export of
+`std::time::Instant`, but on wasm32-unknown-unknown it is a distinct type, so
+gpui-motion-kit 0.5.0 (with gpui-ce-motion 0.4.0) fails to compile for the
+browser with 38x E0308 "expected std::time::Instant, found
+web_time::time::instant::Instant".
+
+- integrations/gpui-kit: every adapter epoch is a `web_time::Instant`
+  (lib.rs Clock/MotionState/ValueState, layout, measured_size, pop_layout,
+  reorder_native, scroll_native, shared_layout, vector, gesture_native);
+  depends on web-time 1.
+- core: re-exports `web_time::Instant` as `#[doc(hidden)] __Instant`, used by
+  the `__motion_spatial_adapter` and `__motion_text_adapter` macros; depends
+  on web-time 1. The CE-only `gpui` feature code is unchanged (it calls
+  `Instant::now()` itself and is not built for the Kit adapter).
+
+Nothing on the Kit path calls `Instant::now()`, spawns threads or reads
+SystemTime, so with this change the adapter builds and runs in a browser
+(checked: wasm32-unknown-unknown build, Chromium at 60 fps, reduced motion
+snaps), and native behaviour is unchanged (web_time re-exports std there).
+Cargo.lock files gain web-time (already a gpui-pre dependency).
+
+Suggest adding `cargo check --target wasm32-unknown-unknown -p gpui-motion-kit`
+to CI.
+---
+diff --git a/Cargo.toml b/Cargo.toml
+index 34262ed..05bf7df 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -35,6 +35,7 @@ native-tests = ["gpui", "gpui/test-support"]
+ [dependencies]
+ svgtypes = { version = "0.15.3", optional = true }
+ unicode-segmentation = { version = "1.13.3", optional = true }
++web-time = "1"
+ # Match the published CE API; no workspace patches or Git dependencies.
+ gpui = { package = "gpui-ce", version = "=0.2.2", default-features = false, optional = true }
+ 
+diff --git a/integrations/gpui-kit/Cargo.toml b/integrations/gpui-kit/Cargo.toml
+index 24a13c2..6634e99 100644
+--- a/integrations/gpui-kit/Cargo.toml
++++ b/integrations/gpui-kit/Cargo.toml
+@@ -31,6 +31,7 @@ native-tests = ["gpui-kit/test-support"]
+ [dependencies]
+ gpui-ce-motion = { path = "../..", version = "0.4.0", default-features = false, features = ["text", "svg-path"] }
+ gpui-kit = { version = "=0.7.3", default-features = false }
++web-time = "1"
+ 
+ [lints.rust]
+ missing_docs = "warn"
+diff --git a/integrations/gpui-kit/src/gesture_native.rs b/integrations/gpui-kit/src/gesture_native.rs
+index d056a0d..bf68b35 100644
+--- a/integrations/gpui-kit/src/gesture_native.rs
++++ b/integrations/gpui-kit/src/gesture_native.rs
+@@ -16,8 +16,10 @@ use gpui_kit::{
+ use std::{
+     cell::RefCell,
+     rc::Rc,
+-    time::{Duration, Instant},
++    time::Duration,
+ };
++// web_time::Instant is std's on native targets; GPUI's executor clock (`background_executor().now()`) is web_time's, a distinct type on wasm32-unknown-unknown.
++use web_time::Instant;
+ 
+ type DragCallback = Rc<dyn Fn(DragEvent, &mut Window, &mut App)>;
+ type PinchCallback = Rc<dyn Fn(PinchGesture, &mut Window, &mut App)>;
+diff --git a/integrations/gpui-kit/src/layout.rs b/integrations/gpui-kit/src/layout.rs
+index 01f08c6..c860d42 100644
+--- a/integrations/gpui-kit/src/layout.rs
++++ b/integrations/gpui-kit/src/layout.rs
+@@ -6,7 +6,9 @@ use gpui_kit::{
+     LayoutId, Pixels, Window, point, px,
+ };
+ 
+-use std::{cell::Cell, rc::Rc, time::Instant};
++use std::{cell::Cell, rc::Rc};
++// web_time::Instant is std's on native targets; GPUI's executor clock (`background_executor().now()`) is web_time's, a distinct type on wasm32-unknown-unknown.
++use web_time::Instant;
+ 
+ /// A view-owned coordinate scope for automatic position-only layout animation.
+ /// Clone shares the ancestor scope; retain one group across renders and use that
+diff --git a/integrations/gpui-kit/src/lib.rs b/integrations/gpui-kit/src/lib.rs
+index 1736ed2..527c15a 100644
+--- a/integrations/gpui-kit/src/lib.rs
++++ b/integrations/gpui-kit/src/lib.rs
+@@ -22,8 +22,10 @@ use gpui_kit::{AnyElement, App, Empty, IntoElement, Styled, Window, px};
+ 
+ use std::{
+     ops::Deref,
+-    time::{Duration, Instant},
++    time::Duration,
+ };
++// web_time::Instant is std's on native targets; GPUI's executor clock (`background_executor().now()`) is web_time's, a distinct type on wasm32-unknown-unknown.
++use web_time::Instant;
+ 
+ /// The portable motion engine, available without enabling GPUI CE.
+ pub use gpui_ce_motion as core;
+diff --git a/integrations/gpui-kit/src/measured_size.rs b/integrations/gpui-kit/src/measured_size.rs
+index ec32778..bd52899 100644
+--- a/integrations/gpui-kit/src/measured_size.rs
++++ b/integrations/gpui-kit/src/measured_size.rs
+@@ -6,7 +6,8 @@ use gpui_kit::{
+     InspectorElementId, IntoElement, LayoutId, Pixels, Style, Window, px, size,
+ };
+ 
+-use std::time::Instant;
++// web_time::Instant is std's on native targets; GPUI's executor clock (`background_executor().now()`) is web_time's, a distinct type on wasm32-unknown-unknown.
++use web_time::Instant;
+ 
+ /// Which measured dimensions interpolate. Other dimensions follow content immediately.
+ #[derive(Clone, Copy, Debug, Default)]
+diff --git a/integrations/gpui-kit/src/pop_layout.rs b/integrations/gpui-kit/src/pop_layout.rs
+index b24e0f5..61deba2 100644
+--- a/integrations/gpui-kit/src/pop_layout.rs
++++ b/integrations/gpui-kit/src/pop_layout.rs
+@@ -6,7 +6,9 @@ use gpui_kit::{
+     InspectorElementId, IntoElement, LayoutId, Pixels, Point, Style, Window, point, px, size,
+ };
+ 
+-use std::{cell::Cell, rc::Rc, time::Instant};
++use std::{cell::Cell, rc::Rc};
++// web_time::Instant is std's on native targets; GPUI's executor clock (`background_executor().now()`) is web_time's, a distinct type on wasm32-unknown-unknown.
++use web_time::Instant;
+ 
+ /// Retain in the view. A container records its origin; exiting items reserve no
+ /// flow space but remain at their last measured parent-relative bounds. Use the
+diff --git a/integrations/gpui-kit/src/reorder_native.rs b/integrations/gpui-kit/src/reorder_native.rs
+index 743b374..0dadcb0 100644
+--- a/integrations/gpui-kit/src/reorder_native.rs
++++ b/integrations/gpui-kit/src/reorder_native.rs
+@@ -17,8 +17,10 @@ use std::{
+     collections::HashMap,
+     hash::Hash,
+     rc::Rc,
+-    time::{Duration, Instant},
++    time::Duration,
+ };
++// web_time::Instant is std's on native targets; GPUI's executor clock (`background_executor().now()`) is web_time's, a distinct type on wasm32-unknown-unknown.
++use web_time::Instant;
+ 
+ struct Metrics {
+     bounds: Bounds<Pixels>,
+diff --git a/integrations/gpui-kit/src/scroll_native.rs b/integrations/gpui-kit/src/scroll_native.rs
+index bca53ea..12cd338 100644
+--- a/integrations/gpui-kit/src/scroll_native.rs
++++ b/integrations/gpui-kit/src/scroll_native.rs
+@@ -7,7 +7,8 @@ use gpui_kit::{
+     LayoutId, Pixels, ScrollHandle, Styled, Window,
+ };
+ 
+-use std::time::Instant;
++// web_time::Instant is std's on native targets; GPUI's executor clock (`background_executor().now()`) is web_time's, a distinct type on wasm32-unknown-unknown.
++use web_time::Instant;
+ 
+ /// Native scroll axis.
+ #[derive(Clone, Copy, Debug)]
+diff --git a/integrations/gpui-kit/src/shared_layout.rs b/integrations/gpui-kit/src/shared_layout.rs
+index 56c4b69..9936b93 100644
+--- a/integrations/gpui-kit/src/shared_layout.rs
++++ b/integrations/gpui-kit/src/shared_layout.rs
+@@ -6,7 +6,9 @@ use gpui_kit::{
+     LayoutId, Pixels, Styled, Window, point, px,
+ };
+ 
+-use std::{cell::RefCell, collections::HashMap, hash::Hash, rc::Rc, time::Instant};
++use std::{cell::RefCell, collections::HashMap, hash::Hash, rc::Rc};
++// web_time::Instant is std's on native targets; GPUI's executor clock (`background_executor().now()`) is web_time's, a distinct type on wasm32-unknown-unknown.
++use web_time::Instant;
+ 
+ struct Entry {
+     position: LayoutPositionState,
+diff --git a/integrations/gpui-kit/src/vector.rs b/integrations/gpui-kit/src/vector.rs
+index 6a686ce..6a97211 100644
+--- a/integrations/gpui-kit/src/vector.rs
++++ b/integrations/gpui-kit/src/vector.rs
+@@ -8,7 +8,9 @@ use gpui_kit::{
+     Path, PathBuilder, Pixels, Style, Window, point, px, size,
+ };
+ 
+-use std::{cell::RefCell, rc::Rc, time::Instant};
++use std::{cell::RefCell, rc::Rc};
++// web_time::Instant is std's on native targets; GPUI's executor clock (`background_executor().now()`) is web_time's, a distinct type on wasm32-unknown-unknown.
++use web_time::Instant;
+ 
+ struct Data {
+     morph: PathMorphState,
+diff --git a/src/lib.rs b/src/lib.rs
+index 8ba199f..1c27ae6 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -211,6 +211,12 @@ pub use vector::{PathMeasure, PathPoint};
+ #[cfg(feature = "text")]
+ pub use text::{FixedNumber, FormattedNumber, NumberFormat, NumberFormatError, RichText, TextSpan};
+ 
++// The adapter macros' clock type. gpui-pre's executor clock is
++// web_time's Instant, which is std's on native targets but its own type on
++// wasm32-unknown-unknown.
++#[doc(hidden)]
++pub use web_time::Instant as __Instant;
++
+ mod spatial_native;
+ 
+ #[cfg(feature = "gpui")]
+diff --git a/src/spatial_native.rs b/src/spatial_native.rs
+index bafc4ff..8fa1f01 100644
+--- a/src/spatial_native.rs
++++ b/src/spatial_native.rs
+@@ -7,8 +7,10 @@ macro_rules! __motion_spatial_adapter {
+             cell::RefCell,
+             ops::{Deref, DerefMut},
+             rc::Rc,
+-            time::{Duration, Instant},
++            time::Duration,
+         };
++        // web_time::Instant is std's on native targets; GPUI's executor clock (`background_executor().now()`) is web_time's, a distinct type on wasm32-unknown-unknown.
++        use $crate::__Instant as Instant;
+         use $adapter as native;
+         use $ui::{
+             AnyElement, App, Bounds, Element, ElementId, GlobalElementId, InspectorElementId,
+diff --git a/src/text/native.rs b/src/text/native.rs
+index 53fc696..3aa38e9 100644
+--- a/src/text/native.rs
++++ b/src/text/native.rs
+@@ -9,8 +9,10 @@ macro_rules! __motion_text_adapter {
+             collections::{BTreeMap, BTreeSet, VecDeque},
+             rc::Rc,
+             sync::Arc,
+-            time::{Duration, Instant},
++            time::Duration,
+         };
++        // web_time::Instant is std's on native targets; GPUI's executor clock (`background_executor().now()`) is web_time's, a distinct type on wasm32-unknown-unknown.
++        use $crate::__Instant as Instant;
+         use $crate::{
+             Animation, MotionValue, NumberEffect, PresenceMode, Scramble, StaggerFrom, TextClip,
+             TextError, TextLayoutUnit, TextMatch, TextOptions, TextPlaybackState, TextPresentation,

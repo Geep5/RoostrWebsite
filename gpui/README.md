@@ -83,7 +83,7 @@ The mode choice is `<config dir>/Roostr/mode` (`localStorage`
 
 | Crate | Ports |
 |---|---|
-| `roostr-core` | Wire types, `Backend` trait + daemon/harness clients, the on-device `Account` (replica identity, profile, join requests), the mode choice, the global `Store` (`data.svelte.ts`), navigation and tabs, UI state, theme tokens, icons, and the shared `lib/*.ts` helpers |
+| `roostr-core` | Wire types, `Backend` trait + daemon/harness clients, the on-device `Account` (replica identity, profile, join requests), the mode choice, the global `Store` (`data.svelte.ts`), navigation and tabs, UI state, theme tokens, icons, motion presets (`motion`), and the shared `lib/*.ts` helpers |
 | `roostr-engine` | The shared Odin engine: a static library natively (built from `glonOdin`), the site's `engine.wasm` in the browser |
 | `roostr-replica-store` | The replica's change store: SQLite natively, IndexedDB (`roostr-replica`) in the browser, plus the one-time import of the Svelte app's IndexedDB `roostr` (`svelte_import`) |
 | `roostr-replica` | The daemon-less backend (`engine/backend.ts`, iOS `Backend.swift`): replay, query cache, mutations, shared spaces, identity and device-local storage; `sync/` is the relay sync (`sync.ts`, `SyncEngine.swift`) |
@@ -276,6 +276,31 @@ platform: a mouse drag selects across lines and messages and ⌘C copies; on a
 touch screen a long press selects a word with gpui-kit's window text
 selection (`gpui_kit::base::TextSelection`), whose handles extend it and
 whose Copy / Select All menu sits over it (drawn by gpui-kit, not UIKit).
+
+## Motion
+
+Transitions run on [gpui-motion](https://github.com/1bye/gpui-motion)
+(`gpui-motion-kit` 0.5.0 over `gpui-ce-motion` 0.4.0) through
+`roostr_core::motion`: presets with the Svelte CSS timings (`HOVER_REVEAL`
+100ms, `FADE` 120, `CONTROL` 150, `HANDLE` 150 on cubic-bezier(.22,1,.36,1),
+`COLUMNS` 160, `SHEET_SNAP` 180, `DISCLOSURE` 200, all CSS `ease` otherwise),
+springs only to settle a released gesture, and keyed element state
+(`use_motion`, `animate`, `progress`, `hover`) for stateless components. Looping
+indicators (sync pulse, typing dots, spinners) stay on gpui's
+`Animation::repeat`. Motion never holds input: menus, dialogs and sheets take
+keys and clicks from their first frame and close at once; nothing animates on
+load or on changes arriving from sync, except a new chat message.
+
+Each front end follows the OS "reduce motion" setting live
+(`NSWorkspace` on macOS, `UIAccessibility` on iOS, `prefers-reduced-motion`
+in a browser); with it on every transition snaps to its end and the loops
+hold still.
+
+Both crates are vendored (`vendor/gpui-motion-kit`, `vendor/gpui-ce-motion`,
+patched in through `[patch.crates-io]`, changes marked `roostr:`): as
+published their clocks are `std::time::Instant`, which is not gpui's
+`web_time::Instant` on wasm32, so the browser build did not compile.
+`vendor/gpui-motion-kit/UPSTREAM.patch` is the fix for upstream.
 
 ## Develop
 

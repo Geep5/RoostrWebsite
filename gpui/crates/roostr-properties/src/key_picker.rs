@@ -245,7 +245,7 @@ impl Render for KeyPickerState {
                         .child(field(&self.query, FieldSkin::Search, window, cx)),
                 )
                 .child(list);
-            root = root.child(below(4., menu));
+            root = root.child(below("key-menu", 4., menu));
         }
         root
     }

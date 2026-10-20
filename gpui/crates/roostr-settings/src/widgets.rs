@@ -7,7 +7,7 @@ use std::rc::Rc;
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use roostr_core::{theme, ui};
+use roostr_core::{motion, theme, ui};
 
 /// A full-window modal layer (`.del-overlay`: `rgb(0 0 0/0.55)`, centered)
 /// painted above everything. The caller wires the backdrop's mouse-down
@@ -52,6 +52,53 @@ pub fn hint(text: impl Into<SharedString>) -> Div {
         .line_height(px(18.))
         .text_color(theme::muted())
         .child(text.into())
+}
+
+/// A transient confirmation ("Saved", "Copied ✓") that rises in over 150ms
+/// (opacity, y 6 → 0) and fades out over 200ms after its flag clears. It is
+/// never interactive, so the exit may outlive the flag: the owning view keeps
+/// one per flash and remembers the last text for the exit to draw.
+#[derive(Default)]
+pub struct Flash {
+    state: motion::MotionState,
+    text: SharedString,
+}
+
+impl Flash {
+    /// The presence declaration: shown or leaving.
+    pub fn motion(shown: bool) -> motion::Motion {
+        let hidden = motion::Target::default().y(6.).opacity(0.);
+        motion::Motion::new(motion::Target::default())
+            .exit(hidden)
+            .transition(
+                if shown {
+                    motion::CONTROL
+                } else {
+                    motion::Tween::ease(200)
+                }
+                .transition(),
+            )
+            .present(shown)
+    }
+
+    /// The flash for `text` ("" = hidden), each frame; `build` styles the
+    /// text. Draws nothing once the exit has settled.
+    pub fn render<E: IntoElement>(
+        &mut self,
+        text: impl Into<SharedString>,
+        build: impl FnOnce(SharedString) -> E,
+        window: &mut Window,
+        cx: &App,
+    ) -> AnyElement {
+        let text = text.into();
+        let shown = !text.is_empty();
+        if shown {
+            self.text = text;
+        }
+        let frame = self.state.frame(Self::motion(shown), window, cx);
+        let label = self.text.clone();
+        frame.render(|frame| frame.apply(div().child(build(label))))
+    }
 }
 
 type ClickHandler = Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
@@ -294,12 +341,17 @@ impl RenderOnce for Btn {
     }
 }
 
-/// The settings toggle (`.switch`): 34×20 track, 16px white knob.
+/// The settings toggle (`.switch`): 34×20 track, 16px white knob, both
+/// easing between states (`transition: left 0.15s ease` / `background 0.15s`).
 pub fn switch(
     id: impl Into<ElementId>,
     on: bool,
     toggle: impl Fn(bool, &mut Window, &mut App) + 'static,
+    window: &mut Window,
+    cx: &mut App,
 ) -> Stateful<Div> {
+    let id = id.into();
+    let t = motion::progress(id.clone(), on, motion::CONTROL, window, cx);
     div()
         .id(id)
         .relative()
@@ -308,12 +360,12 @@ pub fn switch(
         .h(px(20.))
         .rounded_full()
         .cursor_pointer()
-        .bg(if on { theme::accent() } else { theme::border() })
+        .bg(motion::mix(theme::border(), theme::accent(), t))
         .child(
             div()
                 .absolute()
                 .top(px(2.))
-                .left(px(if on { 16. } else { 2. }))
+                .left(px(2. + 14. * t))
                 .size(px(16.))
                 .rounded_full()
                 .bg(theme::white()),
@@ -594,5 +646,52 @@ impl RenderOnce for Select {
             .flex_col()
             .child(trigger)
             .child(div().h_0().children(menu))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::{Flash, motion};
+
+    #[test]
+    fn flash_hidden_on_mount_then_rises_and_fades() {
+        let mut state = motion::MotionState::default();
+        let at = Duration::from_millis;
+        assert!(
+            !state
+                .sample(Flash::motion(false), at(0), false)
+                .is_mounted()
+        );
+        let shown = state.sample(Flash::motion(true), at(10), false);
+        assert!(shown.is_mounted() && shown.is_animating());
+        assert!(shown.target().alpha() < 0.5 && shown.target().y_px() > 3.);
+        let settled = state.sample(Flash::motion(true), at(10 + 150), false);
+        assert_eq!(
+            (settled.target().y_px(), settled.target().alpha()),
+            (0., 1.)
+        );
+        assert!(
+            state
+                .sample(Flash::motion(false), at(200), false)
+                .is_mounted()
+        );
+        assert!(
+            !state
+                .sample(Flash::motion(false), at(200 + 200), false)
+                .is_mounted()
+        );
+    }
+
+    #[test]
+    fn flash_snaps_under_reduced_motion() {
+        let mut state = motion::MotionState::default();
+        let at = Duration::from_millis;
+        state.sample(Flash::motion(false), at(0), true);
+        let shown = state.sample(Flash::motion(true), at(1), true);
+        assert_eq!((shown.target().y_px(), shown.target().alpha()), (0., 1.));
+        assert!(!shown.is_animating());
+        assert!(!state.sample(Flash::motion(false), at(2), true).is_mounted());
     }
 }

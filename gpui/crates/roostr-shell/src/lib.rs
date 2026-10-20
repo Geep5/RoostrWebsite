@@ -17,6 +17,7 @@
 
 mod create_menu;
 mod header;
+mod list_motion;
 mod mobile;
 mod modal;
 mod pin_collapse;

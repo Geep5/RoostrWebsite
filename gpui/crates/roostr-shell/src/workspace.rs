@@ -13,7 +13,9 @@ use gpui_kit::*;
 use roostr_core::nav::Route;
 use roostr_core::store::Store;
 use roostr_core::types::Space;
-use roostr_core::{Connection, Glyph, NavEvent, Navigator, PaneState, StoreEvent, UiState, theme};
+use roostr_core::{
+    Connection, Glyph, NavEvent, Navigator, PaneState, StoreEvent, UiState, motion, theme,
+};
 use web_time::Instant;
 
 use crate::create_menu::CreateMenu;
@@ -40,14 +42,9 @@ const SIDE_MIN: f32 = 180.;
 const SIDE_MAX: f32 = 480.;
 /// Resting on a drawer tab this long toggles it.
 const DWELL: Duration = Duration::from_millis(700);
-/// Grid column transition (`transition: grid-template-columns 0.16s ease`).
-const COLUMN_TRANSITION: Duration = Duration::from_millis(160);
-/// `[data-tip]` appears after this much hover (`animation: tip-in 0.12s ease 0.4s`)…
+/// `[data-tip]` appears after this much hover (`animation: tip-in 0.12s ease 0.4s`),
+/// then fades in over [`motion::FADE`].
 const TIP_DELAY: Duration = Duration::from_millis(400);
-/// …and fades in over this.
-const TIP_FADE: Duration = Duration::from_millis(120);
-/// Collapse arrows rotate 90° in 150ms.
-const ARROW_TURN: Duration = Duration::from_millis(150);
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum DwellTab {
@@ -77,72 +74,23 @@ impl RailDrag {
     }
 }
 
-/// A width that eases towards its target like a CSS transition.
-#[derive(Default)]
-struct Tween {
-    from: f32,
-    to: f32,
-    start: Option<Instant>,
-}
-
-impl Tween {
-    fn new(value: f32) -> Self {
-        Self {
-            from: value,
-            to: value,
-            start: None,
-        }
-    }
-
-    fn current(&self, now: Instant) -> f32 {
-        match self.start {
-            Some(start) => {
-                let t = (now - start).as_secs_f32() / COLUMN_TRANSITION.as_secs_f32();
-                if t >= 1. {
-                    self.to
-                } else {
-                    self.from + (self.to - self.from) * css_ease(t)
-                }
-            }
-            None => self.to,
-        }
-    }
-
-    fn value(&mut self, target: f32, animate: bool, window: &mut Window) -> f32 {
-        let now = Instant::now();
-        if target != self.to {
-            self.from = if animate { self.current(now) } else { target };
-            self.to = target;
-            self.start = animate.then_some(now);
-        }
-        let value = self.current(now);
-        if self.start.is_some() {
-            if value == self.to {
-                self.start = None;
-            } else {
-                window.request_animation_frame();
-            }
-        }
-        value
-    }
-}
-
-/// CSS `ease` = cubic-bezier(0.25, 0.1, 0.25, 1).
-pub(crate) fn css_ease(t: f32) -> f32 {
-    let (x1, y1, x2, y2) = (0.25f32, 0.1f32, 0.25f32, 1.0f32);
-    let bez = |a: f32, b: f32, s: f32| {
-        3. * a * s * (1. - s).powi(2) + 3. * b * s * s * (1. - s) + s.powi(3)
+/// A grid column's width (`transition: grid-template-columns 0.16s ease`),
+/// following the pointer 1:1 while a resizer drags (`transition: none`).
+fn column(
+    state: &mut motion::ValueState,
+    target: f32,
+    animate: bool,
+    window: &mut Window,
+    cx: &App,
+) -> f32 {
+    let transition = if animate {
+        motion::COLUMNS.transition()
+    } else {
+        motion::Transition::Instant
     };
-    let (mut lo, mut hi) = (0f32, 1f32);
-    for _ in 0..24 {
-        let mid = (lo + hi) / 2.;
-        if bez(x1, x2, mid) < t {
-            lo = mid;
-        } else {
-            hi = mid;
-        }
-    }
-    bez(y1, y2, (lo + hi) / 2.)
+    state
+        .frame(f64::from(target), transition, window, cx)
+        .value() as f32
 }
 
 /// The shell. Build it once per window with the page factory; it follows
@@ -164,9 +112,12 @@ pub struct Workspace {
     pane_drag: Option<(Pixels, f32)>,
     pub(crate) nav_hidden: bool,
     dwell: Option<Dwell>,
-    rail_tween: Tween,
-    side_tween: Tween,
-    pane_tween: Tween,
+    rail_col: motion::ValueState,
+    side_col: motion::ValueState,
+    pane_col: motion::ValueState,
+    /// The desk has rendered: columns animate only after its first frame
+    /// (a CSS transition doesn't run on mount).
+    desk_shown: bool,
     // Sidebar.
     /// Folds this device asked for that the pinned objects don't show yet.
     pub(crate) pin_folds: HashMap<String, crate::pin_collapse::PendingFold>,
@@ -196,11 +147,9 @@ pub struct Workspace {
     seeding_personal: bool,
     /// Window bounds of the dropdown anchors (New pill, More, Properties ＋), from the last frame.
     anchors: Rc<std::cell::RefCell<HashMap<&'static str, Bounds<Pixels>>>>,
-    /// The hovered `[data-tip]` control: (anchor key, text, hover start).
-    tip: Option<(&'static str, SharedString, Instant)>,
+    /// The hovered `[data-tip]` control: (anchor key, text, past the delay).
+    tip: Option<(&'static str, SharedString, bool)>,
     _tip_timer: Option<Task<()>>,
-    /// When each section/widget arrow last flipped (150ms rotation).
-    pub(crate) arrow_flips: HashMap<String, Instant>,
     /// Keyboard focus handles of the tabs, by uid.
     pub(crate) tab_focus: HashMap<u64, FocusHandle>,
     // Mobile shell (`isMobile`).
@@ -282,6 +231,11 @@ impl Workspace {
         let section_collapsed = UiState::get(cx, "section-collapsed").unwrap_or_default();
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
+        let (rail_col, side_col) = if nav_hidden {
+            (0., 0.)
+        } else {
+            (rail_width, side_width)
+        };
         let mut this = Self {
             pages,
             page_cache: HashMap::new(),
@@ -298,9 +252,10 @@ impl Workspace {
             pane_drag: None,
             nav_hidden,
             dwell: None,
-            rail_tween: Tween::new(if nav_hidden { 0. } else { rail_width }),
-            side_tween: Tween::new(if nav_hidden { 0. } else { side_width }),
-            pane_tween: Tween::new(0.),
+            rail_col: motion::ValueState::new(f64::from(rail_col)),
+            side_col: motion::ValueState::new(f64::from(side_col)),
+            pane_col: motion::ValueState::new(0.),
+            desk_shown: false,
             pin_folds: HashMap::new(),
             legacy_folds,
             section_collapsed,
@@ -324,7 +279,6 @@ impl Workspace {
             anchors: Rc::default(),
             tip: None,
             _tip_timer: None,
-            arrow_flips: HashMap::new(),
             tab_focus: HashMap::new(),
             mobile_space_open: false,
             mobile_collapsed: HashMap::new(),
@@ -799,6 +753,7 @@ impl Workspace {
         &self,
         which: DwellTab,
         open: bool,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
         let dwelling = self
@@ -818,6 +773,12 @@ impl Workspace {
             DwellTab::Nav => "nav-drawer",
             DwellTab::Pane => "pane-drawer",
         };
+        // `opacity: 0.55`, 1 on hover (`transition: opacity 0.12s ease`).
+        let hover_key = match which {
+            DwellTab::Nav => "nav-drawer-hover",
+            DwellTab::Pane => "pane-drawer-hover",
+        };
+        let (hover, hover_state) = motion::hover(hover_key, motion::FADE, window, cx);
         // A grip: two columns of dots, muted until the handle is hovered.
         let dot = move || {
             div()
@@ -851,9 +812,9 @@ impl Workspace {
             .bg(theme::bg())
             .border_color(theme::border())
             .cursor_pointer()
-            .opacity(0.55)
+            .opacity(0.55 + 0.45 * hover)
             .overflow_hidden()
-            .hover(|s| s.opacity(1.).border_color(theme::accent()))
+            .hover(|s| s.border_color(theme::accent()))
             .map(|d| match (which, open) {
                 (DwellTab::Nav, true) | (DwellTab::Pane, true) => d.border_1().rounded_full(),
                 (DwellTab::Nav, false) => d.border_t_1().border_r_1().border_b_1().rounded_r_full(),
@@ -875,6 +836,7 @@ impl Workspace {
             .child(grip)
             .tooltip(crate::tip(tip))
             .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                motion::HoverMotion::set(&hover_state, *hovered, cx);
                 if *hovered {
                     this.dwell_start(which, cx);
                 } else {
@@ -943,20 +905,14 @@ impl Workspace {
         let (pane_open, pane_available, pane_width) = (pane.open, pane.available, pane.width);
         let pane_view = PaneHost::global(cx).read(cx).view.clone();
         let affixed = pane_open && pane_available && pane_view.is_some();
-        let animate = !self.resizing();
-        let rail_col = self.rail_tween.value(
-            if self.nav_hidden { 0. } else { self.rail_width },
-            animate,
-            window,
-        );
-        let side_col = self.side_tween.value(
-            if self.nav_hidden { 0. } else { self.side_width },
-            animate,
-            window,
-        );
-        let pane_col =
-            self.pane_tween
-                .value(if affixed { pane_width } else { 0. }, animate, window);
+        let animate = !self.resizing() && self.desk_shown;
+        self.desk_shown = true;
+        let rail_target = if self.nav_hidden { 0. } else { self.rail_width };
+        let rail_col = column(&mut self.rail_col, rail_target, animate, window, cx);
+        let side_target = if self.nav_hidden { 0. } else { self.side_width };
+        let side_col = column(&mut self.side_col, side_target, animate, window, cx);
+        let pane_target = if affixed { pane_width } else { 0. };
+        let pane_col = column(&mut self.pane_col, pane_target, animate, window, cx);
         let wide = Self::open_object_id(cx)
             .and_then(|id| {
                 Store::global(cx)
@@ -971,10 +927,8 @@ impl Workspace {
         } else {
             rail_col + side_col + 3. - 8.
         };
-        let dwelling = self.dwell.is_some();
-        // Drawer dwell fill and collapse-arrow turns animate frame by frame.
-        self.arrow_flips.retain(|_, at| at.elapsed() < ARROW_TURN);
-        if dwelling || !self.arrow_flips.is_empty() {
+        // The drawer dwell fill grows frame by frame.
+        if self.dwell.is_some() {
             window.request_animation_frame();
         }
 
@@ -994,7 +948,7 @@ impl Workspace {
                     .h_full()
                     .py(px(6.))
                     .when(!self.nav_hidden && rail_col > 6., |d| {
-                        d.child(self.render_rail(rail_col - 6., cx))
+                        d.child(self.render_rail(rail_col - 6., window, cx))
                     }),
             )
             // Sidebar column.
@@ -1033,24 +987,25 @@ impl Workspace {
             )
             // Resizers (in the gaps between panes).
             .when(!self.nav_hidden, |d| {
-                d.child(self.render_rail_resize(rail_col, cx)).child(
-                    div()
-                        .id("side-resize")
-                        .absolute()
-                        .top(px(6.))
-                        .bottom(px(6.))
-                        .left(px(rail_col + side_col - 8.))
-                        .w(px(8.))
-                        .cursor_col_resize()
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(|this, e: &MouseDownEvent, _, cx| {
-                                this.side_drag = Some((e.position.x, this.side_width));
-                                cx.stop_propagation();
-                                cx.notify();
-                            }),
-                        ),
-                )
+                d.child(self.render_rail_resize(rail_col, window, cx))
+                    .child(
+                        div()
+                            .id("side-resize")
+                            .absolute()
+                            .top(px(6.))
+                            .bottom(px(6.))
+                            .left(px(rail_col + side_col - 8.))
+                            .w(px(8.))
+                            .cursor_col_resize()
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, e: &MouseDownEvent, _, cx| {
+                                    this.side_drag = Some((e.position.x, this.side_width));
+                                    cx.stop_propagation();
+                                    cx.notify();
+                                }),
+                            ),
+                    )
             })
             .when(affixed, |d| {
                 d.child(
@@ -1075,7 +1030,7 @@ impl Workspace {
             })
             // Drawer tabs.
             .child(
-                self.render_drawer_tab(DwellTab::Nav, !self.nav_hidden, cx)
+                self.render_drawer_tab(DwellTab::Nav, !self.nav_hidden, window, cx)
                     .left(px(nav_tab_left)),
             )
             .when(pane_available, |d| {
@@ -1085,7 +1040,7 @@ impl Workspace {
                     0.
                 };
                 d.child(
-                    self.render_drawer_tab(DwellTab::Pane, pane_open, cx)
+                    self.render_drawer_tab(DwellTab::Pane, pane_open, window, cx)
                         .right(px(right)),
                 )
             });
@@ -1125,19 +1080,21 @@ impl Workspace {
                     .into_any_element(),
             );
         }
+        // Dropdowns drop in (`motion::appear`) and close at once.
         let anchors = self.anchors.borrow().clone();
         if mobile {
-            out.extend(self.render_m_create_menu(window));
+            out.extend(self.render_m_create_menu(window, cx));
         } else if let Some(menu) = self.create_menu.clone()
             && let Some(b) = anchors.get("create")
         {
             let max_h = window.viewport_size().height - px(110.);
+            let enter = motion::appear_frame("create-menu-appear", -4., window, cx);
             out.push(
                 anchored()
                     .position(point(b.right(), b.top() + px(32.)))
                     .anchor(Anchor::TopRight)
                     .snap_to_window_with_margin(px(8.))
-                    .child(div().max_h(max_h).flex().child(menu))
+                    .child(enter.apply(div().max_h(max_h).flex().child(menu)))
                     .into_any_element(),
             );
         }
@@ -1145,63 +1102,58 @@ impl Workspace {
             && let Some(b) = anchors.get("more")
         {
             let menu = self.render_more_menu(window, cx);
+            let enter = motion::appear_frame("more-menu-appear", -4., window, cx);
             out.push(
                 anchored()
                     .position(point(b.right(), b.top() + px(32.)))
                     .anchor(Anchor::TopRight)
                     .snap_to_window_with_margin(px(8.))
-                    .child(menu)
+                    .child(enter.apply(menu))
                     .into_any_element(),
             );
         }
         if let Some(suggest) = self.new_prop.clone()
             && let Some(b) = anchors.get("new-prop")
         {
+            let enter = motion::appear_frame("new-prop-appear", -4., window, cx);
             out.push(
                 anchored()
                     .position(point(b.left(), b.bottom() + px(4.)))
                     .snap_to_window_with_margin(px(8.))
-                    .child(suggest)
+                    .child(enter.apply(div().child(suggest)))
                     .into_any_element(),
             );
         }
         if self.delete_prop.is_some() {
             out.push(self.render_delete_prop(window, cx));
         }
-        if let Some((key, text, since)) = self.tip.clone()
+        if let Some((key, text, true)) = self.tip.clone()
             && let Some(b) = anchors.get(key)
         {
-            let shown = since.elapsed().saturating_sub(TIP_DELAY);
-            if since.elapsed() >= TIP_DELAY {
-                let fade = (shown.as_secs_f32() / TIP_FADE.as_secs_f32()).min(1.);
-                if fade < 1. {
-                    window.request_animation_frame();
-                }
-                out.push(
-                    anchored()
-                        .position(point(b.center().x, b.bottom() + px(6.)))
-                        .anchor(Anchor::TopCenter)
-                        .snap_to_window_with_margin(px(8.))
-                        .child(
-                            div()
-                                .opacity(fade)
-                                .bg(theme::panel())
-                                .border_1()
-                                .border_color(theme::border())
-                                .rounded(theme::radius::sm())
-                                .px(px(8.))
-                                .py(px(3.))
-                                .text_size(px(11.))
-                                .font_weight(FontWeight::NORMAL)
-                                .line_height(relative(theme::LINE_HEIGHT_NORMAL))
-                                .text_color(theme::fg())
-                                .whitespace_nowrap()
-                                .shadow(roostr_core::ui::tooltip_shadow())
-                                .child(text),
-                        )
-                        .into_any_element(),
-                );
-            }
+            let fade = motion::appear_frame(key, 0., window, cx);
+            out.push(
+                anchored()
+                    .position(point(b.center().x, b.bottom() + px(6.)))
+                    .anchor(Anchor::TopCenter)
+                    .snap_to_window_with_margin(px(8.))
+                    .child(
+                        fade.apply(div())
+                            .bg(theme::panel())
+                            .border_1()
+                            .border_color(theme::border())
+                            .rounded(theme::radius::sm())
+                            .px(px(8.))
+                            .py(px(3.))
+                            .text_size(px(11.))
+                            .font_weight(FontWeight::NORMAL)
+                            .line_height(relative(theme::LINE_HEIGHT_NORMAL))
+                            .text_color(theme::fg())
+                            .whitespace_nowrap()
+                            .shadow(roostr_core::ui::tooltip_shadow())
+                            .child(text),
+                    )
+                    .into_any_element(),
+            );
         }
         if let Some(search) = &self.search {
             out.push(search.clone().into_any_element());
@@ -1225,10 +1177,15 @@ impl Workspace {
             .child(self.anchor_probe(key))
             .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
                 if *hovered {
-                    this.tip = Some((key, text.into(), Instant::now()));
+                    this.tip = Some((key, text.into(), false));
                     this._tip_timer = Some(cx.spawn(async move |this, cx| {
                         cx.background_executor().timer(TIP_DELAY).await;
-                        let _ = this.update(cx, |_, cx| cx.notify());
+                        let _ = this.update(cx, |this, cx| {
+                            if let Some(tip) = this.tip.as_mut().filter(|t| t.0 == key) {
+                                tip.2 = true;
+                                cx.notify();
+                            }
+                        });
                     }));
                 } else if this.tip.as_ref().is_some_and(|t| t.0 == key) {
                     this.tip = None;
@@ -1236,29 +1193,6 @@ impl Workspace {
                 }
                 cx.notify();
             }))
-    }
-
-    /// Flip a section/widget arrow's animation clock.
-    pub(crate) fn flip_arrow(&mut self, key: String) {
-        self.arrow_flips.insert(key, Instant::now());
-    }
-
-    /// The ▶ disclosure arrow, 90° when open, rotating over 150ms after a flip.
-    pub(crate) fn arrow(&self, key: &str, open: bool, size: f32) -> Svg {
-        let t = self
-            .arrow_flips
-            .get(key)
-            .map(|at| (at.elapsed().as_secs_f32() / ARROW_TURN.as_secs_f32()).min(1.))
-            .unwrap_or(1.);
-        let eased = css_ease(t);
-        let turn = if open { eased } else { 1. - eased };
-        svg()
-            .path(Glyph::Disclosure.path())
-            .size(px(size))
-            .flex_none()
-            .with_transformation(Transformation::rotate(radians(
-                turn * std::f32::consts::FRAC_PI_2,
-            )))
     }
 
     /// An invisible probe recording its parent's window bounds under `key`
@@ -1276,6 +1210,17 @@ impl Workspace {
         .left_0()
         .size_full()
     }
+}
+
+/// The ▶ disclosure arrow at `turn` (0 closed, 1 open: rotated 90°).
+pub(crate) fn arrow_at(turn: f32, size: f32) -> Svg {
+    svg()
+        .path(Glyph::Disclosure.path())
+        .size(px(size))
+        .flex_none()
+        .with_transformation(Transformation::rotate(radians(
+            turn * std::f32::consts::FRAC_PI_2,
+        )))
 }
 
 impl Render for Workspace {

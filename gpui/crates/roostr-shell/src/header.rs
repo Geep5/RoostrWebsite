@@ -14,7 +14,7 @@ use roostr_core::types::{Block, Fields, RelationDef, Value, pos};
 use roostr_core::{Glyph, PaneState, TypeDef, api, theme, ui};
 use serde_json::json;
 
-use crate::modal::{outline_button, overlay, small_card};
+use crate::modal::{dialog_appear, outline_button, overlay, small_card};
 use crate::workspace::Workspace;
 
 pub(crate) fn init(_: &mut App) {}
@@ -889,8 +889,9 @@ impl Workspace {
             Some(n) => format!("{n} object{}", if n == 1 { "" } else { "s" }),
         };
         let deleting = d.deleting;
+        let enter = dialog_appear("prop-del-appear", window, cx);
         deferred(
-            overlay("prop-del-overlay")
+            overlay("prop-del-overlay", enter.target().alpha())
                 .flex()
                 .items_center()
                 .justify_center()
@@ -904,7 +905,8 @@ impl Workspace {
                     }),
                 )
                 .child(
-                    small_card(window)
+                    enter
+                        .apply(small_card(window))
                         .id("prop-del-modal")
                         .gap_0()
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())

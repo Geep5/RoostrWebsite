@@ -716,7 +716,7 @@ impl RenderOnce for CredentialCell {
                 .child(backdrop("cred-backdrop", move |_, cx| {
                     close_state.update(cx, |s, cx| s.close(cx))
                 }))
-                .child(below(4., pop));
+                .child(below("cred-pop", 4., pop));
         }
         root
     }

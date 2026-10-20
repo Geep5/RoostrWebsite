@@ -24,6 +24,9 @@ roostr-engine = { path = "crates/roostr-engine" }
 roostr-replica-store = { path = "crates/roostr-replica-store" }
 roostr-replica = { path = "crates/roostr-replica" }
 gpui-kit = "0.7.3"
+# Interruptible tweens, springs and presence on gpui-kit; see
+# roostr_core::motion and vendor/gpui-motion-kit.
+gpui-motion-kit = "0.5.0"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"
@@ -71,8 +74,11 @@ codegen-units = 1
 strip = true
 
 # The iOS app's emoji fallback and color rasterization (iOS-only changes; see
-# vendor/gpui-pre-apple/Cargo.toml), and the browser's touch hover (see
-# vendor/gpui-pre-web/Cargo.toml).
+# vendor/gpui-pre-apple/Cargo.toml), the browser's touch hover (see
+# vendor/gpui-pre-web/Cargo.toml), and gpui-motion's clock on wasm (see
+# vendor/gpui-motion-kit/Cargo.toml).
 [patch.crates-io]
 gpui-pre-apple = { path = "vendor/gpui-pre-apple" }
 gpui-pre-web = { path = "vendor/gpui-pre-web" }
+gpui-motion-kit = { path = "vendor/gpui-motion-kit" }
+gpui-ce-motion = { path = "vendor/gpui-ce-motion" }

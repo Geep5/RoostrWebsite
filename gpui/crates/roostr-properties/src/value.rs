@@ -858,7 +858,7 @@ impl ValueEditor {
         );
         if self.object_open {
             let menu = self.render_object_menu(window, cx);
-            row = row.child(below(6., menu));
+            row = row.child(below("object-menu", 6., menu));
         }
         row.into_any_element()
     }
@@ -1128,6 +1128,7 @@ impl Render for ValueEditor {
                         self.calendar.clone().filter(|_| self.date_open),
                         |d, cal| {
                             d.child(below(
+                                "date-calendar",
                                 6.,
                                 div()
                                     .occlude()

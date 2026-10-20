@@ -17,13 +17,15 @@ use roostr_core::io;
 use roostr_core::profile as nostr_profile;
 use roostr_core::serving::{MachineRow, fetch_machines, machine_name};
 use roostr_core::ui::data_url_image;
-use roostr_core::{Store, UiState, api, theme};
+use roostr_core::{Store, UiState, api, motion, theme};
 use serde_json::{Value as Json, json};
 
 use crate::export::{ExportFormat, export_all};
 use crate::local::{self, AgentAuth, PlanStatus, with_status};
 use crate::profile;
-use crate::widgets::{Btn, FieldStyle, Select, Span, field, h3, hint, rich, spinner, switch};
+use crate::widgets::{
+    Btn, FieldStyle, Flash, Select, Span, field, h3, hint, rich, spinner, switch,
+};
 
 /// The editor's "Add to dictionary" list (web localStorage `spell-ignore`).
 const IGNORE_KEY: &str = "spell-ignore";
@@ -32,6 +34,8 @@ const DESK_TIMEOUT: Duration = Duration::from_secs(15);
 /// Follow a Claude sign-in this often until it finishes.
 const PLAN_POLL: Duration = Duration::from_millis(2000);
 const FLASH: Duration = Duration::from_millis(1500);
+/// The mobile sheet rising into place on open (a soft `ease`).
+const SHEET_ENTER: motion::Tween = motion::Tween::ease(260);
 const BUILD_STAMP: &str = env!("ROOSTR_BUILD_STAMP");
 
 /// Relays offered as toggles: ours on by default, public ones off.
@@ -87,11 +91,13 @@ pub struct Settings {
     relays: Vec<String>,
     new_relay: Entity<InputState>,
     save_state: &'static str,
+    save_flash: Flash,
 
     // Agent credentials: `None` while checking, `Some(None)` when unavailable.
     agent_auth: Option<Option<AgentAuth>>,
     kimi_draft: Entity<InputState>,
     agent_saved: &'static str,
+    agent_flash: Flash,
     login_error: SharedString,
 
     // Claude plan
@@ -128,12 +134,13 @@ pub struct Settings {
 
     open_menu: Option<Menu>,
     /// The mobile sheet's drag-to-close: how far it is pulled down, where
-    /// the finger started while it drags, and the pull it springs back from
-    /// (each spring-back a new animation).
+    /// the finger started while it drags, its presented offset (entering
+    /// from below, then following the finger 1:1 and settling back over
+    /// `sheet_settle` after a short pull).
     sheet_y: Pixels,
     sheet_drag: Option<Pixels>,
-    sheet_spring: Option<Pixels>,
-    sheet_springs: u64,
+    sheet: Option<motion::ValueState>,
+    sheet_settle: motion::Tween,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -268,9 +275,11 @@ impl Settings {
             relays: Vec::new(),
             new_relay,
             save_state: "",
+            save_flash: Flash::default(),
             agent_auth: None,
             kimi_draft,
             agent_saved: "",
+            agent_flash: Flash::default(),
             login_error: SharedString::default(),
             plan: None,
             plan_machines: Vec::new(),
@@ -295,8 +304,8 @@ impl Settings {
             open_menu: None,
             sheet_y: px(0.),
             sheet_drag: None,
-            sheet_spring: None,
-            sheet_springs: 0,
+            sheet: None,
+            sheet_settle: SHEET_ENTER,
             _subscriptions: subscriptions,
         };
         this.load_profile(window, cx);
@@ -1024,6 +1033,11 @@ impl Focusable for Settings {
 // ----------------------------------------------------------------- render
 
 fn section(title: impl Into<SharedString>) -> Div {
+    section_flash(title, Empty.into_any_element())
+}
+
+/// A section whose heading carries a transient " · Saved" ([`Flash`]).
+fn section_flash(title: impl Into<SharedString>, flash: AnyElement) -> Div {
     div()
         .mt(px(14.))
         .px(px(16.))
@@ -1033,7 +1047,19 @@ fn section(title: impl Into<SharedString>) -> Div {
         .bg(theme::panel())
         .border_1()
         .border_color(theme::border())
-        .child(h3(title).mb(px(6.)))
+        .child(
+            div()
+                .flex()
+                .gap(px(4.))
+                .mb(px(6.))
+                .child(h3(title))
+                .child(flash),
+        )
+}
+
+/// A heading's flash text (`h3 · Saved`).
+fn flash_suffix(text: SharedString) -> Div {
+    h3(format!("· {text}"))
 }
 
 /// `.hint` with its bottom margin (10px).
@@ -1344,12 +1370,10 @@ impl Render for Settings {
         }
 
         // ── Relays
-        let mut relays = section(if self.save_state.is_empty() {
-            "Relays".to_string()
-        } else {
-            format!("Relays · {}", self.save_state)
-        })
-        .child(p(
+        let save_flash = self
+            .save_flash
+            .render(self.save_state, flash_suffix, window, cx);
+        let mut relays = section_flash("Relays", save_flash).child(p(
             "Where your encrypted changes sync. Your data stays local until relays are configured.",
         ));
         for (ix, (url, label, note)) in KNOWN_RELAYS.iter().enumerate() {
@@ -1390,9 +1414,15 @@ impl Render for Settings {
                                     )),
                             ),
                     )
-                    .child(switch(("relay-switch", ix), on, move |on, _, cx| {
-                        row_this.update(cx, |this, cx| this.toggle_relay(url, on, cx))
-                    })),
+                    .child(switch(
+                        ("relay-switch", ix),
+                        on,
+                        move |on, _, cx| {
+                            row_this.update(cx, |this, cx| this.toggle_relay(url, on, cx))
+                        },
+                        window,
+                        cx,
+                    )),
             );
         }
         for r in self
@@ -1781,11 +1811,10 @@ impl Render for Settings {
         }
 
         // ── Agent
-        let mut agent = section(if self.agent_saved.is_empty() {
-            "Agent".to_string()
-        } else {
-            format!("Agent · {}", self.agent_saved)
-        });
+        let agent_flash = self
+            .agent_flash
+            .render(self.agent_saved, flash_suffix, window, cx);
+        let mut agent = section_flash("Agent", agent_flash);
         match &self.agent_auth {
             None => agent = agent.child(p("Checking agent daemon…")),
             Some(None) => {
@@ -1917,12 +1946,24 @@ impl Render for Settings {
         // env(safe-area-inset-top) + 32px))`, the inset being 0 inside the
         // host's safe area.
         let viewport = roostr_core::layout::viewport(window);
+        // Rises from below the window on open; tracks the finger 1:1.
+        let transition = if self.sheet_drag.is_some() {
+            motion::Transition::Instant
+        } else {
+            self.sheet_settle.transition()
+        };
+        let sheet_state = self
+            .sheet
+            .get_or_insert_with(|| motion::ValueState::new(f64::from(viewport.height)));
+        let sheet_top = px(sheet_state
+            .frame(f64::from(self.sheet_y), transition, window, cx)
+            .value() as f32);
         let sheet = div()
             .id("settings")
             .track_focus(&self.focus)
             .key_context("Settings")
             .relative()
-            .top(self.sheet_y)
+            .top(sheet_top)
             .w_full()
             .max_h(viewport.height - px(48.))
             .flex()
@@ -1967,18 +2008,7 @@ impl Render for Settings {
                     .pb(px(22.))
                     .children(content),
             );
-        let sheet = match self.sheet_spring {
-            // Springing back from a pull short of the threshold.
-            Some(from) => sheet
-                .with_animation(
-                    ElementId::NamedInteger("sheet-spring".into(), self.sheet_springs),
-                    Animation::new(Duration::from_millis(180))
-                        .with_easing(gpui_kit::base::animation::cubic_bezier(0.25, 0.1, 0.25, 1.)),
-                    move |sheet, delta| sheet.top(from * (1. - delta)),
-                )
-                .into_any_element(),
-            None => sheet.into_any_element(),
-        };
+        let sheet = sheet.into_any_element();
         // The dialog lends its backdrop, focus and Escape; the sheet places
         // itself against the window's bottom edge.
         div()
@@ -2024,7 +2054,6 @@ impl Settings {
                                 window.prevent_default();
                                 this.update(cx, |s, cx| {
                                     s.sheet_drag = Some(ev.start_position.y);
-                                    s.sheet_spring = None;
                                     cx.notify();
                                 });
                             }
@@ -2043,10 +2072,8 @@ impl Settings {
                                 if s.sheet_y > px(110.) {
                                     return true;
                                 }
-                                if s.sheet_y > px(0.) {
-                                    s.sheet_spring = Some(s.sheet_y);
-                                    s.sheet_springs += 1;
-                                }
+                                // Settles back from a pull short of the threshold (`transform 0.18s ease`).
+                                s.sheet_settle = motion::SHEET_SNAP;
                                 s.sheet_y = px(0.);
                                 cx.notify();
                                 false

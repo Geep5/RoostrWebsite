@@ -478,7 +478,7 @@ impl Render for ObjectMeta {
                 if let Some(s) = &self.suggest {
                     pop = pop.child(s.clone());
                 }
-                wrap = wrap.child(below(6., pop));
+                wrap = wrap.child(below("sources-pop", 6., pop));
             }
             row = row.child(wrap);
         }
@@ -539,7 +539,7 @@ impl Render for ObjectMeta {
                             ),
                     );
                 }
-                wrap = wrap.child(below(6., pop));
+                wrap = wrap.child(below("backlinks-pop", 6., pop));
             }
             row = row.child(wrap);
         }

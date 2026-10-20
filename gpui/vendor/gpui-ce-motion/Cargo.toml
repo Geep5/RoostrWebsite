@@ -1,0 +1,86 @@
+# gpui-ce-motion 0.4.0 as published on crates.io (the portable engine under
+# gpui-motion-kit), vendored and patched in through the workspace's
+# [patch.crates-io] for one change, marked `roostr:` in src/lib.rs,
+# src/spatial_native.rs and src/text/native.rs:
+# - The adapter macros store their epochs as std::time::Instant, but
+#   gpui-pre's executor clock (`background_executor().now()`) is
+#   web_time::Instant, a different type on wasm32-unknown-unknown, so the
+#   browser build did not compile. They use web_time's Instant (std's on
+#   native targets). Upstream: ../gpui-motion-kit/UPSTREAM.patch.
+# Examples, tests, benches and docs are left out.
+
+[package]
+edition = "2024"
+rust-version = "1.95"
+name = "gpui-ce-motion"
+version = "0.4.0"
+build = false
+publish = false
+autolib = false
+autobins = false
+autoexamples = false
+autotests = false
+autobenches = false
+description = "Declarative, interruptible animations, transitions, and text motion for GPUI CE"
+readme = false
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/1bye/gpui-motion"
+
+[features]
+default = []
+demo = [
+    "gpui",
+    "dep:gpui_platform",
+]
+gpui = [
+    "dep:gpui",
+    "text",
+    "svg-path",
+]
+native-tests = [
+    "gpui",
+    "gpui/test-support",
+]
+svg-path = ["dep:svgtypes"]
+text = ["dep:unicode-segmentation"]
+
+[lib]
+name = "gpui_ce_motion"
+path = "src/lib.rs"
+
+[dependencies.gpui]
+version = "=0.2.2"
+optional = true
+default-features = false
+package = "gpui-ce"
+
+[dependencies.gpui_platform]
+version = "=0.1.0"
+features = [
+    "font-kit",
+    "wayland",
+    "x11",
+]
+optional = true
+package = "gpui_ce_platform"
+
+[dependencies.svgtypes]
+version = "0.15.3"
+optional = true
+
+[dependencies.unicode-segmentation]
+version = "1.13.3"
+optional = true
+
+# roostr: the adapters' clock type (see above).
+[dependencies.web-time]
+version = "1"
+
+[lints.clippy]
+dbg_macro = "warn"
+todo = "warn"
+undocumented_unsafe_blocks = "warn"
+
+[lints.rust]
+missing_docs = "warn"
+unsafe_op_in_unsafe_fn = "deny"

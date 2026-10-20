@@ -10,7 +10,7 @@ use gpui_kit::*;
 use roostr_core::store::Store;
 use roostr_core::sync_status::{sync_progress, sync_tip};
 use roostr_core::types::{Space, SyncPhase};
-use roostr_core::{Glyph, Navigator, theme};
+use roostr_core::{Glyph, Navigator, motion, theme};
 
 use crate::modal::Prompt;
 use crate::workspace::{RailDrag, Workspace};
@@ -45,6 +45,13 @@ pub(crate) fn mix(a: Hsla, p: f32, b: Hsla) -> Hsla {
     .into()
 }
 
+/// `color` as gpui-motion's sRGB colour.
+fn motion_color(color: Hsla) -> motion::Color {
+    let Rgba { r, g, b, a } = color.to_rgb();
+    let channel = |v: f32| f64::from(v.clamp(0., 1.));
+    motion::Color::rgba(channel(r), channel(g), channel(b), channel(a))
+}
+
 fn space_icon(space: &Space, size: Pixels, font: Pixels) -> AnyElement {
     let icon = if space.icon.is_empty() {
         space
@@ -72,7 +79,12 @@ fn space_icon(space: &Space, size: Pixels, font: Pixels) -> AnyElement {
 }
 
 impl Workspace {
-    pub(crate) fn render_rail(&mut self, width: f32, cx: &mut Context<Self>) -> Div {
+    pub(crate) fn render_rail(
+        &mut self,
+        width: f32,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Div {
         let wide = self.rail_width > 100.;
         let store = Store::global(cx).read(cx);
         let spaces: Vec<Space> = store.ordered_spaces().into_iter().cloned().collect();
@@ -310,10 +322,29 @@ impl Workspace {
                 .mb(px(6.))
                 .rounded_full()
                 .tooltip(crate::tip(sync_tip(&status)));
+            // The state colours cross-fade over 200ms.
+            let color = match (err, pct) {
+                (true, _) => theme::red(),
+                (false, Some(_)) => theme::border(),
+                (false, None) => theme::accent(),
+            };
+            let fill = motion::StyleMotion::new(
+                motion::StyleTarget::default()
+                    .color(motion::ColorProperty::Background, motion_color(color)),
+            )
+            .transition(motion::Tween::ease(200).transition());
+            let bg = motion::use_motion(
+                "sync-dot-color",
+                window,
+                cx,
+                motion::StyleMotionState::default,
+            );
+            let dot = bg
+                .update(cx, |bg, cx| bg.frame(fill, window, cx))
+                .apply(dot);
             let dot = match (err, pct) {
-                (true, _) => dot.bg(theme::red()).into_any_element(),
+                (true, _) => dot.into_any_element(),
                 (false, Some(pct)) => dot
-                    .bg(theme::border())
                     .child(
                         canvas(
                             |_, _, _| {},
@@ -325,7 +356,6 @@ impl Workspace {
                     )
                     .into_any_element(),
                 (false, None) => dot
-                    .bg(theme::accent())
                     .with_animation(
                         "sync-pulse",
                         Animation::new(Duration::from_millis(1200))
@@ -420,18 +450,26 @@ impl Workspace {
     pub(crate) fn render_rail_resize(
         &self,
         rail_col: f32,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
         let active = self.rail_drag.is_some();
+        // `transition: all 0.15s cubic-bezier(0.22, 1, 0.36, 1)`: the pill
+        // fades in while the zone is hovered or held, the handle stretches
+        // 32 → 64px while dragging, and the pill darkens under the pointer.
+        let (zone_hover, zone) = motion::hover("rail-resize-hover", motion::HANDLE, window, cx);
+        let stretch = motion::progress("rail-handle-active", active, motion::HANDLE, window, cx);
+        let (pill_hover, pill) = motion::hover("rail-handle-hover", motion::HANDLE, window, cx);
+        let height = 32. + 32. * stretch;
         div()
             .id("rail-resize")
-            .group("rail-resize")
             .absolute()
             .top(px(6.))
             .bottom(px(6.))
             .left(px(rail_col))
             .w(px(12.))
             .cursor_col_resize()
+            .on_hover(move |hovered, _, cx| motion::HoverMotion::set(&zone, *hovered, cx))
             .child(
                 div()
                     .id("rail-handle")
@@ -439,24 +477,22 @@ impl Workspace {
                     .left_0()
                     .w_full()
                     .top(relative(0.5))
-                    .map(|d| {
-                        if active {
-                            d.h(px(64.)).mt(px(-32.))
-                        } else {
-                            d.h(px(32.)).mt(px(-16.))
-                        }
-                    })
+                    .h(px(height))
+                    .mt(px(-height / 2.))
                     .flex()
                     .justify_center()
+                    .on_hover(move |hovered, _, cx| motion::HoverMotion::set(&pill, *hovered, cx))
                     .child(
                         div()
                             .w(px(6.))
                             .h_full()
                             .rounded(px(3.))
-                            .bg(theme::hover())
-                            .opacity(if active { 1. } else { 0. })
-                            .group_hover("rail-resize", |s| s.opacity(1.))
-                            .hover(|s| s.bg(theme::resize_active())),
+                            .bg(motion::mix(
+                                theme::hover(),
+                                theme::resize_active(),
+                                pill_hover,
+                            ))
+                            .opacity(zone_hover.max(stretch)),
                     ),
             )
             .on_mouse_down(

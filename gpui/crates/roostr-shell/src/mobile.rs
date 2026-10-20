@@ -12,6 +12,7 @@ use gpui_kit::component::IconNamed as _;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use roostr_core::layout::{self, sync_now};
+use roostr_core::motion;
 use roostr_core::nav::{Navigator, Route, navigate};
 use roostr_core::objects::{is_image_icon, object_icon, type_glyph};
 use roostr_core::relations::{format_glyph, is_reserved_key, space_relations};
@@ -21,6 +22,7 @@ use roostr_core::types::{ObjectSummary, RelationDef, Space, SyncPhase, Value};
 use roostr_core::{Glyph, PaneState, theme, ui};
 
 use crate::PaneHost;
+use crate::list_motion;
 use crate::pinned::PinnedWidget;
 use crate::rail::commit_space_move;
 use crate::tabs::checkbox_icon;
@@ -113,8 +115,9 @@ fn m_obj(icon: Option<String>, name: String) -> Div {
         )
 }
 
-/// `.m-chev`: the ⌄ of a collapsible card or section, turned over while open.
-fn m_chev(id: impl Into<ElementId>, open: bool) -> Stateful<Div> {
+/// `.m-chev`: the ⌄ of a collapsible card or section, turned over while open
+/// (`transition: transform 0.12s`): `turn` 0 folded, 1 open.
+fn m_chev(id: impl Into<ElementId>, turn: f32) -> Stateful<Div> {
     div()
         .id(id)
         .flex_none()
@@ -128,8 +131,10 @@ fn m_chev(id: impl Into<ElementId>, open: bool) -> Stateful<Div> {
                 .path(Glyph::ChevronDown.path())
                 .size(px(13.))
                 .text_color(theme::muted())
-                .when(open, |s| {
-                    s.with_transformation(Transformation::rotate(radians(std::f32::consts::PI)))
+                .when(turn > 0., |s| {
+                    s.with_transformation(Transformation::rotate(radians(
+                        std::f32::consts::PI * turn,
+                    )))
                 }),
         )
 }
@@ -401,13 +406,14 @@ impl Workspace {
                 .map(|d| self.data_tip(d, "tip-m-pane", "Chat & properties", cx))
                 .on_click(|_, _, cx| PaneState::global(cx).update(cx, |p, cx| p.set_open(true, cx)))
         });
+        let sync = (relation || summary).then(|| self.render_m_sync(window, cx));
         let actions = (relation || summary || space).then(|| {
             div()
                 .flex()
                 .flex_none()
                 .items_center()
                 .gap(px(8.))
-                .when(relation || summary, |d| d.child(self.render_m_sync(cx)))
+                .children(sync)
                 .child(
                     div().relative().child(
                         m_btn("m-more")
@@ -460,14 +466,22 @@ impl Workspace {
     /// `.m-sync`: the sync dot as a button - green when synced, a pulsing
     /// orange while busy, a progress ring (filled to the pass's percentage,
     /// or a spinning arc) and its label while a history pass runs. A tap
-    /// syncs now where the host can.
-    fn render_m_sync(&self, cx: &mut Context<Self>) -> AnyElement {
+    /// syncs now where the host can. The dot cross-fades between states and
+    /// the ring and its count ease to each new value (Svelte jumped), each
+    /// retargeting when the pass reports faster than it eases.
+    fn render_m_sync(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let status = Store::global(cx).read(cx).status.clone();
         let pending = status.pending.unwrap_or(0);
         let ok = status.phase == SyncPhase::Live && pending == 0;
         let busy = status.phase == SyncPhase::Backfill || pending > 0;
         let progress = sync_progress(&status);
         let pct = progress.and_then(|p| p.pct);
+        let shown_pct =
+            pct.map(|pct| motion::animate("m-sync-pct", pct as f32, motion::CONTROL, window, cx));
+        let shown_received = progress.filter(|p| p.pct.is_none()).map(|p| {
+            let received = p.received as f32;
+            motion::animate("m-sync-received", received, motion::CONTROL, window, cx)
+        });
         let dot_color = if ok {
             theme::green()
         } else if busy {
@@ -475,6 +489,13 @@ impl Workspace {
         } else {
             theme::muted()
         };
+        let dot_color = list_motion::blend(
+            "m-sync-dot",
+            dot_color,
+            motion::Tween::ease(200),
+            window,
+            cx,
+        );
         let dot = div().flex_none().size(px(12.)).rounded_full().bg(dot_color);
         let dot = if busy && pct.is_none() {
             dot.with_animation(
@@ -488,13 +509,11 @@ impl Workspace {
         } else {
             dot.into_any_element()
         };
-        let ring = match (progress, pct) {
+        let ring = match (progress, shown_pct) {
             (Some(_), Some(pct)) => Some(
                 canvas(
                     |_, _, _| {},
-                    move |bounds, _, window, _| {
-                        paint_sync_ring(bounds, 0., pct as f32 / 100., window)
-                    },
+                    move |bounds, _, window, _| paint_sync_ring(bounds, 0., pct / 100., window),
                 )
                 .absolute()
                 .inset_0()
@@ -534,9 +553,9 @@ impl Workspace {
                 .text_size(px(8.))
                 .line_height(px(8.))
                 .text_color(theme::muted())
-                .child(match p.pct {
-                    Some(pct) => format!("{pct}%"),
-                    None => count(p.received),
+                .child(match shown_pct {
+                    Some(pct) => format!("{}%", pct.round() as u64),
+                    None => count(shown_received.map_or(p.received, |r| r.round() as u64)),
                 })
         });
         let sync = sync_now(cx);
@@ -986,9 +1005,19 @@ impl Workspace {
         label: &'static str,
         add: Option<AnyElement>,
         rows: Vec<AnyElement>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Div {
         let open = !self.mobile_collapsed.get(key).copied().unwrap_or(false);
+        // The body folds with the ⌄; a long section only fades.
+        let fold = list_motion::fold(
+            crate::eid("m-section-fold", key),
+            open,
+            Some(motion::FADE),
+            rows.len() <= 30,
+            window,
+            cx,
+        );
         let mut body = div()
             .flex()
             .flex_col()
@@ -1033,11 +1062,11 @@ impl Workspace {
                     )
                     .when(open, |d| d.children(add))
                     .child(
-                        m_chev(crate::eid("m-section-chev", key), open)
+                        m_chev(crate::eid("m-section-chev", key), fold.turn())
                             .on_click(cx.listener(move |this, _, _, cx| this.flip_mobile(key, cx))),
                     ),
             )
-            .when(open, |d| d.child(body))
+            .when(fold.shown(), |d| d.child(fold.wrap(body)))
     }
 
     /// `.m-section-add`: a 44px ＋ target.
@@ -1092,16 +1121,29 @@ impl Workspace {
             .track_scroll(&self.mobile_home_scroll)
             .pb(px(12.))
             .child(self.pull_to_sync(&self.mobile_home_scroll));
+        let pins = list_motion::pins("m-pins", &current.id, &current.pinned_ids, window, cx);
         for p in pinned {
             let id = p.id.clone();
             let collapsed = self.pin_collapsed(&id, cx);
+            // Only this device's own fold moves (`.m-wcard-body` popped in
+            // Svelte); one sync brings in snaps.
+            let own = self.pin_folds.contains_key(&id);
+            let fold = list_motion::fold(
+                crate::eid("m-wcard-fold", &id),
+                !collapsed,
+                own.then_some(motion::FADE),
+                true,
+                window,
+                cx,
+            );
             let icon = object_icon(Store::global(cx).read(cx), &p.icon, &p.type_key, &active);
             let name = if p.name.is_empty() {
                 "Untitled".to_string()
             } else {
                 p.name.clone()
             };
-            let body = (!collapsed)
+            let body = fold
+                .shown()
                 .then(|| {
                     let view = self
                         .pinned_views
@@ -1116,64 +1158,63 @@ impl Workspace {
                 .filter(|view| !view.read(cx).is_empty());
             let open_id = id.clone();
             let flip_id = id.clone();
-            column = column.child(
-                div()
-                    .flex_none()
-                    .bg(theme::panel())
-                    .border_1()
-                    .border_color(theme::border())
-                    .rounded(px(10.))
-                    .overflow_hidden()
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .w_full()
-                            .text_color(theme::fg())
-                            .text_size(px(15.))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .child(
-                                div()
-                                    .id(crate::eid("m-wcard", &id))
-                                    .flex_1()
-                                    .min_w_0()
-                                    .flex()
-                                    .items_center()
-                                    .gap(px(10.))
-                                    .pt(px(12.))
-                                    .pr(px(6.))
-                                    .pb(px(12.))
-                                    .pl(px(16.))
-                                    .cursor_pointer()
-                                    .child(
-                                        div()
-                                            .flex_none()
-                                            .w(px(22.))
-                                            .flex()
-                                            .items_center()
-                                            .justify_center()
-                                            .text_size(px(16.))
-                                            .line_height(px(16.))
-                                            .text_color(theme::accent())
-                                            .child(ui::icon_text(&icon, px(16.))),
-                                    )
-                                    .child(div().flex_1().min_w_0().truncate().child(name))
-                                    .on_click(move |_, _, cx| {
-                                        navigate(Route::Object(open_id.clone()), cx)
-                                    }),
-                            )
-                            .child(
-                                m_chev(crate::eid("m-wcard-chev", &id), !collapsed).on_click(
-                                    cx.listener(move |this, _, _, cx| {
-                                        this.toggle_pin_collapsed(&flip_id, cx)
-                                    }),
-                                ),
+            let card = div()
+                .flex_none()
+                .bg(theme::panel())
+                .border_1()
+                .border_color(theme::border())
+                .rounded(px(10.))
+                .overflow_hidden()
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .w_full()
+                        .text_color(theme::fg())
+                        .text_size(px(15.))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child(
+                            div()
+                                .id(crate::eid("m-wcard", &id))
+                                .flex_1()
+                                .min_w_0()
+                                .flex()
+                                .items_center()
+                                .gap(px(10.))
+                                .pt(px(12.))
+                                .pr(px(6.))
+                                .pb(px(12.))
+                                .pl(px(16.))
+                                .cursor_pointer()
+                                .child(
+                                    div()
+                                        .flex_none()
+                                        .w(px(22.))
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .text_size(px(16.))
+                                        .line_height(px(16.))
+                                        .text_color(theme::accent())
+                                        .child(ui::icon_text(&icon, px(16.))),
+                                )
+                                .child(div().flex_1().min_w_0().truncate().child(name))
+                                .on_click(move |_, _, cx| {
+                                    navigate(Route::Object(open_id.clone()), cx)
+                                }),
+                        )
+                        .child(
+                            m_chev(crate::eid("m-wcard-chev", &id), fold.turn()).on_click(
+                                cx.listener(move |this, _, _, cx| {
+                                    this.toggle_pin_collapsed(&flip_id, cx)
+                                }),
                             ),
-                    )
-                    .when_some(body, |d, view| {
-                        d.child(div().px(px(10.)).pb(px(10.)).child(view))
-                    }),
-            );
+                        ),
+                )
+                .when_some(body, |d, view| {
+                    d.child(fold.wrap(div().px(px(10.)).pb(px(10.)).child(view)))
+                });
+            column = column.child(pins.card(&id, card, window, cx));
         }
 
         // Recently edited: the space's newest six, pinned or not.
@@ -1243,7 +1284,8 @@ impl Workspace {
                 })
                 .collect()
         };
-        column = column.child(self.m_section("__recent", "Recently edited", None, recent_rows, cx));
+        let recent = self.m_section("__recent", "Recently edited", None, recent_rows, window, cx);
+        column = column.child(pins.follow("section:recent", recent));
 
         // Types.
         let type_rows: Vec<AnyElement> = {
@@ -1278,7 +1320,8 @@ impl Workspace {
         let add_type = Self::m_section_add("m-new-type")
             .on_click(cx.listener(|this, _, window, cx| this.new_type(window, cx)))
             .into_any_element();
-        column = column.child(self.m_section("__types", "Types", Some(add_type), type_rows, cx));
+        let types = self.m_section("__types", "Types", Some(add_type), type_rows, window, cx);
+        column = column.child(pins.follow("section:types", types));
 
         // Properties.
         let prop_rows: Vec<AnyElement> = {
@@ -1323,8 +1366,15 @@ impl Workspace {
             .child(self.anchor_probe("new-prop"))
             .on_click(cx.listener(|this, _, window, cx| this.open_new_property(window, cx)))
             .into_any_element();
-        column =
-            column.child(self.m_section("__props", "Properties", Some(add_prop), prop_rows, cx));
+        let props = self.m_section(
+            "__props",
+            "Properties",
+            Some(add_prop),
+            prop_rows,
+            window,
+            cx,
+        );
+        column = column.child(pins.follow("section:props", props));
 
         let settings_id = current.id.clone();
         div()
@@ -1466,9 +1516,15 @@ impl Workspace {
 
     /// `.m-create-menu`: the New menu docked above the bottom bar, 14px
     /// from the sides, scrolling inside itself below the top of the screen.
-    pub(crate) fn render_m_create_menu(&self, window: &Window) -> Option<AnyElement> {
+    /// It rises 4px into place as it fades in (input from its first frame).
+    pub(crate) fn render_m_create_menu(
+        &self,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Option<AnyElement> {
         let menu = self.create_menu.clone()?;
         let max_h = roostr_core::layout::viewport(window).height - px(96.);
+        let appear = roostr_core::motion::appear_frame("m-create-menu-appear", 4., window, cx);
         Some(
             div()
                 .debug_selector(|| "m-create-menu".into())
@@ -1479,7 +1535,7 @@ impl Workspace {
                 .max_h(max_h)
                 .flex()
                 .flex_col()
-                .child(menu)
+                .child(appear.apply(div().min_h_0().flex().flex_col().child(menu)))
                 .into_any_element(),
         )
     }

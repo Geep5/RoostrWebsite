@@ -11,6 +11,7 @@ use std::sync::Arc;
 
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+use roostr_core::motion::{self, HoverMotion};
 use roostr_core::types::BlockContent;
 use roostr_core::{Route, Store, theme};
 
@@ -287,10 +288,22 @@ impl Render for FileBlock {
                 };
                 let resizing = self.drag_width.is_some();
                 let drag_entity = entity.clone();
+                // `.img-frame:hover .resize` (`transition: opacity 0.12s`); a
+                // resize keeps it shown.
+                let (reveal, hover) = if self.read_only {
+                    (0., None)
+                } else {
+                    let (t, state) = motion::hover("img-resize-reveal", motion::FADE, window, cx);
+                    (t, Some(state))
+                };
                 root = root.child(
                     div()
                         .id("img-frame")
-                        .group("img-frame")
+                        .when_some(hover, |d, state| {
+                            d.on_hover(move |hovered: &bool, _, cx| {
+                                HoverMotion::set(&state, *hovered, cx)
+                            })
+                        })
                         .relative()
                         .w(px(dw))
                         .h(px(dh))
@@ -321,9 +334,7 @@ impl Render for FileBlock {
                                     .border_color(theme::bg())
                                     .bg(theme::accent())
                                     .cursor(CursorStyle::ResizeUpLeftDownRight)
-                                    .when(!resizing, |d| {
-                                        d.opacity(0.).group_hover("img-frame", |s| s.opacity(1.))
-                                    })
+                                    .opacity(if resizing { 1. } else { reveal })
                                     .on_mouse_down(
                                         MouseButton::Left,
                                         cx.listener(move |this, ev: &MouseDownEvent, _, cx| {

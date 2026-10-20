@@ -37,10 +37,16 @@ objc2-foundation = { version = "0.3.2", default-features = false, features = [
     "NSArray",
     "NSDictionary",
     "NSError",
+    "NSNotification",
     "NSObject",
+    "NSOperation",
     "NSString",
     "NSUserDefaults",
     "NSValue",
+] }
+objc2-ui-kit = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "UIAccessibility",
 ] }
 objc2-user-notifications = { version = "0.3.2", default-features = false, features = [
     "std",

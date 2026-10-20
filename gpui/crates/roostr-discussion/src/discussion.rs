@@ -23,7 +23,9 @@ use roostr_core::color::bubble;
 use roostr_core::io;
 use roostr_core::nav::{self, Route};
 use roostr_core::objects::{is_image_icon, object_icon};
-use roostr_core::{AgentEndpoint, AgentMessage, Conversation, Object, Store, guest_agents, theme};
+use roostr_core::{
+    AgentEndpoint, AgentMessage, Conversation, Object, Store, guest_agents, motion, theme,
+};
 use serde::Deserialize;
 
 use crate::chat::{
@@ -135,6 +137,11 @@ pub struct Discussion {
     list: ListState,
     fingerprints: Vec<u64>,
     landed_on: String,
+    /// The `object:thread` whose messages are shown (an arrival needs a
+    /// thread already on screen).
+    arrival_key: String,
+    /// Someone else's message that just arrived at the end: it fades in.
+    arrived: Option<String>,
     seen_count: usize,
     focused_once: bool,
     /// A newly followed message to check once laid out (taller than the pane: show its top).
@@ -219,6 +226,8 @@ impl Discussion {
             list,
             fingerprints: Vec::new(),
             landed_on: String::new(),
+            arrival_key: String::new(),
+            arrived: None,
             seen_count: 0,
             focused_once: false,
             tall_check: None,
@@ -332,10 +341,11 @@ impl Discussion {
                     .filter(|t| !t.is_empty())
             })
             .unwrap_or_else(|| "Exchange".into());
-        self.messages = Rc::new(messages);
+        let previous = std::mem::replace(&mut self.messages, Rc::new(messages));
         // Whether the reader was at the end, measured before the splice
         // re-estimates the new rows' heights.
         let at_end = self.at_end();
+        self.note_arrival(&previous, at_end);
         self.sync_list();
         self.follow_new_messages(at_end, cx);
         self.update_polling(cx);
@@ -351,6 +361,26 @@ impl Discussion {
 
     fn message(&self, id: &str) -> Option<&ChatMessage> {
         self.messages.iter().find(|m| m.id == id)
+    }
+
+    /// Someone else's message arriving at the end of the thread on screen
+    /// fades in. The thread's first load, history and your own sent messages
+    /// don't, nor anything arriving while you read further up.
+    fn note_arrival(&mut self, previous: &[ChatMessage], at_end: bool) {
+        let key = format!("{}:{}", self.object_id, self.thread_id);
+        let shown = std::mem::replace(&mut self.arrival_key, key.clone()) == key;
+        let Some(last) = self.messages.last() else {
+            return;
+        };
+        if shown
+            && self.is_open()
+            && at_end
+            && last.author != self.me
+            && !previous.is_empty()
+            && !previous.iter().any(|m| m.id == last.id)
+        {
+            self.arrived = Some(last.id.clone());
+        }
     }
 
     /// Splice the list from the first message whose rendering inputs changed.
@@ -1581,6 +1611,17 @@ fn when(ts: i64) -> String {
 
 // ===================================================================== render
 
+/// A newly arrived message: opacity 0 → 1 while it rises 6px into place
+/// over 160ms.
+fn arrival(id: &str, window: &mut Window, cx: &mut App) -> motion::Frame {
+    let arrive = motion::Motion::new(motion::Target::default())
+        .initial(motion::Target::default().y(6.).opacity(0.))
+        .transition(motion::Tween::ease(160).transition());
+    let id = SharedString::from(format!("msg-arrive-{id}"));
+    motion::use_motion(id, window, cx, motion::MotionState::default)
+        .update(cx, |state, cx| state.frame(arrive, window, cx))
+}
+
 impl Discussion {
     fn render_avatar(&self, id: ElementId, author: &str, store: &Store) -> AnyElement {
         let emoji = self.avatar_emoji(author, store);
@@ -1626,8 +1667,18 @@ impl Discussion {
         }
     }
 
-    fn render_message(&self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
+    fn render_message(&self, ix: usize, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let m = self.messages[ix].clone();
+        // The actions fade in while the message is hovered
+        // (`.msg .actions { transition: opacity 0.1s }`).
+        let reveal = (!self.read_only).then(|| {
+            let id = SharedString::from(format!("msg-actions-{}", m.id));
+            motion::hover(id, motion::HOVER_REVEAL, window, cx)
+        });
+        let picker_frame = (self.picker_for == m.id).then(|| {
+            let id = SharedString::from(format!("picker-appear-{}", m.id));
+            motion::appear_frame(id, -4., window, cx)
+        });
         let store_entity = Store::global(cx);
         let store = store_entity.read(cx);
         let own = m.author == self.me;
@@ -1952,7 +2003,7 @@ impl Discussion {
         }
 
         // Hover actions.
-        let actions = (!self.read_only).then(|| {
+        let actions = reveal.as_ref().map(|(opacity, _)| {
             let action_button = |id: &'static str, label: &'static str| {
                 div()
                     .id((id, ix))
@@ -1972,8 +2023,7 @@ impl Discussion {
                 .flex()
                 .gap(px(2.))
                 .self_start()
-                .opacity(0.)
-                .group_hover("msg", |s| s.opacity(1.))
+                .opacity(*opacity)
                 .when(!exchange, |d| {
                     d.child(
                         action_button("react", "😀")
@@ -2015,7 +2065,7 @@ impl Discussion {
         });
 
         // Reaction picker.
-        let picker = (self.picker_for == m.id).then(|| {
+        let picker = picker_frame.map(|frame| {
             let id = m.id.clone();
             let entity = cx.entity().downgrade();
             let entity2 = entity.clone();
@@ -2029,7 +2079,8 @@ impl Discussion {
                         .anchor(Anchor::TopRight)
                         .snap_to_window_with_margin(px(8.))
                         .child(
-                            div()
+                            frame
+                                .apply(div())
                                 .occlude()
                                 .on_mouse_down_out(cx.listener(|this, _, _, cx| {
                                     this.picker_for.clear();
@@ -2058,7 +2109,9 @@ impl Discussion {
 
         div()
             .id(ElementId::Name(format!("msg-{mid}").into()))
-            .group("msg")
+            .when_some(reveal.map(|(_, hover)| hover), |d, hover| {
+                d.on_hover(move |hovered, _, cx| motion::HoverMotion::set(&hover, *hovered, cx))
+            })
             .relative()
             .flex()
             .gap(px(10.))
@@ -2178,16 +2231,21 @@ impl Discussion {
     fn render_item(
         &mut self,
         ix: usize,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let n = self.messages.len();
         let top = if ix == 0 { px(4.) } else { px(14.) };
         if ix < n {
-            div()
-                .pt(top)
-                .child(self.render_message(ix, cx))
-                .into_any_element()
+            let item = div().pt(top).child(self.render_message(ix, window, cx));
+            if self.arrived.as_deref() != Some(self.messages[ix].id.as_str()) {
+                return item.into_any_element();
+            }
+            let frame = arrival(&self.messages[ix].id, window, cx);
+            if !frame.is_animating() {
+                self.arrived = None;
+            }
+            frame.apply(item).into_any_element()
         } else {
             let footer = self.render_footer(cx);
             let has = n == 0 || self.agent_working().is_some() || self.agent_error().is_some();
@@ -2199,14 +2257,24 @@ impl Discussion {
         }
     }
 
-    fn render_mention_menu(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let menu = || {
+    fn render_mention_menu(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        // The menu rises out of the composer as it opens; it is absolute, so
+        // the frame moves its margin rather than the box.
+        let appear = |window: &mut Window, cx: &mut App| {
+            motion::appear_frame("composer-menu-appear", 4., window, cx).target()
+        };
+        let menu = |frame: motion::Target| {
             div()
                 .absolute()
                 .bottom_full()
                 .left_0()
                 .right_0()
-                .mb(px(6.))
+                .mb(px(6. - frame.y_px()))
+                .opacity(frame.alpha())
                 .bg(theme::panel())
                 .border_1()
                 .border_color(theme::border())
@@ -2239,6 +2307,7 @@ impl Discussion {
         if let Some(mention) = &self.mention {
             let matches = self.mention_matches();
             if !matches.is_empty() {
+                let frame = appear(window, cx);
                 let rows = matches.into_iter().enumerate().map(|(i, option)| {
                     let icon = if option.icon.is_empty() {
                         div()
@@ -2301,7 +2370,7 @@ impl Discussion {
                         })
                 });
                 return Some(
-                    menu()
+                    menu(frame)
                         .id("mention-menu")
                         .p(px(4.))
                         .flex()
@@ -2314,7 +2383,7 @@ impl Discussion {
             }
             if self.tag_options.is_some() {
                 return Some(
-                    menu()
+                    menu(appear(window, cx))
                         .px(px(12.))
                         .py(px(10.))
                         .child(format!("No agent matches “{}”.", mention.query))
@@ -2323,6 +2392,7 @@ impl Discussion {
             }
         }
         let tag = self.object_tag.as_ref()?;
+        let frame = appear(window, cx);
         let matches = self.object_matches(cx);
         let store = Store::global(cx);
         let space = roostr_core::nav::Navigator::global(cx)
@@ -2437,7 +2507,7 @@ impl Discussion {
                 .into_any_element()
         };
         Some(
-            menu()
+            menu(frame)
                 .flex()
                 .flex_col()
                 .max_h(px(260.))
@@ -2516,7 +2586,7 @@ impl Discussion {
             .border_color(theme::border())
             .rounded(theme::radius::menu())
             .mt(px(10.))
-            .children(self.render_mention_menu(cx))
+            .children(self.render_mention_menu(window, cx))
             .child(
                 div()
                     .capture_action(cx.listener(Self::on_enter))

@@ -383,10 +383,22 @@ impl Editor {
                     ),
             );
         }
+        // Appears once per opening (keyed by where the `/` was typed), so
+        // filtering re-renders it in place.
+        let appear = roostr_core::motion::appear_frame(
+            ElementId::Name(format!("slash-appear-{}-{}", slash.block, slash.start).into()),
+            -4.,
+            window,
+            cx,
+        );
         Some(
-            deferred(anchored().position(point(left, top)).child(list))
-                .with_priority(2)
-                .into_any_element(),
+            deferred(
+                anchored()
+                    .position(point(left, top))
+                    .child(appear.apply(list)),
+            )
+            .with_priority(2)
+            .into_any_element(),
         )
     }
 }

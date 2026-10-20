@@ -16,6 +16,7 @@
 
 mod local;
 mod network;
+mod reduce_motion;
 mod reminders;
 
 use std::ffi::c_int;
@@ -301,6 +302,7 @@ pub extern "C" fn roostr_main() -> c_int {
     };
     app.run(move |cx| {
         gpui_kit::init(cx);
+        reduce_motion::follow(cx);
         gpui_ios::ios::set_status_bar_style(gpui_ios::StatusBarContentStyle::Light);
         match open_replica() {
             Ok(backend) => start(backend, signals, cx),

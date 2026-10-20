@@ -13,7 +13,7 @@ use roostr_core::nav::{self, Route};
 use roostr_core::objects::{kind_name, object_icon};
 use roostr_core::options::{tag_colors, unknown_tag_bg};
 use roostr_core::relations::{current_space_id, object_space_id, space_relations};
-use roostr_core::{Object, QueryRow, RelationDef, Store, Value, api, field_str, theme};
+use roostr_core::{Object, QueryRow, RelationDef, Store, Value, api, field_str, motion, theme};
 use serde_json::{Value as Json, json};
 
 use crate::DataViewKind;
@@ -301,6 +301,18 @@ pub(crate) fn menu_surface() -> Div {
         .text_size(px(13.))
         .text_color(theme::fg())
         .shadow(vec![shadow(hsla(0., 0., 0., 0.5), 0., 12., 32., 0.)])
+}
+
+/// A popover or menu entering: opacity 0 → 1 while it drops 4px into place
+/// (`motion::appear`), restarting each time `id` mounts again. It takes
+/// clicks and keys from its first frame and closes at once.
+pub(crate) fn appear<E: Styled>(
+    id: impl Into<ElementId>,
+    menu: E,
+    window: &mut Window,
+    cx: &mut App,
+) -> E {
+    motion::appear_frame(id, -4., window, cx).apply(menu)
 }
 
 /// A `.vrow` menu row: label left, trailer right; hover/active hl-med.

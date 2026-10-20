@@ -4,6 +4,9 @@
 //! `ROOSTR_BACKEND=replica` or the Settings choice - against this device's
 //! own replica (`roostr-replica`), no daemon needed.
 
+#[cfg(target_os = "macos")]
+mod reduce_motion;
+
 use std::sync::Arc;
 
 use gpui_kit::component::TitleBar;
@@ -207,6 +210,8 @@ fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
     application().with_assets(roostr_core::Assets).run(|cx| {
         gpui_kit::init(cx);
+        #[cfg(target_os = "macos")]
+        reduce_motion::follow(cx);
         set_menus(cx);
         match chosen_mode() {
             Mode::Replica => {

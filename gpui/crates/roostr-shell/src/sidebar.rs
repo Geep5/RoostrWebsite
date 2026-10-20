@@ -5,6 +5,7 @@
 use gpui_kit::component::IconNamed as _;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+use roostr_core::motion::{self, HoverMotion};
 use roostr_core::nav::{Navigator, Route, navigate};
 use roostr_core::objects::{object_icon, type_glyph};
 use roostr_core::relations::{format_glyph, is_reserved_key, space_relations};
@@ -14,11 +15,12 @@ use roostr_core::{Glyph, TypeDef, UiState, theme};
 use roostr_properties::{PropertyPick, PropertySuggest, SuggestEvent};
 
 use crate::create_menu::{CreateMenu, CreateMenuEvent};
+use crate::list_motion::{self, PinMotion, Pins};
 use crate::modal::{Prompt, PromptEvent};
 use crate::pinned::PinnedWidget;
 use crate::rail::DragGhost;
 use crate::tabs::checkbox_icon;
-use crate::workspace::Workspace;
+use crate::workspace::{self, Workspace};
 
 #[derive(Clone)]
 pub(crate) struct WidgetDrag {
@@ -106,6 +108,11 @@ impl Workspace {
             return card;
         };
         let open_id = Self::open_object_id(cx);
+        let pins = list_motion::pins("pins", &current.id, &current.pinned_ids, window, cx);
+        let pinned = self.render_pinned(&current, open_id.as_deref(), &pins, window, cx);
+        let recent = self.render_recent(&current, open_id.as_deref(), window, cx);
+        let types = self.render_types(open_id.as_deref(), window, cx);
+        let props = self.render_props(open_id.as_deref(), window, cx);
         card.child(self.render_space_head(&current, window, cx))
             .child(
                 div()
@@ -120,10 +127,10 @@ impl Workspace {
                     .flex()
                     .flex_col()
                     .gap(px(8.))
-                    .children(self.render_pinned(&current, open_id.as_deref(), cx))
-                    .child(self.render_recent(&current, open_id.as_deref(), cx))
-                    .child(self.render_types(open_id.as_deref(), cx))
-                    .child(self.render_props(open_id.as_deref(), window, cx)),
+                    .children(pinned)
+                    .child(pins.follow("section:recent", recent))
+                    .child(pins.follow("section:types", types))
+                    .child(pins.follow("section:props", props)),
             )
     }
 
@@ -262,15 +269,9 @@ impl Workspace {
         cx.notify();
     }
 
-    fn flip_widget(&mut self, id: &str, cx: &mut Context<Self>) {
-        self.flip_arrow(format!("widget:{id}"));
-        self.toggle_pin_collapsed(id, cx);
-    }
-
     fn flip_section(&mut self, key: &str, cx: &mut Context<Self>) {
         let collapsed = !self.section_collapsed.get(key).copied().unwrap_or(false);
         self.section_collapsed.insert(key.to_string(), collapsed);
-        self.flip_arrow(format!("section:{key}"));
         UiState::set(cx, "section-collapsed", &self.section_collapsed);
         cx.notify();
     }
@@ -279,6 +280,8 @@ impl Workspace {
         &mut self,
         current: &Space,
         open_id: Option<&str>,
+        pins: &Pins,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
         let pinned: Vec<ObjectSummary> = {
@@ -297,6 +300,17 @@ impl Workspace {
         for p in pinned {
             let id = p.id.clone();
             let collapsed = self.pin_collapsed(&id, cx);
+            // Only this device's own fold moves (Svelte popped the body); one
+            // sync brings in snaps.
+            let own = self.pin_folds.contains_key(&id);
+            let fold = list_motion::fold(
+                crate::eid("widget-fold", &id),
+                !collapsed,
+                own.then_some(motion::CONTROL),
+                true,
+                window,
+                cx,
+            );
             let icon = object_icon(Store::global(cx).read(cx), &p.icon, &p.type_key, &active);
             let name = if p.name.is_empty() {
                 "Untitled".to_string()
@@ -304,7 +318,7 @@ impl Workspace {
                 p.name.clone()
             };
             let is_current = open_id == Some(id.as_str());
-            let body = (!collapsed).then(|| {
+            let body = fold.shown().then(|| {
                 self.pinned_views
                     .entry(id.clone())
                     .or_insert_with(|| cx.new(|cx| PinnedWidget::new(id.clone(), cx)))
@@ -350,7 +364,7 @@ impl Workspace {
                                 .cursor_pointer()
                                 .hover(|s| s.opacity(1.))
                                 .child(
-                                    self.arrow(&format!("widget:{id}"), !collapsed, 7.)
+                                    workspace::arrow_at(fold.turn(), 7.)
                                         .text_color(theme::muted())
                                         .group_hover(format!("widget-collapse:{id}"), |s| {
                                             s.text_color(theme::fg())
@@ -358,7 +372,7 @@ impl Workspace {
                                 )
                                 .on_click(cx.listener({
                                     let id = id.clone();
-                                    move |this, _, _, cx| this.flip_widget(&id, cx)
+                                    move |this, _, _, cx| this.toggle_pin_collapsed(&id, cx)
                                 })),
                         )
                         .child(
@@ -390,7 +404,7 @@ impl Workspace {
                                 .on_click(open(id.clone())),
                         ),
                 )
-                .children(body)
+                .children(body.map(|view| fold.wrap(view)))
                 .when_some(over_here, |d, bottom| {
                     d.child(
                         div()
@@ -455,18 +469,23 @@ impl Workspace {
                         }
                     }
                 }))
-                .on_drop(cx.listener(|this, payload: &WidgetDrag, _, cx| {
-                    let target = this.widget_over.take();
-                    this.widget_drag = None;
-                    cx.notify();
-                    let (Some((target, bottom)), Some(space)) = (target, Self::current_space(cx))
-                    else {
-                        return;
-                    };
-                    roostr_core::pins::move_pin(&space, &payload.id, &target, bottom, cx)
-                        .detach_and_log_err(cx);
+                .on_drop(cx.listener({
+                    let pins = pins.state.clone();
+                    move |this, payload: &WidgetDrag, _, cx| {
+                        let target = this.widget_over.take();
+                        this.widget_drag = None;
+                        cx.notify();
+                        let (Some((target, bottom)), Some(space)) =
+                            (target, Self::current_space(cx))
+                        else {
+                            return;
+                        };
+                        PinMotion::arm(&pins, cx);
+                        roostr_core::pins::move_pin(&space, &payload.id, &target, bottom, cx)
+                            .detach_and_log_err(cx);
+                    }
                 }));
-            out.push(card.into_any_element());
+            out.push(pins.card(&id, card, window, cx));
         }
         out
     }
@@ -477,9 +496,27 @@ impl Workspace {
         label: &'static str,
         add: Option<AnyElement>,
         rows: Vec<AnyElement>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Div {
         let open = !self.section_collapsed.get(key).copied().unwrap_or(false);
+        // A long section only fades: sliding it would lay out every row each frame.
+        let fold = list_motion::fold(
+            crate::eid("section-fold", key),
+            open,
+            Some(motion::CONTROL),
+            rows.len() <= 30,
+            window,
+            cx,
+        );
+        // `.section-name` (`transition: color 0.15s`).
+        let (hover, hovered) = motion::hover(
+            crate::eid("section-hover", key),
+            motion::CONTROL,
+            window,
+            cx,
+        );
+        let tint = motion::mix(theme::muted(), theme::fg(), hover);
         let mut body = div()
             .bg(theme::panel())
             .border_1()
@@ -508,7 +545,6 @@ impl Workspace {
                     .child(
                         div()
                             .id(crate::eid("section", key))
-                            .group(SharedString::from(format!("section:{key}")))
                             .flex()
                             .items_center()
                             .gap(px(6.))
@@ -518,26 +554,22 @@ impl Workspace {
                             .text_size(px(11.))
                             .font_weight(FontWeight::SEMIBOLD)
                             .line_height(px(18.))
-                            .text_color(theme::muted())
+                            .text_color(tint)
                             .cursor_pointer()
-                            .hover(|s| s.text_color(theme::fg()))
                             .child(
-                                div().opacity(0.7).child(
-                                    self.arrow(&format!("section:{key}"), open, 7.)
-                                        .text_color(theme::muted())
-                                        .group_hover(format!("section:{key}"), |s| {
-                                            s.text_color(theme::fg())
-                                        }),
-                                ),
+                                div()
+                                    .opacity(0.7)
+                                    .child(workspace::arrow_at(fold.turn(), 7.).text_color(tint)),
                             )
                             .child(roostr_core::ui::spaced_text(label.to_uppercase(), 0.05))
+                            .on_hover(move |over, _, cx| HoverMotion::set(&hovered, *over, cx))
                             .on_click(
                                 cx.listener(move |this, _, _, cx| this.flip_section(key, cx)),
                             ),
                     )
                     .children(add),
             )
-            .when(open, |d| d.child(body))
+            .when(fold.shown(), |d| d.child(fold.wrap(body)))
     }
 
     fn section_add(id: &'static str, tip: &'static str) -> Stateful<Div> {
@@ -565,6 +597,7 @@ impl Workspace {
         &mut self,
         current: &Space,
         open_id: Option<&str>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Div {
         let active = Navigator::global(cx).read(cx).space().to_string();
@@ -637,10 +670,15 @@ impl Workspace {
                     .collect()
             }
         };
-        self.section("recent", "Recently edited", None, rows, cx)
+        self.section("recent", "Recently edited", None, rows, window, cx)
     }
 
-    fn render_types(&mut self, open_id: Option<&str>, cx: &mut Context<Self>) -> Div {
+    fn render_types(
+        &mut self,
+        open_id: Option<&str>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Div {
         let space_id = Self::space_id(cx);
         let rows: Vec<AnyElement> = {
             let store = Store::global(cx).read(cx);
@@ -680,7 +718,7 @@ impl Workspace {
         let add = Self::section_add("new-type", "New type")
             .on_click(cx.listener(|this, _, window, cx| this.new_type(window, cx)))
             .into_any_element();
-        self.section("types", "Types", Some(add), rows, cx)
+        self.section("types", "Types", Some(add), rows, window, cx)
     }
 
     fn render_props(
@@ -736,8 +774,7 @@ impl Workspace {
             .child(self.anchor_probe("new-prop"))
             .on_click(cx.listener(|this, _, window, cx| this.open_new_property(window, cx)))
             .into_any_element();
-        let _ = window;
-        self.section("props", "Properties", Some(add), rows, cx)
+        self.section("props", "Properties", Some(add), rows, window, cx)
     }
 
     pub(crate) fn open_new_property(&mut self, window: &mut Window, cx: &mut Context<Self>) {

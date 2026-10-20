@@ -5,6 +5,7 @@
 
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+use roostr_core::motion::{self, LayoutGroup};
 use roostr_core::{QueryRow, RelationDef, Value, api, theme};
 use serde_json::json;
 
@@ -12,6 +13,9 @@ use crate::common::{self, cached_object, engine_body};
 use crate::config;
 use crate::context_menu::{MenuEvent, RowContextMenu};
 use crate::views::{ViewInput, ViewMsg};
+
+/// Boards with more cards than this never slide (Avoid: large lists).
+const SLIDE_MAX_CARDS: usize = 200;
 
 #[derive(Clone)]
 struct Column {
@@ -71,6 +75,12 @@ pub(crate) struct KanbanView {
     drop_col: Option<String>,
     ctx_menu: Option<Entity<RowContextMenu>>,
     collection: Option<String>,
+    /// Card positions: the cards slide to their places after a drop.
+    cards_layout: LayoutGroup,
+    /// A card was dropped: the next rows to arrive slide into place.
+    slide_next: bool,
+    /// The rows on show arrived after a drop (refreshes from sync snap).
+    cards_slide: bool,
 }
 
 impl EventEmitter<ViewMsg> for KanbanView {}
@@ -90,6 +100,9 @@ impl KanbanView {
             drop_col: None,
             ctx_menu: None,
             collection,
+            cards_layout: LayoutGroup::default(),
+            slide_next: false,
+            cards_slide: false,
         };
         this.load(cx);
         this
@@ -120,6 +133,8 @@ impl KanbanView {
             let _ = this.update(cx, |this, cx| {
                 if this.generation == generation {
                     this.rows = res.records;
+                    this.cards_slide =
+                        std::mem::take(&mut this.slide_next) && this.rows.len() <= SLIDE_MAX_CARDS;
                     cx.notify();
                 }
             });
@@ -235,6 +250,7 @@ impl KanbanView {
         let Some(row) = self.rows.iter().find(|r| r.id == drag.id) else {
             return;
         };
+        self.slide_next = true;
         let id = drag.id.clone();
         let task = if rel.format == "checkbox" {
             api::note::set_field(&id, &rel.key, Value::bool(col.id == "true"), cx)
@@ -417,19 +433,28 @@ impl Render for KanbanView {
                     name: name.clone(),
                     icon: icon.clone(),
                 };
+                let card = card_body(&icon, name)
+                    .id(SharedString::from(format!("card-{}-{}", col.id, r.id)))
+                    .cursor_grab()
+                    .hover(|s| s.border_color(theme::accent()))
+                    .on_drag(drag, |d, _, _, cx| cx.new(|_| d.clone()))
+                    .on_click(move |_, _, cx| common::open_object(&id, cx))
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(move |this, e: &MouseDownEvent, window, cx| {
+                            this.open_menu(id2.clone(), e.position, window, cx)
+                        }),
+                    );
+                // After a drop the cards below the moved one slide up (or
+                // down) to their places; the moved card lands at once.
                 column = column.child(
-                    card_body(&icon, name)
-                        .id(SharedString::from(format!("card-{}-{}", col.id, r.id)))
-                        .cursor_grab()
-                        .hover(|s| s.border_color(theme::accent()))
-                        .on_drag(drag, |d, _, _, cx| cx.new(|_| d.clone()))
-                        .on_click(move |_, _, cx| common::open_object(&id, cx))
-                        .on_mouse_down(
-                            MouseButton::Right,
-                            cx.listener(move |this, e: &MouseDownEvent, window, cx| {
-                                this.open_menu(id2.clone(), e.position, window, cx)
-                            }),
-                        ),
+                    self.cards_layout
+                        .position(
+                            SharedString::from(format!("card-pos-{}-{}", col.id, r.id)),
+                            card,
+                        )
+                        .enabled(self.cards_slide)
+                        .transition(motion::CONTROL.transition()),
                 );
             }
             if empty {
@@ -444,6 +469,11 @@ impl Render for KanbanView {
             }
             board = board.child(column);
         }
+        // Cards measure their slides from the board: the page moving it slides nothing.
+        let board = self
+            .cards_layout
+            .position("board-layout", board)
+            .enabled(false);
         div().child(board).into_any_element()
     }
 }

@@ -15,9 +15,8 @@ use roostr_core::nav::{Route, navigate};
 use roostr_core::objects::{kind_name, object_icon, type_icon};
 use roostr_core::store::Store;
 use roostr_core::types::{QueryRow, SYSTEM_TYPE_KEYS, field_str};
-use roostr_core::{Navigator, TypeDef, theme, ui};
+use roostr_core::{Navigator, TypeDef, motion, theme, ui};
 use serde_json::{Value as Json, json};
-use web_time::Instant;
 
 use crate::workspace::Workspace;
 
@@ -63,8 +62,11 @@ pub(crate) struct SearchModal {
     sheet_drag: Option<SheetDrag>,
     /// How far the sheet is pulled down (`sheetY`).
     sheet_y: f32,
-    /// A short pull released: where it snaps back from, and when.
-    sheet_release: Option<(f32, Instant)>,
+    /// The sheet's drop as shown: 1:1 with a pull, settling to 0 otherwise.
+    sheet: motion::ValueState,
+    /// How the sheet settles: rising in when opened ([`SHEET_ENTER`]), then
+    /// snapping back from a short pull (`transition: transform 0.18s ease`).
+    sheet_settle: motion::Tween,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -80,8 +82,9 @@ struct SheetDrag {
 
 /// Past this pull the released sheet closes.
 const SHEET_CLOSE: f32 = 110.;
-/// `transition: transform 0.18s ease` when a short pull snaps back.
-const SHEET_SNAP: Duration = Duration::from_millis(180);
+/// The sheet rises in when opened (Svelte popped it): a decelerating tween
+/// like an iOS sheet, not a spring, since no gesture let go of it.
+const SHEET_ENTER: motion::Tween = motion::Tween::bezier(260, [0.2, 0.8, 0.2, 1.]);
 
 /// Case-insensitive first match of `q` in `text` (`highlight`'s split).
 fn find_ci(text: &str, q: &str) -> Option<Range<usize>> {
@@ -170,6 +173,12 @@ impl SearchModal {
             }
         })];
         let channel = Self::channel_id(cx);
+        // A phone's sheet starts below the screen and rises in.
+        let sheet_from = if roostr_core::layout::is_mobile(window) {
+            f32::from(roostr_core::layout::viewport(window).height - px(56.))
+        } else {
+            0.
+        };
         let fetch = default_type_key(&channel, cx);
         cx.spawn(async move |this, cx| {
             let key = fetch.await;
@@ -195,7 +204,8 @@ impl SearchModal {
             scroll: ScrollHandle::new(),
             sheet_drag: None,
             sheet_y: 0.,
-            sheet_release: None,
+            sheet: motion::ValueState::new(f64::from(sheet_from)),
+            sheet_settle: SHEET_ENTER,
             _subscriptions: subscriptions,
         };
         this.search(cx);
@@ -460,7 +470,7 @@ impl SearchModal {
                 if self.sheet_y > SHEET_CLOSE {
                     self.close(cx);
                 } else {
-                    self.sheet_release = Some((self.sheet_y, Instant::now()));
+                    self.sheet_settle = motion::SHEET_SNAP;
                     self.sheet_y = 0.;
                     cx.notify();
                 }
@@ -492,26 +502,20 @@ impl SearchModal {
             }
         }
         self.sheet_y = drag.dy.max(0.);
-        self.sheet_release = None;
         cx.notify();
         true
     }
 
-    /// The sheet's current drop: the pull, or a snap back easing to 0.
-    fn sheet_offset(&mut self, window: &mut Window) -> f32 {
-        if self.sheet_drag.as_ref().is_some_and(|d| d.dragging) {
-            return self.sheet_y;
-        }
-        let Some((from, at)) = self.sheet_release else {
-            return 0.;
+    /// The sheet's current drop: the pull, else settling to 0.
+    fn sheet_offset(&mut self, window: &mut Window, cx: &App) -> f32 {
+        let (target, transition) = if self.sheet_drag.as_ref().is_some_and(|d| d.dragging) {
+            (self.sheet_y, motion::Transition::Instant)
+        } else {
+            (0., self.sheet_settle.transition())
         };
-        let t = at.elapsed().as_secs_f32() / SHEET_SNAP.as_secs_f32();
-        if t >= 1. {
-            self.sheet_release = None;
-            return 0.;
-        }
-        window.request_animation_frame();
-        from * (1. - crate::workspace::css_ease(t))
+        self.sheet
+            .frame(f64::from(target), transition, window, cx)
+            .value() as f32
     }
 
     fn row(id: ElementId, selected: bool, mobile: bool) -> Stateful<Div> {
@@ -622,10 +626,12 @@ impl Render for SearchModal {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let mobile = roostr_core::layout::is_mobile(window);
         let sheet_offset = if mobile {
-            self.sheet_offset(window)
+            self.sheet_offset(window, cx)
         } else {
             0.
         };
+        // The dim fades in; the desktop panel appears like a dialog.
+        let enter = crate::modal::dialog_appear("search-appear", window, cx);
         let viewport = roostr_core::layout::viewport(window);
         let channel = Self::channel_id(cx);
         let active = Navigator::global(cx).read(cx).space().to_string();
@@ -914,7 +920,7 @@ impl Render for SearchModal {
             .top_0()
             .left_0()
             .size_full()
-            .bg(theme::overlay())
+            .bg(theme::overlay().opacity(enter.target().alpha()))
             .occlude()
             .flex()
             .justify_center()
@@ -931,6 +937,7 @@ impl Render for SearchModal {
             )
             .child(
                 ui::modal_frame(width)
+                    .when(!mobile, |d| enter.apply(d))
                     .id("search-modal")
                     .debug_selector(|| "search-modal".into())
                     .key_context(CONTEXT)

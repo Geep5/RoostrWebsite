@@ -7,6 +7,7 @@
 use std::cell::Cell;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::time::Duration;
 
 use gpui::{
     LongPressEvent, Modifiers, ScrollDelta, ScrollWheelEvent, TestAppContext, TouchPhase,
@@ -119,6 +120,13 @@ fn shown(cx: &mut VisualTestContext, selector: &'static str) -> bool {
     cx.debug_bounds(selector).is_some()
 }
 
+/// Let running transitions (a sheet rising) finish.
+fn settle_motion(cx: &mut VisualTestContext) {
+    cx.executor().advance_clock(Duration::from_secs(1));
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+}
+
 fn center(cx: &mut VisualTestContext, selector: &'static str) -> Point<Pixels> {
     cx.debug_bounds(selector)
         .unwrap_or_else(|| panic!("{selector} is not on screen"))
@@ -219,6 +227,8 @@ fn phone_width_runs_the_mobile_shell(cx: &mut TestAppContext) {
     // Search is a bottom sheet below a 56px strip; a short pull snaps
     // back, a pull past 110px closes it.
     tap(cx, "m-search");
+    // It rises into place.
+    settle_motion(cx);
     let sheet = cx.debug_bounds("search-modal").expect("the search sheet");
     assert_eq!((sheet.top(), sheet.bottom()), (px(56.), px(844.)));
     let inside = sheet.center();

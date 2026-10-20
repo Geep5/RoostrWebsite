@@ -7,8 +7,8 @@ use std::rc::Rc;
 use gpui_kit::component::input::{Input, InputState, Textarea, TextareaState};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use roostr_core::theme;
 pub(crate) use roostr_core::ui::{menu_shadow, modal_shadow, tooltip as tip};
+use roostr_core::{motion, theme};
 
 /// `0 12px 32px rgba(0,0,0,.45)`: the popovers' shadow.
 pub(crate) fn pop_shadow() -> Vec<BoxShadow> {
@@ -22,17 +22,56 @@ pub(crate) fn pop_shadow() -> Vec<BoxShadow> {
 }
 
 /// Hang `content` below the element it is placed in (which must be
-/// `.relative()`), `gap` under its bottom edge, kept on screen.
-pub(crate) fn below(gap: f32, content: impl IntoElement) -> impl IntoElement {
+/// `.relative()`), `gap` under its bottom edge, kept on screen. It drops in
+/// as it opens (`id` keys that, unique among the view's open popovers) and
+/// takes input from its first frame.
+pub(crate) fn below(
+    id: impl Into<ElementId>,
+    gap: f32,
+    content: impl IntoElement,
+) -> impl IntoElement {
     div().absolute().left_0().top_full().child(
         deferred(
             anchored()
                 .anchor(Anchor::TopLeft)
                 .snap_to_window_with_margin(px(8.))
-                .child(div().mt(px(gap)).child(content)),
+                .child(Appear {
+                    id: id.into(),
+                    gap,
+                    content: content.into_any_element(),
+                }),
         )
         .with_priority(2),
     )
+}
+
+/// [`below`]'s panel, entering with [`motion::appear`].
+#[derive(IntoElement)]
+struct Appear {
+    id: ElementId,
+    gap: f32,
+    content: AnyElement,
+}
+
+impl RenderOnce for Appear {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        motion::appear_frame(self.id, -4., window, cx)
+            .apply(div().mt(px(self.gap)).child(self.content))
+    }
+}
+
+/// A row the user just added entering its list: opacity 0 → 1 while it rises
+/// 6px into place over [`motion::CONTROL`]. Removal is immediate.
+pub(crate) fn enter_frame(
+    id: impl Into<ElementId>,
+    window: &mut Window,
+    cx: &mut App,
+) -> motion::Frame {
+    let enter = motion::Motion::new(motion::Target::default())
+        .initial(motion::Target::default().y(6.).opacity(0.))
+        .transition(motion::CONTROL.transition());
+    motion::use_motion(id, window, cx, motion::MotionState::default)
+        .update(cx, |state, cx| state.frame(enter, window, cx))
 }
 
 /// An invisible full-window layer under an open popover: a press anywhere

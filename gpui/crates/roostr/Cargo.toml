@@ -13,3 +13,20 @@ roostr-replica.workspace = true
 futures.workspace = true
 gpui-kit.workspace = true
 env_logger = "0.11"
+
+# Following the OS "reduce motion" setting (src/reduce_motion.rs).
+[target.'cfg(target_os = "macos")'.dependencies]
+block2 = "0.6"
+objc2-foundation = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "block2",
+    "NSNotification",
+    "NSObject",
+    "NSOperation",
+    "NSString",
+] }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "NSAccessibility",
+    "NSWorkspace",
+] }

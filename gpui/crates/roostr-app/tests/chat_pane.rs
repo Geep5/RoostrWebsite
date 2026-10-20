@@ -6,6 +6,7 @@
 #![cfg(not(target_family = "wasm"))]
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use gpui::{
     Modifiers, MouseButton, ScrollDelta, ScrollWheelEvent, TestAppContext, TouchPhase,
@@ -180,6 +181,10 @@ fn the_chat_pane_scrolls_and_its_text_selects(cx: &mut TestAppContext) {
         PaneState::global(cx).update(cx, |pane, cx| pane.set_open(true, cx));
         navigate(Route::Object("page-1".into()), cx);
     });
+    cx.run_until_parked();
+    // The opened pane's column slides in (`grid-template-columns 0.16s`).
+    cx.executor().advance_clock(Duration::from_secs(1));
+    cx.update(|window, _| window.refresh());
     cx.run_until_parked();
 
     let list = cx

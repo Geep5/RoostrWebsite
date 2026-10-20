@@ -974,6 +974,7 @@ impl Render for BlockMenu {
             .absolute()
             .inset_0()
         };
+        let appear = roostr_core::motion::appear_frame("block-menu-appear", -4., window, cx);
         let menu = div()
             .id("block-menu")
             .occlude()
@@ -1023,29 +1024,37 @@ impl Render for BlockMenu {
             };
             let ft = px(8.).max(sub_top.min(viewport.height - fh - px(12.)));
             let rows = self.flyout(kind, cx);
+            let appear = roostr_core::motion::appear_frame(
+                ElementId::Name(format!("block-flyout-appear-{kind:?}").into()),
+                -4.,
+                window,
+                cx,
+            );
             deferred(
                 anchored().position(point(fl, ft)).child(
-                    div()
-                        .id("block-menu-flyout")
-                        .occlude()
-                        .relative()
-                        .w(px(SUB_W))
-                        .max_h(px(420.))
-                        .overflow_y_scroll()
-                        .bg(theme::panel())
-                        .border_1()
-                        .border_color(theme::border())
-                        .rounded(px(10.))
-                        .shadow(roostr_core::ui::menu_shadow())
-                        .p(px(4.))
-                        .on_hover(cx.listener(|this, hovered: &bool, _, _| {
-                            // Reaching the flyout cancels the pending close from rows crossed on the way.
-                            if *hovered {
-                                this.pending = None;
-                            }
-                        }))
-                        .child(record(bounds.clone()))
-                        .children(rows),
+                    appear.apply(
+                        div()
+                            .id("block-menu-flyout")
+                            .occlude()
+                            .relative()
+                            .w(px(SUB_W))
+                            .max_h(px(420.))
+                            .overflow_y_scroll()
+                            .bg(theme::panel())
+                            .border_1()
+                            .border_color(theme::border())
+                            .rounded(px(10.))
+                            .shadow(roostr_core::ui::menu_shadow())
+                            .p(px(4.))
+                            .on_hover(cx.listener(|this, hovered: &bool, _, _| {
+                                // Reaching the flyout cancels the pending close from rows crossed on the way.
+                                if *hovered {
+                                    this.pending = None;
+                                }
+                            }))
+                            .child(record(bounds.clone()))
+                            .children(rows),
+                    ),
                 ),
             )
             .with_priority(4)
@@ -1083,7 +1092,11 @@ impl Render for BlockMenu {
                 .size_0(),
             )
             // Not deferred: the filter input must stay on the focus path (keys/actions).
-            .child(anchored().position(point(left, top)).child(menu))
+            .child(
+                anchored()
+                    .position(point(left, top))
+                    .child(appear.apply(menu)),
+            )
             .children(flyout)
     }
 }

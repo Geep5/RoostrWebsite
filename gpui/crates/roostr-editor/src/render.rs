@@ -8,6 +8,7 @@ use std::rc::Rc;
 use gpui_kit::component::Icon;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+use roostr_core::motion::{self, HoverMotion};
 use roostr_core::types::{Block, BlockContent, layout, mark, pos, style};
 use roostr_core::{Glyph, Route, Store, theme};
 
@@ -92,9 +93,36 @@ impl Editor {
         if self.narrow { px(2.) } else { px(6.) }
     }
 
-    /// The 48px rail with the drag handle (Anytype .icon.commonDnd).
-    fn gutter(&self, id: &str, label: SharedString, cx: &mut Context<Self>) -> AnyElement {
-        let group: SharedString = format!("blk-{id}").into();
+    /// The handle's hover reveal (`.block:hover > .gutter .handle`,
+    /// `transition: opacity 0.1s`) and the state the row's on_hover feeds:
+    /// none on a touch screen (`@media (hover: hover)`) or without a handle.
+    fn handle_reveal(
+        &self,
+        id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> (f32, Option<Entity<HoverMotion>>) {
+        if self.read_only || roostr_core::layout::is_touch() {
+            return (0., None);
+        }
+        let (t, state) = motion::hover(
+            Self::row_id("handle-reveal", id),
+            motion::HOVER_REVEAL,
+            window,
+            cx,
+        );
+        (t, Some(state))
+    }
+
+    /// The 48px rail with the drag handle (Anytype .icon.commonDnd), at
+    /// `reveal` ([`Self::handle_reveal`]).
+    fn gutter(
+        &self,
+        id: &str,
+        label: SharedString,
+        reveal: f32,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let editor = cx.entity();
         let open_id = id.to_string();
         let drag_id = id.to_string();
@@ -136,8 +164,7 @@ impl Editor {
                         .justify_center()
                         .text_color(theme::muted())
                         .cursor_grab()
-                        .opacity(if active { 0.7 } else { 0. })
-                        .when(!touch, |d| d.group_hover(group, |s| s.opacity(1.)))
+                        .opacity(if active { 0.7 } else { reveal })
                         .hover(|s| {
                             s.bg(theme::hover())
                                 .border_color(theme::hover())
@@ -212,13 +239,25 @@ impl Editor {
         out
     }
 
-    /// The `.block` row wrapper shared by every kind.
-    fn row(&self, id: &str, gutter: bool, cx: &mut Context<Self>) -> Stateful<Div> {
+    /// The `.block` row wrapper shared by every kind; its hover feeds `hovers`.
+    fn row(
+        &self,
+        id: &str,
+        gutter: bool,
+        hovers: Vec<Entity<HoverMotion>>,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
         let down_id = id.to_string();
         let menu_id = id.to_string();
         div()
             .id(Self::row_id("row", id))
-            .group(SharedString::from(format!("blk-{id}")))
+            .when(!hovers.is_empty(), |d| {
+                d.on_hover(move |hovered: &bool, _, cx| {
+                    for state in &hovers {
+                        HoverMotion::set(state, *hovered, cx);
+                    }
+                })
+            })
             .relative()
             .flex()
             .items_start()
@@ -474,11 +513,12 @@ impl Editor {
         let label = drag_label(c);
         let dragging = self.dragging.as_deref() == Some(id);
         if c.table.is_some() {
+            let (reveal, hover) = self.handle_reveal(id, window, cx);
             let row = self
-                .row(id, true, cx)
+                .row(id, true, hover.into_iter().collect(), cx)
                 .when(dragging, |d| d.opacity(0.4))
-                .child(self.gutter(id, label, cx))
-                .child(self.render_table(&block, f, cx))
+                .child(self.gutter(id, label, reveal, cx))
+                .child(self.render_table(&block, f, window, cx))
                 .children(self.row_decor(id));
             return Some(row.into_any_element());
         }
@@ -518,7 +558,7 @@ impl Editor {
             },
             "embed" => self.render_embed(&meta, id, cx),
             "bookmark" => render_bookmark(&meta, id),
-            "link" => self.render_link(&block, &meta, f, cx),
+            "link" => self.render_link(&block, &meta, f, window, cx),
             other => {
                 // Unknown custom content: a chip, children nested below.
                 let kids: Vec<AnyElement> = block
@@ -555,10 +595,11 @@ impl Editor {
                 );
             }
         };
+        let (reveal, hover) = self.handle_reveal(id, window, cx);
         let row = self
-            .row(id, true, cx)
+            .row(id, true, hover.into_iter().collect(), cx)
             .when(dragging, |d| d.opacity(0.4))
-            .child(self.gutter(id, label, cx))
+            .child(self.gutter(id, label, reveal, cx))
             .child(body)
             .children(self.row_decor(id));
         Some(row.into_any_element())
@@ -586,6 +627,19 @@ impl Editor {
         };
         let is_toggle = s == style::TOGGLE;
         let open = is_toggle && toggles::is_toggle_open(&self.object_id, id, cx);
+        // `.toggle-arrow` (`transition: transform 0.2s ease`); the opened
+        // children fade in with it and leave at once (they may hold the caret).
+        let turn = if is_toggle {
+            motion::progress(
+                Self::row_id("toggle-turn", id),
+                open,
+                motion::DISCLOSURE,
+                window,
+                cx,
+            )
+        } else {
+            1.
+        };
         let placeholder = if s == style::TITLE {
             "Untitled"
         } else {
@@ -616,7 +670,20 @@ impl Editor {
             }
             _ => {}
         }
-        let mut row = self.row(id, true, cx).child(self.gutter(id, label, cx));
+        let (reveal, handle_hover) = self.handle_reveal(id, window, cx);
+        let mut hovers: Vec<_> = handle_hover.into_iter().collect();
+        // `.block:hover .code-copy` (`transition: opacity 0.12s`).
+        let copy_reveal = if s == style::CODE {
+            let (t, state) =
+                motion::hover(Self::row_id("copy-reveal", id), motion::FADE, window, cx);
+            hovers.push(state);
+            t
+        } else {
+            0.
+        };
+        let mut row = self
+            .row(id, true, hovers, cx)
+            .child(self.gutter(id, label, reveal, cx));
         match s {
             style::CHECKBOX => {
                 let toggle_id = id.to_string();
@@ -698,7 +765,9 @@ impl Editor {
                         .child(
                             Icon::new(Glyph::ChevronRight)
                                 .size(px(16.))
-                                .when(open, |i| i.rotate(radians(std::f32::consts::FRAC_PI_2))),
+                                .when(turn > 0., |i| {
+                                    i.rotate(radians(std::f32::consts::FRAC_PI_2 * turn))
+                                }),
                         ),
                 );
             }
@@ -725,10 +794,7 @@ impl Editor {
                     .bg(theme::panel())
                     .text_color(theme::muted())
                     .cursor_pointer()
-                    .when(!copied, |d| {
-                        d.opacity(0.)
-                            .group_hover(SharedString::from(format!("blk-{id}")), |s| s.opacity(1.))
-                    })
+                    .opacity(if copied { 1. } else { copy_reveal })
                     .hover(|s| s.text_color(theme::fg()).bg(theme::hover()))
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .on_click(cx.listener(move |this, _, _, cx| this.copy_code(&copy_id, cx)))
@@ -786,7 +852,7 @@ impl Editor {
                 .iter()
                 .filter_map(|cid| self.render_block(cid, f, window, cx))
                 .collect();
-            tree = tree.child(div().pl(px(26.)).children(kids));
+            tree = tree.child(div().pl(px(26.)).opacity(turn).children(kids));
             // Anytype targetBot: a thin strip below the children; a drop there lands after the subtree.
             let over = matches!(&self.drop_hint, Some(h) if h.id == block.id && h.bot);
             tree = tree.child(
@@ -815,6 +881,7 @@ impl Editor {
                 div()
                     .id(Self::row_id("empty-toggle", id))
                     .ml(px(30.))
+                    .opacity(turn)
                     .py(px(2.))
                     .text_size(px(15.))
                     .text_color(theme::muted())
@@ -862,11 +929,29 @@ impl Editor {
     }
 
     /// TableBlock: cells are ordinary text blocks "<rowId>-<colId>".
-    fn render_table(&self, block: &Block, f: &Frame, cx: &mut Context<Self>) -> AnyElement {
+    fn render_table(
+        &self,
+        block: &Block,
+        f: &Frame,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let (cols, rows) = self.table_shape(&block.id);
         let table_id = block.id.clone();
-        let group: SharedString = format!("tbl-{}", block.id).into();
         let ro = self.read_only;
+        // `.table-wrap:hover` reveals the gutters and add edges
+        // (`transition: opacity 0.1s`).
+        let (reveal, hover) = if ro {
+            (0., None)
+        } else {
+            let (t, state) = motion::hover(
+                Self::row_id("table-reveal", &block.id),
+                motion::HOVER_REVEAL,
+                window,
+                cx,
+            );
+            (t, Some(state))
+        };
         let mini = |id: ElementId, enabled: bool| {
             div()
                 .id(id)
@@ -882,7 +967,9 @@ impl Editor {
         };
         let mut wrap = div()
             .id(Self::row_id("table", &block.id))
-            .group(group.clone())
+            .when_some(hover, |d, state| {
+                d.on_hover(move |hovered: &bool, _, cx| HoverMotion::set(&state, *hovered, cx))
+            })
             .flex_1()
             .min_w_0()
             .py(px(4.))
@@ -895,8 +982,7 @@ impl Editor {
                     .flex()
                     .h(px(14.))
                     .mr(px(20.))
-                    .opacity(0.)
-                    .group_hover(group.clone(), |s| s.opacity(1.))
+                    .opacity(reveal)
                     .children(cols.iter().enumerate().map(|(i, col)| {
                         let (t, c) = (table_id.clone(), col.clone());
                         div().flex_1().flex().justify_center().child(
@@ -976,8 +1062,7 @@ impl Editor {
                             .flex_none()
                             .flex()
                             .flex_col()
-                            .opacity(0.)
-                            .group_hover(group.clone(), |s| s.opacity(1.))
+                            .opacity(reveal)
                             .children(rows.iter().enumerate().map(|(i, r)| {
                                 let r = r.clone();
                                 let h = self
@@ -1024,8 +1109,7 @@ impl Editor {
                     .text_size(px(13.))
                     .text_color(theme::muted())
                     .cursor_pointer()
-                    .opacity(0.)
-                    .group_hover(group.clone(), |s| s.opacity(1.))
+                    .opacity(reveal)
                     .hover(|s| s.text_color(theme::accent()).border_color(theme::accent()))
                     .tooltip(roostr_core::ui::tooltip("Add column"))
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
@@ -1052,8 +1136,7 @@ impl Editor {
                     .text_size(px(13.))
                     .text_color(theme::muted())
                     .cursor_pointer()
-                    .opacity(0.)
-                    .group_hover(group, |s| s.opacity(1.))
+                    .opacity(reveal)
                     .hover(|s| s.text_color(theme::accent()).border_color(theme::accent()))
                     .tooltip(roostr_core::ui::tooltip("Add row"))
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
@@ -1151,6 +1234,7 @@ impl Editor {
         block: &Block,
         meta: &std::collections::BTreeMap<String, String>,
         f: &Frame,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let store = Store::global(cx).read(cx);
@@ -1211,6 +1295,13 @@ impl Editor {
             }
         };
         let body = if card {
+            // `.link-card:hover` (`transition: border-color 0.15s`).
+            let (tint, hover) = motion::hover(
+                Self::row_id("link-tint", &block.id),
+                motion::CONTROL,
+                window,
+                cx,
+            );
             div()
                 .id(Self::row_id("link", &block.id))
                 .flex()
@@ -1218,14 +1309,14 @@ impl Editor {
                 .justify_center()
                 .gap(px(2.))
                 .border_1()
-                .border_color(theme::border())
+                .border_color(motion::mix(theme::border(), theme::muted(), tint))
                 .rounded(px(8.))
                 .p(px(16.))
                 .min_w(px(240.))
                 .max_w_full()
                 .text_color(theme::fg())
                 .cursor_pointer()
-                .hover(|s| s.border_color(theme::muted()))
+                .on_hover(move |hovered: &bool, _, cx| HoverMotion::set(&hover, *hovered, cx))
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .on_click(click)
                 .child(

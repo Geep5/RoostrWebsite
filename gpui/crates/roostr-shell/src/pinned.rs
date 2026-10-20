@@ -8,6 +8,7 @@ use chrono::{Datelike, Local, NaiveDate, TimeZone};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use roostr_core::filters::{engine_filters_of, space_filter_of};
+use roostr_core::motion::{self, NumberEffect, NumberMotionState};
 use roostr_core::nav::{Navigator, Route, navigate};
 use roostr_core::objects::object_icon;
 use roostr_core::relations::{object_space_id, space_relations};
@@ -21,6 +22,8 @@ use crate::rail::mix;
 const LIMIT: usize = 4;
 const GALLERY_LIMIT: usize = 8;
 const DOW: [&str; 7] = ["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"];
+/// A kanban group's count rolling to a new value.
+const COUNT: motion::Tween = motion::Tween::ease(250);
 
 pub(crate) struct PinnedWidget {
     id: String,
@@ -460,10 +463,24 @@ impl Render for PinnedWidget {
                 if count == 0 {
                     continue;
                 }
+                // A count rolls to its new value (Svelte swapped the text);
+                // the first render shows it as is.
+                let shown = motion::use_motion(
+                    crate::eid("w-group-count", &gid),
+                    window,
+                    cx,
+                    NumberMotionState::default,
+                );
+                let shown = shown
+                    .read(cx)
+                    .element(crate::eid("w-group-n", &gid), count as i64)
+                    .effect(NumberEffect::Roll)
+                    .transition(COUNT.transition())
+                    .animate_initial(false);
                 body = body.child(
                     line(("w-group", i).into(), false)
                         .child(div().flex_1().min_w_0().truncate().child(name))
-                        .child(div().text_size(px(11.)).child(count.to_string()))
+                        .child(div().text_size(px(11.)).child(shown))
                         .on_click(open(set_id.clone())),
                 );
             }

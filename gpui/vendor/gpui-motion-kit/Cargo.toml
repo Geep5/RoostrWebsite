@@ -1,0 +1,63 @@
+# gpui-motion-kit 0.5.0 as published on crates.io (gpui-motion's gpui-kit
+# adapter), vendored and patched in through the workspace's [patch.crates-io]
+# for one change, marked `roostr:` in src/:
+# - Motion epochs were std::time::Instant, but gpui-pre's executor clock
+#   (`background_executor().now()`) is web_time::Instant, a different type on
+#   wasm32-unknown-unknown, so the browser build did not compile. They are
+#   web_time's Instant (std's on native targets). The same change in
+#   ../gpui-ce-motion; both are in UPSTREAM.patch, for 1bye/gpui-motion.
+# Examples are left out.
+
+[package]
+edition = "2024"
+rust-version = "1.95"
+name = "gpui-motion-kit"
+version = "0.5.0"
+build = false
+publish = false
+autolib = false
+autobins = false
+autoexamples = false
+autotests = false
+autobenches = false
+description = "Declarative, interruptible animations and text motion for GPUI Kit"
+readme = false
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/1bye/gpui-motion"
+
+[features]
+default = []
+demo = [
+    "gpui-kit/component",
+    "gpui-kit/assets",
+]
+native-tests = ["gpui-kit/test-support"]
+
+[lib]
+name = "gpui_motion_kit"
+path = "src/lib.rs"
+
+[dependencies.gpui-ce-motion]
+version = "0.4.0"
+features = [
+    "text",
+    "svg-path",
+]
+default-features = false
+
+[dependencies.gpui-kit]
+version = "=0.7.3"
+default-features = false
+
+# roostr: the motion clock type (see above).
+[dependencies.web-time]
+version = "1"
+
+[lints.clippy]
+dbg_macro = "warn"
+todo = "warn"
+undocumented_unsafe_blocks = "warn"
+
+[lints.rust]
+missing_docs = "warn"
+unsafe_op_in_unsafe_fn = "deny"

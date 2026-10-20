@@ -9,7 +9,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use roostr_core::create::apply_template;
 use roostr_core::types::style;
-use roostr_core::{Fields, Object, Route, Store, Value, api, nav, theme};
+use roostr_core::{Fields, Object, Route, Store, Value, api, motion, nav, theme};
 use serde_json::json;
 
 use crate::widgets::{modal_shadow, text_area, tip};
@@ -561,6 +561,8 @@ impl TypePanel {
                 .child("New template"),
         );
         let size = window.viewport_size();
+        // The modal rises in as it opens; closing drops it at once.
+        let appear = motion::appear_frame("tg-modal-appear", 8., window, cx);
         deferred(
             anchored().position(point(px(0.), px(0.))).position_mode(AnchoredPositionMode::Window).child(
                 div()
@@ -579,7 +581,7 @@ impl TypePanel {
                             cx.notify();
                         }),
                     )
-                    .child(
+                    .child(appear.apply(
                         div()
                             .id("tg-modal")
                             .w(px(640.))
@@ -619,7 +621,7 @@ impl TypePanel {
                                 "A default template pre-fills every new {name}; the New button's ▾ picks one per object."
                             )))
                             .child(grid),
-                    ),
+                    )),
             ),
         )
         .with_priority(4)

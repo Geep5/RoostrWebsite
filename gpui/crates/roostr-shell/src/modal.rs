@@ -6,7 +6,7 @@
 use gpui_kit::component::input::{Enter, Escape, Input, InputState};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use roostr_core::theme;
+use roostr_core::{motion, theme};
 
 actions!(roostr_shell_prompt, [Cancel, Confirm]);
 
@@ -114,17 +114,29 @@ pub(crate) fn outline_button(
         .child(label.into())
 }
 
-/// The full-window dimmed overlay every modal sits on.
-pub(crate) fn overlay(id: impl Into<ElementId>) -> Stateful<Div> {
+/// The full-window dimmed overlay every modal sits on, its dim at `shown`
+/// (0..=1) while it fades in.
+pub(crate) fn overlay(id: impl Into<ElementId>, shown: f32) -> Stateful<Div> {
     div()
         .id(id)
         .absolute()
         .top_0()
         .left_0()
         .size_full()
-        .bg(theme::overlay())
+        .bg(theme::overlay().opacity(shown))
         .occlude()
         .line_height(relative(1.2))
+}
+
+/// A dialog appearing: the card fades in rising 8px over [`motion::FADE`]
+/// (the overlay's dim follows its opacity). It takes keys from its first
+/// frame and closes at once.
+pub(crate) fn dialog_appear(
+    id: impl Into<ElementId>,
+    window: &mut Window,
+    cx: &mut App,
+) -> motion::Frame {
+    motion::appear_frame(id, 8., window, cx)
 }
 
 /// The small modal card.
@@ -145,7 +157,8 @@ pub(crate) fn small_card(window: &Window) -> Div {
 impl Render for Prompt {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let input = self.input.clone();
-        overlay("prompt-overlay")
+        let enter = dialog_appear("prompt-appear", window, cx);
+        overlay("prompt-overlay", enter.target().alpha())
             .flex()
             .items_center()
             .justify_center()
@@ -154,7 +167,8 @@ impl Render for Prompt {
                 cx.listener(|this, _, _, cx| this.cancel(cx)),
             )
             .child(
-                small_card(window)
+                enter
+                    .apply(small_card(window))
                     .id("prompt")
                     .key_context(CONTEXT)
                     .track_focus(&self.focus)

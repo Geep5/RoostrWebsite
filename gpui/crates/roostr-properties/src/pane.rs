@@ -25,7 +25,8 @@ use roostr_core::serving::{
 use roostr_core::types::{field_str, is_builtin_tool, is_locked_tool, repeat_of};
 use roostr_core::ui::{CheckboxIcon, prop_line_icon};
 use roostr_core::{
-    Fields, Glyph, Object, QueryRow, RelationDef, Route, Store, StoreEvent, Value, api, nav, theme,
+    Fields, Glyph, Object, QueryRow, RelationDef, Route, Store, StoreEvent, Value, api, motion,
+    nav, theme,
 };
 use serde_json::json;
 
@@ -39,7 +40,7 @@ use crate::project_folder::ProjectFolder;
 use crate::repeat_view::RepeatView;
 use crate::suggest::{PropertyPick, PropertySuggest, SuggestEvent};
 use crate::value::{PropertyValue, date_label, number_text};
-use crate::widgets::{backdrop, below, placeholder, pop_shadow, prefix, tip};
+use crate::widgets::{backdrop, below, enter_frame, placeholder, pop_shadow, prefix, tip};
 
 /// Types that never have an agent of their own (`AGENTLESS_TYPES`).
 const AGENTLESS_TYPES: &[&str] = &[
@@ -229,6 +230,12 @@ pub struct PropertiesPane {
     object_id: String,
     editing: Option<String>,
     suggest: Option<Entity<PropertySuggest>>,
+    /// The row the user just added: it enters once it arrives.
+    entering: Option<String>,
+    /// The open editor's row and its values at the last render.
+    chips_seen: Option<(String, Vec<String>)>,
+    /// `row/value` chips the user just added, entering.
+    chips_entering: HashSet<String>,
     view_keys: HashSet<String>,
     serving: Option<(String, bool)>,
     machines: Vec<MachineRow>,
@@ -271,6 +278,9 @@ impl PropertiesPane {
             object_id,
             editing: None,
             suggest: None,
+            entering: None,
+            chips_seen: None,
+            chips_entering: HashSet::new(),
             view_keys: HashSet::new(),
             serving: None,
             machines: vec![],
@@ -845,6 +855,25 @@ impl PropertiesPane {
         cx.notify();
     }
 
+    /// The entering frame of chip `item` on row `key`, while it enters.
+    fn chip_enter(
+        &mut self,
+        key: &str,
+        item: &str,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Option<motion::Frame> {
+        let id = format!("{key}/{item}");
+        if !self.chips_entering.contains(&id) {
+            return None;
+        }
+        let frame = enter_frame(SharedString::from(format!("chip-enter-{id}")), window, cx);
+        if !frame.is_animating() {
+            self.chips_entering.remove(&id);
+        }
+        Some(frame)
+    }
+
     fn empty_value(format: &str) -> Value {
         match format {
             "checkbox" => Value::bool(false),
@@ -870,6 +899,7 @@ impl PropertiesPane {
                 .detach_and_log_err(cx);
                 // Open the new row's editor so the value can be set straight away.
                 this.editing = Some(rel.key.clone());
+                this.entering = Some(rel.key.clone());
             }
             cx.notify();
         });
@@ -922,11 +952,29 @@ impl PropertiesPane {
     }
 }
 
+/// The hover reveal of a chip's or row's × (`.rm { opacity: 0; transition:
+/// opacity 100ms }`, shown on `.chip-wrap:hover` / `.row-wrap:hover`): its
+/// opacity, and the `on_hover` the wrap feeds.
+fn rm_reveal(
+    wrap: &SharedString,
+    window: &mut Window,
+    cx: &mut App,
+) -> (f32, impl Fn(&bool, &mut Window, &mut App) + 'static) {
+    let id = SharedString::from(format!("reveal-{wrap}"));
+    let (reveal, state) = motion::hover(id, motion::HOVER_REVEAL, window, cx);
+    (
+        reveal,
+        move |hovered: &bool, _: &mut Window, cx: &mut App| {
+            motion::HoverMotion::set(&state, *hovered, cx)
+        },
+    )
+}
+
 fn chip_rm(
     id: SharedString,
     label: String,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
-    group: SharedString,
+    reveal: f32,
 ) -> Stateful<Div> {
     div()
         .id(id)
@@ -944,8 +992,8 @@ fn chip_rm(
         .text_size(px(11.))
         .text_color(theme::muted())
         .cursor_pointer()
-        .invisible()
-        .group_hover(group, |s| s.visible())
+        .opacity(reveal)
+        .when(reveal <= 0., |d| d.invisible())
         .hover(|s| s.text_color(theme::red()).bg(theme::hover()))
         .tooltip(tip(label))
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
@@ -1138,7 +1186,7 @@ impl Render for PropertiesPane {
                     .child("＋ Add property"),
             );
             if let Some(s) = &self.suggest {
-                add = add.child(below(4., s.clone()));
+                add = add.child(below("add-suggest", 4., s.clone()));
             }
             root = root.child(add);
         }
@@ -1254,6 +1302,20 @@ impl PropertiesPane {
             }
         };
         let list = plain_list(v);
+        // Values the user adds from this row's open editor enter; values
+        // arriving on load or from sync don't.
+        if self.editing.as_deref() == Some(key.as_str()) {
+            if let Some((seen_key, seen)) = &self.chips_seen
+                && *seen_key == key
+            {
+                for item in list.iter().filter(|item| !seen.contains(item)) {
+                    self.chips_entering.insert(format!("{key}/{item}"));
+                }
+            }
+            self.chips_seen = Some((key.clone(), list.clone()));
+        } else if self.chips_seen.as_ref().is_some_and(|(k, _)| *k == key) {
+            self.chips_seen = None;
+        }
         if is_capability && key == "status" {
             let status = object.field_str("status");
             let (glyph, color) = capability_status_badge(status);
@@ -1310,10 +1372,13 @@ impl PropertiesPane {
                     .map(|o| o.color.clone())
                     .unwrap_or_default();
                 let g: SharedString = format!("tag-{key}-{t}").into();
+                let (reveal, on_hover) = rm_reveal(&g, window, cx);
+                let enter = self.chip_enter(&key, t, window, cx);
                 value = value.child(
                     div()
                         .id(g.clone())
-                        .group(g.clone())
+                        .on_hover(on_hover)
+                        .when_some(enter, |d, f| f.apply(d))
                         .relative()
                         .flex()
                         .child(pane_pill(t.clone(), &color))
@@ -1322,7 +1387,7 @@ impl PropertiesPane {
                                 format!("rm-{key}-{t}").into(),
                                 format!("Remove {t}"),
                                 remover(t.clone()),
-                                g.clone(),
+                                reveal,
                             ))
                         }),
                 );
@@ -1363,6 +1428,10 @@ impl PropertiesPane {
                 value = value.child(empty());
             }
             for id in &list {
+                let g: SharedString = format!("cred-{id}").into();
+                let (reveal, on_hover) = rm_reveal(&g, window, cx);
+                let enter = self.chip_enter(&key, id, window, cx);
+                let store = Store::global(cx).read(cx);
                 let (label, tone, title) = match self.credentials.get(id) {
                     None => (
                         store
@@ -1404,11 +1473,11 @@ impl PropertiesPane {
                     }
                 };
                 let warn = tone == "warn";
-                let g: SharedString = format!("cred-{id}").into();
                 value = value.child(
                     div()
                         .id(g.clone())
-                        .group(g.clone())
+                        .on_hover(on_hover)
+                        .when_some(enter, |d, f| f.apply(d))
                         .relative()
                         .flex()
                         .max_w_full()
@@ -1430,7 +1499,7 @@ impl PropertiesPane {
                                 format!("rm-{id}").into(),
                                 format!("Remove {label}"),
                                 remover(id.clone()),
-                                g.clone(),
+                                reveal,
                             ))
                         }),
                 );
@@ -1440,6 +1509,10 @@ impl PropertiesPane {
                 value = value.child(empty());
             }
             for id in &list {
+                let g: SharedString = format!("agent-{id}").into();
+                let (reveal, on_hover) = rm_reveal(&g, window, cx);
+                let enter = self.chip_enter(&key, id, window, cx);
+                let store = Store::global(cx).read(cx);
                 let a = store.agent(id);
                 let gone = a.is_none() && self.gone_agents.contains(id);
                 let loading = a.is_none() && !gone;
@@ -1460,11 +1533,11 @@ impl PropertiesPane {
                     _ => "Loading…".into(),
                 };
                 let rm_label = format!("Remove {}", a.map_or("agent", |a| a.name.as_str()));
-                let g: SharedString = format!("agent-{id}").into();
                 value = value.child(
                     div()
                         .id(g.clone())
-                        .group(g.clone())
+                        .on_hover(on_hover)
+                        .when_some(enter, |d, f| f.apply(d))
                         .relative()
                         .flex()
                         .max_w_full()
@@ -1481,7 +1554,7 @@ impl PropertiesPane {
                                 format!("rm-{id}").into(),
                                 rm_label,
                                 remover(id.clone()),
-                                g.clone(),
+                                reveal,
                             ))
                         }),
                 );
@@ -1529,10 +1602,13 @@ impl PropertiesPane {
                 };
                 let g: SharedString = format!("{key}-{id}").into();
                 let rm_label = format!("Remove {name}");
+                let (reveal, on_hover) = rm_reveal(&g, window, cx);
+                let enter = self.chip_enter(&key, id, window, cx);
                 value = value.child(
                     div()
                         .id(g.clone())
-                        .group(g.clone())
+                        .on_hover(on_hover)
+                        .when_some(enter, |d, f| f.apply(d))
                         .relative()
                         .flex()
                         .max_w_full()
@@ -1551,7 +1627,7 @@ impl PropertiesPane {
                                 format!("rm-{id}").into(),
                                 rm_label,
                                 remover(id.clone()),
-                                g.clone(),
+                                reveal,
                             ))
                         }),
                 );
@@ -1561,6 +1637,10 @@ impl PropertiesPane {
                 value = value.child(empty());
             }
             for id in &list {
+                let g: SharedString = format!("obj-{id}").into();
+                let (reveal, on_hover) = rm_reveal(&g, window, cx);
+                let enter = self.chip_enter(&key, id, window, cx);
+                let store = Store::global(cx).read(cx);
                 let o = store.summary(id);
                 let a = if o.is_some() { None } else { store.agent(id) };
                 let lead: AnyElement = match o {
@@ -1594,7 +1674,6 @@ impl PropertiesPane {
                     .filter(|n| !n.is_empty())
                     .or_else(|| a.map(|a| a.name.clone()).filter(|n| !n.is_empty()))
                     .unwrap_or_else(|| "Untitled".into());
-                let g: SharedString = format!("obj-{id}").into();
                 let rm_label = format!(
                     "Remove {}",
                     if name == "Untitled" {
@@ -1606,7 +1685,8 @@ impl PropertiesPane {
                 value = value.child(
                     div()
                         .id(g.clone())
-                        .group(g.clone())
+                        .on_hover(on_hover)
+                        .when_some(enter, |d, f| f.apply(d))
                         .relative()
                         .flex()
                         .max_w_full()
@@ -1623,7 +1703,7 @@ impl PropertiesPane {
                                 format!("rm-{id}").into(),
                                 rm_label,
                                 remover(id.clone()),
-                                g.clone(),
+                                reveal,
                             ))
                         }),
                 );
@@ -1692,61 +1772,67 @@ impl PropertiesPane {
         let k2 = key.clone();
         let type_key_owned = type_key.to_string();
         let obj2 = object.clone();
-        let mut wrap = div().relative().group(group.clone()).child(
-            div()
-                .id(SharedString::from(format!("row-{key}")))
-                .flex()
-                .items_start()
-                .gap(px(10.))
-                .pl(px(6.))
-                .pr(px(24.))
-                .py(px(4.))
-                .rounded(theme::radius::sm())
-                .text_size(px(13.))
-                .line_height(px(22.))
-                .when(editable, |d| {
-                    d.cursor_pointer()
-                        .group_hover(group.clone(), |s| s.bg(theme::hover()))
-                })
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    this.toggle_edit(&k2, editable, &obj2, &type_key_owned, window, cx)
-                }))
-                .child(
-                    div()
-                        .flex_none()
-                        .w(relative(0.4))
-                        .max_w(px(120.))
-                        .min_w_0()
-                        .min_h(px(22.))
-                        .flex()
-                        .items_center()
-                        .gap(px(7.))
-                        .text_color(theme::muted())
-                        .child(match rel.icon_emoji.as_deref().filter(|e| !e.is_empty()) {
-                            Some(e) => div()
-                                .flex_none()
-                                .w(px(14.))
-                                .text_size(px(13.))
-                                .text_center()
-                                .child(e.to_string())
-                                .into_any_element(),
-                            None => Icon::new(glyph)
-                                .size(px(14.))
-                                .flex_none()
-                                .text_color(theme::muted())
-                                .into_any_element(),
-                        })
-                        .child(
-                            div()
-                                .min_w_0()
-                                .overflow_hidden()
-                                .whitespace_nowrap()
-                                .text_ellipsis()
-                                .child(label.clone()),
-                        ),
-                )
-                .child(value),
-        );
+        let (reveal, on_hover) = rm_reveal(&group, window, cx);
+        let mut wrap = div()
+            .id(SharedString::from(format!("row-wrap-{key}")))
+            .relative()
+            .group(group.clone())
+            .on_hover(on_hover)
+            .child(
+                div()
+                    .id(SharedString::from(format!("row-{key}")))
+                    .flex()
+                    .items_start()
+                    .gap(px(10.))
+                    .pl(px(6.))
+                    .pr(px(24.))
+                    .py(px(4.))
+                    .rounded(theme::radius::sm())
+                    .text_size(px(13.))
+                    .line_height(px(22.))
+                    .when(editable, |d| {
+                        d.cursor_pointer()
+                            .group_hover(group.clone(), |s| s.bg(theme::hover()))
+                    })
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.toggle_edit(&k2, editable, &obj2, &type_key_owned, window, cx)
+                    }))
+                    .child(
+                        div()
+                            .flex_none()
+                            .w(relative(0.4))
+                            .max_w(px(120.))
+                            .min_w_0()
+                            .min_h(px(22.))
+                            .flex()
+                            .items_center()
+                            .gap(px(7.))
+                            .text_color(theme::muted())
+                            .child(match rel.icon_emoji.as_deref().filter(|e| !e.is_empty()) {
+                                Some(e) => div()
+                                    .flex_none()
+                                    .w(px(14.))
+                                    .text_size(px(13.))
+                                    .text_center()
+                                    .child(e.to_string())
+                                    .into_any_element(),
+                                None => Icon::new(glyph)
+                                    .size(px(14.))
+                                    .flex_none()
+                                    .text_color(theme::muted())
+                                    .into_any_element(),
+                            })
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .text_ellipsis()
+                                    .child(label.clone()),
+                            ),
+                    )
+                    .child(value),
+            );
         wrap = wrap.child(
             canvas(
                 move |bounds, _, _| width.set(bounds.size.width),
@@ -1773,8 +1859,8 @@ impl PropertiesPane {
                     .text_size(px(13.))
                     .text_color(theme::muted())
                     .cursor_pointer()
-                    .invisible()
-                    .group_hover(group.clone(), |s| s.visible())
+                    .opacity(reveal)
+                    .when(reveal <= 0., |d| d.invisible())
                     .hover(|s| s.text_color(theme::red()).bg(theme::hover()))
                     .tooltip(tip("Remove property"))
                     .on_click(cx.listener(move |this, _, _, cx| {
@@ -1786,6 +1872,7 @@ impl PropertiesPane {
         }
         if editing {
             wrap = wrap.child(below(
+                SharedString::from(format!("edit-pop-{key}")),
                 4.,
                 self.render_pop(
                     object,
@@ -1799,6 +1886,13 @@ impl PropertiesPane {
                     cx,
                 ),
             ));
+        }
+        if self.entering.as_deref() == Some(key.as_str()) {
+            let frame = enter_frame(SharedString::from(format!("row-enter-{key}")), window, cx);
+            if !frame.is_animating() {
+                self.entering = None;
+            }
+            wrap = frame.apply(wrap);
         }
         wrap.into_any_element()
     }

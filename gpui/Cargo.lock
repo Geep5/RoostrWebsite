@@ -2625,6 +2625,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "gpui-ce-motion"
+version = "0.4.0"
+dependencies = [
+ "svgtypes 0.15.3",
+ "unicode-segmentation",
+ "web-time",
+]
+
+[[package]]
 name = "gpui-component"
 version = "0.7.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2711,6 +2720,15 @@ dependencies = [
  "rust-embed",
  "wasm-bindgen",
  "wasm-bindgen-futures",
+]
+
+[[package]]
+name = "gpui-motion-kit"
+version = "0.5.0"
+dependencies = [
+ "gpui-ce-motion",
+ "gpui-kit",
+ "web-time",
 ]
 
 [[package]]
@@ -6432,9 +6450,12 @@ dependencies = [
 name = "roostr"
 version = "0.1.0"
 dependencies = [
+ "block2 0.6.2",
  "env_logger",
  "futures",
  "gpui-kit",
+ "objc2-app-kit 0.3.2",
+ "objc2-foundation 0.3.2",
  "roostr-app",
  "roostr-core",
  "roostr-replica",
@@ -6474,6 +6495,7 @@ dependencies = [
  "fancy-regex",
  "futures",
  "gpui-kit",
+ "gpui-motion-kit",
  "gpui-pre-reqwest-client",
  "js-sys",
  "log",
@@ -6592,6 +6614,7 @@ dependencies = [
  "log",
  "objc2 0.6.5",
  "objc2-foundation 0.3.2",
+ "objc2-ui-kit",
  "objc2-user-notifications",
  "parking_lot",
  "roostr-app",

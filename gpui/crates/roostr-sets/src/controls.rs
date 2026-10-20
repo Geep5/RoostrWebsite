@@ -5,11 +5,12 @@
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
-use gpui_kit::component::Icon;
 use gpui_kit::component::input::{Escape as InputEscape, Input, InputEvent, InputState};
+use gpui_kit::component::{Icon, IconNamed as _};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use roostr_core::filters::space_filter_of;
+use roostr_core::motion::{self, LayoutGroup, Motions};
 use roostr_core::relations::{create_relation, current_space_id, format_glyph, object_space_id};
 use roostr_core::{Glyph, Object, RelationDef, Store, Value, api, field_str, theme};
 use roostr_properties::KeyPicker;
@@ -17,7 +18,7 @@ use serde_json::{Value as Json, json};
 
 use crate::DataViewKind;
 use crate::common::{
-    self, BoundsCell, Place, bounds_cell, floating, inside_any, menu_surface, menu_title,
+    self, BoundsCell, Place, appear, bounds_cell, floating, inside_any, menu_surface, menu_title,
     new_button, separator, tag_pill, track_bounds, vrow,
 };
 use crate::config::{self, FilterRule, SortRule, ViewProp};
@@ -104,6 +105,14 @@ pub(crate) struct QueryControls {
     tpl_bounds: BoundsCell,
     more_bounds: BoundsCell,
     cond_bounds: BoundsCell,
+    /// Positions of the filter / sort rules: they slide to their new place
+    /// after a reorder, an add or a removal.
+    rules_layout: LayoutGroup,
+    /// Rules entering, keyed by [`rule_ids`].
+    rule_motions: Motions<SharedString>,
+    /// The open rules panel and how many rules it showed last frame: rules
+    /// past that were just added and enter. `None` while no panel is open.
+    rules_seen: Option<(Panel, usize)>,
     _subs: Vec<Subscription>,
 }
 
@@ -151,6 +160,9 @@ impl QueryControls {
             tpl_bounds: bounds_cell(),
             more_bounds: bounds_cell(),
             cond_bounds: bounds_cell(),
+            rules_layout: LayoutGroup::default(),
+            rule_motions: Motions::default(),
+            rules_seen: None,
             _subs: subs,
         };
         this.load_templates(cx);
@@ -608,6 +620,53 @@ impl QueryControls {
 
     // ── Rendering ────────────────────────────────────────────────
 
+    /// Whether the open rules panel gained rules since its last frame: those
+    /// were just added and enter (opening the panel or re-keying a rule does
+    /// not animate).
+    fn rules_entering(&self, panel: Panel, len: usize) -> bool {
+        matches!(self.rules_seen, Some((open, seen)) if open == panel && len > seen)
+    }
+
+    /// Record the rules `panel` showed and forget removed ones (a removal is
+    /// immediate).
+    fn rules_settled(&mut self, panel: Panel, ids: &[SharedString]) {
+        self.rules_seen = Some((panel, ids.len()));
+        self.rule_motions.retain(|id| ids.contains(id));
+    }
+
+    /// Rule `id`'s row: a rule just added enters (opacity 0 → 1 while it drops
+    /// 4px, 150ms), and every rule slides to its new place when the rules
+    /// reorder or a sibling comes or goes.
+    fn rule_row(
+        &mut self,
+        id: &SharedString,
+        entering: bool,
+        row: impl IntoElement + 'static,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> AnyElement {
+        let mut enter =
+            motion::Motion::new(motion::Target::default()).transition(motion::CONTROL.transition());
+        if entering && !self.rule_motions.contains_key(id) {
+            enter = enter.initial(motion::Target::default().y(-4.).opacity(0.));
+        }
+        let frame = self.rule_motions.frame_one(id.clone(), enter, window, cx);
+        // Wrapped: the row keeps its own opacity (a dragged rule is dimmed).
+        self.rules_layout
+            .position(id.clone(), frame.apply(div().child(row)))
+            .transition(motion::CONTROL.transition())
+            .into_any_element()
+    }
+
+    /// The rules panel. Its rules measure their slides from it, so the page
+    /// moving the panel (the content above it growing) slides nothing.
+    fn rules_panel(&self, panel: Div) -> AnyElement {
+        self.rules_layout
+            .position("rules-panel", panel)
+            .enabled(false)
+            .into_any_element()
+    }
+
     fn cbtn(&self, id: &'static str, glyph: Glyph, on: bool) -> Stateful<Div> {
         div()
             .id(id)
@@ -736,11 +795,13 @@ impl QueryControls {
         relations: &Rc<Vec<RelationDef>>,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> Div {
+    ) -> AnyElement {
         let filters = config::parse_filters(&object.fields);
         let keys = config::filter_keys(relations);
+        let ids = rule_ids("filter", filters.iter().map(|f| f.key.as_str()));
+        let entering = self.rules_entering(Panel::Filter, filters.len());
         let mut panel = panel_box();
-        for (i, f) in filters.iter().enumerate() {
+        for ((i, f), id) in filters.iter().enumerate().zip(&ids) {
             let rels = relations.clone();
             let label: KeyLabel = Rc::new(move |k, _| config::option_label(&rels, k).into());
             let mut rule = div().flex().flex_wrap().items_center().gap(px(8.)).child(
@@ -750,7 +811,7 @@ impl QueryControls {
                     }),
                 ),
             );
-            rule = rule.child(self.condition_select(i, f, relations, cx));
+            rule = rule.child(self.condition_select(i, f, relations, window, cx));
             if config::needs_value(relations, f) {
                 let options = config::options_for(relations, &f.key);
                 if !options.is_empty() {
@@ -866,22 +927,22 @@ impl QueryControls {
                         this.save_filters(next, cx);
                     })),
             );
-            panel = panel.child(rule);
+            panel = panel.child(self.rule_row(id, entering, rule, window, cx));
         }
+        self.rules_settled(Panel::Filter, &ids);
         let all = filters.clone();
-        panel.child(
-            add_row("add-filter", "+ Add filter", false).on_click(cx.listener(
-                move |this, _, _, cx| {
-                    let mut next = all.clone();
-                    next.push(FilterRule {
-                        key: "name".into(),
-                        condition: "like".into(),
-                        value: vec![],
-                    });
-                    this.save_filters(next, cx);
-                },
-            )),
-        )
+        let panel = panel.child(add_row("add-filter", "+ Add filter", false).on_click(
+            cx.listener(move |this, _, _, cx| {
+                let mut next = all.clone();
+                next.push(FilterRule {
+                    key: "name".into(),
+                    condition: "like".into(),
+                    value: vec![],
+                });
+                this.save_filters(next, cx);
+            }),
+        ));
+        self.rules_panel(panel)
     }
 
     /// The condition `<select>`: the current label, a dropdown of the key's catalog.
@@ -890,6 +951,7 @@ impl QueryControls {
         i: usize,
         f: &FilterRule,
         relations: &[RelationDef],
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Div {
         let conds = config::conditions_for(relations, &f.key);
@@ -960,6 +1022,7 @@ impl QueryControls {
                     cx.notify();
                 }
             }));
+            let menu = appear(("fcond-menu", i), menu, window, cx);
             host = host.child(floating(Place::BelowLeft, 4., menu));
         }
         host
@@ -1051,10 +1114,13 @@ impl QueryControls {
         &mut self,
         object: &Object,
         relations: &Rc<Vec<RelationDef>>,
+        window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> Div {
+    ) -> AnyElement {
         let sorts = config::parse_sorts(&object.fields);
         let keys = config::filter_keys(relations);
+        let ids = rule_ids("sort", sorts.iter().map(|s| s.key.as_str()));
+        let entering = self.rules_entering(Panel::Sort, sorts.len());
         let mut panel = panel_box().gap(px(2.));
         if sorts.is_empty() {
             panel = panel.child(
@@ -1066,13 +1132,27 @@ impl QueryControls {
                     .child("No sorts applied"),
             );
         }
-        for (i, s) in sorts.iter().enumerate() {
+        for ((i, s), id) in sorts.iter().enumerate().zip(&ids) {
             let rels = relations.clone();
             let label: KeyLabel = Rc::new(move |k, _| config::option_label(&rels, k).into());
             let all = sorts.clone();
             let all2 = sorts.clone();
             let all3 = sorts.clone();
-            let group: SharedString = format!("sort-item-{i}").into();
+            // `.dnd` and `.row-btns` reveal on the row's hover (`opacity 0.1s`).
+            let (reveal, hover) = motion::hover(
+                SharedString::from(format!("{id}-hover")),
+                motion::HOVER_REVEAL,
+                window,
+                cx,
+            );
+            // `.sort-arrow`: one ↑ turned 180° for Desc (`transition: transform 0.15s`).
+            let turn = motion::progress(
+                SharedString::from(format!("{id}-dir")),
+                s.desc,
+                motion::CONTROL,
+                window,
+                cx,
+            );
             let dragging = self.sort_drag == Some(i);
             let over = self.sort_over == Some(i) && self.sort_drag.is_some_and(|d| d != i);
             let more_open = self.sort_more == Some(i);
@@ -1093,76 +1173,77 @@ impl QueryControls {
                 let a = sorts.clone();
                 let b = sorts.clone();
                 let more_bounds = self.more_bounds.clone();
+                let menu = menu_surface()
+                    .relative()
+                    .min_w(px(174.))
+                    .occlude()
+                    .child(track_bounds(&self.more_bounds))
+                    .child(menu_title("Show empty"))
+                    .child(
+                        vrow(("empty-top", i), false)
+                            .child("At the top")
+                            .when(s.empty_start, |d| {
+                                d.child(div().text_color(theme::accent()).child("✓"))
+                            })
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.sort_more = None;
+                                let next = a
+                                    .iter()
+                                    .enumerate()
+                                    .map(|(j, x)| {
+                                        if j == i {
+                                            SortRule {
+                                                empty_start: true,
+                                                ..x.clone()
+                                            }
+                                        } else {
+                                            x.clone()
+                                        }
+                                    })
+                                    .collect();
+                                this.save_sorts(next, cx);
+                            })),
+                    )
+                    .child(
+                        vrow(("empty-bottom", i), false)
+                            .child("At the bottom")
+                            .when(!s.empty_start, |d| {
+                                d.child(div().text_color(theme::accent()).child("✓"))
+                            })
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.sort_more = None;
+                                let next = b
+                                    .iter()
+                                    .enumerate()
+                                    .map(|(j, x)| {
+                                        if j == i {
+                                            SortRule {
+                                                empty_start: false,
+                                                ..x.clone()
+                                            }
+                                        } else {
+                                            x.clone()
+                                        }
+                                    })
+                                    .collect();
+                                this.save_sorts(next, cx);
+                            })),
+                    )
+                    .on_mouse_down_out(cx.listener(move |this, e: &MouseDownEvent, _, cx| {
+                        if !inside_any(&[&more_bounds], e.position) {
+                            this.sort_more = None;
+                            cx.notify();
+                        }
+                    }));
                 more = more.child(floating(
                     Place::BelowRight,
                     4.,
-                    menu_surface()
-                        .relative()
-                        .min_w(px(174.))
-                        .occlude()
-                        .child(track_bounds(&self.more_bounds))
-                        .child(menu_title("Show empty"))
-                        .child(
-                            vrow(("empty-top", i), false)
-                                .child("At the top")
-                                .when(s.empty_start, |d| {
-                                    d.child(div().text_color(theme::accent()).child("✓"))
-                                })
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.sort_more = None;
-                                    let next = a
-                                        .iter()
-                                        .enumerate()
-                                        .map(|(j, x)| {
-                                            if j == i {
-                                                SortRule {
-                                                    empty_start: true,
-                                                    ..x.clone()
-                                                }
-                                            } else {
-                                                x.clone()
-                                            }
-                                        })
-                                        .collect();
-                                    this.save_sorts(next, cx);
-                                })),
-                        )
-                        .child(
-                            vrow(("empty-bottom", i), false)
-                                .child("At the bottom")
-                                .when(!s.empty_start, |d| {
-                                    d.child(div().text_color(theme::accent()).child("✓"))
-                                })
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.sort_more = None;
-                                    let next = b
-                                        .iter()
-                                        .enumerate()
-                                        .map(|(j, x)| {
-                                            if j == i {
-                                                SortRule {
-                                                    empty_start: false,
-                                                    ..x.clone()
-                                                }
-                                            } else {
-                                                x.clone()
-                                            }
-                                        })
-                                        .collect();
-                                    this.save_sorts(next, cx);
-                                })),
-                        )
-                        .on_mouse_down_out(cx.listener(move |this, e: &MouseDownEvent, _, cx| {
-                            if !inside_any(&[&more_bounds], e.position) {
-                                this.sort_more = None;
-                                cx.notify();
-                            }
-                        })),
+                    appear(("sort-more-menu", i), menu, window, cx),
                 ));
             }
             let row = div()
                 .id(("sort-item", i))
-                .group(group.clone())
+                .on_hover(move |hovered, _, cx| motion::HoverMotion::set(&hover, *hovered, cx))
                 .flex()
                 .items_center()
                 .gap(px(8.))
@@ -1188,8 +1269,7 @@ impl QueryControls {
                         .text_size(px(10.))
                         .text_color(theme::muted())
                         .cursor_grab()
-                        .opacity(0.)
-                        .group_hover(group.clone(), |s| s.opacity(0.7))
+                        .opacity(0.7 * reveal)
                         .child("⋮⋮"),
                 )
                 .child(
@@ -1235,12 +1315,14 @@ impl QueryControls {
                         .cursor_pointer()
                         .hover(|s| s.bg(theme::hl_med()))
                         .child(
-                            Icon::new(if s.desc {
-                                Glyph::SortArrowDown
-                            } else {
-                                Glyph::SortArrow
-                            })
-                            .size(px(16.)),
+                            svg()
+                                .path(Glyph::SortArrow.path())
+                                .size(px(16.))
+                                .flex_none()
+                                .text_color(theme::fg())
+                                .with_transformation(Transformation::rotate(radians(
+                                    turn * std::f32::consts::PI,
+                                ))),
                         )
                         .child(if s.desc { "Desc" } else { "Asc" })
                         .on_click(cx.listener(move |this, _, _, cx| {
@@ -1267,8 +1349,7 @@ impl QueryControls {
                         .items_center()
                         .gap(px(2.))
                         .ml_auto()
-                        .opacity(if more_open { 1. } else { 0. })
-                        .group_hover(group, |s| s.opacity(1.))
+                        .opacity(if more_open { 1. } else { reveal })
                         .child(more)
                         .child(ibtn(("sort-x", i), "✕").on_click(cx.listener(
                             move |this, _, _, cx| {
@@ -1282,8 +1363,9 @@ impl QueryControls {
                             },
                         ))),
                 );
-            panel = panel.child(row);
+            panel = panel.child(self.rule_row(id, entering, row, window, cx));
         }
+        self.rules_settled(Panel::Sort, &ids);
         let all = sorts.clone();
         panel = panel
             .child(separator())
@@ -1306,8 +1388,23 @@ impl QueryControls {
                     .on_click(cx.listener(|this, _, _, cx| this.save_sorts(vec![], cx))),
             );
         }
-        panel
+        self.rules_panel(panel)
     }
+}
+
+/// Each rule's identity under `prefix`: its property key, numbered among the
+/// rules sharing it. Motion follows the rule when the rules reorder (Svelte
+/// keyed them by index).
+fn rule_ids<'a>(prefix: &str, keys: impl IntoIterator<Item = &'a str>) -> Vec<SharedString> {
+    let mut seen: HashMap<&str, usize> = HashMap::new();
+    keys.into_iter()
+        .map(|key| {
+            let n = seen.entry(key).or_default();
+            let id = format!("{prefix}-{key}#{n}");
+            *n += 1;
+            id.into()
+        })
+        .collect()
 }
 
 fn view_prop(r: &RelationDef) -> ViewProp {
@@ -1488,6 +1585,7 @@ impl Render for QueryControls {
                             cx.notify();
                         }
                     }));
+                let list = appear("prop-chip-list", list, window, cx);
                 chip = chip.child(floating(Place::BelowLeft, 6., list));
             }
             row = row.child(chip);
@@ -1631,10 +1729,12 @@ impl Render for QueryControls {
                     // `.plist` is 274px wide (offsetWidth).
                     let place =
                         Place::beside(self.vsub_bounds.get(), px(274.), window.viewport_size());
+                    let list = self.prop_list(prop_title, calendar, &used, &rest, &current_key, cx);
+                    let list = appear("vsub-list", list, window, cx);
                     sub = sub.child(floating(
                         place,
                         if place == Place::BelowLeft { 6. } else { 12. },
-                        self.prop_list(prop_title, calendar, &used, &rest, &current_key, cx),
+                        list,
                     ));
                 }
                 vmenu = vmenu.child(sub);
@@ -1657,6 +1757,7 @@ impl Render for QueryControls {
                     cx.notify();
                 }
             }));
+            let vmenu = appear("view-menu", vmenu, window, cx);
             settings = settings.child(floating(Place::BelowRight, 6., vmenu));
         }
         row = row.child(settings);
@@ -1737,6 +1838,7 @@ impl Render for QueryControls {
                             cx.notify();
                         }
                     }));
+                let pick = appear("tpl-pick", pick, window, cx);
                 new_wrap = new_wrap.child(floating(Place::BelowRight, 4., pick));
             }
         }
@@ -1747,8 +1849,13 @@ impl Render for QueryControls {
             Panel::Filter => {
                 root = root.child(self.render_filter_panel(&object, &relations, window, cx))
             }
-            Panel::Sort => root = root.child(self.render_sort_panel(&object, &relations, cx)),
-            Panel::None => {}
+            Panel::Sort => {
+                root = root.child(self.render_sort_panel(&object, &relations, window, cx))
+            }
+            Panel::None => {
+                self.rules_seen = None;
+                self.rule_motions.clear();
+            }
         }
         root
     }
@@ -1765,4 +1872,24 @@ fn tpl_row(id: impl Into<ElementId>, label: SharedString) -> Stateful<Div> {
         .cursor_pointer()
         .hover(|s| s.bg(theme::hover()))
         .child(label)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::rule_ids;
+
+    #[test]
+    fn rule_ids_follow_rules_through_a_reorder() {
+        let ids = |keys: &[&str]| -> Vec<String> {
+            rule_ids("sort", keys.iter().copied())
+                .into_iter()
+                .map(String::from)
+                .collect()
+        };
+        assert_eq!(
+            ids(&["name", "status", "name"]),
+            ["sort-name#0", "sort-status#0", "sort-name#1"]
+        );
+        assert_eq!(ids(&["status", "name"]), ["sort-status#0", "sort-name#0"]);
+    }
 }

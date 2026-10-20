@@ -21,6 +21,7 @@ pub mod io;
 pub mod layout;
 pub mod markdown;
 pub mod mode;
+pub mod motion;
 pub mod nav;
 pub mod objects;
 pub mod options;

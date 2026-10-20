@@ -10,7 +10,7 @@ use gpui_kit::component::input::{Escape, InputEvent, InputState};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use roostr_core::relations::{create_relation, is_reserved_key, space_relations};
-use roostr_core::{RelationDef, Store, theme};
+use roostr_core::{RelationDef, Store, motion, theme};
 
 use crate::credentials::{COOKIE_META, is_secret_field};
 use crate::type_limit::{TypeLimitPicker, toggled};
@@ -314,22 +314,30 @@ fn section(text: &'static str) -> Div {
         .child(text)
 }
 
-/// Anytype's switch: 30×18 track, 14px knob.
-fn switch(id: impl Into<ElementId>, on: bool) -> Stateful<Div> {
+/// Anytype's switch: 30×18 track, 14px knob. The knob slides and the track
+/// recolours over 150ms (`transition: left 0.15s` / `background 0.15s`).
+fn switch(key: &str, on: bool, window: &mut Window, cx: &mut App) -> Stateful<Div> {
+    let p = motion::progress(
+        SharedString::from(format!("switch-knob-{key}")),
+        on,
+        motion::CONTROL,
+        window,
+        cx,
+    );
     div()
-        .id(id.into())
+        .id(SharedString::from(format!("switch-{key}")))
         .flex_none()
         .relative()
         .w(px(30.))
         .h(px(18.))
         .rounded(px(9.))
-        .bg(if on { theme::accent() } else { theme::hover() })
+        .bg(motion::mix(theme::hover(), theme::accent(), p))
         .cursor_pointer()
         .child(
             div()
                 .absolute()
                 .top(px(2.))
-                .left(px(if on { 14. } else { 2. }))
+                .left(px(2. + 12. * p))
                 .size(px(14.))
                 .rounded_full()
                 .bg(theme::white()),
@@ -394,12 +402,9 @@ impl Render for PropertyFlow {
                                 it.emoji.is_some(),
                             ))
                             .child(r_name(it.name.clone()))
-                            .child(
-                                switch(SharedString::from(format!("switch-{}", it.key)), on)
-                                    .on_click(cx.listener(move |_, _, _, cx| {
-                                        cx.emit(FlowEvent::Toggle(key.clone(), !on))
-                                    })),
-                            ),
+                            .child(switch(&it.key, on, window, cx).on_click(cx.listener(
+                                move |_, _, _, cx| cx.emit(FlowEvent::Toggle(key.clone(), !on)),
+                            ))),
                     );
                 }
                 if self.items.is_empty() {
@@ -572,6 +577,8 @@ impl Render for PropertyFlow {
                                 }),
                         );
                     }
+                    let menu =
+                        motion::appear_frame("type-menu-appear", -4., window, cx).apply(menu);
                     type_wrap = type_wrap.child(
                         div().absolute().left_0().top(px(34.)).child(
                             deferred(anchored().snap_to_window_with_margin(px(8.)).child(menu))
@@ -621,6 +628,7 @@ impl Render for PropertyFlow {
                 flow = flow.child(form);
             }
         }
-        flow
+        // The popover drops in as it opens; it takes keys from its first frame.
+        motion::appear_frame("property-flow-appear", -4., window, cx).apply(flow)
     }
 }

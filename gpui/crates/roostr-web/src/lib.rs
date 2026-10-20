@@ -71,6 +71,7 @@ pub fn run(base: String) -> Result<(), JsValue> {
 
     let handle = app.run_embedded(move |cx| {
         gpui_kit::init(cx);
+        follow_reduce_motion(cx);
         // Fonts (Inter as the UI, IBM Plex Sans for `.SystemUIFont`) and the
         // palette, before the first window measures any text.
         theme::init(cx);
@@ -452,6 +453,27 @@ fn watch_visibility(backend: ReplicaBackend) {
         .add_event_listener_with_callback("visibilitychange", listener.as_ref().unchecked_ref());
     // Lives as long as the page.
     listener.forget();
+}
+
+/// `prefers-reduced-motion: reduce`, followed live: with it on, every
+/// transition snaps (`roostr_core::motion`) and the looping indicators hold
+/// still, as the Svelte app's `@media (prefers-reduced-motion)` stopped them.
+fn follow_reduce_motion(cx: &mut App) {
+    let Some(query) = web_sys::window()
+        .and_then(|window| window.match_media("(prefers-reduced-motion: reduce)").ok())
+        .flatten()
+    else {
+        return;
+    };
+    let (tx, changes) = mpsc::unbounded();
+    let target = query.clone();
+    let listener = Closure::<dyn FnMut()>::new(move || {
+        let _ = tx.unbounded_send(target.matches());
+    });
+    let _ = query.add_event_listener_with_callback("change", listener.as_ref().unchecked_ref());
+    // Lives as long as the page.
+    listener.forget();
+    roostr_core::motion::follow_reduce_motion(query.matches(), changes, cx);
 }
 
 fn reload() {

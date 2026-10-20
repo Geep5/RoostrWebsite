@@ -11,7 +11,7 @@ use roostr_core::invite::{SpaceJoinLink, join_url};
 use roostr_core::objects::{object_icon, type_glyph};
 use roostr_core::types::{Space, field_str};
 use roostr_core::ui::{CheckboxIcon, modal_shadow, tooltip};
-use roostr_core::{Navigator, Route, Store, StoreEvent, Value, api, nav, theme};
+use roostr_core::{Navigator, Route, Store, StoreEvent, Value, api, motion, nav, theme};
 use serde_json::json;
 
 use crate::local::{JoinRequest, clear_join_request, list_join_requests};
@@ -44,6 +44,9 @@ pub struct SpaceManage {
     /// First click on Remove arms it, the second rotates the key.
     confirm_remove: String,
     copied_join: bool,
+    /// The npub this view last added: its row rises in when it arrives
+    /// (rows from sync just appear).
+    added_member: Option<String>,
     join_requests: Vec<JoinRequest>,
     identity_error: SharedString,
     type_menu_open: bool,
@@ -120,6 +123,7 @@ impl SpaceManage {
             npub_draft,
             confirm_remove: String::new(),
             copied_join: false,
+            added_member: None,
             join_requests: Vec::new(),
             identity_error: SharedString::default(),
             type_menu_open: false,
@@ -428,6 +432,7 @@ impl SpaceManage {
         if npub.is_empty() {
             return;
         }
+        self.added_member = Some(npub.clone());
         let task = api::space::member_add(&self.object_id, &npub, None, cx);
         let draft = self.npub_draft.clone();
         cx.spawn(async move |_, cx| match task.await {
@@ -571,12 +576,17 @@ impl SpaceManage {
         body: Vec<AnyElement>,
         input: AnyElement,
         actions: AnyElement,
-        window: &Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Deferred {
         let closable_on_backdrop = !self.deleting;
+        // Backdrop and panel fade in, the panel rising 8px, over 120ms; it
+        // takes keys from the first frame and closes at once.
+        let appear = motion::appear_frame("del-modal-appear", 8., window, cx);
+        let alpha = appear.target().alpha();
         over_window(
             window_overlay("del-overlay", window)
+                .bg(hsla(0., 0., 0., 0.55 * alpha))
                 .track_focus(&self.modal_focus)
                 .on_mouse_down(
                     MouseButton::Left,
@@ -613,7 +623,8 @@ impl SpaceManage {
                         )
                         .child(div().flex().flex_col().gap(px(10.)).children(body))
                         .child(div().mt(px(8.)).mb(px(14.)).child(input))
-                        .child(actions),
+                        .child(actions)
+                        .map(|panel| appear.apply(panel)),
                 ),
         )
     }
@@ -774,40 +785,60 @@ impl Render for SpaceManage {
         for m in &members {
             let npub = m.npub.clone();
             let armed = self.confirm_remove == m.npub;
-            root = root.child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(10.))
-                    .text_size(px(13.))
-                    .child(
-                        div()
-                            .id(SharedString::from(format!("npub-{}", m.npub)))
-                            .font_family(theme::fonts::MONO)
-                            .tooltip(tooltip(m.npub.clone()))
-                            .child(short_npub(&m.npub)),
+            let row = div()
+                .flex()
+                .items_center()
+                .gap(px(10.))
+                .text_size(px(13.))
+                .child(
+                    div()
+                        .id(SharedString::from(format!("npub-{}", m.npub)))
+                        .font_family(theme::fonts::MONO)
+                        .tooltip(tooltip(m.npub.clone()))
+                        .child(short_npub(&m.npub)),
+                )
+                .child(
+                    div()
+                        .text_size(px(12.))
+                        .text_color(theme::muted())
+                        .child(m.role.clone()),
+                )
+                .child(
+                    Btn::manage(
+                        SharedString::from(format!("remove-{}", m.npub)),
+                        if armed {
+                            "Confirm: rotate key"
+                        } else {
+                            "Remove"
+                        },
                     )
-                    .child(
-                        div()
-                            .text_size(px(12.))
-                            .text_color(theme::muted())
-                            .child(m.role.clone()),
-                    )
-                    .child(
-                        Btn::manage(
-                            SharedString::from(format!("remove-{}", m.npub)),
-                            if armed {
-                                "Confirm: rotate key"
-                            } else {
-                                "Remove"
-                            },
-                        )
-                        .danger_hover()
-                        .on_click(
-                            cx.listener(move |this, _, _, cx| this.remove_member(npub.clone(), cx)),
-                        ),
+                    .danger_hover()
+                    .on_click(
+                        cx.listener(move |this, _, _, cx| this.remove_member(npub.clone(), cx)),
                     ),
-            );
+                );
+            // A member you just added rises in (opacity, y 6 → 0, 150ms).
+            let row = if self.added_member.as_deref() == Some(m.npub.as_str()) {
+                let enter = motion::use_motion(
+                    SharedString::from(format!("member-enter-{}", m.npub)),
+                    window,
+                    cx,
+                    motion::MotionState::default,
+                );
+                let frame = enter.update(cx, |state, cx| {
+                    state.frame(
+                        motion::Motion::new(motion::Target::default())
+                            .initial(motion::Target::default().y(6.).opacity(0.))
+                            .transition(motion::CONTROL.transition()),
+                        window,
+                        cx,
+                    )
+                });
+                frame.apply(row)
+            } else {
+                row
+            };
+            root = root.child(row);
         }
         if members.is_empty() {
             root = root.child(manage_hint("No members yet — it's just you."));

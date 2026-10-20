@@ -695,6 +695,8 @@ impl Render for RowContextMenu {
             let host = div().relative().child(item);
             if fly == Some(kind) {
                 let content = this.render_fly(kind, window, cx);
+                // Each flyout enters as it opens (switching flyouts mounts the next).
+                let content = common::appear(("ctx-fly", kind as usize), content, window, cx);
                 // Flush against the menu's right edge, centred on the item
                 // (estimated 320px tall); flipped to the menu's left edge
                 // within 10px of the window edge, clamped to the window.
@@ -859,7 +861,7 @@ impl Render for RowContextMenu {
                 anchored()
                     .position(pos)
                     .snap_to_window_with_margin(px(8.))
-                    .child(menu),
+                    .child(common::appear("ctx-menu", menu, window, cx)),
             )
             // Escape: the type search handles its own (clear, then close the
             // flyout); otherwise the data view's Dismiss closes the menu.

@@ -2082,7 +2082,14 @@ impl Render for SetTable {
                 let left = rb.left() + px(name_width + widths[..ci].iter().sum::<f32>());
                 Some(point(left, rb.bottom() + px(4.)))
             });
-            if let Some(pos) = cell {
+            if let (Some(pos), Some((rid, key))) = (cell, self.cell_edit.as_ref()) {
+                // Enters per cell: another cell's editor mounts afresh.
+                let pop = common::appear(
+                    SharedString::from(format!("cell-pop-{rid}-{key}")),
+                    div().child(pop),
+                    window,
+                    cx,
+                );
                 // In-tree: the editor's inputs need their keyboard actions.
                 root = root.child(
                     anchored()

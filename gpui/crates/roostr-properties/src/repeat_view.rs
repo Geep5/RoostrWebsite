@@ -1021,7 +1021,7 @@ impl Render for RepeatView {
                         })),
                     );
                 }
-                agent_wrap = agent_wrap.child(below(4., list));
+                agent_wrap = agent_wrap.child(below("agent-menu", 4., list));
             }
             pop = pop.child(fieldrow().child(lbl("Agent")).child(agent_wrap));
 
@@ -1056,7 +1056,7 @@ impl Render for RepeatView {
                         ),
                     );
                 }
-                freq_wrap = freq_wrap.child(below(4., list));
+                freq_wrap = freq_wrap.child(below("freq-menu", 4., list));
             }
             pop = pop.child(
                 fieldrow()
@@ -1072,7 +1072,7 @@ impl Render for RepeatView {
                         cx.listener(|this, _, window, cx| this.open_calendar(window, cx)),
                     ));
                 if let Some(cal) = &self.calendar {
-                    starts = starts.child(below(4., cal.clone()));
+                    starts = starts.child(below("anchor-calendar", 4., cal.clone()));
                 }
                 pop = pop.child(fieldrow().child(lbl("Starts")).child(starts));
             }
@@ -1408,6 +1408,6 @@ impl Render for RepeatView {
                 cx.notify();
             });
         }))
-        .child(below(6., pop))
+        .child(below("repeat-pop", 6., pop))
     }
 }
