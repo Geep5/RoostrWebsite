@@ -256,7 +256,12 @@ editing, as it blurred the field in the web view: the editor then shows a
 remote edit to the block the caret was in, which it leaves alone while that
 block is being edited (BlockNode.svelte's rule, `sync_live_texts`). Once the
 last finger lifts, the pointer leaves the window, so nothing stays hovered
-and no tooltip lingers after a tap.
+and no tooltip lingers after a tap. A `[data-tip]` also goes with its
+control, as CSS's `:hover::after` did: a tap that takes the control off
+screen (the back button to the Spaces list) hears no hover end, and the tip
+is dropped once a frame no longer draws the control. The Settings sheet's
+key import field stays above the keyboard as it rises, as WebKit scrolled a
+focused input into view.
 
 The edit menu is UIKit's (`UIEditMenuInteraction`), as it was in the web
 view: a finger held still for half a second on the focused

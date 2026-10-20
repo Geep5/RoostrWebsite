@@ -150,6 +150,8 @@ pub struct Workspace {
     /// The hovered `[data-tip]` control: (anchor key, text, past the delay).
     tip: Option<(&'static str, SharedString, bool)>,
     _tip_timer: Option<Task<()>>,
+    /// The `[data-tip]` controls drawn by the last frame that drew this view.
+    tips_drawn: Rc<std::cell::RefCell<std::collections::HashSet<&'static str>>>,
     /// Keyboard focus handles of the tabs, by uid.
     pub(crate) tab_focus: HashMap<u64, FocusHandle>,
     // Mobile shell (`isMobile`).
@@ -279,6 +281,7 @@ impl Workspace {
             anchors: Rc::default(),
             tip: None,
             _tip_timer: None,
+            tips_drawn: Rc::default(),
             tab_focus: HashMap::new(),
             mobile_space_open: false,
             mobile_collapsed: HashMap::new(),
@@ -1165,7 +1168,8 @@ impl Workspace {
     }
 
     /// `[data-tip]`: a pill centred 6px below the control, after 400ms
-    /// hover, fading in over 120ms.
+    /// hover, fading in over 120ms. Like CSS's `:hover::after`, it goes with
+    /// the control (see [`Self::drop_orphan_tip`]).
     pub(crate) fn data_tip(
         &self,
         el: Stateful<Div>,
@@ -1173,8 +1177,13 @@ impl Workspace {
         text: &'static str,
         cx: &Context<Self>,
     ) -> Stateful<Div> {
+        let anchors = self.anchors.clone();
+        let drawn = self.tips_drawn.clone();
         el.relative()
-            .child(self.anchor_probe(key))
+            .child(probe(move |bounds| {
+                anchors.borrow_mut().insert(key, bounds);
+                drawn.borrow_mut().insert(key);
+            }))
             .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
                 if *hovered {
                     this.tip = Some((key, text.into(), false));
@@ -1195,21 +1204,41 @@ impl Workspace {
             }))
     }
 
+    /// Forget the tip of a control the last frame no longer drew. A control
+    /// taken off screen under the pointer (the back button a tap navigated
+    /// away from) never hears its hover end, so its tip would come up after
+    /// the delay and stay, at the control's old place. Runs at the start of
+    /// each render, before this frame's controls are drawn.
+    fn drop_orphan_tip(&mut self) {
+        let drawn = std::mem::take(&mut *self.tips_drawn.borrow_mut());
+        if self
+            .tip
+            .as_ref()
+            .is_some_and(|(key, ..)| !drawn.contains(key))
+        {
+            self.tip = None;
+            self._tip_timer = None;
+        }
+    }
+
     /// An invisible probe recording its parent's window bounds under `key`
     /// (where a dropdown anchors).
     pub(crate) fn anchor_probe(&self, key: &'static str) -> impl IntoElement {
         let anchors = self.anchors.clone();
-        canvas(
-            move |bounds, _, _| {
-                anchors.borrow_mut().insert(key, bounds);
-            },
-            |_, _, _, _| {},
-        )
+        probe(move |bounds| {
+            anchors.borrow_mut().insert(key, bounds);
+        })
+    }
+}
+
+/// An invisible element covering its parent that hands `record` its window
+/// bounds each time it is drawn.
+fn probe(record: impl FnOnce(Bounds<Pixels>) + 'static) -> impl IntoElement {
+    canvas(move |bounds, _, _| record(bounds), |_, _, _, _| {})
         .absolute()
         .top_0()
         .left_0()
         .size_full()
-    }
 }
 
 /// The ▶ disclosure arrow at `turn` (0 closed, 1 open: rotated 90°).
@@ -1225,6 +1254,7 @@ pub(crate) fn arrow_at(turn: f32, size: f32) -> Svg {
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.drop_orphan_tip();
         let root = div()
             .id("workspace")
             .key_context("Workspace")

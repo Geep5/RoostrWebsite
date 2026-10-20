@@ -2,6 +2,8 @@
 //! it: profile, chat colour, Nostr identity, relays, the desktop sync check,
 //! the spellcheck dictionary, export, the Claude plan and agent keys.
 
+use std::cell::Cell;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -86,6 +88,9 @@ pub struct Settings {
     nsec: SharedString,
     import_draft: Entity<InputState>,
     import_error: SharedString,
+    /// The settings scroll area's height the import field was last kept in
+    /// view at, while it has focus (see [`keep_in_view`]).
+    import_in_view: Rc<Cell<Option<Pixels>>>,
 
     // Relays
     relays: Vec<String>,
@@ -272,6 +277,7 @@ impl Settings {
             nsec: SharedString::default(),
             import_draft,
             import_error: SharedString::default(),
+            import_in_view: Rc::default(),
             relays: Vec::new(),
             new_relay,
             save_state: "",
@@ -1355,9 +1361,15 @@ impl Render for Settings {
                 )))
                 .child(
                     div()
+                        .relative()
                         .flex()
                         .gap(px(8.))
                         .mt(px(6.))
+                        .child(keep_in_view(
+                            self.import_draft.focus_handle(cx),
+                            self.scroll.clone(),
+                            self.import_in_view.clone(),
+                        ))
                         .child(field(&self.import_draft, modal_field(), window, cx).flex_1())
                         .child(Btn::small("import-submit", "Import").on_click(cx.listener(|this, _, _, cx| {
                             if !this.import_draft.read(cx).value().trim().is_empty() {
@@ -2010,11 +2022,17 @@ impl Render for Settings {
             );
         let sheet = sheet.into_any_element();
         // The dialog lends its backdrop, focus and Escape; the sheet places
-        // itself against the window's bottom edge.
+        // itself against the bottom edge of the area the app is laid out in
+        // (inside the iOS safe area, above the keyboard). It escapes the
+        // dialog's empty surface as a deferred layer at the dialog layer's
+        // own priority (gpui-base: 10 + its layer, 0 for Settings): nested
+        // in that layer, it paints after it - over the backdrop's dim - and
+        // still under popups (100) and any dialog opened above it.
+        let visible = window.fully_visible_bounds();
         div()
             .child(
                 deferred(
-                    anchored().position(point(px(0.), px(0.))).child(
+                    anchored().position(visible.origin).child(
                         div()
                             .w(viewport.width)
                             .h(viewport.height)
@@ -2024,7 +2042,7 @@ impl Render for Settings {
                             .child(sheet),
                     ),
                 )
-                .with_priority(1),
+                .with_priority(10),
             )
             .into_any_element()
     }
@@ -2089,6 +2107,48 @@ impl Settings {
         .absolute()
         .inset_0()
     }
+}
+
+/// Keeps its parent (a text field's row) inside the scroll area `scroll`
+/// while `focus` has focus, as iOS WebKit kept a focused input in view: once
+/// on focus, and again each time the area changes height - the on-screen
+/// keyboard rising shortens the phone sheet, and would otherwise cover a
+/// field low in it. Scrolls no further than needed; scrolling away while
+/// typing is left alone. `in_view` holds the height last handled.
+fn keep_in_view(
+    focus: FocusHandle,
+    scroll: ScrollHandle,
+    in_view: Rc<Cell<Option<Pixels>>>,
+) -> impl IntoElement {
+    const MARGIN: Pixels = px(12.);
+    canvas(
+        move |bounds, window, _| {
+            if !focus.is_focused(window) {
+                in_view.set(None);
+                return;
+            }
+            let area = scroll.bounds();
+            if in_view.replace(Some(area.size.height)) == Some(area.size.height) {
+                return;
+            }
+            let below = bounds.bottom() + MARGIN - area.bottom();
+            let above = area.top() - (bounds.top() - MARGIN);
+            let mut offset = scroll.offset();
+            if below > px(0.) {
+                offset.y -= below;
+            } else if above > px(0.) {
+                offset.y += above;
+            } else {
+                return;
+            }
+            offset.y = offset.y.clamp(-scroll.max_offset().y, px(0.));
+            scroll.set_offset(offset);
+            window.request_animation_frame();
+        },
+        |_, _, _, _| {},
+    )
+    .absolute()
+    .inset_0()
 }
 
 /// Open Settings as a modal over the window (580px); at ≤720px, a bottom
