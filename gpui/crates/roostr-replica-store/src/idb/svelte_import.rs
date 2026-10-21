@@ -297,17 +297,21 @@ impl Svelte {
     }
 
     /// Every key and value of object store `name` (none when it is missing:
-    /// a database from before store.ts version 5).
+    /// a database from before store.ts version 5), read in chunks.
     async fn rows(&self, name: &'static str) -> Result<(Vec<JsValue>, Vec<JsValue>), StoreError> {
         let db = self.db.clone();
         guarded("read", async move {
+            let (mut keys, mut values) = (Vec::new(), Vec::new());
             if !db.object_store_names().contains(name) {
-                return Ok((Vec::new(), Vec::new()));
+                return Ok((keys, values));
             }
             let tx = db.transaction_with_str(name).map_err(js_error)?;
-            let store = os(&tx, name)?;
-            let keys = array(req(store.get_all_keys()).await?);
-            let values = array(req(store.get_all()).await?);
+            each_row(Rows::Store(&os(&tx, name)?), |key, value| {
+                keys.push(key);
+                values.push(value);
+                Ok(())
+            })
+            .await?;
             Ok((keys, values))
         })
         .await

@@ -142,6 +142,18 @@ gets one (`indexedDB.databases()`, else an open that aborts its upgrade). A
 failed import logs a warning and retries on the next start; it never keeps
 the replica from starting.
 
+Every IndexedDB operation runs under a watchdog (`IDB_TIMEOUT_MS`, 12 s):
+it reports "local storage stopped responding" only once the database has
+answered nothing for that long while the page was responsive - a busy main
+thread, a slow disk, or an operation queued behind another's long
+transaction never counts. Whole-store reads go 500 rows per request, and
+per-object lookups are issued together rather than one round trip each, so
+no operation's length grows with the vault (a wall-clock limit on one
+operation used to fail every start of a ~2,000-object vault on slower
+disks, at `cached_replays`). `cargo test --release -p roostr-replica --test
+large_vault -- --ignored` (with `SEED_RELAY`, `SEED_OUT`) seeds a throwaway
+~18k-change vault with bases and shared spaces onto a relay, to load against.
+
 The alternative is the daemon and harness on the visitor's own computer, like
 the hosted Svelte app in paired mode ("Pair with Roostr on this computer
 instead" on the sign-in gate, or Settings → "Where your vault lives"): the
