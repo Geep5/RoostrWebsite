@@ -713,6 +713,7 @@ impl Settings {
     /// lite replica, "Fully sync this device" behind a details sheet. After
     /// confirming, the sync status line shows the download.
     fn render_holding(&self, vault: Div, cx: &mut Context<Self>) -> Div {
+        let vault = vault.child(self.render_mode_line(cx));
         if roostr_core::lite::lite(cx).is_none() {
             return vault;
         }
@@ -779,6 +780,65 @@ impl Settings {
                     p(progress.unwrap_or_else(|| "Fully syncing this device…".into())).mt(px(6.)),
                 )
             })
+    }
+
+    /// One line at the top of "Where your vault lives": which mode this
+    /// device is in (Full via the daemon, Full replica, Lite replica) and
+    /// where its sync stands - so neither has to be inferred from the rest.
+    fn render_mode_line(&self, cx: &mut Context<Self>) -> Div {
+        use roostr_core::SyncPhase;
+        let status = Store::global(cx).read(cx).status.clone();
+        let replica = roostr_core::lite::lite(cx).is_some();
+        let lite = status.lite.is_some();
+        let (mode, mode_color) = match (replica, lite) {
+            (false, _) => ("Full", theme::green()),
+            (true, false) => ("Full", theme::green()),
+            (true, true) => ("Lite", theme::orange()),
+        };
+        let progress = sync_progress(&status).map(|p| progress_text(&p));
+        let (state, state_color) = match status.phase {
+            SyncPhase::Error => (
+                format!("Sync error{}", status.detail.as_deref().map(|d| format!(": {d}")).unwrap_or_default()),
+                theme::red(),
+            ),
+            _ if progress.is_some() => (progress.unwrap_or_default(), theme::orange()),
+            _ if !replica => ("Holds your whole vault (this computer's engine)".to_string(), theme::green()),
+            _ if lite => (
+                match &self.estimate {
+                    Some(e) => format!("About {}% on this device · the rest downloads as you open it", e.percent()),
+                    None => "Part of your vault on this device · the rest downloads as you open it".to_string(),
+                },
+                theme::muted(),
+            ),
+            SyncPhase::Live if status.bootstrapped => ("100% synced · up to date".to_string(), theme::green()),
+            SyncPhase::Live | SyncPhase::Backfill => ("Syncing…".to_string(), theme::orange()),
+            SyncPhase::Idle => ("Not connected to a relay".to_string(), theme::muted()),
+        };
+        let pending = status.pending.filter(|n| *n > 0).map(|n| format!(" · {n} change{} not sent yet", if n == 1 { "" } else { "s" }));
+        div()
+            .mt(px(10.))
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .flex_wrap()
+            .child(
+                div()
+                    .px(px(8.))
+                    .py(px(2.))
+                    .rounded(px(999.))
+                    .border_1()
+                    .border_color(mode_color)
+                    .text_color(mode_color)
+                    .text_size(px(12.))
+                    .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                    .child(format!("{mode} mode")),
+            )
+            .child(
+                div()
+                    .text_size(px(13.))
+                    .text_color(state_color)
+                    .child(format!("{state}{}", pending.unwrap_or_default())),
+            )
     }
 
     // ------------------------------------------------------------- relays
