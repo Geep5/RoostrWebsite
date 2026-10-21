@@ -14,6 +14,7 @@ use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use roostr_core::color::{DEFAULT_CHAT_COLOR, hex, normalize_hex};
+use roostr_core::devices::{self, DEVICE_ID_PREFIX, DeviceRecord};
 use roostr_core::harness::harness;
 use roostr_core::io;
 use roostr_core::lite::VaultEstimate;
@@ -21,7 +22,7 @@ use roostr_core::profile as nostr_profile;
 use roostr_core::serving::{MachineRow, fetch_machines, machine_name};
 use roostr_core::sync_status::{progress_text, sync_progress};
 use roostr_core::ui::data_url_image;
-use roostr_core::{Store, UiState, api, lite_ui, motion, theme};
+use roostr_core::{Store, StoreEvent, UiState, api, lite_ui, motion, theme};
 use serde_json::{Value as Json, json};
 
 use crate::export::{ExportFormat, export_all};
@@ -145,6 +146,14 @@ pub struct Settings {
     confirm_full: bool,
     full_requested: bool,
 
+    // "Your devices": every device record of the account, this backend's
+    // device id (from the settings), the record being renamed and its draft.
+    devices: Vec<DeviceRecord>,
+    device_id: String,
+    show_older_devices: bool,
+    renaming_device: Option<String>,
+    device_name_draft: Entity<InputState>,
+
     open_menu: Option<Menu>,
     /// The mobile sheet's drag-to-close: how far it is pulled down, where
     /// the finger started while it drags, its presented offset (entering
@@ -195,6 +204,7 @@ impl Settings {
             .or_else(|| hex(DEFAULT_CHAT_COLOR))
             .unwrap_or(theme::white());
         let swatch = cx.new(|cx| ColorPickerState::new(window, cx).default_value(swatch_color));
+        let device_name_draft = input(window, cx, "Device name");
 
         let subscriptions = vec![
             cx.subscribe_in(
@@ -272,6 +282,25 @@ impl Settings {
             ),
             // The sync status line under "Fully sync this device" follows the store.
             cx.observe(&Store::global(cx), |_, _, cx| cx.notify()),
+            cx.subscribe_in(
+                &device_name_draft,
+                window,
+                |this, _, event: &InputEvent, _, cx| {
+                    if let InputEvent::PressEnter { .. } = event {
+                        this.save_device_name(cx);
+                    }
+                },
+            ),
+            cx.subscribe(&Store::global(cx), |this, _, event: &StoreEvent, cx| {
+                let reload = match event {
+                    StoreEvent::Committed(id) => id.starts_with(DEVICE_ID_PREFIX),
+                    StoreEvent::Reconnected => true,
+                    StoreEvent::Refreshed => false,
+                };
+                if reload {
+                    this.load_devices(cx);
+                }
+            }),
         ];
 
         let mut this = Self {
@@ -320,6 +349,11 @@ impl Settings {
             estimate: None,
             confirm_full: false,
             full_requested: false,
+            devices: Vec::new(),
+            device_id: String::new(),
+            show_older_devices: false,
+            renaming_device: None,
+            device_name_draft,
             open_menu: None,
             sheet_y: px(0.),
             sheet_drag: None,
@@ -330,6 +364,7 @@ impl Settings {
         this.load_profile(window, cx);
         this.load(cx);
         this.load_estimate(cx);
+        this.load_devices(cx);
         this
     }
 
@@ -362,11 +397,81 @@ impl Settings {
                     Ok(settings) => {
                         this.relays = settings.relays;
                         this.npub = settings.npub.unwrap_or_default();
+                        this.device_id = settings.device_id;
                     }
                     Err(error) => this.settings_error = error.to_string().into(),
                 }
                 this.load_agent_auth(cx);
                 this.load_plan(cx);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// "Your devices": the account's device records, reloaded on open, after
+    /// a rename/remove and whenever a device record commits.
+    fn load_devices(&mut self, cx: &mut Context<Self>) {
+        let task = devices::list(cx);
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| {
+                match result {
+                    Ok(records) => this.devices = records,
+                    Err(error) => log::warn!("device list failed: {error:#}"),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn start_rename_device(
+        &mut self,
+        record: &DeviceRecord,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.renaming_device = Some(record.id.clone());
+        let name = record.name.clone();
+        self.device_name_draft.update(cx, |s, cx| {
+            s.set_value(name, window, cx);
+            s.focus(window, cx);
+        });
+        cx.notify();
+    }
+
+    fn save_device_name(&mut self, cx: &mut Context<Self>) {
+        let Some(id) = self.renaming_device.clone() else {
+            return;
+        };
+        let name = self.device_name_draft.read(cx).value().trim().to_string();
+        if name.is_empty() {
+            return;
+        }
+        self.renaming_device = None;
+        let task = devices::rename(&id, &name, cx);
+        self.after_device_change(task, cx);
+    }
+
+    fn remove_device(&mut self, id: &str, cx: &mut Context<Self>) {
+        let task = devices::remove(id, cx);
+        self.after_device_change(task, cx);
+    }
+
+    fn after_device_change<T: 'static>(
+        &mut self,
+        task: Task<anyhow::Result<T>>,
+        cx: &mut Context<Self>,
+    ) {
+        self.settings_error = SharedString::default();
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| {
+                if let Err(error) = result {
+                    this.settings_error = error.to_string().into();
+                }
+                this.load_devices(cx);
                 cx.notify();
             });
         })
@@ -712,8 +817,10 @@ impl Settings {
     /// Replica only: "This device holds about N% of your vault" and, on a
     /// lite replica, "Fully sync this device" behind a details sheet. After
     /// confirming, the sync status line shows the download.
-    fn render_holding(&self, vault: Div, cx: &mut Context<Self>) -> Div {
-        let vault = vault.child(self.render_mode_line(cx));
+    fn render_holding(&self, vault: Div, window: &Window, cx: &mut Context<Self>) -> Div {
+        let vault = vault
+            .child(self.render_mode_line(cx))
+            .child(self.render_devices(window, cx));
         if roostr_core::lite::lite(cx).is_none() {
             return vault;
         }
@@ -821,24 +928,152 @@ impl Settings {
             .items_center()
             .gap(px(8.))
             .flex_wrap()
-            .child(
-                div()
-                    .px(px(8.))
-                    .py(px(2.))
-                    .rounded(px(999.))
-                    .border_1()
-                    .border_color(mode_color)
-                    .text_color(mode_color)
-                    .text_size(px(12.))
-                    .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                    .child(format!("{mode} mode")),
-            )
+            .child(pill(format!("{mode} mode"), mode_color))
             .child(
                 div()
                     .text_size(px(13.))
                     .text_color(state_color)
                     .child(format!("{state}{}", pending.unwrap_or_default())),
             )
+    }
+
+    /// "Your devices" under the mode line: this device first, then the most
+    /// recent; devices unseen for 30 days fold under "Older devices".
+    fn render_devices(&self, window: &Window, cx: &mut Context<Self>) -> Div {
+        let list = div()
+            .mt(px(14.))
+            .flex()
+            .flex_col()
+            .gap(px(6.))
+            .child(h3("Your devices"));
+        if self.devices.is_empty() {
+            return list.child(hint("No devices yet"));
+        }
+        let now = chrono::Utc::now().timestamp_millis();
+        let (shown, older) = devices::arrange(self.devices.clone(), &self.device_id, now);
+        let older_count = older.len();
+        let open = self.show_older_devices;
+        let mut list = list.children(shown.iter().map(|r| self.render_device(r, now, window, cx)));
+        if older_count > 0 {
+            list = list.child(
+                div().flex().child(
+                    Btn::action(
+                        "devices-older",
+                        format!(
+                            "{} Older devices ({older_count})",
+                            if open { "▾" } else { "▸" }
+                        ),
+                    )
+                    .subtle()
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.show_older_devices = !this.show_older_devices;
+                        cx.notify();
+                    })),
+                ),
+            );
+            if open {
+                list = list.children(older.iter().map(|r| self.render_device(r, now, window, cx)));
+            }
+        }
+        list.child(hint(
+            "Remove deletes a record only - the device adds itself again the next time it runs.",
+        ))
+    }
+
+    fn render_device(
+        &self,
+        record: &DeviceRecord,
+        now: i64,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let this_device = record.device_id() == self.device_id;
+        let name = if this_device {
+            format!("{} (this device)", record.name)
+        } else {
+            record.name.clone()
+        };
+        let (badge, color) = if record.lite {
+            ("Lite", theme::orange())
+        } else {
+            ("Full", theme::green())
+        };
+        let id = record.id.clone();
+        let renaming = self.renaming_device.as_deref() == Some(record.id.as_str());
+        let row = div()
+            .px(px(10.))
+            .py(px(8.))
+            .rounded(px(8.))
+            .border_1()
+            .flex()
+            .flex_col()
+            .gap(px(6.))
+            .map(|d| {
+                if record.lite {
+                    d.border_color(theme::orange().opacity(0.4))
+                        .bg(theme::orange().opacity(0.06))
+                } else {
+                    d.border_color(theme::border())
+                }
+            });
+        if renaming {
+            return row.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .child(field(&self.device_name_draft, modal_field(), window, cx).flex_1())
+                    .child(
+                        Btn::small(SharedString::from(format!("device-save-{id}")), "Save")
+                            .on_click(cx.listener(|this, _, _, cx| this.save_device_name(cx))),
+                    )
+                    .child(
+                        Btn::action(SharedString::from(format!("device-cancel-{id}")), "Cancel")
+                            .subtle()
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.renaming_device = None;
+                                cx.notify();
+                            })),
+                    ),
+            );
+        }
+        let rename_record = record.clone();
+        row.child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .flex_wrap()
+                .child(div().text_size(px(14.)).text_color(theme::fg()).child(name))
+                .child(pill(badge, color))
+                .when(record.lite, |d| {
+                    d.child(div().text_size(px(13.)).text_color(theme::orange()).child(format!("{}% held", record.percent)))
+                })
+                .child(
+                    div()
+                        .text_size(px(13.))
+                        .text_color(theme::muted())
+                        .child(format!("last seen {}", devices::last_seen_text(now, record.last_seen))),
+                ),
+        )
+        .child(
+            div()
+                .flex()
+                .gap(px(8.))
+                .child(
+                    Btn::action(SharedString::from(format!("device-rename-{id}")), "Rename")
+                        .subtle()
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.start_rename_device(&rename_record, window, cx)
+                        })),
+                )
+                .child(
+                    Btn::action(SharedString::from(format!("device-remove-{id}")), "Remove")
+                        .subtle()
+                        .tooltip("Removes this record only - the device adds itself again the next time it runs.")
+                        .on_click(cx.listener(move |this, _, _, cx| this.remove_device(&id, cx))),
+                ),
+        )
     }
 
     // ------------------------------------------------------------- relays
@@ -1242,6 +1477,20 @@ fn p(text: impl Into<SharedString>) -> Div {
 /// these messages draw muted like any hint.
 fn error_p(text: impl Into<SharedString>) -> Div {
     p(text)
+}
+
+/// The rounded outline badge of the mode line ("Full mode") and the device rows.
+fn pill(text: impl Into<SharedString>, color: Hsla) -> Div {
+    div()
+        .px(px(8.))
+        .py(px(2.))
+        .rounded(px(999.))
+        .border_1()
+        .border_color(color)
+        .text_color(color)
+        .text_size(px(12.))
+        .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+        .child(text.into())
 }
 
 fn modal_field() -> FieldStyle {
@@ -1687,7 +1936,7 @@ impl Render for Settings {
                     }),
                 ),
             );
-        let vault = self.render_holding(vault, cx);
+        let vault = self.render_holding(vault, window, cx);
 
         // ── Desktop sync check
         let checking = self.desk == Desk::Checking;

@@ -12,6 +12,7 @@ pub mod daemon;
 pub mod dates;
 #[cfg(not(any(target_family = "wasm", target_os = "ios")))]
 pub mod dev;
+pub mod devices;
 pub mod filters;
 pub mod harness;
 pub mod http;

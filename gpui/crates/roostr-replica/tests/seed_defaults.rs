@@ -53,6 +53,17 @@ fn changes_on(relay: &TestRelay) -> usize {
         .count()
 }
 
+/// Every change `store` holds: id → object id.
+async fn held_changes(store: &SqliteChangeStore) -> std::collections::HashMap<String, String> {
+    let mut out = std::collections::HashMap::new();
+    for object_id in store.object_ids().await.unwrap() {
+        for change in store.changes_for(object_id.clone()).await.unwrap() {
+            out.insert(change.id, object_id.clone());
+        }
+    }
+    out
+}
+
 #[test]
 fn a_fresh_replica_that_syncs_existing_defaults_publishes_zero_seeding_changes() {
     let _turn = ENGINE_TURN.lock();
@@ -99,9 +110,24 @@ fn a_fresh_replica_that_syncs_existing_defaults_publishes_zero_seeding_changes()
         roostr_nostr::sleep(Duration::from_secs(2)).await;
         backend.await_idle().await;
         assert_eq!(store.pending_publishes().await.unwrap(), []);
+        // What this replica wrote itself (all it holds the seeder did not)
+        // is its device record and the personal directory's entry for it -
+        // nothing of the catalog.
+        let seeded = held_changes(&seeder_store).await;
+        let own = format!("__device__:{}", backend.settings().await.unwrap().device_id);
+        let written: Vec<String> = held_changes(&store)
+            .await
+            .into_iter()
+            .filter(|(id, _)| !seeded.contains_key(id))
+            .map(|(_, object_id)| object_id)
+            .collect();
+        assert!(
+            written.iter().all(|id| *id == own || id == "__directory__"),
+            "seeding re-wrote {written:?}"
+        );
         assert_eq!(
             changes_on(&relay),
-            vault,
+            vault + written.len(),
             "seeding re-published the catalog"
         );
         // The catalog is there - synced, not re-written.

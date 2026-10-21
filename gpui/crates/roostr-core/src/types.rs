@@ -587,6 +587,11 @@ pub struct Settings {
     pub npub: Option<String>,
     #[serde(default)]
     pub identity_pending: bool,
+    /// The device this backend writes its device record as (the daemon's
+    /// `<data>/device-id`, a replica's `roostr-device-id`): Settings marks
+    /// its row "(this device)" ([`crate::devices`]).
+    #[serde(default)]
+    pub device_id: String,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -725,6 +730,7 @@ pub const SYSTEM_TYPE_KEYS: &[&str] = &[
     "user_prefs",
     "vanish_log",
     "directory",
+    "device",
     "descriptor",
     "install",
     "set",

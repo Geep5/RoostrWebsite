@@ -287,6 +287,23 @@ and, when lite, "Fully sync this device": a details sheet (what it
 downloads, how long, storage used now, offline afterwards, only logging out
 undoes it) before it switches; the sync status line then shows the download.
 
+### Your devices
+
+Every device of the account keeps a device record (glonOdin
+`core/device.odin`, `docs/state-sync.md` "Device records"): a replica writes
+its own (`roostr-replica` `write_device_record`, named by `DeviceInfo`:
+"Chrome at roostr.space", the iPhone's model, "Desktop app on <host>") once
+its first sync settles, when what it holds changes and on a 5-minute check
+(`last_seen` alone at most every 30 minutes); the daemon writes its own. A
+lite replica fetches the records the personal directory lists. Settings →
+"Where your vault lives" lists them under the mode line in every mode
+(`roostr_core::devices`): name ("(this device)" by `Settings.device_id`),
+Full/Lite, "% held" when lite, last seen; Rename keeps a person's name over
+the device's own, Remove deletes the record until the device next runs;
+devices unseen for 30 days fold under "Older devices".
+`crates/roostr-replica/tests/devices.rs` runs two replicas of one key end to
+end.
+
 ## iOS
 
 `crates/roostr-ios` is the iOS app; the sibling `RoostrIOS` repository is

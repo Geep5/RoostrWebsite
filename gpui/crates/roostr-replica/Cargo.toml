@@ -26,11 +26,19 @@ web-time.workspace = true
 async-io = "2"
 dirs.workspace = true
 
+# The device record's name (src/device.rs): the desktop app's host name,
+# the iPhone's hardware identifier.
+[target.'cfg(not(any(target_family = "wasm", target_os = "ios")))'.dependencies]
+gethostname = "1"
+
+[target.'cfg(target_os = "ios")'.dependencies]
+libc = "0.2"
+
 [target.'cfg(target_family = "wasm")'.dependencies]
 wasm-bindgen.workspace = true
 wasm-bindgen-futures.workspace = true
 js-sys.workspace = true
-web-sys = { workspace = true, features = ["Storage", "Window"] }
+web-sys = { workspace = true, features = ["Storage", "Window", "Navigator", "Location"] }
 
 [dev-dependencies]
 tempfile = "3"

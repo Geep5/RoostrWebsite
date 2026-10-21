@@ -30,6 +30,7 @@ use roostr_replica_store::{
 use serde_json::{Value as Json, json};
 use sha2::{Digest, Sha256};
 
+use crate::device::DeviceInfo;
 use crate::identity;
 use crate::keyring::{KvSpaceKeyring, SPACE_KEYS};
 use crate::local::LocalKv;
@@ -72,6 +73,10 @@ const PREPARE_RETRY: std::time::Duration = std::time::Duration::from_secs(5);
 const PREPARE_EMIT_MS: i64 = 250;
 /// Memo rows the preparation writes at a time: what a reload mid-way loses at most.
 const MEMO_ROWS_PER_WRITE: usize = 50;
+/// How often a running replica checks its device record
+/// ([`Inner::write_device_record`]); the planner writes only what changed,
+/// and `last_seen` alone at most every 30 minutes.
+const DEVICE_CHECK: std::time::Duration = std::time::Duration::from_secs(5 * 60);
 
 /// Everything a replica runs on: built by [`ReplicaBackend::open_native`] /
 /// [`ReplicaBackend::open_browser`], or by hand in tests.
@@ -156,6 +161,8 @@ struct State {
     /// The spaces sync follows as shared (their own `#h` stream); every
     /// other space syncs in the personal stream.
     shared_spaces: HashSet<String>,
+    /// This session's device record writer runs ([`Inner::start_device_records`]).
+    device_writer: bool,
 }
 
 /// What a lite replica holds and is doing.
@@ -196,6 +203,10 @@ struct Inner {
     lite_default: AtomicBool,
     /// One lite directory fetch at a time ([`Inner::lite_frame`]).
     lite_frame_lock: AsyncMutex<()>,
+    /// What this replica's device record calls it.
+    device: DeviceInfo,
+    /// One device record write at a time.
+    device_lock: AsyncMutex<()>,
     /// The browser store again, concretely, for the one-time import of the
     /// Svelte site's vault (set by [`ReplicaBackend::open_browser`]).
     #[cfg(target_family = "wasm")]
@@ -381,6 +392,8 @@ impl ReplicaBackend {
                 owner_signals: AsyncMutex::new(()),
                 lite_default: AtomicBool::new(false),
                 lite_frame_lock: AsyncMutex::new(()),
+                device: DeviceInfo::this_platform(),
+                device_lock: AsyncMutex::new(()),
                 #[cfg(target_family = "wasm")]
                 svelte_import: std::cell::OnceCell::new(),
             }),
@@ -534,6 +547,16 @@ impl ReplicaBackend {
     /// `repeat.next`; this only reads it.
     pub async fn upcoming_occurrences(&self, after: i64, limit: usize) -> Result<Vec<Occurrence>> {
         self.inner.upcoming_occurrences(after, limit).await
+    }
+
+    /// Write this device's record now (glonOdin `core/device.odin`; it is
+    /// also written once the first sync settles, when what this device
+    /// holds changes, and on a timer). `true` when something was due: the
+    /// planner writes only what changed and `last_seen` alone at most
+    /// every 30 minutes.
+    pub async fn write_device_record(&self) -> Result<bool> {
+        self.inner.ready().await?;
+        self.inner.write_device_record().await
     }
 }
 
@@ -691,6 +714,7 @@ impl Inner {
         // The next start prepares again from what the memo then holds.
         let mut st = self.state.lock();
         st.seeded = false;
+        st.device_writer = false;
         st.prepare_generation += 1;
     }
 
@@ -703,6 +727,7 @@ impl Inner {
         };
         old.sync.stop();
         let session = Arc::new(self.new_session(old.keys.clone()));
+        self.state.lock().device_writer = false;
         if let Err(error) = self.choose_holding(&session).await {
             log::warn!("[replica] holding after a relay change: {error:#}");
         }
@@ -1692,9 +1717,11 @@ impl Inner {
                 })
                 .unwrap_or_default()
         };
+        // The device records the personal directory lists come with it.
         let ids = listed
             .iter()
             .flat_map(|space| [space.clone(), directory_id(space)])
+            .chain(self.listed_devices())
             .collect();
         complete &= self.lite_fetch(&session, ids).await?;
         let nothing = {
@@ -1725,6 +1752,11 @@ impl Inner {
                 .collect()
         };
         self.lite_fetch(&session, defs).await?;
+        // With the personal directory held, this device's record is listed
+        // in it; with the definitions in, its share is what it will hold.
+        if complete {
+            self.start_device_records();
+        }
         Ok(())
     }
 
@@ -1814,6 +1846,8 @@ impl Inner {
         }
         let replayed = self.ensure().await;
         self.emit_status(true);
+        // More of the vault is here now.
+        self.spawn_device_record();
         match result {
             Ok(true) => {}
             Ok(false) => log::info!(
@@ -1834,6 +1868,7 @@ impl Inner {
         self.kv.set(HOLDING, Some("full"));
         self.store.set_meta(LITE_SCOPES.to_string(), None).await?;
         self.emit_status(true);
+        self.spawn_device_record();
         let sync = session.sync.clone();
         let download: BoxFuture<()> = Box::pin(async move {
             match sync.set_lite(None).await {
@@ -1890,6 +1925,122 @@ impl Inner {
             missing_bytes: missing_events * EVENT_BYTES,
             seconds: missing_events / EVENTS_PER_SECOND,
         })
+    }
+
+    // -------------------------------------------------------------- devices
+
+    /// Device record ids the personal directory lists (`device:<recordId>`).
+    fn listed_devices(&self) -> Vec<String> {
+        let st = self.state.lock();
+        st.states
+            .get(DIRECTORY_ID)
+            .map(|dir| {
+                directory_entries(dir, "device:")
+                    .map(|(id, _)| id.to_string())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Lite: fetch the device records the personal directory lists that
+    /// this replica neither holds nor asked for (Settings lists them all).
+    fn spawn_lite_devices(self: &Arc<Self>) {
+        let this = self.clone();
+        let fetch: BoxFuture<()> = Box::pin(async move {
+            let result = async {
+                let Some(session) = this.session() else {
+                    return Ok(());
+                };
+                this.ensure().await?;
+                let ids = this.listed_devices();
+                this.lite_fetch(&session, ids).await.map(|_| ())
+            }
+            .await;
+            if let Err(error) = result {
+                log::warn!("[replica] lite device records: {error:#}");
+            }
+        });
+        rt::spawn(fetch);
+    }
+
+    /// Start this session's device record writer, once: the record now,
+    /// then a check every [`DEVICE_CHECK`] while the session runs.
+    fn start_device_records(self: &Arc<Self>) {
+        let Some(session) = self.session() else {
+            return;
+        };
+        {
+            let mut st = self.state.lock();
+            if st.device_writer || st.logging_out {
+                return;
+            }
+            st.device_writer = true;
+        }
+        let (inner, session) = (Arc::downgrade(self), Arc::downgrade(&session));
+        let writer: BoxFuture<()> = Box::pin(async move {
+            loop {
+                {
+                    let Some(this) = inner.upgrade() else {
+                        return;
+                    };
+                    let current = session
+                        .upgrade()
+                        .zip(this.session())
+                        .is_some_and(|(ours, running)| Arc::ptr_eq(&ours, &running));
+                    if !current {
+                        return;
+                    }
+                    if let Err(error) = this.write_device_record().await {
+                        log::warn!("[replica] device record: {error:#}");
+                    }
+                }
+                roostr_nostr::sleep(DEVICE_CHECK).await;
+            }
+        });
+        rt::spawn(writer);
+    }
+
+    /// What this device holds changed: its record now, once the writer runs.
+    fn spawn_device_record(self: &Arc<Self>) {
+        if !self.state.lock().device_writer {
+            return;
+        }
+        let this = self.clone();
+        let write: BoxFuture<()> = Box::pin(async move {
+            if let Err(error) = this.write_device_record().await {
+                log::warn!("[replica] device record: {error:#}");
+            }
+        });
+        rt::spawn(write);
+    }
+
+    /// This device's record (`device_seen`, glonOdin `core/device.odin`):
+    /// its auto name and kind, full or lite and about how much it holds.
+    /// The planner writes only what changed (a renamed record keeps its
+    /// name), and `last_seen` alone at most every 30 minutes. `true` when
+    /// something was written.
+    async fn write_device_record(self: &Arc<Self>) -> Result<bool> {
+        let _one = self.device_lock.lock().await;
+        if self.session().is_none() || self.state.lock().logging_out {
+            return Ok(false);
+        }
+        let lite = self.is_lite();
+        let percent = if lite {
+            self.estimate().await?.percent()
+        } else {
+            100
+        };
+        let mut params = JsonMap::new();
+        params.insert(
+            "object_id".into(),
+            json!(roostr_core::devices::record_id(&self.device_id())),
+        );
+        params.insert("name".into(), json!(self.device.name));
+        params.insert("kind".into(), json!(self.device.kind));
+        params.insert("holding".into(), json!(if lite { "lite" } else { "full" }));
+        params.insert("percent".into(), json!(percent));
+        let out = self.mutate_inner("device_seen", params, false).await?;
+        Ok(out.get("changed").and_then(Json::as_bool) == Some(true))
     }
 
     // ---------------------------------------------------------------- query
@@ -2311,6 +2462,7 @@ impl Inner {
             author_id: keys.as_ref().map(Keys::author_id).unwrap_or_default(),
             npub: keys.as_ref().map(Keys::npub),
             identity_pending: false,
+            device_id: self.device_id(),
         })
     }
 
@@ -2783,17 +2935,25 @@ impl SyncHost for Host {
         let Some(inner) = self.0.upgrade() else {
             return;
         };
-        let shared = {
+        let (shared, directory) = {
             let mut st = inner.state.lock();
             st.dirty.extend(ids.iter().cloned());
-            ids.iter().any(|id| {
+            let shared = ids.iter().any(|id| {
                 id == VANISH_LOG_ID || st.states.get(id).is_some_and(|s| type_key(s) == "channel")
-            })
+            });
+            (
+                shared,
+                st.lite.is_some() && ids.iter().any(|id| id == DIRECTORY_ID),
+            )
         };
         inner.notify(&ids);
         // A synced commit on a space object can change members or keys.
         if shared {
             inner.spawn_refresh();
+        }
+        // Lite: a device the personal directory now lists is fetched.
+        if directory {
+            inner.spawn_lite_devices();
         }
     }
 
@@ -2904,6 +3064,12 @@ impl SyncHost for Host {
         let unchecked = inner.state.lock().lite.as_ref().is_some_and(|l| !l.checked);
         if unchecked && reachable {
             inner.spawn_lite_frame();
+        }
+        // This device's record, once it holds its earlier one: a full
+        // replica after a complete pass (a lite one starts at the end of its
+        // directory fetch, [`Inner::lite_frame`]), or offline.
+        if (complete && !inner.is_lite()) || !reachable {
+            inner.start_device_records();
         }
     }
 }
