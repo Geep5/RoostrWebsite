@@ -77,6 +77,9 @@ const MEMO_ROWS_PER_WRITE: usize = 50;
 /// ([`Inner::write_device_record`]); the planner writes only what changed,
 /// and `last_seen` alone at most every 30 minutes.
 const DEVICE_CHECK: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+/// A device record write that failed (offline, a relay not answering a
+/// lite fetch) is tried again after this.
+const DEVICE_RETRY: std::time::Duration = std::time::Duration::from_secs(15);
 
 /// Everything a replica runs on: built by [`ReplicaBackend::open_native`] /
 /// [`ReplicaBackend::open_browser`], or by hand in tests.
@@ -1754,7 +1757,9 @@ impl Inner {
         self.lite_fetch(&session, defs).await?;
         // With the personal directory held, this device's record is listed
         // in it; with the definitions in, its share is what it will hold.
-        if complete {
+        // A relay that did not answer leaves the fetch incomplete, not the
+        // directory missing.
+        if complete || self.state.lock().states.contains_key(DIRECTORY_ID) {
             self.start_device_records();
         }
         Ok(())
@@ -1964,7 +1969,8 @@ impl Inner {
     }
 
     /// Start this session's device record writer, once: the record now,
-    /// then a check every [`DEVICE_CHECK`] while the session runs.
+    /// then a check every [`DEVICE_CHECK`] while the session runs (a failed
+    /// write is tried again after [`DEVICE_RETRY`]).
     fn start_device_records(self: &Arc<Self>) {
         let Some(session) = self.session() else {
             return;
@@ -1979,7 +1985,7 @@ impl Inner {
         let (inner, session) = (Arc::downgrade(self), Arc::downgrade(&session));
         let writer: BoxFuture<()> = Box::pin(async move {
             loop {
-                {
+                let wait = {
                     let Some(this) = inner.upgrade() else {
                         return;
                     };
@@ -1990,11 +1996,15 @@ impl Inner {
                     if !current {
                         return;
                     }
-                    if let Err(error) = this.write_device_record().await {
-                        log::warn!("[replica] device record: {error:#}");
+                    match this.write_device_record().await {
+                        Ok(_) => DEVICE_CHECK,
+                        Err(error) => {
+                            log::warn!("[replica] device record: {error:#}");
+                            DEVICE_RETRY
+                        }
                     }
-                }
-                roostr_nostr::sleep(DEVICE_CHECK).await;
+                };
+                roostr_nostr::sleep(wait).await;
             }
         });
         rt::spawn(writer);
