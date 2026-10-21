@@ -26,9 +26,15 @@ pub const HTTP_AUTH: u32 = 27235;
 pub const ALLOWLIST: u32 = 30100;
 /// A base: addressable, part 0 of the object's compacted state.
 pub const BASE: u32 = 31078;
+/// An identity's space-key backup: addressable, NIP-44 encrypted to itself
+/// (`d` = [`KEYRING_D`]); the daemon publishes it (nostrsync.ts
+/// `publishKeyring`) so every device of the account holds its spaces' keys.
+pub const KEYRING: u32 = 30078;
 
 /// The allowlist event's `d` tag.
 pub const ALLOWLIST_D: &str = "roostr-allowlist";
+/// The keyring backup's `d` tag.
+pub const KEYRING_D: &str = "roostr-keyring";
 /// Every DAG kind a sync filter pulls.
 pub const DAG: [u32; 4] = [CHANGE, CHECKPOINT, BASE, BASE_PART];
 /// A shared space's `#h` filter: its DAG kinds plus h-deletions.

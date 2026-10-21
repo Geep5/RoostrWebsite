@@ -777,6 +777,7 @@ impl Inner {
         // Gift wraps addressed to us: created_at is randomized, so no
         // cursor - the seen-set dedupes.
         self.fetch_wraps().await;
+        self.fetch_keyring_backup().await;
         self.clone().spawn_live_worker();
         self.subscribe_live();
         self.clone().spawn_watchdog();
@@ -878,6 +879,7 @@ impl Inner {
     ) -> anyhow::Result<bool> {
         let complete = self.backfill(since, resume_until).await?;
         self.fetch_wraps().await;
+        self.fetch_keyring_backup().await;
         Ok(complete)
     }
 

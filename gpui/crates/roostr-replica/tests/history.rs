@@ -133,13 +133,19 @@ const STREAM_PHASES: [[&str; 2]; 3] = [
     ["1078", "1078#h"],
 ];
 
-/// History walks: one-filter `REQ`s other than id fetches and gift wraps.
+/// History walks: one-filter `REQ`s other than id fetches, gift wraps and
+/// the keyring backup.
 fn dag_walks(relay: &TestRelay) -> Vec<Filter> {
     relay
         .world()
         .walks
         .iter()
-        .filter(|f| !f.kinds.iter().flatten().any(|k| *k == kinds::GIFT_WRAP))
+        .filter(|f| {
+            !f.kinds
+                .iter()
+                .flatten()
+                .any(|k| *k == kinds::GIFT_WRAP || *k == kinds::KEYRING)
+        })
         .cloned()
         .collect()
 }

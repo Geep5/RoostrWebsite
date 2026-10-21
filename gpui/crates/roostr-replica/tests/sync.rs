@@ -342,6 +342,85 @@ fn child_same_key() {
     });
 }
 
+/// The account's keyring backup as the daemon publishes it (nostrsync.ts
+/// `publishKeyring`): its key file, NIP-44 encrypted to itself.
+fn keyring_backup(keys: &Keys, channels: Value, created_at: u64) -> Event {
+    let ck = roostr_nostr::nip44::conversation_key(keys, keys.pubkey()).unwrap();
+    let file = json!({"version": 1, "channels": channels, "localPubkey": keys.pubkey()});
+    keys.sign(EventTemplate {
+        kind: kinds::KEYRING,
+        created_at,
+        tags: vec![vec!["d".into(), kinds::KEYRING_D.into()]],
+        content: roostr_nostr::nip44::encrypt(&file.to_string(), &ck).unwrap(),
+    })
+}
+
+/// A space made on another device of the account (the daemon) reaches this
+/// replica through the keyring backup, at start and live; a key this replica
+/// holds at the same or a newer keyId is kept.
+#[test]
+fn keyring_backup_installs_the_accounts_space_keys() {
+    let _turn = ENGINE_TURN.lock();
+    let relay = TestRelay::start();
+    let keys = Keys::generate();
+    let viv = "a".repeat(64);
+    let ours = "b".repeat(64);
+    let theirs = "c".repeat(64);
+    let later = "d".repeat(64);
+    relay.insert(keyring_backup(
+        &keys,
+        json!({
+            "viv": {"key": viv, "keyId": 1, "createdAt": 1},
+            "kept": {"key": theirs, "keyId": 1, "createdAt": 1},
+        }),
+        1_000,
+    ));
+    block_on(async {
+        let a = Replica::memory(keys.clone(), vec![relay.url.clone()]).await;
+        a.keyring
+            .set(
+                "kept",
+                roostr_nostr::spacekeys::SpaceKey {
+                    key: ours.clone(),
+                    key_id: 2,
+                    created_at: 1,
+                    owner: None,
+                },
+            )
+            .unwrap();
+        a.sync.start().await.unwrap();
+        a.sync.await_first_walk().await;
+        let installed = eventually(WAIT, async || a.keyring.get("viv").unwrap().is_some()).await;
+        assert!(installed, "the backup's space key was installed at start");
+        assert_eq!(a.keyring.get("viv").unwrap().unwrap().key, viv);
+        assert_eq!(
+            a.keyring.get("kept").unwrap().unwrap().key,
+            ours,
+            "a newer local keyId wins"
+        );
+        assert!(
+            *a.host.space_keys.lock() > 0,
+            "the host was told to refresh its spaces"
+        );
+
+        // A rotation on the other device arrives live.
+        relay.insert(keyring_backup(
+            &keys,
+            json!({"viv": {"key": later, "keyId": 2, "createdAt": 2}}),
+            roostr_nostr::now_s() + 1,
+        ));
+        let rotated = eventually(WAIT, async || {
+            a.keyring
+                .get("viv")
+                .unwrap()
+                .is_some_and(|k| k.key == later)
+        })
+        .await;
+        assert!(rotated, "a newer keyId in a live backup replaced the key");
+        a.sync.stop();
+    });
+}
+
 /// `members` as a channel stores it: `[{npub, role}]`.
 fn members(entries: &[(&str, &str)]) -> Value {
     let items: Vec<Value> = entries

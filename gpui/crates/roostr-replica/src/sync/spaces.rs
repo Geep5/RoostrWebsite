@@ -9,8 +9,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
+use roostr_nostr::nip44;
 use roostr_nostr::nip59::{self, JoinRequest as JoinRumor, SpaceInvite};
 use roostr_nostr::relay::{publish_any, query_many};
+use roostr_nostr::spacekeys::KeyFile;
 use roostr_nostr::{Event, EventTemplate, Filter, kinds, profile};
 
 use super::invite::{JoinRequest, record_join_request};
@@ -49,6 +51,70 @@ impl Inner {
         wraps.sort_by_key(|w| w.created_at);
         for wrap in &wraps {
             self.handle_wrap(wrap).await;
+        }
+    }
+
+    /// This identity's newest keyring backup (kind 30078, `d` =
+    /// roostr-keyring), merged in: a space created on another device of the
+    /// account - the daemon publishes its keyring - becomes shared here.
+    pub(super) async fn fetch_keyring_backup(&self) {
+        let filter = Filter::new()
+            .kinds([kinds::KEYRING])
+            .authors([self.pk.clone()])
+            .tag('d', [kinds::KEYRING_D.to_string()]);
+        let Ok(events) = query_many(&self.relays, &[filter], PAGE_TIMEOUT).await else {
+            return; // unreachable relays: the live subscription delivers it
+        };
+        if let Some(newest) = events.iter().max_by_key(|e| e.created_at) {
+            self.merge_keyring_backup(newest);
+        }
+    }
+
+    /// Merge one keyring backup (nostrsync.ts `mergeKeyring`): a space this
+    /// device lacks is added as the backup has it, and a newer keyId (a
+    /// rotation elsewhere) replaces the one held; an equal or older one
+    /// leaves the local entry. A vanished or left space stays gone.
+    pub(super) fn merge_keyring_backup(&self, event: &Event) {
+        if event.kind != kinds::KEYRING
+            || event.pubkey != self.pk
+            || event.tag("d") != Some(kinds::KEYRING_D)
+        {
+            return;
+        }
+        let remote = nip44::conversation_key(&self.keys, &self.pk)
+            .map_err(|e| e.to_string())
+            .and_then(|ck| nip44::decrypt(&event.content, &ck).map_err(|e| e.to_string()))
+            .and_then(|text| KeyFile::parse(&text).map_err(|e| e.to_string()));
+        let remote = match remote {
+            Ok(file) => file,
+            Err(error) => {
+                log::warn!("[sync] keyring backup: {error}");
+                return;
+            }
+        };
+        let mut added = 0;
+        for (space_id, entry) in remote.channels {
+            if !roostr_nostr::keys::is_hex32(&entry.key) || self.host.space_gone(&space_id) {
+                continue;
+            }
+            let held = match self.keyring.get(&space_id) {
+                Ok(held) => held,
+                Err(error) => {
+                    log::warn!("[sync] keyring backup: {error}");
+                    return;
+                }
+            };
+            if held.is_some_and(|h| h.key_id >= entry.key_id) {
+                continue;
+            }
+            match self.keyring.set(&space_id, entry) {
+                Ok(()) => added += 1,
+                Err(error) => log::warn!("[sync] keyring backup: {error}"),
+            }
+        }
+        roostr_core::sync_trace!("keyring backup merged: {added} space key(s) new or newer");
+        if added > 0 {
+            self.host.on_space_key();
         }
     }
 

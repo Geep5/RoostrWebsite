@@ -74,6 +74,13 @@ impl Inner {
                 .tag('p', [self.pk.clone()])
                 .since((now_s() as u64).saturating_sub(WRAP_LOOKBACK_S)),
         );
+        filters.push(
+            Filter::new()
+                .kinds([kinds::KEYRING])
+                .authors([self.pk.clone()])
+                .tag('d', [kinds::KEYRING_D.to_string()])
+                .since(now_s() as u64),
+        );
         filters
     }
 
@@ -177,6 +184,8 @@ impl Inner {
                     roostr_core::sync_trace!("live event {}", describe_event(&event, &self.pk));
                     if event.kind == kinds::GIFT_WRAP {
                         self.handle_wrap(&event).await;
+                    } else if event.kind == kinds::KEYRING {
+                        self.merge_keyring_backup(&event);
                     } else if let Err(error) = self.handle_live_event(event).await {
                         log::warn!("[sync] live event: {error}");
                     }

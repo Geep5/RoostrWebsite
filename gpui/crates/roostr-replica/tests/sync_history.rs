@@ -154,7 +154,8 @@ fn kinds_of(filter: &Filter) -> String {
     kinds.join(",")
 }
 
-/// The history walks a relay saw (one-filter REQs other than gift wraps).
+/// The history walks a relay saw (one-filter REQs other than gift wraps and
+/// the keyring backup).
 fn history_walks(relay: &TestRelay) -> Vec<Filter> {
     relay
         .world()
@@ -163,7 +164,7 @@ fn history_walks(relay: &TestRelay) -> Vec<Filter> {
         .filter(|f| {
             !f.kinds
                 .as_ref()
-                .is_some_and(|k| k.contains(&kinds::GIFT_WRAP))
+                .is_some_and(|k| k.contains(&kinds::GIFT_WRAP) || k.contains(&kinds::KEYRING))
         })
         .cloned()
         .collect()
@@ -690,7 +691,7 @@ fn a_device_that_bootstrapped_from_a_manifest_floor_walks_everything_again_and_f
             .filter(|f| {
                 f.kinds
                     .as_ref()
-                    .is_some_and(|k| !k.contains(&kinds::GIFT_WRAP))
+                    .is_some_and(|k| !k.contains(&kinds::GIFT_WRAP) && !k.contains(&kinds::KEYRING))
             })
             .cloned()
             .collect();
@@ -768,7 +769,7 @@ fn a_suffix_first_repair_and_a_later_duplicate_suffix_leave_no_partial_group() {
             .filter(|f| {
                 f.kinds
                     .as_ref()
-                    .is_some_and(|k| !k.contains(&kinds::GIFT_WRAP))
+                    .is_some_and(|k| !k.contains(&kinds::GIFT_WRAP) && !k.contains(&kinds::KEYRING))
             })
             .cloned()
             .collect();

@@ -126,6 +126,15 @@ Svelte app's own entry on the same origin, so a key it saved opens here
 without signing in again (its space keys, relays and invite bookkeeping too:
 `roostr-space-keys`, `roostr-relays`, …).
 
+Space keys also come from the account's keyring backup (kind 30078,
+`d` = `roostr-keyring`, NIP-44 encrypted to the account itself), which the
+daemon publishes: read at start and on every catch-up, and followed live.
+A space created on the account's computer is therefore shared in a browser
+signed in with the same key; without it the tab treated that space as
+private, wrote its chat to the personal stream and could not read replies
+sealed under the space key. A key the tab holds at the same or a newer
+keyId is kept; a vanished or left space stays gone.
+
 The Svelte app's own replica, IndexedDB `roostr`, is imported into
 `roostr-replica` once, on the replica's first start for the key, before its
 first sync (`roostr_replica_store::svelte_import`): every change (bytes,
