@@ -1781,6 +1781,10 @@ impl PropertiesPane {
             .child(
                 div()
                     .id(SharedString::from(format!("row-{key}")))
+                    .debug_selector({
+                        let selector = format!("prop-row-{key}");
+                        move || selector
+                    })
                     .flex()
                     .items_start()
                     .gap(px(10.))

@@ -166,6 +166,7 @@ impl ConversationDrawer {
         let active = self.tab() == tab;
         div()
             .id(label)
+            .debug_selector(move || format!("pane-tab-{label}"))
             .flex()
             .items_center()
             .gap(px(5.))

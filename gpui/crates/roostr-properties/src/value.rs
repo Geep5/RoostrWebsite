@@ -230,6 +230,8 @@ impl ValueEditor {
                         if let Some(c) = candidates.get(this.object_active.max(0) as usize) {
                             let id = c.id.clone();
                             this.pick_candidate(id, window, cx);
+                        } else if this.offer_create(cx).is_some() {
+                            this.create_from_query(window, cx);
                         }
                     }
                     _ => {}
@@ -598,6 +600,91 @@ impl ValueEditor {
         }
     }
 
+    /// The type a typed name becomes (relations other than agent / prompt):
+    /// the first type the relation is limited to, else a page.
+    fn create_type(&self, cx: &App) -> String {
+        self.allowed_type_keys(Store::global(cx).read(cx))
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| "page".into())
+    }
+
+    /// `(name, type label)` when the picker should offer to create an object
+    /// named after the query: a non-empty query that names no candidate, on a
+    /// relation without its own "New agent / prompt" flow.
+    fn offer_create(&self, cx: &App) -> Option<(String, String)> {
+        if self.read_only || !self.new_kind(cx).is_empty() {
+            return None;
+        }
+        let name = self.object_query.read(cx).value().trim().to_string();
+        if name.is_empty() {
+            return None;
+        }
+        let lower = name.to_lowercase();
+        if self
+            .candidates(cx)
+            .iter()
+            .any(|c| c.name.trim().to_lowercase() == lower)
+        {
+            return None;
+        }
+        let key = self.create_type(cx);
+        let store = Store::global(cx).read(cx);
+        let label = store
+            .types
+            .iter()
+            .find(|t| t.key == key && (self.space.is_empty() || t.space == self.space))
+            .or_else(|| store.types.iter().find(|t| t.key == key))
+            .map(|t| t.name.clone())
+            .filter(|n| !n.is_empty())
+            .unwrap_or(key);
+        Some((name, label))
+    }
+
+    /// Make an object named after the query in this space and link it.
+    fn create_from_query(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((name, _)) = self.offer_create(cx) else {
+            return;
+        };
+        if self.creating_agent {
+            return;
+        }
+        self.creating_agent = true;
+        let channel = if self.space.is_empty() {
+            Store::global(cx)
+                .read(cx)
+                .channels
+                .first()
+                .map(|s| s.id.clone())
+                .unwrap_or_default()
+        } else {
+            self.space.clone()
+        };
+        let fields = if channel.is_empty() {
+            Fields::new()
+        } else {
+            Fields::from([("channel".to_string(), Value::string(channel))])
+        };
+        let type_key = self.create_type(cx);
+        let task = api::note::create(&name, Some(&type_key), Some(fields), cx);
+        cx.spawn_in(window, async move |this, cx| {
+            let result = task.await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.creating_agent = false;
+                match result {
+                    Ok(id) => {
+                        this.object_open = false;
+                        this.toggle_object(&id, window, cx);
+                    }
+                    Err(error) => log::error!("create: {error:#}"),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
     fn toggle_object_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.object_open = !self.object_open;
         self.agent_name = None;
@@ -846,6 +933,7 @@ impl ValueEditor {
         row = row.child(
             div()
                 .id("link-object")
+                .debug_selector(|| "link-object".into())
                 .border_1()
                 .border_color(theme::border())
                 .rounded_full()
@@ -869,6 +957,7 @@ impl ValueEditor {
         let store = Store::global(cx).read(cx);
         let mut menu = div()
             .id("obj-menu")
+            .debug_selector(|| "obj-menu".into())
             .w(self.objects_width.get().max(px(240.)))
             .max_h(px(320.))
             .overflow_y_scroll()
@@ -931,6 +1020,10 @@ impl ValueEditor {
             menu = menu.child(
                 div()
                     .id(SharedString::from(format!("cand-{}", c.id)))
+                    .debug_selector({
+                        let selector = format!("cand-{}", c.id);
+                        move || selector
+                    })
                     .flex()
                     .items_center()
                     .gap(px(6.))
@@ -985,6 +1078,36 @@ impl ValueEditor {
                     .text_size(px(11.))
                     .text_color(theme::muted())
                     .child("No matches"),
+            );
+        }
+        if let Some((name, label)) = self.offer_create(cx) {
+            let creating = self.creating_agent;
+            menu = menu.child(
+                div()
+                    .id("create-from-query")
+                    .debug_selector(|| "create-from-query".into())
+                    .mt(px(2.))
+                    .border_t_1()
+                    .border_color(theme::border())
+                    .px(px(6.))
+                    .py(px(5.))
+                    .rounded(theme::radius::sm())
+                    .text_size(px(13.))
+                    .text_color(theme::accent())
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .when(creating, |d| d.opacity(0.5))
+                    .when(!creating, |d| {
+                        d.cursor_pointer().hover(|s| s.bg(theme::hover())).on_click(
+                            cx.listener(|this, _, window, cx| this.create_from_query(window, cx)),
+                        )
+                    })
+                    .child(if creating {
+                        "Creating…".to_string()
+                    } else {
+                        format!("＋ Create {label} “{name}”")
+                    }),
             );
         }
         if !kind.is_empty() {
