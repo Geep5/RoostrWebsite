@@ -502,14 +502,32 @@ impl Inner {
         let Some(store) = self.svelte_import.get() else {
             return;
         };
+        // The boot screen's line while it runs (`boot_progress` shows a
+        // backfill's detail): reading, then the changes as they are written.
+        let progress = |written: u64, total: u64| {
+            let detail = if total == 0 {
+                "Importing this browser's earlier vault".to_string()
+            } else {
+                format!(
+                    "Importing · {} of {} changes",
+                    roostr_core::sync_status::count(written),
+                    roostr_core::sync_status::count(total)
+                )
+            };
+            self.emit_detail(Some(detail));
+        };
         let outcome = svelte_import::import_svelte_vault(
             store,
             svelte_import::SVELTE_DB,
             &self.engine,
             keys.pubkey(),
             &keys.author_id(),
+            &progress,
         )
         .await;
+        if self.state.lock().status.detail.is_some() {
+            self.emit_detail(None);
+        }
         match outcome {
             Ok(SvelteImport::Imported(stats)) => {
                 log::info!("[replica] imported the Svelte site's vault: {stats:?}");
@@ -934,6 +952,23 @@ impl Inner {
         {
             log::debug!("[replica] replay memo not written: {error}");
         }
+    }
+
+    /// Shows `detail` as what the replica is doing before its sync runs
+    /// (a backfill's detail, which the boot screen shows), or clears it.
+    #[cfg_attr(not(target_family = "wasm"), allow(dead_code))]
+    fn emit_detail(&self, detail: Option<String>) {
+        let next = {
+            let mut st = self.state.lock();
+            st.status.phase = if detail.is_some() {
+                SyncPhase::Backfill
+            } else {
+                SyncPhase::Idle
+            };
+            st.status.detail = detail;
+            st.status.clone()
+        };
+        self.emit(BackendEvent::Status(next));
     }
 
     /// `(prepared, total)` of the preparation in flight.

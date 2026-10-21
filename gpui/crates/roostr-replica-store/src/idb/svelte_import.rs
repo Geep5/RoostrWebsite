@@ -125,12 +125,15 @@ pub struct ImportStats {
 
 /// Imports the Svelte vault in database `source` into `target` once for
 /// the identity `pubkey` (author id `author_id`). See the module docs.
+/// `progress(written, total)` reports the changes as they are written;
+/// `(0, 0)` first, once a vault to import is found and being read.
 pub async fn import_svelte_vault(
     target: &IdbChangeStore,
     source: &str,
     engine: &Engine,
     pubkey: &str,
     author_id: &str,
+    progress: &dyn Fn(u64, u64),
 ) -> Result<SvelteImport, StoreError> {
     if let Some(settled) = target.meta(IMPORT_FLAG.into()).await? {
         return Ok(SvelteImport::Settled(settled));
@@ -138,7 +141,7 @@ pub async fn import_svelte_vault(
     let outcome = match Svelte::open(source).await? {
         None => SvelteImport::Absent,
         Some(svelte) => {
-            let outcome = import_from(&svelte, target, engine, pubkey, author_id).await;
+            let outcome = import_from(&svelte, target, engine, pubkey, author_id, progress).await;
             svelte.close();
             outcome?
         }
@@ -157,6 +160,7 @@ async fn import_from(
     engine: &Engine,
     pubkey: &str,
     author_id: &str,
+    progress: &dyn Fn(u64, u64),
 ) -> Result<SvelteImport, StoreError> {
     let mut stats = ImportStats::default();
     let meta = svelte.meta(&mut stats).await?;
@@ -165,6 +169,7 @@ async fn import_from(
         Some(stamp) if stamp.owner != pubkey => return Ok(SvelteImport::Foreign),
         _ => {}
     }
+    progress(0, 0);
     let mut changes = svelte.changes(engine, &mut stats).await?;
     if changes.is_empty() && meta.pending.is_empty() {
         return Ok(SvelteImport::Empty);
@@ -184,8 +189,11 @@ async fn import_from(
 
     changes.sort_by(|a, b| (a.timestamp, &a.record.id).cmp(&(b.timestamp, &b.record.id)));
     let records: Vec<ChangeRecord> = changes.into_iter().map(|c| c.record).collect();
+    let (mut written, total) = (0, records.len() as u64);
     for chunk in records.chunks(BATCH) {
         stats.changes += write_changes(target, chunk.to_vec()).await?;
+        written += chunk.len() as u64;
+        progress(written, total);
     }
     let checkpoints = svelte.checkpoints(&mut stats).await?;
     for chunk in checkpoints.chunks(BATCH) {
@@ -623,9 +631,12 @@ async fn write_checkpoints(
         let tx = target.write(&[CHECKPOINTS])?;
         let store = os(&tx, CHECKPOINTS)?;
         let mut stored = 0;
-        for record in records {
+        let held = all(records
+            .iter()
+            .map(|record| store.get(&record.object_id.as_str().into())))
+        .await?;
+        for (record, held) in records.into_iter().zip(held) {
             let key: JsValue = record.object_id.as_str().into();
-            let held = req(store.get(&key)).await?;
             // As in put_checkpoint: the engine call does not yield.
             if !held.is_undefined() && !record.supersedes(&checkpoint_from(&held)?, &engine).await?
             {
@@ -651,16 +662,26 @@ async fn write_bases(
     guarded("write", async move {
         let tx = target.write(&[BASES, BASE_CURRENT])?;
         let (bases, current) = (os(&tx, BASES)?, os(&tx, BASE_CURRENT)?);
+        // Every lookup issued before any is awaited, then every object's
+        // chain read back at once (after the puts, so it holds them).
+        let records: Vec<&BaseRecord> = objects.iter().flat_map(|(_, records)| records).collect();
+        let held = all(records
+            .iter()
+            .map(|record| bases.get_key(&key2(record.object_id.as_str(), record.hash.as_str()))))
+        .await?;
         let mut stored = 0;
-        for (object_id, records) in objects {
-            for record in &records {
-                let key = key2(record.object_id.as_str(), record.hash.as_str());
-                if req(bases.get_key(&key)).await?.is_undefined() {
-                    bases.put(&base_value(record)).map_err(js_error)?;
-                    stored += 1;
-                }
+        for (record, held) in records.into_iter().zip(held) {
+            if held.is_undefined() {
+                bases.put(&base_value(record)).map_err(js_error)?;
+                stored += 1;
             }
-            let mut held = IdbChangeStore::bases_in(&bases, &object_id).await?;
+        }
+        let chains = objects
+            .iter()
+            .map(|(object_id, _)| IdbChangeStore::base_request(&bases, object_id))
+            .collect::<Result<Vec<_>, _>>()?;
+        for ((object_id, _), mut chain) in objects.iter().zip(chains) {
+            let mut held = IdbChangeStore::bases_from(chain.next().await?)?;
             let Some(newest) = held.iter().map(|base| base.epoch).max() else {
                 continue;
             };
@@ -704,27 +725,43 @@ async fn write_meta(
                 .put_with_key(&value.into(), &key.into())
                 .map_err(js_error)
         };
+        // Every lookup of a chunk issued before any is awaited: one round
+        // trip per chunk, not per row (19k published marks on a large vault).
         let mut published = 0;
-        for key in &meta.published {
-            let at = format!("{}{key}", keys::PUBLISHED);
-            if get(at.clone()).await?.is_undefined() {
-                put(&at, "1")?;
-                store
-                    .delete(&format!("{}{key}", keys::PENDING).into())
-                    .map_err(js_error)?;
-                published += 1;
+        for chunk in meta.published.chunks(CHUNK as usize) {
+            let marks: Vec<String> = chunk
+                .iter()
+                .map(|key| format!("{}{key}", keys::PUBLISHED))
+                .collect();
+            let held = all(marks.iter().map(|at| store.get_key(&at.as_str().into()))).await?;
+            for ((key, at), held) in chunk.iter().zip(&marks).zip(held) {
+                if held.is_undefined() {
+                    put(at, "1")?;
+                    store
+                        .delete(&format!("{}{key}", keys::PENDING).into())
+                        .map_err(js_error)?;
+                    published += 1;
+                }
             }
         }
         let mut pending = 0;
-        for item in &meta.pending {
-            let at = format!("{}{}", keys::PENDING, item.key);
-            if get(format!("{}{}", keys::PUBLISHED, item.key))
-                .await?
-                .is_undefined()
-                && get(at.clone()).await?.is_undefined()
-            {
-                put(&at, &encode_pending(item)?)?;
-                pending += 1;
+        for chunk in meta.pending.chunks(CHUNK as usize) {
+            // Issued after the marks above: they see them.
+            let held = all(chunk.iter().flat_map(|item| {
+                [
+                    store.get_key(&format!("{}{}", keys::PUBLISHED, item.key).into()),
+                    store.get_key(&format!("{}{}", keys::PENDING, item.key).into()),
+                ]
+            }))
+            .await?;
+            for (item, held) in chunk.iter().zip(held.chunks(2)) {
+                if held.iter().all(JsValue::is_undefined) {
+                    put(
+                        &format!("{}{}", keys::PENDING, item.key),
+                        &encode_pending(item)?,
+                    )?;
+                    pending += 1;
+                }
             }
         }
         if !meta.base_streams.is_empty() {

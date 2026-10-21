@@ -462,17 +462,31 @@ async fn a_svelte_vault_is_imported_once_and_its_pending_change_published() {
 
     // Once: the flag settles every later start.
     assert_eq!(
-        svelte_import::import_svelte_vault(&store, SVELTE_DB, &engine, keys.pubkey(), &author)
-            .await
-            .unwrap(),
+        svelte_import::import_svelte_vault(
+            &store,
+            SVELTE_DB,
+            &engine,
+            keys.pubkey(),
+            &author,
+            &|_, _| {}
+        )
+        .await
+        .unwrap(),
         SvelteImport::Settled("imported".into())
     );
     // A store erased by a logout does not take the stamped vault again.
     let erased = IdbChangeStore::open("svelte-import-probe").await.unwrap();
     assert_eq!(
-        svelte_import::import_svelte_vault(&erased, SVELTE_DB, &engine, keys.pubkey(), &author)
-            .await
-            .unwrap(),
+        svelte_import::import_svelte_vault(
+            &erased,
+            SVELTE_DB,
+            &engine,
+            keys.pubkey(),
+            &author,
+            &|_, _| {}
+        )
+        .await
+        .unwrap(),
         SvelteImport::Stamped
     );
     assert!(
@@ -514,6 +528,7 @@ async fn a_fresh_visitor_never_creates_the_svelte_database() {
         &engine,
         keys.pubkey(),
         &keys.author_id(),
+        &|_, _| {},
     )
     .await;
     hide_databases(false);
@@ -551,10 +566,16 @@ async fn the_walk_progress_and_rebased_orphans_carry_over() {
         .expect("seed store.ts vault");
 
     let target = IdbChangeStore::open("svelte-import-probe").await.unwrap();
-    let outcome =
-        svelte_import::import_svelte_vault(&target, SVELTE_DB, &engine, keys.pubkey(), &author)
-            .await
-            .unwrap();
+    let outcome = svelte_import::import_svelte_vault(
+        &target,
+        SVELTE_DB,
+        &engine,
+        keys.pubkey(),
+        &author,
+        &|_, _| {},
+    )
+    .await
+    .unwrap();
     let SvelteImport::Imported(stats) = outcome else {
         panic!("not imported: {outcome:?}");
     };

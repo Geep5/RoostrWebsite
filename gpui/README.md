@@ -143,7 +143,11 @@ logout, imports it again.
 The Svelte database is otherwise left as it was. A visitor without one never
 gets one (`indexedDB.databases()`, else an open that aborts its upgrade). A
 failed import logs a warning and retries on the next start; it never keeps
-the replica from starting.
+the replica from starting. It reads the Svelte stores 500 rows a request
+and writes 1,000 rows a transaction, every lookup of a batch issued at once
+(publication marks, obligations, checkpoints, bases), so a slow disk costs a
+round trip per batch, not per row; the boot screen meanwhile says "Importing
+· 4,000 of 16,323 changes".
 
 Every IndexedDB operation runs under a watchdog (`IDB_TIMEOUT_MS`, 12 s):
 it reports "local storage stopped responding" only once the database has
