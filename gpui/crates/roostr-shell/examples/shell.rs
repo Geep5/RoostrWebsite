@@ -80,7 +80,7 @@ impl Render for RoutePage {
                 .map(|s| format!("{} {} ({})", s.icon, s.name, s.type_key))
                 .or_else(|| store.space(id).map(|s| format!("Space {}", s.name)))
                 .unwrap_or_else(|| "(not in summaries)".into()),
-            Route::Home => "Nothing open in this space yet. Pick something in the sidebar - All Objects lists everything here - or make something new from the New menu.".into(),
+            Route::Home => "Nothing open in this space yet. Pick something in the sidebar, find anything with search, or make something new from the New menu.".into(),
             _ => String::new(),
         };
         div()

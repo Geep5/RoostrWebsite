@@ -2,7 +2,8 @@
 //! `Backend.swift` in Rust. Store + replay + query + mutate + relay sync
 //! behind [`roostr_core::Backend`]; all state lives on this device.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Weak};
 
 use anyhow::{Result, anyhow, bail};
@@ -12,9 +13,10 @@ use futures::lock::Mutex as AsyncMutex;
 use parking_lot::Mutex;
 use roostr_core::backend::{Backend, BackendEvent, JsonMap};
 use roostr_core::io::{BoxFuture, BoxStream};
+use roostr_core::lite::{LiteControl, VaultEstimate};
 use roostr_core::types::{
-    Object, ObjectSummary, QueryResult, RelationDef, RelationOption, Settings, Space, SpaceMember,
-    SyncPhase, SyncStatus, is_system_type,
+    LiteStatus, Object, ObjectSummary, QueryResult, RelationDef, RelationOption, Settings, Space,
+    SpaceLoad, SpaceMember, SyncPhase, SyncStatus, is_system_type,
 };
 use roostr_engine::{
     Change, Engine, MutationRequest, MutationResponse, QueryUpdate, ServingInputs, StateInputs,
@@ -32,12 +34,30 @@ use crate::identity;
 use crate::keyring::{KvSpaceKeyring, SPACE_KEYS};
 use crate::local::LocalKv;
 use crate::rt;
-use crate::sync::{self, RelaySync, SharedSpaceInfo, SyncHost, VANISH_LOG_ID};
+use crate::sync::{self, LiteScopes, RelaySync, SharedSpaceInfo, SyncHost, VANISH_LOG_ID};
 
 /// Device-local key of the relay list (backend.ts `relays()`).
 pub const RELAYS: &str = "roostr-relays";
 /// The kind-0 profile cache (profile.ts).
 pub const PROFILE: &str = "roostr-profile";
+/// Device-local: how much of the vault this replica holds, `"lite"` or
+/// `"full"`, decided on its first start ([`Inner::choose_holding`]).
+pub const HOLDING: &str = "roostr-holding";
+/// Device-local: this install's stable id, the device the directories'
+/// per-device counts are written under (`docs/state-sync.md`, "Directories").
+pub const DEVICE_ID: &str = "roostr-device-id";
+/// Store meta: what a lite replica holds whole ([`LiteScopes`] as JSON).
+const LITE_SCOPES: &str = "lite-scopes";
+/// The personal directory (`core/directory.odin`), and the prefix of the
+/// id of a space's directory.
+const DIRECTORY_ID: &str = "__directory__";
+const DIRECTORY_SPACE_PREFIX: &str = "__directory__:";
+/// [`LiteControl::estimate`], roughly: bytes per relay event (an encrypted
+/// change with its envelope), events a sync imports per second, and events
+/// per object while this device holds none to measure.
+const EVENT_BYTES: u64 = 1_600;
+const EVENTS_PER_SECOND: u64 = 120;
+const EVENTS_PER_OBJECT: u64 = 3;
 /// Persisted replays are valid only for the engine that computed them; the
 /// suffix versions this host's row encoding (Backend.swift `replayCacheVersion`).
 const REPLAY_ROW_VERSION: &str = "rust/1";
@@ -131,6 +151,27 @@ struct State {
     memo: Vec<CachedReplay>,
     /// `bootstrapped` as sync last reported it; shown once prepared.
     sync_bootstrapped: bool,
+    /// `Some` on a lite replica ([`roostr_core::lite`]).
+    lite: Option<LiteHold>,
+    /// The spaces sync follows as shared (their own `#h` stream); every
+    /// other space syncs in the personal stream.
+    shared_spaces: HashSet<String>,
+}
+
+/// What a lite replica holds and is doing.
+#[derive(Default)]
+struct LiteHold {
+    scopes: LiteScopes,
+    /// The first directory fetch finished with every relay answering.
+    checked: bool,
+    /// Space downloads in flight.
+    loading: Vec<SpaceLoad>,
+    /// Ids fetched from the relays this session: each is asked once (sync
+    /// follows it from then on, or no relay had it).
+    asked: HashSet<String>,
+    /// Bumped whenever the shared spaces (the keys a fetch asks under)
+    /// change: a fetch that overlapped a change records nothing as asked.
+    keys_generation: u64,
 }
 
 struct Inner {
@@ -151,6 +192,10 @@ struct Inner {
     refresh_lock: AsyncMutex<()>,
     /// Owner deletion signals, applied one at a time.
     owner_signals: AsyncMutex<()>,
+    /// A fresh replica starts lite ([`ReplicaBackend::lite_by_default`]).
+    lite_default: AtomicBool,
+    /// One lite directory fetch at a time ([`Inner::lite_frame`]).
+    lite_frame_lock: AsyncMutex<()>,
     /// The browser store again, concretely, for the one-time import of the
     /// Svelte site's vault (set by [`ReplicaBackend::open_browser`]).
     #[cfg(target_family = "wasm")]
@@ -175,10 +220,10 @@ fn fbool(o: &Json, key: &str) -> bool {
     field(o, key)["boolValue"].as_bool() == Some(true)
 }
 
-/// `repeat`'s map entries, whichever form the state carries: an object, or
+/// A Map value's member, whichever form the state carries: an object, or
 /// `[key, value]` pairs (Backend+Repeat.swift `repeatEntries`).
-fn repeat_entry<'a>(o: &'a Json, key: &str) -> Option<&'a Json> {
-    let entries = &field(o, "repeat")["mapValue"]["entries"];
+fn map_member<'a>(value: &'a Json, key: &str) -> Option<&'a Json> {
+    let entries = &value["mapValue"]["entries"];
     if let Some(map) = entries.as_object() {
         return map.get(key);
     }
@@ -186,6 +231,67 @@ fn repeat_entry<'a>(o: &'a Json, key: &str) -> Option<&'a Json> {
         let pair = pair.as_array().filter(|pair| pair.len() == 2)?;
         (pair[0].as_str() == Some(key)).then(|| &pair[1])
     })
+}
+
+/// `repeat`'s map entries.
+fn repeat_entry<'a>(o: &'a Json, key: &str) -> Option<&'a Json> {
+    map_member(field(o, "repeat"), key)
+}
+
+/// A space's directory id (`core/directory.odin` `directory_space_id`).
+fn directory_id(space_id: &str) -> String {
+    format!("{DIRECTORY_SPACE_PREFIX}{space_id}")
+}
+
+fn is_directory_id(id: &str) -> bool {
+    id == DIRECTORY_ID || id.starts_with(DIRECTORY_SPACE_PREFIX)
+}
+
+/// A directory's entries under `prefix` (`space:`, `pin:`, `type:`,
+/// `rel:`, `count:`): (the rest of the field key, its value).
+fn directory_entries<'a>(
+    dir: &'a Json,
+    prefix: &'a str,
+) -> impl Iterator<Item = (&'a str, &'a Json)> {
+    dir["fields"]
+        .as_object()
+        .into_iter()
+        .flatten()
+        .filter_map(move |(key, value)| Some((key.strip_prefix(prefix)?, value)))
+}
+
+/// A directory Map entry's string member ("" when unset).
+fn member_str<'a>(entry: &'a Json, key: &str) -> &'a str {
+    map_member(entry, key)
+        .and_then(|v| v["stringValue"].as_str())
+        .unwrap_or("")
+}
+
+/// A builder completed this directory (`version` 1).
+fn directory_ready(dir: Option<&Arc<Json>>) -> bool {
+    dir.is_some_and(|d| !deleted(d) && fint(d, "version") == Some(1))
+}
+
+/// Objects per type key a directory counts: every device's
+/// `count:<type>:<device>` summed (the type key is all before the last `:`).
+fn directory_counts(dir: &Json) -> HashMap<String, u64> {
+    let mut sums: HashMap<String, i64> = HashMap::new();
+    for (rest, value) in directory_entries(dir, "count:") {
+        let Some((type_key, _device)) = rest.rsplit_once(':') else {
+            continue;
+        };
+        *sums.entry(type_key.to_string()).or_default() += int_of(&value["intValue"]).unwrap_or(0);
+    }
+    sums.into_iter()
+        .filter(|(_, n)| *n > 0)
+        .map(|(key, n)| (key, n as u64))
+        .collect()
+}
+
+/// Counted as an object of the vault, as the directories count (spaces and
+/// bookkeeping are not).
+fn counted(o: &Json) -> bool {
+    !deleted(o) && type_key(o) != "channel" && !is_system_type(type_key(o))
 }
 
 /// protobuf int64 as JSON: a number, or a string.
@@ -273,10 +379,20 @@ impl ReplicaBackend {
                 cache_lock: AsyncMutex::new(()),
                 refresh_lock: AsyncMutex::new(()),
                 owner_signals: AsyncMutex::new(()),
+                lite_default: AtomicBool::new(false),
+                lite_frame_lock: AsyncMutex::new(()),
                 #[cfg(target_family = "wasm")]
                 svelte_import: std::cell::OnceCell::new(),
             }),
         }
+    }
+
+    /// A replica that holds nothing yet starts lite ([`roostr_core::lite`]):
+    /// the browser and the iPhone. One that already holds a vault, or that
+    /// chose before, keeps its choice ([`HOLDING`]).
+    pub fn lite_by_default(self) -> Self {
+        self.inner.lite_default.store(true, Ordering::Relaxed);
+        self
     }
 
     /// The desktop replica in `dir` (created): `replica.sqlite` and the
@@ -311,7 +427,8 @@ impl ReplicaBackend {
 
     /// The browser replica: IndexedDB `roostr-replica`, the page's
     /// `localStorage`, the site's engine.wasm from `source`. Its first start
-    /// imports the Svelte site's IndexedDB vault (`roostr`) once.
+    /// imports the Svelte site's IndexedDB vault (`roostr`) once; a browser
+    /// with nothing to import starts lite.
     #[cfg(target_family = "wasm")]
     #[allow(clippy::arc_with_non_send_sync)]
     pub async fn open_browser(source: &roostr_engine::WebSource) -> Result<Self> {
@@ -326,7 +443,8 @@ impl ReplicaBackend {
             store: Arc::new(store.clone()),
             kv: Arc::new(crate::local::BrowserLocalKv),
             label: "this browser's replica".into(),
-        });
+        })
+        .lite_by_default();
         let _ = backend.inner.svelte_import.set(store);
         Ok(backend)
     }
@@ -481,6 +599,7 @@ impl Inner {
             st.seeded = false;
         }
         let session = Arc::new(self.new_session(keys));
+        self.choose_holding(&session).await?;
         *self.session.lock() = Some(session.clone());
         self.refresh_shared().await;
         // Converge the bundled catalog: a replica that already walked the
@@ -584,18 +703,65 @@ impl Inner {
         };
         old.sync.stop();
         let session = Arc::new(self.new_session(old.keys.clone()));
+        if let Err(error) = self.choose_holding(&session).await {
+            log::warn!("[replica] holding after a relay change: {error:#}");
+        }
         *self.session.lock() = Some(session.clone());
         self.refresh_shared().await;
         self.start_sync(&session).await;
     }
 
+    /// Lite or full, decided on a replica's first start ([`HOLDING`]): lite
+    /// when this platform starts lite ([`ReplicaBackend::lite_by_default`])
+    /// and the store holds nothing yet; a replica already holding a vault
+    /// stays full. A lite session starts with what it holds whole.
+    async fn choose_holding(&self, session: &Session) -> Result<()> {
+        let lite = match self.kv.get(HOLDING).as_deref() {
+            Some(holding) => holding == "lite",
+            None => {
+                let fresh = self.lite_default.load(Ordering::Relaxed)
+                    && !self.store.bootstrapped().await?
+                    && self.store.object_ids().await?.is_empty();
+                self.kv
+                    .set(HOLDING, Some(if fresh { "lite" } else { "full" }));
+                fresh
+            }
+        };
+        if !lite {
+            self.state.lock().lite = None;
+            return Ok(());
+        }
+        let scopes: LiteScopes = self
+            .store
+            .meta(LITE_SCOPES.to_string())
+            .await?
+            .and_then(|raw| serde_json::from_str(&raw).ok())
+            .unwrap_or_default();
+        {
+            let mut st = self.state.lock();
+            match st.lite.as_mut() {
+                Some(lite) => lite.scopes = scopes.clone(),
+                None => {
+                    st.lite = Some(LiteHold {
+                        scopes: scopes.clone(),
+                        ..LiteHold::default()
+                    });
+                }
+            }
+        }
+        session.sync.set_lite(Some(scopes)).await?;
+        Ok(())
+    }
+
     /// Starts `session`'s sync - once every object is prepared: sync asks
     /// which space an object is in (where its writes go, whose orphans this
-    /// device may rebase), which only its state answers.
+    /// device may rebase), which only its state answers. A lite replica
+    /// then fetches its directories.
     async fn start_sync(self: &Arc<Self>, session: &Arc<Session>) {
         if self.state.lock().waiting.is_empty() {
-            if let Err(error) = session.sync.start().await {
-                log::warn!("[replica] sync start failed: {error:#}");
+            match session.sync.start().await {
+                Ok(()) => self.spawn_lite_frame(),
+                Err(error) => log::warn!("[replica] sync start failed: {error:#}"),
             }
             return;
         }
@@ -605,18 +771,24 @@ impl Inner {
                 Ok(()) => session.sync.start().await,
                 Err(error) => Err(error),
             };
-            if let Err(error) = started {
-                log::warn!("[replica] sync start failed: {error:#}");
+            match started {
+                Ok(()) => this.spawn_lite_frame(),
+                Err(error) => log::warn!("[replica] sync start failed: {error:#}"),
             }
         });
         rt::spawn(start);
     }
 
-    /// Idempotent by fixture: a converged space commits nothing; once per session.
+    /// Idempotent by fixture: a converged space commits nothing; once per
+    /// session. Never on a lite replica: converging reads every space.
     fn seed_defaults(self: &Arc<Self>) {
         {
             let mut st = self.state.lock();
-            if st.seeded || st.logging_out || self.session.lock().is_none() {
+            if st.seeded
+                || st.logging_out
+                || st.lite.is_some()
+                || self.session.lock().is_none()
+            {
                 return;
             }
             st.seeded = true;
@@ -654,7 +826,8 @@ impl Inner {
             }
             self.stop();
             self.store.clear().await?;
-            for key in [SPACE_KEYS, PROFILE, "roostr-shared-queued"] {
+            // The next identity decides lite or full afresh.
+            for key in [SPACE_KEYS, PROFILE, HOLDING, "roostr-shared-queued"] {
                 self.kv.set(key, None);
             }
             identity::clear(&*self.kv);
@@ -799,6 +972,10 @@ impl Inner {
         }
         self.save_memo(true).await;
         self.enforce_vanished(rebuilt, &ids).await?;
+        // A directory replayed: what a lite replica draws may have changed.
+        if self.state.lock().lite.is_some() && ids.iter().any(|id| is_directory_id(id)) {
+            self.emit_status(true);
+        }
         if rebuilt && !self.state.lock().waiting.is_empty() {
             self.emit_status(true);
             self.start_preparing();
@@ -966,6 +1143,7 @@ impl Inner {
                 SyncPhase::Idle
             };
             st.status.detail = detail;
+            st.status.lite = Self::lite_status(&st);
             st.status.clone()
         };
         self.emit(BackendEvent::Status(next));
@@ -992,6 +1170,7 @@ impl Inner {
             let preparing = Self::preparing(&st);
             st.status.preparing = preparing;
             st.status.bootstrapped = st.sync_bootstrapped && preparing.is_none();
+            st.status.lite = Self::lite_status(&st);
             st.status.clone()
         };
         self.emit(BackendEvent::Status(next));
@@ -1241,7 +1420,25 @@ impl Inner {
                 st.states.get(VANISH_LOG_ID).cloned(),
             )
         };
+        let shared_changed = {
+            let mut guard = self.state.lock();
+            let st = &mut *guard;
+            let shared: HashSet<String> = infos.iter().map(|i| i.space_id.clone()).collect();
+            let changed = shared != st.shared_spaces;
+            // Lite: an id asked before a space's key was installed may be
+            // that space's: ask again under the new key.
+            if changed && let Some(lite) = st.lite.as_mut() {
+                lite.asked.clear();
+                lite.keys_generation += 1;
+            }
+            st.shared_spaces = shared;
+            changed
+        };
         session.sync.set_shared_spaces(infos.clone()).await?;
+        if shared_changed && let Some(lite) = self.state.lock().lite.as_mut() {
+            lite.asked.clear();
+            lite.keys_generation += 1;
+        }
 
         // A vanished space whose key is still here owes the relays one h-deletion.
         if vanished {
@@ -1289,18 +1486,25 @@ impl Inner {
 
         let mut owned_writers: Vec<String> = Vec::new();
         let mut any_owned = false;
+        // A lite replica that does not hold an owned space's object yet does
+        // not know its members: publishing would shut them out.
+        let mut members_unknown = false;
         for info in infos
             .iter()
             .filter(|i| i.owner.as_deref().is_none_or(|o| o == my_pk))
         {
             any_owned = true;
+            {
+                let st = self.state.lock();
+                members_unknown |= st.lite.is_some() && !st.states.contains_key(&info.space_id);
+            }
             for w in &info.writers {
                 if !owned_writers.contains(w) {
                     owned_writers.push(w.clone());
                 }
             }
         }
-        if any_owned {
+        if any_owned && !members_unknown {
             session.sync.publish_allowlist(owned_writers).await;
         }
 
@@ -1333,7 +1537,359 @@ impl Inner {
                 );
             }
         }
+        // Lite: spaces whose key just arrived bring their directories.
+        self.spawn_lite_frame();
         Ok(())
+    }
+
+    // ----------------------------------------------------------------- lite
+
+    fn is_lite(&self) -> bool {
+        self.state.lock().lite.is_some()
+    }
+
+    /// This install's stable id ([`DEVICE_ID`]), made on first use.
+    fn device_id(&self) -> String {
+        if let Some(id) = self.kv.get(DEVICE_ID).filter(|id| !id.is_empty()) {
+            return id;
+        }
+        let id = uuid::Uuid::new_v4().to_string();
+        self.kv.set(DEVICE_ID, Some(&id));
+        id
+    }
+
+    /// The spaces a lite replica knows of: those whose object it holds and
+    /// those its personal directory lists (vanished ones left out), sorted.
+    fn known_spaces(st: &State) -> Vec<String> {
+        let mut spaces: BTreeSet<String> = st
+            .states
+            .values()
+            .filter(|o| !deleted(o) && type_key(o) == "channel")
+            .filter_map(|o| o["id"].as_str().map(str::to_string))
+            .collect();
+        if let Some(dir) = st.states.get(DIRECTORY_ID) {
+            spaces.extend(directory_entries(dir, "space:").map(|(id, _)| id.to_string()));
+        }
+        spaces.retain(|space| !st.vanished.contains(space));
+        spaces.into_iter().collect()
+    }
+
+    /// A lite replica holds `space_id` whole: its own stream when it is
+    /// shared here, else the personal stream it syncs in - and no download
+    /// of it is still running.
+    fn space_whole(st: &State, lite: &LiteHold, space_id: &str) -> bool {
+        if lite.loading.iter().any(|l| l.space_id == space_id) {
+            return false;
+        }
+        if st.shared_spaces.contains(space_id) {
+            lite.scopes.spaces.contains(space_id)
+        } else {
+            lite.scopes.personal
+        }
+    }
+
+    /// [`SyncStatus::lite`]: `None` on a full replica.
+    fn lite_status(st: &State) -> Option<LiteStatus> {
+        let lite = st.lite.as_ref()?;
+        let spaces = Self::known_spaces(st);
+        let unready_spaces = if lite.checked {
+            spaces
+                .iter()
+                .filter(|space| !directory_ready(st.states.get(&directory_id(space))))
+                .cloned()
+                .collect()
+        } else {
+            Vec::new()
+        };
+        Some(LiteStatus {
+            ready: directory_ready(st.states.get(DIRECTORY_ID)),
+            checked: lite.checked,
+            unready_spaces,
+            full_spaces: spaces
+                .iter()
+                .filter(|space| Self::space_whole(st, lite, space))
+                .cloned()
+                .collect(),
+            loading: lite.loading.clone(),
+        })
+    }
+
+    /// A lite replica's pins of `space_id`: the held objects' own (`held`,
+    /// as their states order them) and, for every object not held, its
+    /// directory's `pin:` entry; by position, then id (pins.ts).
+    fn lite_pins(st: &State, space_id: &str, held: &[String]) -> Vec<String> {
+        let mut pins: Vec<(String, String)> = held
+            .iter()
+            .map(|id| {
+                let order = st
+                    .states
+                    .get(id)
+                    .map_or("", |s| fstr(s, roostr_core::pins::PIN_KEY));
+                (order.to_string(), id.clone())
+            })
+            .collect();
+        if let Some(dir) = st.states.get(&directory_id(space_id)) {
+            for (id, entry) in directory_entries(dir, "pin:") {
+                if st.states.contains_key(id) || st.vanished.contains(id) {
+                    continue;
+                }
+                pins.push((member_str(entry, "order").to_string(), id.to_string()));
+            }
+        }
+        pins.sort();
+        pins.dedup_by(|a, b| a.1 == b.1);
+        pins.into_iter().map(|(_, id)| id).collect()
+    }
+
+    /// The lite directory fetch in the background ([`Inner::lite_frame`]).
+    fn spawn_lite_frame(self: &Arc<Self>) {
+        if !self.is_lite() {
+            return;
+        }
+        let this = self.clone();
+        let frame: BoxFuture<()> = Box::pin(async move {
+            if let Err(error) = this.lite_frame().await {
+                log::warn!("[replica] lite directories: {error:#}");
+            }
+        });
+        rt::spawn(frame);
+    }
+
+    /// What a lite replica draws from: the personal directory and the
+    /// vanish ledger, every installed or listed space with its directory,
+    /// then the types and properties those directories list (object pages
+    /// and the type list read them). Each id is asked of the relays once a
+    /// session. A vault the relays have never seen (a new key) has nothing
+    /// to leave out: this device then holds it whole.
+    async fn lite_frame(self: &Arc<Self>) -> Result<()> {
+        let _one = self.lite_frame_lock.lock().await;
+        let Some(session) = self.session() else {
+            return Ok(());
+        };
+        if !self.is_lite() || !session.sync.running() {
+            return Ok(());
+        }
+        let keyed: Vec<String> = self
+            .keyring
+            .all()
+            .map_err(|e| anyhow!("{e}"))?
+            .into_keys()
+            .collect();
+        let mut ids = vec![DIRECTORY_ID.to_string(), VANISH_LOG_ID.to_string()];
+        for space in &keyed {
+            ids.push(space.clone());
+            ids.push(directory_id(space));
+        }
+        let mut complete = self.lite_fetch(&session, ids).await?;
+        let listed: Vec<String> = {
+            let st = self.state.lock();
+            st.states
+                .get(DIRECTORY_ID)
+                .map(|dir| {
+                    directory_entries(dir, "space:")
+                        .map(|(id, _)| id.to_string())
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        let ids = listed
+            .iter()
+            .flat_map(|space| [space.clone(), directory_id(space)])
+            .collect();
+        complete &= self.lite_fetch(&session, ids).await?;
+        let nothing = {
+            let st = self.state.lock();
+            !st.states.contains_key(DIRECTORY_ID)
+                && st.states.values().all(|o| type_key(o) != "channel")
+        } && keyed.is_empty()
+            && listed.is_empty();
+        if nothing && complete && session.sync.personal_stream_empty().await.unwrap_or(false) {
+            log::info!("[replica] the relays hold no vault for this key yet: holding it whole");
+            drop(_one);
+            return self.sync_fully().await;
+        }
+        if complete && let Some(lite) = self.state.lock().lite.as_mut() {
+            lite.checked = true;
+        }
+        self.emit_status(true);
+        let defs: Vec<String> = {
+            let st = self.state.lock();
+            Self::known_spaces(&st)
+                .iter()
+                .filter_map(|space| st.states.get(&directory_id(space)))
+                .flat_map(|dir| {
+                    directory_entries(dir, "type:")
+                        .chain(directory_entries(dir, "rel:"))
+                        .map(|(id, _)| id.to_string())
+                })
+                .collect()
+        };
+        self.lite_fetch(&session, defs).await?;
+        Ok(())
+    }
+
+    /// Lite: fetch those of `ids` this replica neither holds nor asked for
+    /// this session, then replay them. `false` when some relay did not
+    /// answer (those ids are asked again next time).
+    async fn lite_fetch(self: &Arc<Self>, session: &Session, ids: Vec<String>) -> Result<bool> {
+        self.ensure().await?;
+        let (wanted, generation): (Vec<String>, u64) = {
+            let st = self.state.lock();
+            let Some(lite) = st.lite.as_ref() else {
+                return Ok(true);
+            };
+            let mut seen = HashSet::new();
+            let wanted = ids
+                .into_iter()
+                .filter(|id| {
+                    !id.is_empty()
+                        && !st.states.contains_key(id)
+                        && !st.waiting.contains(id)
+                        && !st.vanished.contains(id)
+                        && !lite.asked.contains(id)
+                        && seen.insert(id.clone())
+                })
+                .collect();
+            (wanted, lite.keys_generation)
+        };
+        if wanted.is_empty() {
+            return Ok(true);
+        }
+        let complete = session.sync.fetch_objects(wanted.clone()).await?;
+        if complete
+            && let Some(lite) = self.state.lock().lite.as_mut()
+            && lite.keys_generation == generation
+        {
+            lite.asked.extend(wanted.iter().cloned());
+        }
+        self.ensure_ids(&wanted).await?;
+        Ok(complete)
+    }
+
+    /// [`LiteControl::load_space`]: hold `space_id` whole from now on - its
+    /// stream when shared here, else the personal stream every unshared
+    /// space syncs in - and download it now.
+    async fn load_space(self: &Arc<Self>, space_id: &str) -> Result<()> {
+        let session = self.ready().await?;
+        let scopes = {
+            let mut guard = self.state.lock();
+            let st = &mut *guard;
+            let shared = st.shared_spaces.contains(space_id);
+            let Some(lite) = st.lite.as_mut() else {
+                return Ok(());
+            };
+            if lite.loading.iter().any(|l| l.space_id == space_id) {
+                return Ok(());
+            }
+            let mut next = lite.scopes.clone();
+            if shared {
+                next.spaces.insert(space_id.to_string());
+            } else {
+                next.personal = true;
+            }
+            if next == lite.scopes {
+                return Ok(());
+            }
+            lite.scopes = next.clone();
+            lite.loading.push(SpaceLoad {
+                space_id: space_id.to_string(),
+                received: 0,
+                expected: 0,
+            });
+            next
+        };
+        self.emit_status(true);
+        let result = async {
+            self.store
+                .set_meta(
+                    LITE_SCOPES.to_string(),
+                    Some(serde_json::to_string(&scopes)?),
+                )
+                .await?;
+            session.sync.set_lite(Some(scopes)).await
+        }
+        .await;
+        if let Some(lite) = self.state.lock().lite.as_mut() {
+            lite.loading.retain(|l| l.space_id != space_id);
+        }
+        let replayed = self.ensure().await;
+        self.emit_status(true);
+        match result {
+            Ok(true) => {}
+            Ok(false) => log::info!(
+                "[replica] space {space_id}: not every relay answered; sync completes it later"
+            ),
+            Err(error) => return Err(error),
+        }
+        replayed
+    }
+
+    /// [`LiteControl::sync_fully`]: from now on this replica holds the whole
+    /// vault. Resolves once the download started.
+    async fn sync_fully(self: &Arc<Self>) -> Result<()> {
+        let session = self.ready().await?;
+        if self.state.lock().lite.take().is_none() {
+            return Ok(());
+        }
+        self.kv.set(HOLDING, Some("full"));
+        self.store.set_meta(LITE_SCOPES.to_string(), None).await?;
+        self.emit_status(true);
+        let sync = session.sync.clone();
+        let download: BoxFuture<()> = Box::pin(async move {
+            match sync.set_lite(None).await {
+                Ok(complete) => log::info!("[replica] full sync pass ended (complete: {complete})"),
+                Err(error) => log::warn!("[replica] full sync: {error:#}"),
+            }
+        });
+        rt::spawn(download);
+        Ok(())
+    }
+
+    /// [`LiteControl::estimate`], from the store and the directories' counts.
+    async fn estimate(self: &Arc<Self>) -> Result<VaultEstimate> {
+        self.ready().await?;
+        self.ensure().await?;
+        let (full, held_objects, counted_total) = {
+            let st = self.state.lock();
+            let held = st
+                .states
+                .iter()
+                .filter(|(id, o)| counted(o) && !st.vanished.contains(*id))
+                .count() as u64;
+            let total: u64 = st
+                .states
+                .iter()
+                .filter(|(id, o)| id.starts_with(DIRECTORY_SPACE_PREFIX) && !deleted(o))
+                .map(|(_, dir)| directory_counts(dir).values().sum::<u64>())
+                .sum();
+            (st.lite.is_none(), held, total)
+        };
+        let changes: u64 = self.store.change_counts().await?.values().sum();
+        let bases = self.store.current_bases().await?.len() as u64;
+        let held_events = changes + bases;
+        let total_objects = if full {
+            held_objects
+        } else {
+            counted_total.max(held_objects)
+        };
+        let per_object = held_events
+            .checked_div(held_objects)
+            .map_or(EVENTS_PER_OBJECT, |n| n.max(1));
+        let missing_events = if full {
+            0
+        } else {
+            (total_objects - held_objects) * per_object
+        };
+        Ok(VaultEstimate {
+            full,
+            held_objects,
+            total_objects,
+            held_events,
+            missing_events,
+            held_bytes: held_events * EVENT_BYTES,
+            missing_bytes: missing_events * EVENT_BYTES,
+            seconds: missing_events / EVENTS_PER_SECOND,
+        })
     }
 
     // ---------------------------------------------------------------- query
@@ -1608,6 +2164,7 @@ impl Inner {
     ) -> Result<roostr_engine::MutationPlan> {
         self.ensure().await?;
         let id_seed = uuid::Uuid::new_v4().to_string();
+        let device = self.device_id();
         let request = MutationRequest {
             action,
             params,
@@ -1615,6 +2172,7 @@ impl Inner {
             author,
             id_seed: &id_seed,
             key_id,
+            device: &device,
             objects: None,
             overlay: &[],
             absent: &[],
@@ -1628,6 +2186,10 @@ impl Inner {
             MutationResponse::Plan(plan) => return Ok(plan),
             MutationResponse::Missing(ids) => ids,
         };
+        // A lite replica fetches what it does not hold before calling it absent.
+        if let Some(session) = self.session().filter(|_| self.is_lite()) {
+            self.lite_fetch(&session, missing.clone()).await?;
+        }
         self.ensure_ids(&missing).await?;
         let overlay: Vec<Json> = {
             let st = self.state.lock();
@@ -1770,6 +2332,30 @@ impl Inner {
                 done: Some(fbool(o, "done")),
             })
             .collect();
+        // Lite: the pinned objects not held yet, as their directory lists them.
+        if st.lite.is_some() {
+            for (dir_id, dir) in st
+                .states
+                .iter()
+                .filter(|(id, o)| id.starts_with(DIRECTORY_SPACE_PREFIX) && !deleted(o))
+            {
+                let space = &dir_id[DIRECTORY_SPACE_PREFIX.len()..];
+                for (id, entry) in directory_entries(dir, "pin:") {
+                    if st.states.contains_key(id) || st.vanished.contains(id) {
+                        continue;
+                    }
+                    out.push(ObjectSummary {
+                        id: id.to_string(),
+                        type_key: member_str(entry, "type").to_string(),
+                        name: member_str(entry, "name").to_string(),
+                        updated_at: 0,
+                        channel_id: space.to_string(),
+                        icon: member_str(entry, "icon").to_string(),
+                        done: None,
+                    });
+                }
+            }
+        }
         // Newest first, id ascending on a tie - the daemon's order.
         out.sort_by(|a, b| {
             b.updated_at
@@ -1809,9 +2395,14 @@ impl Inner {
         Ok(out)
     }
 
+    /// One object; a lite replica fetches it from the relays first when it
+    /// does not hold it.
     async fn object(self: &Arc<Self>, id: &str) -> Result<Object> {
-        self.ready().await?;
+        let session = self.ready().await?;
         self.ensure_ids(&[id.to_string()]).await?;
+        if self.is_lite() && !self.state.lock().states.contains_key(id) {
+            self.lite_fetch(&session, vec![id.to_string()]).await?;
+        }
         let state = self
             .state
             .lock()
@@ -1858,6 +2449,33 @@ impl Inner {
                 }
             })
             .collect();
+        // Lite: the spaces the personal directory lists that are not held,
+        // and each space's pins of objects not held.
+        if st.lite.is_some() {
+            let held: HashSet<String> = out.iter().map(|s| s.id.clone()).collect();
+            if let Some(dir) = st.states.get(DIRECTORY_ID) {
+                for (id, entry) in directory_entries(dir, "space:") {
+                    if held.contains(id) || st.vanished.contains(id) {
+                        continue;
+                    }
+                    out.push(Space {
+                        name: member_str(entry, "name").to_string(),
+                        icon: member_str(entry, "icon").to_string(),
+                        pinned_ids: Vec::new(),
+                        members: Vec::new(),
+                        key_id: keys.get(id).map_or(1, |k| k.key_id as i64),
+                        created_at: map_member(entry, "created")
+                            .and_then(|v| int_of(&v["intValue"]))
+                            .unwrap_or(0),
+                        owner: space_owner(keys.get(id), session.keys.pubkey()),
+                        id: id.to_string(),
+                    });
+                }
+            }
+            for space in &mut out {
+                space.pinned_ids = Self::lite_pins(&st, &space.id, &space.pinned_ids);
+            }
+        }
         // Creation order, oldest first: the first channel is the stable default space.
         out.sort_by(|a, b| {
             a.created_at
@@ -2184,9 +2802,18 @@ impl SyncHost for Host {
             return;
         };
         let next = {
-            let mut st = inner.state.lock();
+            let mut guard = inner.state.lock();
+            let st = &mut *guard;
+            // A space download in flight shows the pass's progress.
+            if let Some(lite) = st.lite.as_mut() {
+                for load in &mut lite.loading {
+                    load.received = status.received.unwrap_or(load.received);
+                    load.expected = status.expected.unwrap_or(load.expected);
+                }
+            }
             let previous = &st.status;
-            let preparing = Inner::preparing(&st);
+            let preparing = Inner::preparing(st);
+            let lite = Inner::lite_status(st);
             st.status = SyncStatus {
                 phase: match status.phase {
                     sync::Phase::Idle => SyncPhase::Idle,
@@ -2202,6 +2829,7 @@ impl SyncHost for Host {
                 // A vault still being prepared reads as one still loading.
                 bootstrapped: status.bootstrapped && preparing.is_none(),
                 preparing,
+                lite,
             };
             st.sync_bootstrapped = status.bootstrapped;
             st.status.clone()
@@ -2264,12 +2892,18 @@ impl SyncHost for Host {
     }
 
     fn on_history_pass(&self, complete: bool, reachable: bool) {
+        let Some(inner) = self.0.upgrade() else {
+            return;
+        };
         // Seed only once this replica holds what the relays hold; offline
         // (no relay reachable) it seeds anyway, so a first run works.
-        if (complete || !reachable)
-            && let Some(inner) = self.0.upgrade()
-        {
+        if complete || !reachable {
             inner.seed_defaults();
+        }
+        // Lite: directories the relays did not answer for are asked again.
+        let unchecked = inner.state.lock().lite.as_ref().is_some_and(|l| !l.checked);
+        if unchecked && reachable {
+            inner.spawn_lite_frame();
         }
     }
 }
@@ -2366,6 +3000,49 @@ impl Backend for ReplicaBackend {
     #[allow(clippy::arc_with_non_send_sync)]
     fn account(&self) -> Option<Arc<dyn roostr_core::account::Account>> {
         Some(Arc::new(self.clone()))
+    }
+
+    #[allow(clippy::arc_with_non_send_sync)]
+    fn lite(&self) -> Option<Arc<dyn LiteControl>> {
+        Some(Arc::new(self.clone()))
+    }
+}
+
+impl LiteControl for ReplicaBackend {
+    fn type_counts(&self, space_id: &str) -> HashMap<String, u64> {
+        self.inner
+            .state
+            .lock()
+            .states
+            .get(&directory_id(space_id))
+            .map(|dir| directory_counts(dir))
+            .unwrap_or_default()
+    }
+
+    fn load_space(&self, space_id: &str) -> BoxFuture<Result<()>> {
+        let (inner, space_id) = (self.inner.clone(), space_id.to_string());
+        Box::pin(async move { inner.load_space(&space_id).await })
+    }
+
+    fn fetch(&self, ids: Vec<String>) -> BoxFuture<Result<()>> {
+        let inner = self.inner.clone();
+        Box::pin(async move {
+            let session = inner.ready().await?;
+            if inner.is_lite() {
+                inner.lite_fetch(&session, ids).await?;
+            }
+            Ok(())
+        })
+    }
+
+    fn estimate(&self) -> BoxFuture<Result<VaultEstimate>> {
+        let inner = self.inner.clone();
+        Box::pin(async move { inner.estimate().await })
+    }
+
+    fn sync_fully(&self) -> BoxFuture<Result<()>> {
+        let inner = self.inner.clone();
+        Box::pin(async move { inner.sync_fully().await })
     }
 }
 

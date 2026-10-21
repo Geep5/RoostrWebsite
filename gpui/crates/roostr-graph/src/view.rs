@@ -72,6 +72,8 @@ pub struct GraphView {
     focus: Option<String>,
     /// (space, default space) the graph was built for.
     built_for: Option<(String, String)>,
+    /// Lite: the space was held whole when built (else it has placeholders).
+    built_held: bool,
     built: Option<Rc<Built>>,
     labels: Option<Rc<Labels>>,
     label_texts: Vec<String>,
@@ -122,6 +124,7 @@ impl GraphView {
         let mut this = Self {
             focus: focus.filter(|f| !f.is_empty()),
             built_for: None,
+            built_held: true,
             built: None,
             labels: None,
             label_texts: Vec::new(),
@@ -188,9 +191,12 @@ impl GraphView {
             cx.notify();
             return;
         }
+        // Lite: a space finishing its download rebuilds with real nodes.
+        let held = roostr_core::lite_ui::space_held(&channel, cx);
         let key = (channel.clone(), default.clone());
-        if self.built_for.as_ref() != Some(&key) {
+        if self.built_for.as_ref() != Some(&key) || self.built_held != held {
             self.built_for = Some(key);
+            self.built_held = held;
             self.build(channel.clone(), channel == default, cx);
         }
         self.relabel(cx);
@@ -211,12 +217,19 @@ impl GraphView {
                 s.query_all(serde_json::json!({}), cx),
             )
         };
+        // Lite: the directory's per-type counts give the not-loaded placeholders.
+        let counts = match roostr_core::lite::status(cx) {
+            Some(status) if !status.is_full(&channel) => roostr_core::lite::lite(cx)
+                .map(|l| l.type_counts(&channel))
+                .unwrap_or_default(),
+            _ => Default::default(),
+        };
         self.status = "Loading graph…".into();
         self.load = Some(cx.spawn(async move |this, cx| {
             let result = match rows.await {
                 Ok(rows) => Ok(cx
                     .background_spawn(async move {
-                        build_schema_graph(rows, &channel, is_default, &relations, &types)
+                        build_schema_graph(rows, &channel, is_default, &relations, &types, &counts)
                     })
                     .await),
                 Err(error) => Err(error),

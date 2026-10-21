@@ -16,6 +16,8 @@ use crate::paint::oklch;
 
 /// Spacing between neighbouring object dots inside a cluster (world units).
 pub(crate) const DOT_SPACING: f64 = 13.;
+/// Lite: at most this many faint placeholder dots per type; the label says how many.
+pub(crate) const SHADOW_DOTS: usize = 400;
 
 pub(crate) struct GraphObject {
     pub id: String,
@@ -42,12 +44,20 @@ pub(crate) struct GraphType {
     pub x: f64,
     pub y: f64,
     pub objects: Vec<GraphObject>,
+    /// Lite: objects of this type the space's directory counts but this
+    /// device has not loaded (faint "N not loaded" placeholders after the dots).
+    pub shadow: u64,
     /// Property key → share of this type's objects holding it (0..1], in first-seen order.
     pub usage: Vec<(String, f64)>,
     usage_ix: HashMap<String, usize>,
 }
 
 impl GraphType {
+    /// Placeholder dots drawn (capped at [`SHADOW_DOTS`]).
+    pub fn shadow_dots(&self) -> usize {
+        (self.shadow as usize).min(SHADOW_DOTS)
+    }
+
     pub fn uses(&self, key: &str) -> bool {
         self.usage_ix.contains_key(key)
     }
@@ -77,6 +87,8 @@ pub(crate) struct SchemaGraph {
     /// Space properties no object here uses (the type panel's "available, unused").
     pub idle: Vec<RelationDef>,
     pub object_count: usize,
+    /// Lite: objects in the space not loaded on this device (all types).
+    pub shadow_count: u64,
     /// Outer (types) and inner (properties) ring radii.
     pub rt: f64,
     pub rp: f64,
@@ -159,13 +171,16 @@ fn field_string<'a>(fields: &'a Fields, key: &str) -> Option<&'a str> {
 /// Builds the schema graph of one space from its objects (`rows`: every
 /// object of the vault, `fetchAllQuery({})`) - every object, its types,
 /// properties, agents, skills and templates included. `relations` are the
-/// space's own definitions (`spaceRelations`), `types` the store's.
+/// space's own definitions (`spaceRelations`), `types` the store's. `counts`
+/// (lite only, else empty) are the directory's objects per type key: what
+/// exceeds the loaded objects becomes each type's shadow placeholders.
 pub(crate) fn build_schema_graph(
     rows: Vec<QueryRow>,
     channel_id: &str,
     is_default_channel: bool,
     relations: &[RelationDef],
     types: &[TypeDef],
+    counts: &HashMap<String, u64>,
 ) -> SchemaGraph {
     let rows: Vec<QueryRow> = rows
         .into_iter()
@@ -224,6 +239,19 @@ pub(crate) fn build_schema_graph(
             None => by_kind.push((r.type_key, vec![obj])),
         }
     }
+    let loaded: HashMap<String, u64> = by_kind
+        .iter()
+        .map(|(k, list)| (k.clone(), list.len() as u64))
+        .collect();
+    let shadows: HashMap<String, u64> = roostr_core::lite_ui::shadow_counts(counts, &loaded)
+        .into_iter()
+        .collect();
+    for key in shadows.keys() {
+        if !by_kind.iter().any(|(k, _)| k == key) {
+            by_kind.push((key.clone(), Vec::new()));
+        }
+    }
+    let shadow_count = shadows.values().sum();
 
     // ── Types on the outer ring, each an arc as wide as its cluster ──
     let sort_name = |key: &str| type_def(key).map_or_else(|| key.to_string(), |d| d.name.clone());
@@ -250,6 +278,8 @@ pub(crate) fn build_schema_graph(
             for u in &mut usage {
                 u.1 /= count;
             }
+            let shadow = shadows.get(&key).copied().unwrap_or(0);
+            let dots = count + (shadow as usize).min(SHADOW_DOTS) as f64;
             let hue = ((index as f64 / n.max(1) as f64) * 330. + 15.) % 360.;
             let def = type_def(&key);
             let name = match def.map(|d| d.name.as_str()).filter(|s| !s.is_empty()) {
@@ -263,11 +293,12 @@ pub(crate) fn build_schema_graph(
                 key,
                 name,
                 color: oklch(0.76, 0.13, hue),
-                rad: count.sqrt() * DOT_SPACING + 18.,
+                rad: dots.sqrt() * DOT_SPACING + 18.,
                 a: 0.,
                 x: 0.,
                 y: 0.,
                 objects,
+                shadow,
                 usage,
                 usage_ix,
             }
@@ -383,8 +414,52 @@ pub(crate) fn build_schema_graph(
         props,
         idle,
         object_count,
+        shadow_count,
         rt,
         rp,
         extent: rt + max_rad + 420.,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn row(id: &str, type_key: &str) -> QueryRow {
+        QueryRow {
+            id: id.into(),
+            type_key: type_key.into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn lite_shadows_per_type() {
+        let rows = vec![row("a", "page"), row("b", "page"), row("c", "task")];
+        let counts = HashMap::from([
+            ("page".to_string(), 5),
+            ("task".to_string(), 1),
+            ("note".to_string(), 3),
+        ]);
+        let g = build_schema_graph(rows, "s", true, &[], &[], &counts);
+        let shadow = |key: &str| {
+            g.types
+                .iter()
+                .find(|t| t.key == key)
+                .map(|t| (t.objects.len(), t.shadow))
+        };
+        assert_eq!(shadow("page"), Some((2, 3)));
+        assert_eq!(shadow("task"), Some((1, 0)));
+        // A type with nothing loaded is a ghost cluster of its own.
+        assert_eq!(shadow("note"), Some((0, 3)));
+        assert_eq!(g.shadow_count, 6);
+        assert_eq!(g.object_count, 3);
+    }
+
+    #[test]
+    fn full_space_has_no_shadows() {
+        let g = build_schema_graph(vec![row("a", "page")], "s", true, &[], &[], &HashMap::new());
+        assert_eq!(g.shadow_count, 0);
+        assert!(g.types.iter().all(|t| t.shadow == 0));
     }
 }

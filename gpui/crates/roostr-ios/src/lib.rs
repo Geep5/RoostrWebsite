@@ -54,12 +54,14 @@ fn open_replica() -> anyhow::Result<ReplicaBackend> {
     ))
     .map_err(|error| anyhow::anyhow!("{error}"))?;
     let kv = local::IosLocalKv::open(&dir.join("local.json"))?;
+    // A fresh install starts lite; the Swift app's vault, when there is one, stays full.
     Ok(ReplicaBackend::new(ReplicaParts {
         engine: roostr_engine::Engine::native().map_err(|error| anyhow::anyhow!("{error}"))?,
         store: Arc::new(store),
         kv: Arc::new(kv),
         label: "this device's replica".into(),
-    }))
+    })
+    .lite_by_default())
 }
 
 /// The window content: the app inside the safe area and above the

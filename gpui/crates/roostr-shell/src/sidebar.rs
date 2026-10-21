@@ -297,6 +297,10 @@ impl Workspace {
         let drag_id = self.widget_drag.clone().filter(|_| dragging);
         let over = self.widget_over.clone().filter(|_| dragging);
         let mut out = Vec::new();
+        // Lite: the vault or this space not ready yet, or the space loading.
+        if let Some(notice) = roostr_core::lite_ui::ready_notice(&current.id, cx) {
+            out.push(div().px(px(8.)).child(notice).into_any_element());
+        }
         for p in pinned {
             let id = p.id.clone();
             let collapsed = self.pin_collapsed(&id, cx);

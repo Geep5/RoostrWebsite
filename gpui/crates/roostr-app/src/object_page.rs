@@ -622,7 +622,7 @@ impl Render for HomePage {
         let loaded = Store::global(cx).read(cx).loaded;
         div().flex().flex_col().child(self.install.clone()).when(loaded, |d| {
             d.child(div().my(px(24.)).text_size(px(14.)).text_color(theme::muted()).child(
-                "Nothing open in this space yet. Pick something in the sidebar - All Objects lists everything here - or make something new from the New menu.",
+                "Nothing open in this space yet. Pick something in the sidebar, find anything with search, or make something new from the New menu.",
             ))
         })
     }

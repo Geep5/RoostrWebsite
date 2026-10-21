@@ -259,6 +259,34 @@ prompt. A browser keymap binds `secondary-`, never `cmd-`
 (`cargo test --target wasm32-unknown-unknown -p roostr-web` with
 `wasm-bindgen-test-runner` checks the mapping).
 
+### Lite loading in the UI
+
+A replica decides on its first start whether it is lite or full (device key
+`roostr-holding`): the browser and the iPhone start lite when they hold
+nothing yet (a Svelte or Swift vault already there stays full); the desktop
+replica is full. How a lite replica syncs - directories first, objects
+fetched by id and followed by their `h` tag, spaces loaded on demand - is in
+glonOdin's `docs/state-sync.md` ("Directories");
+`crates/roostr-replica/tests/lite.rs` runs it end to end against a relay.
+
+A lite replica (roostr.space and the iPhone by default) holds only what was
+opened, so the views that need a whole space say so (`roostr_core::lite_ui`,
+the same notices on desktop and phone widths). An opened query/set or type
+page - pinned widget or page - over a space not held whole downloads that
+space by itself, showing "Loading this space · N of M" until its rows are
+complete; a pinned collection or link widget fetches just the objects it
+shows. Search, backlinks and the @-agent list show what the device holds plus
+"Load this space fully". The graph draws loaded objects as nodes and, per
+type, the directory's remaining count as faint placeholder dots labelled
+"N not loaded"; selecting the type (or the totals) offers the download. A
+space whose directory is not built yet says "This space isn't ready for lite
+yet — load it fully once", a vault without a built personal directory "This
+vault isn't ready for lite yet" (button: fully sync). Settings → "Where your
+vault lives" shows "This device holds about N% of your vault" on any replica
+and, when lite, "Fully sync this device": a details sheet (what it
+downloads, how long, storage used now, offline afterwards, only logging out
+undoes it) before it switches; the sync status line then shows the download.
+
 ## iOS
 
 `crates/roostr-ios` is the iOS app; the sibling `RoostrIOS` repository is

@@ -24,7 +24,8 @@ use roostr_core::io;
 use roostr_core::nav::{self, Route};
 use roostr_core::objects::{is_image_icon, object_icon};
 use roostr_core::{
-    AgentEndpoint, AgentMessage, Conversation, Object, Store, guest_agents, motion, theme,
+    AgentEndpoint, AgentMessage, Conversation, Object, Store, StoreEvent, guest_agents, lite_ui,
+    motion, theme,
 };
 use serde::Deserialize;
 
@@ -205,6 +206,19 @@ impl Discussion {
         let list = ListState::new(1, ListAlignment::Top, px(600.));
         let subscriptions = vec![
             cx.observe(&store, |this, _, cx| this.sync_object(cx)),
+            // Lite: the agent list is what this device holds; a refresh (the
+            // space finished loading) lists them again.
+            cx.subscribe(&store, |this, _, event: &StoreEvent, cx| {
+                if matches!(event, StoreEvent::Refreshed)
+                    && roostr_core::lite::status(cx).is_some()
+                    && this.tag_loading.is_none()
+                {
+                    this.tag_options = None;
+                    if this.mention.is_some() {
+                        this.ensure_tag_options(cx);
+                    }
+                }
+            }),
             cx.subscribe_in(&composer, window, Self::on_composer_event),
         ];
         let mut this = Self {
@@ -937,6 +951,13 @@ impl Discussion {
                 cx.notify();
             });
         }));
+    }
+
+    /// Lite: the agents listed are those this device holds; offer the space.
+    fn lite_agents_notice(cx: &App) -> Option<AnyElement> {
+        let space = nav::Navigator::global(cx).read(cx).space().to_string();
+        lite_ui::space_notice("agents", &space, cx)
+            .map(|notice| div().px(px(8.)).child(notice).into_any_element())
     }
 
     fn mention_matches(&self) -> Vec<ObjectAgentOption> {
@@ -2378,6 +2399,7 @@ impl Discussion {
                         .max_h(px(260.))
                         .overflow_y_scroll()
                         .children(rows)
+                        .children(Self::lite_agents_notice(cx))
                         .into_any_element(),
                 );
             }
@@ -2387,6 +2409,7 @@ impl Discussion {
                         .px(px(12.))
                         .py(px(10.))
                         .child(format!("No agent matches “{}”.", mention.query))
+                        .children(Self::lite_agents_notice(cx))
                         .into_any_element(),
                 );
             }

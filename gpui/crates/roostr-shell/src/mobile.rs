@@ -1416,7 +1416,12 @@ impl Workspace {
             .overflow_y_scroll()
             .track_scroll(&self.mobile_home_scroll)
             .pb(px(12.))
-            .child(self.pull_to_sync(&self.mobile_home_scroll));
+            .child(self.pull_to_sync(&self.mobile_home_scroll))
+            // Lite: the vault or this space not ready yet, or the space loading.
+            .children(
+                roostr_core::lite_ui::ready_notice(&current.id, cx)
+                    .map(|notice| div().px(px(14.)).child(notice)),
+            );
         let pins = list_motion::pins("m-pins", &current.id, &current.pinned_ids, window, cx);
         for p in pinned {
             let id = p.id.clone();

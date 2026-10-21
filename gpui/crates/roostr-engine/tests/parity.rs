@@ -462,6 +462,7 @@ fn mutation_fixtures() {
             author: str_of(payload, "author"),
             id_seed: str_of(payload, "id_seed"),
             key_id: payload["key_id"].as_i64().unwrap_or_default(),
+            device: str_of(payload, "device"),
             objects: payload["objects"].as_array().map(Vec::as_slice),
             overlay: &[],
             absent: &[],

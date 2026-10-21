@@ -11,7 +11,7 @@ use roostr_core::relations::current_space_id;
 use roostr_core::repeat::describe_repeat;
 use roostr_core::types::{guest_agents, repeat_of};
 use roostr_core::ui::brighten;
-use roostr_core::{Fields, Glyph, Route, Store, Value, api, nav, theme};
+use roostr_core::{Fields, Glyph, Route, Store, StoreEvent, Value, api, lite_ui, nav, theme};
 use serde_json::json;
 
 use crate::suggest::{SuggestEvent, TypeSuggest};
@@ -50,7 +50,18 @@ impl ObjectMeta {
             backlinks: vec![],
             open: None,
             suggest: None,
-            _subs: vec![cx.observe(&store, |_, _, cx| cx.notify())],
+            _subs: vec![
+                cx.observe(&store, |_, _, cx| cx.notify()),
+                // Lite: backlinks come from what this device holds; a refresh
+                // (a space finished loading, objects fetched) may bring more.
+                cx.subscribe(&store, |this, _, event: &StoreEvent, cx| {
+                    if matches!(event, StoreEvent::Refreshed)
+                        && roostr_core::lite::status(cx).is_some()
+                    {
+                        this.load_backlinks(cx);
+                    }
+                }),
+            ],
         };
         this.load_backlinks(cx);
         this
@@ -542,6 +553,23 @@ impl Render for ObjectMeta {
                 wrap = wrap.child(below("backlinks-pop", 6., pop));
             }
             row = row.child(wrap);
+        }
+        // Lite: backlinks above are only what this device holds.
+        if let Some(status) = roostr_core::lite::status(cx)
+            && !status.is_full(&space)
+        {
+            let label = match status.loading(&space) {
+                Some(load) => lite_ui::loading_text(load),
+                None => lite_ui::LOAD_SPACE.to_string(),
+            };
+            let target = space.clone();
+            row = row.child(
+                badge("backlinks-lite", glyph(Glyph::BadgeLink), label, true)
+                    .tooltip(tip(
+                        "Backlinks from what this device holds; load the space for all of them",
+                    ))
+                    .on_click(move |_, _, cx| lite_ui::load_space(&target, cx)),
+            );
         }
         if self.open.is_some() {
             let this = cx.entity().downgrade();

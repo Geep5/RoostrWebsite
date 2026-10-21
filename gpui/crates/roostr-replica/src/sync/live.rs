@@ -1,11 +1,13 @@
 //! Live subscriptions since the cursor (sync.ts `subscribeLive`,
 //! `handleLiveEvent`, `watchdog`; SyncEngine.swift `liveLoop`).
 //!
-//! One subscription per relay carries three filters: this identity's DAG
-//! events, every installed space's `#h` stream (DAG + h-deletions), and gift
-//! wraps addressed to us. [`roostr_nostr::relay::live`] resubscribes after a
-//! failure with the backoff (2 s doubling to 60 s), rebuilding the filters
-//! so `since` follows the cursor; a reconnect runs a catch-up pass (what
+//! One subscription per relay carries this identity's DAG events, every
+//! installed space's `#h` stream (DAG + h-deletions) - in a lite session
+//! only the streams it holds whole, plus each followed object by its `h`
+//! tag - and gift wraps addressed to us. [`roostr_nostr::relay::live`]
+//! resubscribes after a failure with the backoff (2 s doubling to 60 s),
+//! rebuilding the filters so `since` follows the cursor; a reconnect runs a
+//! catch-up pass (what
 //! the dead socket missed) and wakes the outbox. Every event funnels into
 //! one worker, so live handling is serialized like sync.ts' `liveChain`.
 
@@ -18,7 +20,7 @@ use roostr_nostr::nip59::WRAP_LOOKBACK_S;
 use roostr_nostr::relay::{LiveItem, live, query_many};
 use roostr_nostr::{Event, Filter, kinds};
 
-use super::{Inner, PAGE_TIMEOUT, WATCHDOG_PERIOD, now_s, short};
+use super::{BASE_HASH_BATCH, Inner, PAGE_TIMEOUT, WATCHDOG_PERIOD, now_s, short};
 
 /// Remembered live event ids (relays deliver the same event each).
 const LIVE_SEEN_CAP: usize = 20_000;
@@ -30,29 +32,40 @@ pub(crate) enum LiveMsg {
 }
 
 impl Inner {
-    fn live_filters(&self) -> Vec<Filter> {
-        let since = self.live_since().max(0) as u64;
-        let tags: Vec<String> = self
-            .state
-            .lock()
-            .shared
-            .values()
-            .map(|sp| sp.tag.clone())
-            .collect();
-        let mut filters = vec![
-            Filter::new()
-                .kinds(kinds::DAG)
-                .authors([self.pk.clone()])
-                .since(since),
-        ];
+    /// The DAG streams this session follows, unbounded: this identity's own
+    /// events and every installed space's `#h` stream (`space_kinds`), or in
+    /// a lite session the streams it holds whole plus each followed object
+    /// by its `h` tag.
+    fn scope_filters(&self, space_kinds: &[u32]) -> Vec<Filter> {
+        let (personal, tags) = self.whole_streams();
+        let mut filters = Vec::new();
+        if personal {
+            filters.push(Filter::new().kinds(kinds::DAG).authors([self.pk.clone()]));
+        }
         if !tags.is_empty() {
             filters.push(
                 Filter::new()
-                    .kinds(kinds::SPACE)
-                    .tag('h', tags)
-                    .since(since),
+                    .kinds(space_kinds.iter().copied())
+                    .tag('h', tags),
             );
         }
+        for chunk in self.followed_tags().chunks(BASE_HASH_BATCH) {
+            filters.push(
+                Filter::new()
+                    .kinds(kinds::DAG)
+                    .tag('h', chunk.iter().cloned()),
+            );
+        }
+        filters
+    }
+
+    fn live_filters(&self) -> Vec<Filter> {
+        let since = self.live_since().max(0) as u64;
+        let mut filters: Vec<Filter> = self
+            .scope_filters(&kinds::SPACE)
+            .into_iter()
+            .map(|filter| filter.since(since))
+            .collect();
         filters.push(
             Filter::new()
                 .kinds([kinds::GIFT_WRAP])
@@ -263,15 +276,9 @@ impl Inner {
         } else {
             0
         };
-        let (incomplete, tags) = {
+        let incomplete = {
             let st = self.state.lock();
-            (
-                !st.history_complete || groups > 0 || st.discarded_chunk_floor != i64::MAX,
-                st.shared
-                    .values()
-                    .map(|sp| sp.tag.clone())
-                    .collect::<Vec<_>>(),
-            )
+            !st.history_complete || groups > 0 || st.discarded_chunk_floor != i64::MAX
         };
         if incomplete {
             let bootstrapped = self.store.bootstrapped().await?;
@@ -287,14 +294,13 @@ impl Inner {
             self.emit_live_status();
             return Ok(());
         }
-        let mut filters = vec![
-            Filter::new()
-                .kinds(kinds::DAG)
-                .authors([self.pk.clone()])
-                .limit(1),
-        ];
-        if !tags.is_empty() {
-            filters.push(Filter::new().kinds(kinds::DAG).tag('h', tags).limit(1));
+        let filters: Vec<Filter> = self
+            .scope_filters(&kinds::DAG)
+            .into_iter()
+            .map(|filter| filter.limit(1))
+            .collect();
+        if filters.is_empty() {
+            return Ok(());
         }
         let head = match query_many(&self.relays, &filters, PAGE_TIMEOUT).await {
             Ok(events) => events

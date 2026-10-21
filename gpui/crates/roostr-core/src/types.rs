@@ -615,6 +615,48 @@ pub struct SyncStatus {
     /// them in the background with the workspace already open; reads see
     /// what is prepared so far. `None` once every object is.
     pub preparing: Option<(u64, u64)>,
+    /// `Some` on a lite replica ([`crate::lite`]): it holds only what was
+    /// opened, never the whole vault, so it is never `bootstrapped`.
+    pub lite: Option<LiteStatus>,
+}
+
+/// What a lite replica holds ([`crate::lite::LiteControl`]).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct LiteStatus {
+    /// The personal directory arrived built: the sidebar can render. `false`
+    /// with `checked`: "This vault isn't ready for lite yet - load it fully once".
+    pub ready: bool,
+    /// The first directory fetch finished (whatever it found).
+    pub checked: bool,
+    /// Spaces listed in the personal directory whose own directory is
+    /// missing or unbuilt: "This space isn't ready for lite yet".
+    pub unready_spaces: Vec<String>,
+    /// Spaces held whole (their stream downloaded and followed). A space
+    /// synced in the personal stream is whole once that stream is.
+    pub full_spaces: Vec<String>,
+    /// Space downloads in flight.
+    pub loading: Vec<SpaceLoad>,
+}
+
+/// One space download in flight: `received` of about `expected` events
+/// (`expected` 0 while unknown).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SpaceLoad {
+    pub space_id: String,
+    pub received: u64,
+    pub expected: u64,
+}
+
+impl LiteStatus {
+    pub fn is_full(&self, space_id: &str) -> bool {
+        self.full_spaces.iter().any(|s| s == space_id)
+    }
+    pub fn loading(&self, space_id: &str) -> Option<&SpaceLoad> {
+        self.loading.iter().find(|l| l.space_id == space_id)
+    }
+    pub fn is_unready(&self, space_id: &str) -> bool {
+        self.unready_spaces.iter().any(|s| s == space_id)
+    }
 }
 
 /// glon.Position values.
@@ -682,6 +724,7 @@ pub const SYSTEM_TYPE_KEYS: &[&str] = &[
     "milestone",
     "user_prefs",
     "vanish_log",
+    "directory",
     "descriptor",
     "install",
     "set",

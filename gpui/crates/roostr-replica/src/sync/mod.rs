@@ -23,13 +23,20 @@
 //! (NEG-ERR, NOTICE, silence) is walked page by page via `until` instead.
 //! Bases first, then checkpoints, then deltas under the per-stream floor
 //! rules of `docs/state-sync.md` (see [`history`]).
+//!
+//! A lite session ([`RelaySync::set_lite`], see [`lite`]) walks only the
+//! streams it holds whole and follows the objects it holds by their `#h`
+//! tags; everything else is fetched by id when it is opened.
 
 mod history;
 mod ingest;
 pub mod invite;
+mod lite;
 mod live;
 mod outbox;
 mod spaces;
+
+pub use lite::LiteScopes;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
@@ -146,6 +153,8 @@ pub struct SyncStats {
     pub checkpoints: u64,
     pub bases: u64,
     pub rebased: u64,
+    /// Shared-space payloads the space's rules refused (they stay unheld).
+    pub refused: u64,
     pub blinded_tags: HashSet<String>,
 }
 
@@ -217,6 +226,10 @@ struct State {
     first_walk_done: bool,
     live_tasks: Vec<futures::future::AbortHandle>,
     live_seen: HashSet<String>,
+    /// `Some` in a lite session: what it holds whole and what it follows.
+    lite: Option<lite::Follow>,
+    /// A live resubscribe is scheduled (lite: new objects to follow).
+    resubscribe_scheduled: bool,
 }
 
 pub(crate) struct Inner {
@@ -341,6 +354,8 @@ impl RelaySync {
                     first_walk_done: false,
                     live_tasks: Vec::new(),
                     live_seen: HashSet::new(),
+                    lite: None,
+                    resubscribe_scheduled: false,
                 }),
                 import_lock: futures::lock::Mutex::new(()),
                 cursor_lock: futures::lock::Mutex::new(()),
@@ -674,6 +689,11 @@ impl Inner {
             st.bootstrapped = bootstrapped;
         }
         self.open_session().await?;
+        // Lite: follow what the store holds (the backend prepared every state).
+        let lite = self.state.lock().lite.is_some();
+        if lite {
+            self.refresh_followed().await?;
+        }
         for pending in self.store.pending_publishes().await? {
             self.clone().offer_to_outbox(&pending).await;
         }
@@ -691,7 +711,8 @@ impl Inner {
         // the cursor tracks the NEWEST import, so an interrupted first walk
         // would otherwise skip everything older, forever. The walk runs in
         // the background; its progress persists page by page via the floor.
-        let floor = if bootstrapped {
+        // A lite session never walks the vault: it has no floor to resume.
+        let floor = if bootstrapped || lite {
             None
         } else {
             self.store.bootstrap_floor().await?
@@ -732,7 +753,11 @@ impl Inner {
         Ok(())
     }
 
+    /// Never in a lite session: it holds only what it opened.
     async fn mark_bootstrapped(&self) {
+        if self.state.lock().lite.is_some() {
+            return;
+        }
         match self.store.set_bootstrapped().await {
             Ok(()) => self.state.lock().bootstrapped = true,
             Err(error) => log::warn!("[sync] bootstrapped flag: {error}"),
@@ -861,6 +886,8 @@ impl Inner {
         if self.session_open() {
             self.engine.session_spaces(&self.session_spaces()).await?;
         }
+        // Lite: a space's key decides the tag its objects are followed by.
+        self.refresh_followed().await?;
         if stopped || !live_up {
             return Ok(()); // start() wires the subscriptions itself
         }

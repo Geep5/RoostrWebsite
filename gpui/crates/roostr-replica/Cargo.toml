@@ -38,6 +38,7 @@ tempfile = "3"
 [target.'cfg(not(target_family = "wasm"))'.dev-dependencies]
 async-net = "2"
 async-tungstenite = { version = "0.35", default-features = false, features = ["handshake", "futures-03-sink"] }
+env_logger = "0.11"
 
 [target.'cfg(target_family = "wasm")'.dev-dependencies]
 wasm-bindgen-test.workspace = true

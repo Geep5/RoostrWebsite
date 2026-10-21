@@ -16,10 +16,12 @@ use gpui_kit::*;
 use roostr_core::color::{DEFAULT_CHAT_COLOR, hex, normalize_hex};
 use roostr_core::harness::harness;
 use roostr_core::io;
+use roostr_core::lite::VaultEstimate;
 use roostr_core::profile as nostr_profile;
 use roostr_core::serving::{MachineRow, fetch_machines, machine_name};
+use roostr_core::sync_status::{progress_text, sync_progress};
 use roostr_core::ui::data_url_image;
-use roostr_core::{Store, UiState, api, motion, theme};
+use roostr_core::{Store, UiState, api, lite_ui, motion, theme};
 use serde_json::{Value as Json, json};
 
 use crate::export::{ExportFormat, export_all};
@@ -136,6 +138,12 @@ pub struct Settings {
     export_format: ExportFormat,
     exporting: bool,
     export_note: SharedString,
+
+    // Lite: how much of the vault this device holds (`None` while estimating),
+    // and the "Fully sync this device" details sheet.
+    estimate: Option<VaultEstimate>,
+    confirm_full: bool,
+    full_requested: bool,
 
     open_menu: Option<Menu>,
     /// The mobile sheet's drag-to-close: how far it is pulled down, where
@@ -262,6 +270,8 @@ impl Settings {
                     }
                 },
             ),
+            // The sync status line under "Fully sync this device" follows the store.
+            cx.observe(&Store::global(cx), |_, _, cx| cx.notify()),
         ];
 
         let mut this = Self {
@@ -307,6 +317,9 @@ impl Settings {
             export_format: ExportFormat::Markdown,
             exporting: false,
             export_note: SharedString::default(),
+            estimate: None,
+            confirm_full: false,
+            full_requested: false,
             open_menu: None,
             sheet_y: px(0.),
             sheet_drag: None,
@@ -316,6 +329,7 @@ impl Settings {
         };
         this.load_profile(window, cx);
         this.load(cx);
+        this.load_estimate(cx);
         this
     }
 
@@ -353,6 +367,25 @@ impl Settings {
                 }
                 this.load_agent_auth(cx);
                 this.load_plan(cx);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Replica only: the vault estimate, computed each time settings opens.
+    fn load_estimate(&mut self, cx: &mut Context<Self>) {
+        let Some(control) = roostr_core::lite::lite(cx) else {
+            return;
+        };
+        let task = io::spawn(cx, async move { control.estimate().await });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| {
+                match result {
+                    Ok(estimate) => this.estimate = Some(estimate),
+                    Err(error) => log::warn!("vault estimate failed: {error:#}"),
+                }
                 cx.notify();
             });
         })
@@ -674,6 +707,78 @@ impl Settings {
                     })),
                 ),
             )
+    }
+
+    /// Replica only: "This device holds about N% of your vault" and, on a
+    /// lite replica, "Fully sync this device" behind a details sheet. After
+    /// confirming, the sync status line shows the download.
+    fn render_holding(&self, vault: Div, cx: &mut Context<Self>) -> Div {
+        if roostr_core::lite::lite(cx).is_none() {
+            return vault;
+        }
+        let lite = roostr_core::lite::status(cx).is_some();
+        let status = Store::global(cx).read(cx).status.clone();
+        let progress = sync_progress(&status).map(|p| progress_text(&p));
+        vault
+            .child(p(lite_ui::percent_text(self.estimate.as_ref())).mt(px(10.)))
+            .when(lite && !self.confirm_full && !self.full_requested, |d| {
+                d.child(
+                    div().mt(px(6.)).flex().child(
+                        Btn::action("sync-fully", "Fully sync this device")
+                            .subtle()
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.confirm_full = true;
+                                cx.notify();
+                            })),
+                    ),
+                )
+            })
+            .when(lite && self.confirm_full, |d| {
+                let lines = match &self.estimate {
+                    Some(e) => lite_ui::estimate_lines(e),
+                    None => vec!["Estimating what a full sync downloads…".into()],
+                };
+                d.child(
+                    div()
+                        .mt(px(8.))
+                        .p(px(12.))
+                        .rounded(px(8.))
+                        .border_1()
+                        .border_color(theme::border())
+                        .bg(theme::bg())
+                        .flex()
+                        .flex_col()
+                        .gap(px(4.))
+                        .children(lines.into_iter().map(p))
+                        .child(
+                            div()
+                                .mt(px(6.))
+                                .flex()
+                                .gap(px(8.))
+                                .child(
+                                    Btn::action("sync-fully-confirm", "Fully sync this device")
+                                        .armed()
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.confirm_full = false;
+                                            this.full_requested = true;
+                                            lite_ui::sync_fully(cx);
+                                            cx.notify();
+                                        })),
+                                )
+                                .child(Btn::small("sync-fully-cancel", "Cancel").on_click(
+                                    cx.listener(|this, _, _, cx| {
+                                        this.confirm_full = false;
+                                        cx.notify();
+                                    }),
+                                )),
+                        ),
+                )
+            })
+            .when(self.full_requested, |d| {
+                d.child(
+                    p(progress.unwrap_or_else(|| "Fully syncing this device…".into())).mt(px(6.)),
+                )
+            })
     }
 
     // ------------------------------------------------------------- relays
@@ -1522,6 +1627,7 @@ impl Render for Settings {
                     }),
                 ),
             );
+        let vault = self.render_holding(vault, cx);
 
         // ── Desktop sync check
         let checking = self.desk == Desk::Checking;

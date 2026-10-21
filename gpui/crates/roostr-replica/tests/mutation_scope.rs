@@ -32,6 +32,7 @@ fn request<'a>(
         author: AUTHOR,
         id_seed: seed,
         key_id: 0,
+        device: "",
         objects: None,
         overlay: &[],
         absent: &[],

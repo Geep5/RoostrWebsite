@@ -10,5 +10,5 @@ pub mod local;
 pub mod rt;
 pub mod sync;
 
-pub use backend::{Occurrence, PROFILE, RELAYS, ReplicaBackend, ReplicaParts};
+pub use backend::{DEVICE_ID, HOLDING, Occurrence, PROFILE, RELAYS, ReplicaBackend, ReplicaParts};
 pub use roostr_replica_store::{MaybeSend, MaybeSync};

@@ -512,12 +512,14 @@ impl Inner {
         let mut parts = Vec::new();
         let mut touched = Vec::new();
         for item in batch {
-            // Unauthorized payloads stay unheld: a later reconcile re-judges them.
+            // Unauthorized payloads stay unheld: a later reconcile (a lite
+            // fetch: its next round) re-judges them.
             if let Some(p) = &item.provenance
                 && !self
                     .authorized(item, p, &mut pending, &mut states, imported)
                     .await?
             {
+                self.state.lock().stats.refused += 1;
                 continue;
             }
             if let Some(base) = &item.base {

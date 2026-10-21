@@ -58,6 +58,10 @@ pub trait Backend: MaybeSend + MaybeSync + 'static {
     fn account(&self) -> Option<std::sync::Arc<dyn Account>> {
         None
     }
+    /// The vault controls of a replica (lite or full); `None` for a daemon.
+    fn lite(&self) -> Option<std::sync::Arc<dyn crate::lite::LiteControl>> {
+        None
+    }
 }
 
 /// The commit stream's SSE framing (`data:` lines, a blank line dispatches),

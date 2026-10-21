@@ -29,6 +29,9 @@ pub struct MutationRequest<'a> {
     pub id_seed: &'a str,
     /// Space key id the plan writes under (rotations: the next one).
     pub key_id: i64,
+    /// This install's stable device id: the directories' per-device count
+    /// fields (`count:<type>:<device>`) are written under it ("" = the author).
+    pub device: &'a str,
     /// Plan over exactly these states instead of the query cache.
     pub objects: Option<&'a [Value]>,
     /// States that win over the cache (the retry after `Missing`).
@@ -45,6 +48,8 @@ struct Payload<'a> {
     author: &'a str,
     id_seed: &'a str,
     key_id: i64,
+    #[serde(skip_serializing_if = "str::is_empty")]
+    device: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     objects: Option<Vec<Packed<'a>>>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -98,6 +103,7 @@ impl Engine {
             author: request.author,
             id_seed: request.id_seed,
             key_id: request.key_id,
+            device: request.device,
             objects: request
                 .objects
                 .map(|objects| objects.iter().map(Packed::new).collect()),

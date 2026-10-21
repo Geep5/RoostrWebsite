@@ -15,7 +15,7 @@ use roostr_core::nav::{Route, navigate};
 use roostr_core::objects::{kind_name, object_icon, type_icon};
 use roostr_core::store::Store;
 use roostr_core::types::{QueryRow, SYSTEM_TYPE_KEYS, field_str};
-use roostr_core::{Navigator, TypeDef, motion, theme, ui};
+use roostr_core::{Navigator, StoreEvent, TypeDef, lite_ui, motion, theme, ui};
 use serde_json::{Value as Json, json};
 
 use crate::workspace::Workspace;
@@ -163,15 +163,28 @@ impl SearchModal {
         let input =
             cx.new(|cx| InputState::new(window, cx).placeholder("Search objects and content…"));
         input.update(cx, |input, cx| input.focus(window, cx));
-        let subscriptions = vec![cx.subscribe(&input, |this, input, event: &InputEvent, cx| {
-            if matches!(event, InputEvent::Change) {
-                let value = input.read(cx).value().to_string();
-                if value != this.query {
-                    this.query = value;
+        let mut subscriptions =
+            vec![cx.subscribe(&input, |this, input, event: &InputEvent, cx| {
+                if matches!(event, InputEvent::Change) {
+                    let value = input.read(cx).value().to_string();
+                    if value != this.query {
+                        this.query = value;
+                        this.search(cx);
+                    }
+                }
+            })];
+        // Lite: results come from what this device holds; once the space
+        // finished loading (a refresh), search again over all of it.
+        subscriptions.push(
+            cx.subscribe(&Store::global(cx), |this, _, event: &StoreEvent, cx| {
+                if matches!(event, StoreEvent::Refreshed) && roostr_core::lite::status(cx).is_some()
+                {
                     this.search(cx);
                 }
-            }
-        })];
+            }),
+        );
+        // The notice's loading progress lives in the store's status.
+        subscriptions.push(cx.observe(&Store::global(cx), |_, _, cx| cx.notify()));
         let channel = Self::channel_id(cx);
         // A phone's sheet starts below the screen and rises in.
         let sheet_from = if roostr_core::layout::is_mobile(window) {
@@ -1147,6 +1160,11 @@ impl Render for SearchModal {
                         }
                         d.child(row)
                     })
+                    // Lite: results are what this device holds; offer the whole space.
+                    .children(
+                        lite_ui::space_notice("search", &channel, cx)
+                            .map(|notice| div().flex_none().px(px(14.)).child(notice)),
+                    )
                     .child(results)
                     .when(!mobile, |d| {
                         d.child(

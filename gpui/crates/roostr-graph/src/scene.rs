@@ -12,7 +12,7 @@ use gpui_kit::{
 };
 use roostr_core::theme;
 
-use crate::model::{GraphObject, GraphProperty, GraphType, SchemaGraph};
+use crate::model::{DOT_SPACING, GraphObject, GraphProperty, GraphType, SchemaGraph};
 use crate::paint::{Mesh, Screen, Shape, View, fade, hex, tolerance};
 use crate::text::{Anchor, Family, Label, LabelSpec, SpanSpec};
 
@@ -207,6 +207,17 @@ fn type_title(t: &GraphType, upper: bool) -> String {
     }
 }
 
+/// Lite: the label's "· N not loaded" run, when the type has placeholders.
+fn shadow_span(t: &GraphType, size: f64, dx: f64) -> Option<SpanSpec> {
+    (t.shadow > 0).then(|| SpanSpec {
+        text: format!("· {}", roostr_core::lite_ui::shadow_label(t.shadow)),
+        family: Family::Sans,
+        size,
+        weight: 300,
+        dx,
+    })
+}
+
 /// Every world-space label, in [`Labels`] order: far type labels, schema type
 /// labels, property labels, then the four centre texts.
 pub(crate) fn label_specs(g: &SchemaGraph, prop_labels: &[String]) -> Vec<LabelSpec> {
@@ -235,7 +246,10 @@ pub(crate) fn label_specs(g: &SchemaGraph, prop_labels: &[String]) -> Vec<LabelS
                     weight: 400,
                     dx: 18.,
                 },
-            ],
+            ]
+            .into_iter()
+            .chain(shadow_span(t, 60., 18.))
+            .collect(),
         });
     }
     for t in &g.types {
@@ -262,7 +276,10 @@ pub(crate) fn label_specs(g: &SchemaGraph, prop_labels: &[String]) -> Vec<LabelS
                     weight: 400,
                     dx: 8.,
                 },
-            ],
+            ]
+            .into_iter()
+            .chain(shadow_span(t, 17., 8.))
+            .collect(),
         });
     }
     for (p, label) in g.props.iter().zip(prop_labels) {
@@ -378,6 +395,8 @@ pub(crate) struct Geo {
     edges: Vec<Mesh>,
     /// Per type: its object dots.
     dots: Vec<Mesh>,
+    /// Per type (lite): its faint "not loaded" placeholder dots.
+    shadow_dots: Vec<Mesh>,
     cluster_fill: Vec<Mesh>,
     /// Per type: cluster outline at 1.5 and 2.5.
     cluster_stroke: Vec<[Mesh; 2]>,
@@ -399,6 +418,7 @@ impl Geo {
         let tol = tolerance(lod);
         let mut edges = Vec::new();
         let mut dots = Vec::new();
+        let mut shadow_dots = Vec::new();
         let mut cluster_fill = Vec::new();
         let mut cluster_stroke = Vec::new();
         let mut spokes = Vec::new();
@@ -422,6 +442,17 @@ impl Geo {
             let mut mesh = Mesh::default();
             mesh.fill(&shape.build(), tol);
             dots.push(mesh);
+
+            // Lite: placeholders continue the cluster's phyllotaxis past its objects.
+            let mut shape = Shape::new();
+            for j in t.objects.len()..t.objects.len() + t.shadow_dots() {
+                let rr = DOT_SPACING * (j as f64 + 0.5).sqrt();
+                let th = j as f64 * 2.39996;
+                shape.circle(xy(t.x + rr * th.cos(), t.y + rr * th.sin()), DOT_R);
+            }
+            let mut mesh = Mesh::default();
+            mesh.fill(&shape.build(), tol);
+            shadow_dots.push(mesh);
 
             let mut circle = Shape::new();
             circle.circle(xy(t.x, t.y), t.rad);
@@ -510,6 +541,7 @@ impl Geo {
             lod,
             edges,
             dots,
+            shadow_dots,
             cluster_fill,
             cluster_stroke,
             spokes,
@@ -920,6 +952,7 @@ impl Frame {
                 fade(t.color, k * if is_sel { 0.7 } else { 0.22 }),
                 window,
             );
+            self.geo.shadow_dots[t.index].paint(&screen, fade(t.color, k * 0.22), window);
             self.geo.dots[t.index].paint(&screen, fade(t.color, k), window);
             if is_sel && let Some((color, fill, ring)) = &self.sel_geo.marker {
                 fill.paint(&screen, fade(*color, k), window);

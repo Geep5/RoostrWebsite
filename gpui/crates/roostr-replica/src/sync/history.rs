@@ -67,16 +67,48 @@ pub(crate) fn blind(prefix: &[u8], id: &str) -> String {
     hex::encode(&digest[..8])
 }
 
-/// What one history pass shares across its concurrent covers.
-struct Pass {
+/// What one history pass (or one lite fetch) shares across its concurrent covers.
+pub(super) struct Pass {
     seen: Mutex<HashSet<String>>,
     /// Ids claimed by some stream's fetch: fetched once per pass.
     claimed: Mutex<HashSet<String>>,
-    complete: AtomicBool,
+    pub(super) complete: AtomicBool,
     /// Some relay/filter fell back to the paged walk.
     walked: AtomicBool,
     covered_until: Mutex<Option<i64>>,
     since: i64,
+    /// The `h` tags of every event this pass saw, when asked
+    /// ([`Pass::watching_tags`]): which blinded tag an object fetched by id
+    /// answered to.
+    h_tags: Option<Mutex<HashSet<String>>>,
+}
+
+impl Pass {
+    pub(super) fn new(relays: usize, since: i64, resume_until: Option<i64>) -> Self {
+        Self {
+            seen: Mutex::new(HashSet::new()),
+            claimed: Mutex::new(HashSet::new()),
+            complete: AtomicBool::new(relays > 0),
+            walked: AtomicBool::new(false),
+            covered_until: Mutex::new(resume_until),
+            since,
+            h_tags: None,
+        }
+    }
+
+    /// Also collect the `h` tags of the events this pass imports.
+    pub(super) fn watching_tags(mut self) -> Self {
+        self.h_tags = Some(Mutex::new(HashSet::new()));
+        self
+    }
+
+    /// The `h` tags seen so far (empty unless [`Pass::watching_tags`]).
+    pub(super) fn tags_seen(&self) -> HashSet<String> {
+        self.h_tags
+            .as_ref()
+            .map(|tags| tags.lock().clone())
+            .unwrap_or_default()
+    }
 }
 
 fn pace(started: i64) -> Duration {
@@ -121,8 +153,9 @@ impl Inner {
         self.state.lock().history_complete = false;
         self.ensure_session().await?;
         // A full-history walk persists its progress page by page; the floor
-        // only means something while bootstrapping.
-        let track_floor = since <= 1;
+        // only means something while bootstrapping (never in a lite session).
+        let lite = self.state.lock().lite.is_some();
+        let track_floor = since <= 1 && !lite;
         // An unresolved group may be missing fragments older than any
         // observed part: repair scans need full history.
         let (since, checkpoint) = {
@@ -137,37 +170,31 @@ impl Inner {
             (since, st.replay_fault_generation)
         };
         self.persist_cursor().await?;
-        let pass = Pass {
-            seen: Mutex::new(HashSet::new()),
-            claimed: Mutex::new(HashSet::new()),
-            complete: AtomicBool::new(!self.relays.is_empty()),
-            walked: AtomicBool::new(false),
-            covered_until: Mutex::new(resume_until),
-            since,
-        };
+        let pass = Pass::new(self.relays.len(), since, resume_until);
 
+        // Every stream, or in a lite session the ones it holds whole; the
+        // objects it follows elsewhere are caught up below.
+        let (personal, tags) = self.whole_streams();
         let pk = self.pk.clone();
-        let mut base_filters = vec![StreamFilter {
-            scope: String::new(),
-            filter: Filter::new().kinds([kinds::BASE]).authors([pk.clone()]),
-        }];
-        let mut checkpoint_filters = vec![StreamFilter {
-            scope: String::new(),
-            filter: Filter::new()
-                .kinds([kinds::CHECKPOINT])
-                .authors([pk.clone()]),
-        }];
-        let mut change_filters = vec![StreamFilter {
-            scope: String::new(),
-            filter: Filter::new().kinds([kinds::CHANGE]).authors([pk.clone()]),
-        }];
-        let tags: Vec<String> = self
-            .state
-            .lock()
-            .shared
-            .values()
-            .map(|sp| sp.tag.clone())
-            .collect();
+        let mut base_filters = Vec::new();
+        let mut checkpoint_filters = Vec::new();
+        let mut change_filters = Vec::new();
+        if personal {
+            base_filters.push(StreamFilter {
+                scope: String::new(),
+                filter: Filter::new().kinds([kinds::BASE]).authors([pk.clone()]),
+            });
+            checkpoint_filters.push(StreamFilter {
+                scope: String::new(),
+                filter: Filter::new()
+                    .kinds([kinds::CHECKPOINT])
+                    .authors([pk.clone()]),
+            });
+            change_filters.push(StreamFilter {
+                scope: String::new(),
+                filter: Filter::new().kinds([kinds::CHANGE]).authors([pk.clone()]),
+            });
+        }
         for tag in tags {
             base_filters.push(StreamFilter {
                 scope: tag.clone(),
@@ -188,40 +215,7 @@ impl Inner {
         // Bases first: every object renders from its base as soon as it lands.
         self.cover(&pass, &base_filters, None, false).await?;
         // A split base's 31078 names its parts' group: fetch what is missing.
-        let gids: Vec<String> = self.state.lock().open_base_groups.drain().collect();
-        if !gids.is_empty() {
-            let fetches = self.relays.iter().map(|relay| {
-                let gids = &gids;
-                let pass = &pass;
-                async move {
-                    for chunk in gids.chunks(CHECKPOINT_FETCH_BATCH) {
-                        if self.stopped() {
-                            pass.complete.store(false, Ordering::Relaxed);
-                            return Ok(());
-                        }
-                        let filter = Filter::new()
-                            .kinds([kinds::BASE_PART])
-                            .tag('c', chunk.iter().cloned());
-                        match self.query_page(relay, filter).await {
-                            Ok(page) => self.import_page(pass, page).await?,
-                            Err(error) => {
-                                pass.complete.store(false, Ordering::Relaxed);
-                                self.emit_backfill(Some(format!(
-                                    "{}: {}",
-                                    relay.url(),
-                                    short(error, 100)
-                                )));
-                                return Ok(());
-                            }
-                        }
-                    }
-                    anyhow::Ok(())
-                }
-            });
-            for result in futures::future::join_all(fetches).await {
-                result?;
-            }
-        }
+        self.fetch_base_parts(&pass).await?;
         self.cover(&pass, &checkpoint_filters, None, false).await?;
         self.state.lock().checkpoints_loaded = true;
         self.emit_live_status();
@@ -260,7 +254,7 @@ impl Inner {
                     });
                 }
             }
-            if floor_of("").is_some() {
+            if personal && floor_of("").is_some() {
                 let ledger = self
                     .engine
                     .blind_personal(&self.secret_hex, VANISH_LOG_ID)
@@ -295,6 +289,13 @@ impl Inner {
             .filter_map(|sf| Some((sf.scope.clone(), floor_of(&sf.scope)?)))
             .collect();
         self.sweep_unbased(&pass, &change_filters, &floors).await?;
+        // A lite session: the objects it follows outside those streams,
+        // everything new since its cursor.
+        let followed = if lite {
+            Some(self.walk_followed(&pass).await?)
+        } else {
+            None
+        };
 
         // This device's unpublished writes whose object moved to a newer
         // base meanwhile rebase now.
@@ -309,10 +310,11 @@ impl Inner {
             let _import = self.import_lock.lock().await;
             self.rebase_orphans(owed).await?;
         }
-        let covered = if pass.walked.load(Ordering::Relaxed) {
-            since
-        } else {
-            0
+        let covered = match followed {
+            // What the walk covered for sure: the followed objects since then.
+            Some(since) => since,
+            None if pass.walked.load(Ordering::Relaxed) => since,
+            None => 0,
         };
         // Events mid-flight are not a fault: let them land, then judge.
         self.drain_inflight().await;
@@ -345,12 +347,15 @@ impl Inner {
             }
             st.history_complete
         };
+        // A lite pass that fell short redoes its followed objects from where
+        // this one started, not the vault from the beginning.
+        let fault_at = followed.unwrap_or(since);
         if history_complete {
             if track_floor {
                 self.store.set_bootstrap_floor(None).await?;
             }
         } else {
-            self.record_replay_fault(since).await;
+            self.record_replay_fault(fault_at).await;
         }
         self.persist_cursor().await?;
         // Restore the obligation if a new group or fault appeared while the
@@ -364,7 +369,7 @@ impl Inner {
                 || st.replay_fault_generation != checkpoint
         };
         if history_complete && regressed {
-            self.record_replay_fault(since).await;
+            self.record_replay_fault(fault_at).await;
             self.persist_cursor().await?;
         }
         let (stopped, complete, reachable) = {
@@ -415,9 +420,49 @@ impl Inner {
         Ok(())
     }
 
+    /// The parts (1080 by `#c`) of every split base whose 31078 arrived
+    /// without them, from every relay.
+    pub(super) async fn fetch_base_parts(self: &Arc<Self>, pass: &Pass) -> anyhow::Result<()> {
+        let gids: Vec<String> = self.state.lock().open_base_groups.drain().collect();
+        if gids.is_empty() {
+            return Ok(());
+        }
+        let fetches = self.relays.iter().map(|relay| {
+            let gids = &gids;
+            async move {
+                for chunk in gids.chunks(CHECKPOINT_FETCH_BATCH) {
+                    if self.stopped() {
+                        pass.complete.store(false, Ordering::Relaxed);
+                        return Ok(());
+                    }
+                    let filter = Filter::new()
+                        .kinds([kinds::BASE_PART])
+                        .tag('c', chunk.iter().cloned());
+                    match self.query_page(relay, filter).await {
+                        Ok(page) => self.import_page(pass, page).await?,
+                        Err(error) => {
+                            pass.complete.store(false, Ordering::Relaxed);
+                            self.emit_backfill(Some(format!(
+                                "{}: {}",
+                                relay.url(),
+                                short(error, 100)
+                            )));
+                            return Ok(());
+                        }
+                    }
+                }
+                anyhow::Ok(())
+            }
+        });
+        for result in futures::future::join_all(fetches).await {
+            result?;
+        }
+        Ok(())
+    }
+
     /// The paged walk of one filter on one relay, newest first via `until`,
     /// from `since` at the oldest; true when it reached the end.
-    async fn walk(
+    pub(super) async fn walk(
         self: &Arc<Self>,
         index: usize,
         pass: &Pass,
@@ -494,7 +539,7 @@ impl Inner {
 
     /// Ingest a page (oldest first, checkpoints and bases ahead of changes
     /// within one second) and import what completed.
-    async fn import_page(
+    pub(super) async fn import_page(
         self: &Arc<Self>,
         pass: &Pass,
         mut page: Vec<Event>,
@@ -509,6 +554,10 @@ impl Inner {
         for event in page {
             if !pass.seen.lock().insert(event.id.clone()) {
                 continue;
+            }
+            if let Some(tags) = &pass.h_tags {
+                tags.lock()
+                    .extend(event.tag_values("h").map(str::to_string));
             }
             if let Some(item) = self.ingest_event(&event).await? {
                 batch.push(item);

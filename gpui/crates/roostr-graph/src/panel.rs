@@ -328,6 +328,10 @@ pub(crate) fn side_panel(
                 )
                 .child(muted_small(format!("{} objects", ty.objects.len()))),
         )
+        // Lite: the type's placeholders - clicking the ghost cluster lands here.
+        .when(ty.shadow > 0, |d| {
+            d.child(shadow_row(ty.shadow, channel, cx))
+        })
         .child(kicker(format!(
             "IN USE · {} OF {}",
             ty.usage.len(),
@@ -446,6 +450,7 @@ pub(crate) fn side_panel(
                 .child(total(g.props.len().to_string(), "PROPERTIES")),
         )
         .child(note("Hover a type, property or object. Click to pin. Scroll or pinch to zoom. Double-click an object to open it."))
+        .when(g.shadow_count > 0, |d| d.child(shadow_row(g.shadow_count, channel, cx)))
     };
 
     let panel = div()
@@ -476,6 +481,30 @@ pub(crate) fn side_panel(
             .max_h(stage_h - px(140.))
             .into_any_element()
     }
+}
+
+/// Lite: "N not loaded" and, unless the space is downloading already (then
+/// its progress), "Load this space fully".
+fn shadow_row(n: u64, channel: &str, cx: &App) -> Div {
+    let loading = roostr_core::lite::status(cx)
+        .and_then(|s| s.loading(channel).map(roostr_core::lite_ui::loading_text));
+    let space = channel.to_string();
+    div()
+        .flex()
+        .flex_wrap()
+        .items_center()
+        .gap(px(10.))
+        .child(muted_small(roostr_core::lite_ui::shadow_label(n)))
+        .map(|d| match loading {
+            Some(text) => d.child(muted_small(text)),
+            None => d.child(
+                roostr_core::ui::outline_button(
+                    "graph-load-space",
+                    roostr_core::lite_ui::LOAD_SPACE,
+                )
+                .on_click(move |_, _, cx| roostr_core::lite_ui::load_space(&space, cx)),
+            ),
+        })
 }
 
 fn titled(icon: &str, name: &str) -> String {

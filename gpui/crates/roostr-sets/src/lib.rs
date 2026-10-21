@@ -19,7 +19,8 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use roostr_core::create::default_type_key;
 use roostr_core::filters::space_filter_of;
-use roostr_core::{Store, StoreEvent, Value, api, field_str, theme};
+use roostr_core::relations::object_space_id;
+use roostr_core::{Object, Store, StoreEvent, Value, api, field_str, lite_ui, theme};
 use serde_json::json;
 
 use crate::calendar::CalendarView;
@@ -89,6 +90,9 @@ pub struct DataView {
     reload_timer: Option<Task<()>>,
     /// The controls row + panels + collection bar: presses here never arm the marquee.
     chrome_bounds: common::BoundsCell,
+    /// Lite: collection members last asked of the relays, so the refresh
+    /// after the fetch does not ask again.
+    fetched: Vec<String>,
     _subs: Vec<Subscription>,
 }
 
@@ -133,6 +137,7 @@ impl DataView {
             candidates: Vec::new(),
             reload_timer: None,
             chrome_bounds: common::bounds_cell(),
+            fetched: Vec::new(),
             _subs: subs,
         };
         this.sync(window, cx);
@@ -183,6 +188,7 @@ impl DataView {
         let Some(object) = common::cached_object(&self.object_id, cx) else {
             return;
         };
+        self.lite(&object, cx);
         let relations = common::scoped_relations(&object, cx);
         let body = common::table_body(&object, self.kind, &self.search, &relations, cx);
         let input = ViewInput {
@@ -209,6 +215,25 @@ impl DataView {
         }
         self.input = input;
         cx.notify();
+    }
+
+    /// Lite: an opened query/set or type page over a space not held whole
+    /// downloads that space (like its pinned widget; the refresh when it
+    /// lands reloads the rows); a collection fetches its members.
+    fn lite(&mut self, object: &Object, cx: &mut Context<Self>) {
+        if roostr_core::lite::status(cx).is_none() {
+            return;
+        }
+        if self.kind == DataViewKind::Collection {
+            let ids = config::member_ids(&object.fields);
+            if !ids.is_empty() && ids != self.fetched {
+                self.fetched = ids.clone();
+                lite_ui::fetch(ids, cx);
+            }
+            return;
+        }
+        let space = object_space_id(Store::global(cx).read(cx), &object.fields);
+        lite_ui::ensure_space(&space, cx);
     }
 
     fn make_view(
@@ -660,6 +685,15 @@ impl Render for DataView {
             .child(common::track_bounds(&self.chrome_bounds));
         if self.kind == DataViewKind::Collection {
             chrome = chrome.child(self.render_collection_bar(members, cx));
+        }
+        // Lite: the space downloading (or its button, after a failed try).
+        if self.kind != DataViewKind::Collection {
+            let space = object_space_id(Store::global(cx).read(cx), &object.fields);
+            chrome = chrome.children(lite_ui::space_notice(
+                format!("view-{}", self.object_id),
+                &space,
+                cx,
+            ));
         }
         root = root.child(chrome.child(self.controls.clone()));
         let menu = match &self.view {

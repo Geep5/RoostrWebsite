@@ -14,7 +14,7 @@ use roostr_core::objects::object_icon;
 use roostr_core::relations::{object_space_id, space_relations};
 use roostr_core::store::Store;
 use roostr_core::types::{Object, QueryRow, RelationDef, field_str};
-use roostr_core::{StoreEvent, theme};
+use roostr_core::{StoreEvent, lite_ui, theme};
 use serde_json::{Value as Json, json};
 
 use crate::rail::mix;
@@ -33,6 +33,12 @@ pub(crate) struct PinnedWidget {
     /// The sidebar width, set by the shell each frame (gallery column fit).
     pub(crate) side_width: f32,
     seq: u64,
+    /// Lite: the query/set's space, while it is not held whole (its rows
+    /// would be partial); it downloads and the widget shows the progress line.
+    partial_space: Option<String>,
+    /// Lite: ids last asked of the relays (collection members, link
+    /// targets), so the refresh after the fetch does not ask again.
+    fetched: Vec<String>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -61,6 +67,8 @@ impl PinnedWidget {
             month_off: 0,
             side_width: 220.,
             seq: 0,
+            partial_space: None,
+            fetched: Vec::new(),
             _subscriptions: subscriptions,
         };
         this.load(cx);
@@ -84,7 +92,10 @@ impl PinnedWidget {
                     return;
                 }
             };
-            let body = cx.update(|cx| query_body(&object, cx));
+            let body = cx.update(|cx| {
+                let _ = this.update(cx, |this, cx| this.lite(&object, cx));
+                query_body(&object, cx)
+            });
             let rows = match body {
                 Some(body) => cx
                     .update(|cx| roostr_core::api::query(body, cx))
@@ -109,6 +120,34 @@ impl PinnedWidget {
         })
         .detach();
     }
+
+    /// Lite: a query/set over a space not held whole downloads that space
+    /// (once; the refresh when it lands re-evaluates); a collection or a
+    /// link widget fetches the ids it shows.
+    fn lite(&mut self, o: &Object, cx: &mut Context<Self>) {
+        if roostr_core::lite::status(cx).is_none() {
+            self.partial_space = None;
+            return;
+        }
+        let ids = if o.type_key == "collection" {
+            members(o)
+        } else if is_set(o) {
+            let space = object_space_id(Store::global(cx).read(cx), &o.fields);
+            if lite_ui::space_held(&space, cx) {
+                self.partial_space = None;
+            } else {
+                lite_ui::ensure_space(&space, cx);
+                self.partial_space = Some(space);
+            }
+            return;
+        } else {
+            link_targets(o)
+        };
+        if !ids.is_empty() && ids != self.fetched {
+            self.fetched = ids.clone();
+            lite_ui::fetch(ids, cx);
+        }
+    }
 }
 
 fn is_set(o: &Object) -> bool {
@@ -122,20 +161,53 @@ fn space_rels(store: &Store, o: &Object) -> Vec<RelationDef> {
         .collect()
 }
 
+/// A collection's member ids.
+fn members(o: &Object) -> Vec<String> {
+    o.field("collectionIds")
+        .map(|v| {
+            v.items()
+                .iter()
+                .filter_map(|i| i.string_value.clone())
+                .filter(|s| !s.is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// What a non-set object links to (the tree widget's rows).
+fn link_targets(o: &Object) -> Vec<String> {
+    let mut targets: Vec<String> = Vec::new();
+    let mut add = |id: &str| {
+        if !id.is_empty() && !targets.iter().any(|t| t == id) {
+            targets.push(id.to_string());
+        }
+    };
+    for (key, v) in &o.fields {
+        if key == "channel" {
+            continue;
+        }
+        if let Some(link) = v.link_value.as_ref().filter(|l| !l.target_id.is_empty()) {
+            add(&link.target_id);
+        } else if v.values_value.is_some() {
+            for item in v.items() {
+                if let Some(link) = item.link_value.as_ref().filter(|l| !l.target_id.is_empty()) {
+                    add(&link.target_id);
+                } else if key == "collectionIds"
+                    && let Some(s) = &item.string_value
+                {
+                    add(s);
+                }
+            }
+        }
+    }
+    targets
+}
+
 /// The widget's query (`None` = nothing to ask: no members / no links).
 fn query_body(o: &Object, cx: &App) -> Option<Json> {
     let store = Store::global(cx).read(cx);
     if is_set(o) {
-        let members: Vec<String> = o
-            .field("collectionIds")
-            .map(|v| {
-                v.items()
-                    .iter()
-                    .filter_map(|i| i.string_value.clone())
-                    .filter(|s| !s.is_empty())
-                    .collect()
-            })
-            .unwrap_or_default();
+        let members = members(o);
         let mut filters = engine_filters_of(&o.fields, &space_rels(store, o));
         filters.push(space_filter_of(
             &o.fields,
@@ -194,30 +266,7 @@ fn query_body(o: &Object, cx: &App) -> Option<Json> {
         return Some(body);
     }
     // Tree widget: outbound links.
-    let mut targets: Vec<String> = Vec::new();
-    let mut add = |id: &str| {
-        if !id.is_empty() && !targets.iter().any(|t| t == id) {
-            targets.push(id.to_string());
-        }
-    };
-    for (key, v) in &o.fields {
-        if key == "channel" {
-            continue;
-        }
-        if let Some(link) = v.link_value.as_ref().filter(|l| !l.target_id.is_empty()) {
-            add(&link.target_id);
-        } else if v.values_value.is_some() {
-            for item in v.items() {
-                if let Some(link) = item.link_value.as_ref().filter(|l| !l.target_id.is_empty()) {
-                    add(&link.target_id);
-                } else if key == "collectionIds"
-                    && let Some(s) = &item.string_value
-                {
-                    add(s);
-                }
-            }
-        }
-    }
+    let targets = link_targets(o);
     if targets.is_empty() {
         return None;
     }
@@ -313,13 +362,13 @@ fn open(id: String) -> impl Fn(&ClickEvent, &mut Window, &mut App) + 'static {
 
 impl PinnedWidget {
     /// Renders nothing: no object yet, or a preview with no rows (notes,
-    /// pages; a calendar always shows its month).
+    /// pages; a calendar always shows its month) and no space downloading.
     pub(crate) fn is_empty(&self) -> bool {
         let Some(obj) = &self.obj else {
             return true;
         };
         let calendar = is_set(obj) && obj.field_str("viewType") == "calendar";
-        self.rows.is_empty() && !calendar
+        self.rows.is_empty() && !calendar && self.partial_space.is_none()
     }
 }
 
@@ -334,6 +383,13 @@ impl Render for PinnedWidget {
         } else {
             "table"
         };
+        // Lite: the space is downloading - its progress instead of partial rows.
+        if let Some(space) = &self.partial_space {
+            return div().px(px(8.)).children(
+                lite_ui::loading_line(space, cx)
+                    .or_else(|| lite_ui::space_notice(format!("pin-{}", self.id), space, cx)),
+            );
+        }
         if self.rows.is_empty() && view_type != "calendar" {
             return div();
         }
