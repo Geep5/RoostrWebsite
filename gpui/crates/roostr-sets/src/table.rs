@@ -2020,8 +2020,12 @@ impl Render for SetTable {
                                 cx.listener(|this, _, window, cx| this.open_adding(window, cx)),
                             ),
                     )
+                    // Opens leftward, over the table: the + sits at the
+                    // table's right edge, and the page column clips anything
+                    // that spills past it (into the chat pane) - snapping to
+                    // the window can't see that edge.
                     .when_some(self.adding.clone().filter(|_| plus_open), |d, flow| {
-                        d.child(common::floating(common::Place::BelowLeft, 4., flow))
+                        d.child(common::floating(common::Place::BelowRight, 4., flow))
                     }),
             );
 
