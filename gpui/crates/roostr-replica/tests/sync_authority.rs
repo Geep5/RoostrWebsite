@@ -197,9 +197,6 @@ fn administrative_fields_and_channel_deletion_are_the_owners() {
         for key in [
             "members",
             "owner",
-            "keyId",
-            "key",
-            "keys",
             "served_by",
             "machine",
             "machine_id",
@@ -223,6 +220,34 @@ fn administrative_fields_and_channel_deletion_are_the_owners() {
             assert!(
                 !g.permits(&delete, Some(&g.doc), &g.member()).await,
                 "delete {key}"
+            );
+        }
+        // `key`/`keys`/`keyId` are the space's key material only on the space
+        // object; on any other object `key` is an identifier members may set.
+        for key in ["keyId", "key", "keys"] {
+            let on_space =
+                g.w.change(
+                    SPACE_ID,
+                    json!([{"fieldSet": {"key": key, "value": {"stringValue": "attack"}}}]),
+                    &[],
+                    None,
+                )
+                .await;
+            assert!(
+                !g.permits(&on_space, Some(&g.trusted), &g.member()).await,
+                "set {key} on the space"
+            );
+            let on_doc =
+                g.w.change(
+                    "doc",
+                    json!([{"fieldSet": {"key": key, "value": {"stringValue": "prop"}}}]),
+                    &[],
+                    None,
+                )
+                .await;
+            assert!(
+                g.permits(&on_doc, Some(&g.doc), &g.member()).await,
+                "set {key} on an object"
             );
         }
         let delete_space =
