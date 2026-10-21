@@ -488,9 +488,7 @@ impl Inner {
         if self.store.bootstrapped().await.unwrap_or(false) {
             self.seed_defaults();
         }
-        if let Err(error) = session.sync.start().await {
-            log::warn!("[replica] sync start failed: {error:#}");
-        }
+        self.start_sync(&session).await;
         self.spawn_refresh();
         Ok(session)
     }
@@ -570,9 +568,30 @@ impl Inner {
         let session = Arc::new(self.new_session(old.keys.clone()));
         *self.session.lock() = Some(session.clone());
         self.refresh_shared().await;
-        if let Err(error) = session.sync.start().await {
-            log::warn!("[replica] sync restart failed: {error:#}");
+        self.start_sync(&session).await;
+    }
+
+    /// Starts `session`'s sync - once every object is prepared: sync asks
+    /// which space an object is in (where its writes go, whose orphans this
+    /// device may rebase), which only its state answers.
+    async fn start_sync(self: &Arc<Self>, session: &Arc<Session>) {
+        if self.state.lock().waiting.is_empty() {
+            if let Err(error) = session.sync.start().await {
+                log::warn!("[replica] sync start failed: {error:#}");
+            }
+            return;
         }
+        let (this, session) = (self.clone(), session.clone());
+        let start: BoxFuture<()> = Box::pin(async move {
+            let started = match this.ensure_complete().await {
+                Ok(()) => session.sync.start().await,
+                Err(error) => Err(error),
+            };
+            if let Err(error) = started {
+                log::warn!("[replica] sync start failed: {error:#}");
+            }
+        });
+        rt::spawn(start);
     }
 
     /// Idempotent by fixture: a converged space commits nothing; once per session.
