@@ -9,6 +9,7 @@
 //! one event per 120 ms to the first relay that accepts, records the
 //! events as held and marks the obligation published.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -54,6 +55,12 @@ impl Inner {
             if self.store.is_published(item.key.clone()).await? {
                 continue;
             }
+            // A space's compacted history is on the relays inside its base.
+            if item.space_id.is_some() && self.base_covers(&item.object_id, &item.change_id).await?
+            {
+                self.store.mark_published(item.key.clone()).await?;
+                continue;
+            }
             // An entry already saved (by the backend's atomic commit, or
             // sealed by an earlier attempt) is never clobbered.
             match self.store.pending(item.key.clone()).await? {
@@ -72,7 +79,12 @@ impl Inner {
             self.emit_error(format!("publish deferred: {}", short(error, 120)));
             return Ok(());
         }
-        for item in &owed {
+        // A space obligation waits for a completed history walk: another
+        // device of the account may have published it under the space key
+        // already, and the walk marks what the relays hold
+        // (`Inner::release_space_pending` offers it then).
+        let walked = self.state.lock().history_walked;
+        for item in owed.iter().filter(|p| walked || p.space_id.is_none()) {
             self.clone().offer_to_outbox(item).await;
         }
         Ok(())
@@ -135,6 +147,85 @@ impl Inner {
                 self.ensure_publish_queue();
             }
         }
+    }
+
+    /// Obligations the relays already hold leave the outbox unsealed and
+    /// unsent: the walk marked their events published, or - for a space
+    /// obligation - the object's current base covers the change (a base
+    /// imported before covered changes were marked: they were queued then).
+    pub(super) async fn settle_published_pending(&self) -> anyhow::Result<()> {
+        let mut settled = 0usize;
+        for pending in self.store.pending_publishes().await? {
+            let held = self.store.is_published(pending.key.clone()).await?
+                || (pending.space_id.is_some()
+                    && self
+                        .base_covers(&pending.object_id, &pending.change_id)
+                        .await?);
+            if !held {
+                continue;
+            }
+            self.store.mark_published(pending.key.clone()).await?;
+            // An item the engine never held ("unknown outbox key") is fine.
+            if self.session_open()
+                && let Ok(count) = self
+                    .engine
+                    .outbox_result(&pending.key, true, false, now_ms())
+                    .await
+            {
+                self.state.lock().pending_count = count;
+            }
+            settled += 1;
+        }
+        roostr_core::sync_trace!("outbox: {settled} obligation(s) already on the relays, dropped");
+        Ok(())
+    }
+
+    /// The object's current base covers `change_id`. Covered ids are cached
+    /// per base hash: a space's whole history is checked against few bases.
+    pub(super) async fn base_covers(
+        &self,
+        object_id: &str,
+        change_id: &str,
+    ) -> anyhow::Result<bool> {
+        let Some(base) = self.store.current_base(object_id.to_string()).await? else {
+            return Ok(false);
+        };
+        let cached = self.state.lock().base_covered.get(&base.hash).cloned();
+        let covered = match cached {
+            Some(covered) => covered,
+            None => {
+                let bases = self.store.bases(object_id.to_string()).await?;
+                let Some(record) = bases.iter().find(|b| b.hash == base.hash) else {
+                    return Ok(false);
+                };
+                let ids: HashSet<String> = self
+                    .engine
+                    .base_decode(&record.bytes)
+                    .await?
+                    .covered_ids
+                    .into_iter()
+                    .collect();
+                let ids = Arc::new(ids);
+                self.state
+                    .lock()
+                    .base_covered
+                    .insert(base.hash.clone(), ids.clone());
+                ids
+            }
+        };
+        Ok(covered.contains(change_id))
+    }
+
+    /// A walk completed: drop the obligations the relays already hold, then
+    /// offer the space obligations held back until now.
+    pub(super) async fn release_space_pending(self: &Arc<Self>) -> anyhow::Result<()> {
+        self.settle_published_pending().await?;
+        for pending in self.store.pending_publishes().await? {
+            if pending.space_id.is_some() {
+                self.clone().offer_to_outbox(&pending).await;
+            }
+        }
+        Ok(())
     }
 
     /// Drains the engine outbox: one event per [`PUBLISH_SPACING`],

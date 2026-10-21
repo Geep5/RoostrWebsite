@@ -1583,7 +1583,11 @@ impl Inner {
         }
 
         // Publication acknowledgements, not enqueue markers, decide durability.
-        for info in &infos {
+        // Only once a history walk completed: before it, a change another
+        // device already published under the space key looks unpublished
+        // here, and owing it would re-seal the space's whole history.
+        let walked = session.sync.history_walked();
+        for info in infos.iter().filter(|_| walked) {
             let objects: Vec<String> = {
                 let st = self.state.lock();
                 st.states

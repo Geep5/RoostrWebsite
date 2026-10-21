@@ -385,7 +385,31 @@ impl Inner {
 
     /// Hold a base and re-point the object's current one. Bases are never
     /// deleted by sync: a superseded one keeps more orphans decidable.
+    ///
+    /// A base from a space stream holds every change it covers there - the
+    /// compaction that sealed it deleted their deltas - so those changes are
+    /// marked published under the space key: no device re-seals a space's
+    /// compacted history.
     async fn import_base(&self, item: &ImportItem, summary: &BaseSummary) -> anyhow::Result<()> {
+        if let Some(p) = &item.provenance {
+            let covered = self.engine.base_decode(&item.bytes).await?.covered_ids;
+            let published: Vec<String> = covered
+                .iter()
+                .map(|id| format!("{}/{}/{id}", p.space_id, p.key_id))
+                .collect();
+            roostr_core::sync_trace!(
+                "base of {} covers {} change(s): published under space {}",
+                summary.object_id,
+                published.len(),
+                short_id(&p.space_id)
+            );
+            self.store
+                .import(ImportBatch {
+                    published,
+                    ..ImportBatch::default()
+                })
+                .await?;
+        }
         let streams: Vec<String> = item
             .held
             .iter()

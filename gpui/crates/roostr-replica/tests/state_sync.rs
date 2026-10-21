@@ -999,6 +999,97 @@ fn a_personal_stream_holding_no_base_is_walked_whole_while_a_based_space_is_boun
     });
 }
 
+/// A space another device of the account compacted holds its history in the
+/// base only (the compaction deleted the deltas). A device that also holds
+/// those changes from the personal stream must not owe them to the space
+/// again: the base's covered changes are published there.
+#[test]
+fn a_space_base_marks_the_changes_it_covers_published_under_the_space() {
+    let _turn = ENGINE_TURN.lock();
+    let relay = TestRelay::start();
+    let keys = Keys::generate();
+    block_on(async {
+        let f = Fixture::new(&keys, vec![relay.url.clone()]).await;
+        let space = SharedSpaceInfo {
+            space_id: "space".into(),
+            key_hex: hex::encode([5u8; 32]),
+            key_id: 1,
+            writers: vec![keys.pubkey().to_string()],
+            owner: None,
+        };
+        let first = f.change("sdoc", space_note_ops("sdoc"), &[], 60).await;
+        let second = f
+            .change("sdoc", vec![set_name("renamed")], &[&first], 70)
+            .await;
+        let (base, _) = f
+            .compact(&[], vec![first.clone(), second.clone()], BASE_MS)
+            .await;
+        // The personal copies, as the device that wrote them published them.
+        relay.insert(f.delta_event(&first, 1_650_000_000, None).await);
+        relay.insert(f.delta_event(&second, 1_650_000_100, None).await);
+        for event in f.space_base_events(&keys, &space, &base, BASE_S).await {
+            relay.insert(event);
+        }
+        let r = &f.replica;
+        r.host.spaces.lock().insert("sdoc".into(), "space".into());
+        // This device held the space as private first: the personal copies.
+        r.sync.start().await.unwrap();
+        r.sync.await_first_walk().await;
+        assert_eq!(
+            changes(&*r.store, "sdoc").await.len(),
+            2,
+            "the personal copies were imported"
+        );
+        // An obligation queued for the space before its stream was known.
+        let queued = format!("space/1/{}", second.id);
+        r.store
+            .save_pending(PendingPublish {
+                key: queued.clone(),
+                object_id: "sdoc".into(),
+                change_id: second.id.clone(),
+                bytes: r.engine.encode_change(&second).await.unwrap(),
+                space_id: Some("space".into()),
+                key_id: Some(1),
+                base: None,
+                events: None,
+            })
+            .await
+            .unwrap();
+        // Then the space's key arrives (the keyring backup): its stream is walked.
+        let tag = r
+            .engine
+            .blind_space(&space.key_hex, "space:space")
+            .await
+            .unwrap();
+        r.sync.set_shared_spaces(vec![space]).await.unwrap();
+        assert!(r.store.current_base("sdoc".into()).await.unwrap().is_some());
+        let owed = r
+            .store
+            .unpublished_changes(vec!["sdoc".into()], "space/1/".into())
+            .await
+            .unwrap();
+        assert!(
+            owed.is_empty(),
+            "the space base already holds them: {:?}",
+            owed.iter().map(|c| &c.id).collect::<Vec<_>>()
+        );
+        let settled = eventually(WAIT, async || {
+            r.store.pending(queued.clone()).await.unwrap().is_none()
+        })
+        .await;
+        assert!(settled, "the queued obligation was dropped, not sent");
+        r.sync.await_idle().await;
+        let resent = relay
+            .world()
+            .events
+            .iter()
+            .filter(|e| e.kind == kinds::CHANGE && e.tag_values("h").any(|h| h == tag))
+            .count();
+        assert_eq!(resent, 0, "nothing of the space's history was sealed again");
+        r.sync.stop();
+    });
+}
+
 /// A vault whose computer based one object but not two others, both created
 /// long before its newest base: what a fresh device must still show.
 struct Unbased {

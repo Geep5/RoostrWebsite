@@ -224,6 +224,10 @@ struct State {
     pending_objects: HashSet<String>,
     notify_scheduled: bool,
     first_walk_done: bool,
+    /// A history walk completed ([`RelaySync::history_walked`]).
+    history_walked: bool,
+    /// Covered change ids per base hash (`Inner::base_covers`).
+    base_covered: HashMap<String, Arc<HashSet<String>>>,
     live_tasks: Vec<futures::future::AbortHandle>,
     live_seen: HashSet<String>,
     /// `Some` in a lite session: what it holds whole and what it follows.
@@ -382,6 +386,8 @@ impl RelaySync {
                     pending_objects: HashSet::new(),
                     notify_scheduled: false,
                     first_walk_done: false,
+                    history_walked: false,
+                    base_covered: HashMap::new(),
                     live_tasks: Vec::new(),
                     live_seen: HashSet::new(),
                     lite: None,
@@ -494,6 +500,15 @@ impl RelaySync {
         while !self.inner.state.lock().first_walk_done {
             roostr_nostr::sleep(Duration::from_millis(20)).await;
         }
+    }
+
+    /// A history walk completed here: what the relays hold is known, so a
+    /// shared space owes them only the changes they lack. Until then a host
+    /// queues no space publishes (they would re-seal what another device
+    /// already published); the walk that completes it calls
+    /// [`SyncHost::on_space_key`] so the host owes them then.
+    pub fn history_walked(&self) -> bool {
+        self.inner.state.lock().history_walked
     }
 
     /// Resolves once no history pass, import, live event or publish is in
@@ -725,8 +740,11 @@ impl Inner {
         if lite {
             self.refresh_followed().await?;
         }
+        // Space obligations wait for a completed walk (`release_space_pending`).
         for pending in self.store.pending_publishes().await? {
-            self.clone().offer_to_outbox(&pending).await;
+            if pending.space_id.is_none() {
+                self.clone().offer_to_outbox(&pending).await;
+            }
         }
         self.emit(SyncStatus {
             phase: Phase::Backfill,
@@ -756,6 +774,9 @@ impl Inner {
                 Ok(complete) if !this.stopped() => {
                     if !bootstrapped && complete {
                         this.mark_bootstrapped().await;
+                    }
+                    if complete {
+                        this.note_history_walked();
                     }
                     this.emit_live_status();
                 }
@@ -867,7 +888,27 @@ impl Inner {
         if complete && !bootstrapped && !self.stopped() {
             self.mark_bootstrapped().await;
         }
+        if complete && !self.stopped() {
+            self.note_history_walked();
+        }
         Ok(complete)
+    }
+
+    /// A completed walk: the relays' holdings are marked, so space
+    /// obligations they already hold are dropped and the rest offered
+    /// ([`RelaySync::history_walked`]); the host then owes its shared spaces
+    /// what is still missing.
+    fn note_history_walked(self: &Arc<Self>) {
+        let this = self.clone();
+        crate::rt::spawn(async move {
+            let first = !std::mem::replace(&mut this.state.lock().history_walked, true);
+            if let Err(error) = this.release_space_pending().await {
+                log::warn!("[sync] releasing space obligations: {error}");
+            }
+            if first {
+                this.host.on_space_key();
+            }
+        });
     }
 
     /// One history pass, then every gift wrap again (randomized created_at:
@@ -925,16 +966,21 @@ impl Inner {
             return Ok(()); // start() wires the subscriptions itself
         }
         self.subscribe_live();
-        // A newly joined space's whole stream is unseen.
+        // A newly joined space's whole stream is unseen. Walk it before
+        // returning: the caller then owes the relays only the changes that
+        // stream lacks - a space another device of the account shared
+        // already holds its history there, and re-sealing all of it would
+        // flood the relay. Until a walk completes, nothing is owed
+        // ([`RelaySync::history_walked`]).
         if fresh {
-            let this = self.clone();
-            crate::rt::spawn(async move {
-                if let Err(error) = this.backfill(1, None).await
-                    && !this.stopped()
-                {
-                    this.emit_error(error.to_string());
-                }
-            });
+            let walked = self.backfill(1, None).await;
+            let vault_walked = self.state.lock().history_walked;
+            if !matches!(walked, Ok(true)) {
+                self.state.lock().history_walked = false;
+            } else if vault_walked && let Err(error) = self.release_space_pending().await {
+                log::warn!("[sync] releasing space obligations: {error}");
+            }
+            walked?;
         }
         Ok(())
     }
