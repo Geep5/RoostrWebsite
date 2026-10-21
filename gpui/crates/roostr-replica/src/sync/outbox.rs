@@ -79,12 +79,10 @@ impl Inner {
             self.emit_error(format!("publish deferred: {}", short(error, 120)));
             return Ok(());
         }
-        // A space obligation waits for a completed history walk: another
-        // device of the account may have published it under the space key
-        // already, and the walk marks what the relays hold
-        // (`Inner::release_space_pending` offers it then).
-        let walked = self.state.lock().history_walked;
-        for item in owed.iter().filter(|p| walked || p.space_id.is_none()) {
+        // A write made now goes out now; only obligations restored at start
+        // wait for the first walk (`Inner::release_space_pending`), and the
+        // host owes a space its history only after a completed walk.
+        for item in &owed {
             self.clone().offer_to_outbox(item).await;
         }
         Ok(())

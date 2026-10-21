@@ -280,7 +280,16 @@ impl Host {
             Some(value) => function.call1(&JsValue::NULL, &JsValue::from(value)),
             None => function.call0(&JsValue::NULL),
         }
-        .map_err(runtime_error)
+        .map_err(|error| {
+            // A panic writes its message before the `unreachable` it ends in.
+            let diagnostic = self.runtime.diagnostic.borrow();
+            match runtime_error(error) {
+                EngineError::Runtime(message) if !diagnostic.trim().is_empty() => {
+                    EngineError::Runtime(format!("{message} ({})", diagnostic.trim()))
+                }
+                other => other,
+            }
+        })
     }
 
     /// One single-flight request (`core.ts call`). The response is copied out

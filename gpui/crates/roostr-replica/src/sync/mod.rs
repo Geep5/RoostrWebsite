@@ -787,9 +787,19 @@ impl Inner {
                     }
                 }
             }
-            let mut st = this.state.lock();
-            st.bootstrapping = false;
-            st.first_walk_done = true;
+            {
+                let mut st = this.state.lock();
+                st.bootstrapping = false;
+                st.first_walk_done = true;
+            }
+            // Obligations restored at start waited for this walk, which
+            // marked what the relays hold; even an incomplete one must not
+            // strand them (a held base still settles a compacted history).
+            if !this.stopped()
+                && let Err(error) = this.release_space_pending().await
+            {
+                log::warn!("[sync] releasing space obligations: {error}");
+            }
         });
 
         if self.stopped() {

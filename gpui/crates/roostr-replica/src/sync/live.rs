@@ -13,6 +13,7 @@
 
 use std::sync::{Arc, Weak};
 
+use anyhow::Context;
 use futures::StreamExt;
 use futures::channel::mpsc::UnboundedReceiver;
 use futures::future::{AbortHandle, Abortable};
@@ -186,8 +187,14 @@ impl Inner {
                         self.handle_wrap(&event).await;
                     } else if event.kind == kinds::KEYRING {
                         self.merge_keyring_backup(&event);
-                    } else if let Err(error) = self.handle_live_event(event).await {
-                        log::warn!("[sync] live event: {error}");
+                    } else {
+                        let (id, kind) = (event.id.clone(), event.kind);
+                        if let Err(error) = self.handle_live_event(event).await {
+                            log::warn!(
+                                "[sync] live event {} kind {kind}: {error:#}",
+                                short_id(&id)
+                            );
+                        }
                     }
                 }
                 LiveMsg::Reconnected => self.clone().after_reconnect(),
@@ -229,8 +236,13 @@ impl Inner {
     pub(super) async fn handle_live_event(self: &Arc<Self>, event: Event) -> anyhow::Result<()> {
         self.state.lock().active_live_events += 1;
         let result = async {
-            match self.ingest_event(&event).await? {
-                Some(item) => self.import_batch(vec![item], false).await?,
+            match self.ingest_event(&event).await.context("ingest")? {
+                Some(item) => {
+                    let object_id = item.object_id.clone();
+                    self.import_batch(vec![item], false)
+                        .await
+                        .with_context(|| format!("import into {object_id}"))?
+                }
                 None if event.kind == kinds::BASE => {
                     // A live split base: its parts went out first, possibly before the cursor.
                     if let Some(gid) = event.tag("c")

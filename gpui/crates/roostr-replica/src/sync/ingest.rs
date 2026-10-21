@@ -19,6 +19,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+use anyhow::Context;
 use roostr_engine::{
     AuthorizeSubject, BaseSummary, Change, CheckpointSummary, EngineError, RelayEvent,
     SharedProvenance, SpaceAuthority, StateInputs,
@@ -31,7 +32,7 @@ use super::{HeldRow, Inner, describe_event, now_ms, short, short_id};
 
 /// One decrypted relay payload.
 pub(super) struct ImportItem {
-    object_id: String,
+    pub(super) object_id: String,
     bytes: Vec<u8>,
     change: Option<Change>,
     checkpoint: Option<CheckpointSummary>,
@@ -579,7 +580,8 @@ impl Inner {
             if let Some(p) = &item.provenance
                 && !self
                     .authorized(item, p, &mut pending, &mut states, imported)
-                    .await?
+                    .await
+                    .context("authorize")?
             {
                 roostr_core::sync_trace!(
                     "import REFUSED for {} (signer {}, space {}): the authority gate said no",
@@ -606,7 +608,7 @@ impl Inner {
             );
             if let Some(base) = &item.base {
                 states.remove(&item.object_id);
-                self.import_base(item, base).await?;
+                self.import_base(item, base).await.context("base")?;
             } else if let Some(checkpoint) = &item.checkpoint {
                 states.remove(&item.object_id);
                 self.import_checkpoint(item, checkpoint).await?;
@@ -646,7 +648,9 @@ impl Inner {
         self.flush(&mut pending, imported).await?;
         self.state.lock().imported_parts.extend(parts);
         // A new base can orphan held deltas, and a delta can arrive orphaned.
-        self.rebase_orphans(touched).await?;
+        self.rebase_orphans(touched)
+            .await
+            .context("rebase orphans")?;
         if immediate_notify {
             self.flush_object_notify();
         } else {
