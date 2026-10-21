@@ -190,7 +190,7 @@ fn a_channel_stamp_cannot_steal_existing_personal_or_foreign_objects() {
 }
 
 #[test]
-fn administrative_fields_control_types_and_channel_deletion_are_the_owners() {
+fn administrative_fields_and_channel_deletion_are_the_owners() {
     let _turn = ENGINE_TURN.lock();
     block_on(async {
         let g = Gate::new().await;
@@ -225,18 +225,6 @@ fn administrative_fields_control_types_and_channel_deletion_are_the_owners() {
                 "delete {key}"
             );
         }
-        for type_key in ["machine", "agent", "program", "typescript", "skill", "peer"] {
-            let mut control = g.doc.clone();
-            control["typeKey"] = json!(type_key);
-            assert!(
-                !g.permits(&g.edit, Some(&control), &g.member()).await,
-                "member edits {type_key}"
-            );
-            assert!(
-                g.permits(&g.edit, Some(&control), &g.owner()).await,
-                "owner edits {type_key}"
-            );
-        }
         let delete_space =
             g.w.change(SPACE_ID, json!([{"objectDelete": {}}]), &[], None)
                 .await;
@@ -256,6 +244,78 @@ fn administrative_fields_control_types_and_channel_deletion_are_the_owners() {
             )
             .await;
         assert!(!g.permits(&ledger, None, &g.owner()).await);
+    });
+}
+
+/// Agents, skills, programs and computers are a space's objects like any
+/// other: a writer creates them, edits them and talks on them; who serves
+/// them stays the owner's, and a viewer still writes nothing.
+#[test]
+fn writers_change_agents_skills_programs_and_computers_like_any_object() {
+    let _turn = ENGINE_TURN.lock();
+    block_on(async {
+        let g = Gate::new().await;
+        let chat =
+            g.w.change(
+                "doc",
+                json!([
+                    {"blockAdd": {"block": {"id": "__discussion__", "childrenIds": [], "content": {"custom": {"contentType": "discussion", "meta": []}}}, "targetId": "", "position": 0}},
+                    {"blockAdd": {"block": {"id": "message", "childrenIds": [], "content": {"text": {"text": "hello", "style": 0}}}, "targetId": "__discussion__", "position": 0}},
+                ]),
+                &[],
+                None,
+            )
+            .await;
+        let serve =
+            g.w.change(
+                "doc",
+                json!([{"fieldSet": {"key": "served_by", "value": {"stringValue": "machine"}}}]),
+                &[],
+                None,
+            )
+            .await;
+        let mut viewer = g.trusted.clone();
+        replace_string(&mut viewer["fields"]["members"], "writer", "viewer");
+        for type_key in ["machine", "agent", "program", "typescript", "skill", "peer"] {
+            let mut control = g.doc.clone();
+            control["typeKey"] = json!(type_key);
+            let create =
+                g.w.change(
+                    "fresh",
+                    json!([
+                        {"objectCreate": {"typeKey": type_key}},
+                        {"fieldSet": {"key": "channel", "value": {"stringValue": SPACE_ID}}},
+                    ]),
+                    &[],
+                    None,
+                )
+                .await;
+            assert!(
+                g.permits(&create, None, &g.member()).await,
+                "member creates {type_key}"
+            );
+            assert!(
+                g.permits(&g.edit, Some(&control), &g.member()).await,
+                "member edits {type_key}"
+            );
+            assert!(
+                g.permits(&chat, Some(&control), &g.member()).await,
+                "member writes on {type_key}"
+            );
+            assert!(
+                !g.permits(&serve, Some(&control), &g.member()).await,
+                "member moves {type_key}"
+            );
+            assert!(
+                g.permits(&serve, Some(&control), &g.owner()).await,
+                "owner moves {type_key}"
+            );
+            assert!(
+                !g.permits_with(&chat, Some(&control), &g.member(), &viewer)
+                    .await,
+                "viewer writes on {type_key}"
+            );
+        }
     });
 }
 
