@@ -447,3 +447,280 @@ fn lite_member() {
         backend.stop();
     });
 }
+
+/// A type's page on a lite replica: each space's own type object, listing
+/// that space's objects of the type (`--ignored`, like [`lite_end_to_end`]).
+/// Two spaces each hold agents; Matcherino (the reader's own) also holds a
+/// pinned "All Agents" query over the agent type. Viv is first the reader's
+/// own space, then a space another identity owns and shared with the
+/// reader. The sidebar of Viv opens Viv's agent type, and the type page
+/// lists Viv's agents once the space is downloaded - on the reader's full
+/// replica and on a fresh lite one.
+#[test]
+#[ignore]
+fn lite_type_pages() {
+    let local = std::env::var("LITE_RELAY").ok();
+    let test_relay = local.is_none().then(TestRelay::start);
+    let url = local.unwrap_or_else(|| test_relay.as_ref().unwrap().url.clone());
+    let root = tempfile::tempdir().unwrap();
+    let dir = |name: &str| root.path().join(name).display().to_string();
+    for shared in [false, true] {
+        let reader = Keys::generate();
+        let tag = if shared { "shared" } else { "own" };
+        let mut expect = Vec::new();
+        let mut viv = "Viv";
+        if shared {
+            let owner = Keys::generate();
+            let written = child_result(spawn_child(
+                "lite_types_writer",
+                &[
+                    ("LITE_RELAY_URL", url.clone()),
+                    ("LITE_KEY", owner.secret_hex()),
+                    ("LITE_DIR", dir(&format!("{tag}-owner"))),
+                    ("LITE_SPACES", "Viv".into()),
+                    ("LITE_MEMBER", reader.npub()),
+                ],
+            ));
+            println!("owner of Viv (full): {written}");
+            expect.extend(written["spaces"].as_array().unwrap().iter().cloned());
+            viv = "";
+        }
+        let written = child_result(spawn_child(
+            "lite_types_writer",
+            &[
+                ("LITE_RELAY_URL", url.clone()),
+                ("LITE_KEY", reader.secret_hex()),
+                ("LITE_DIR", dir(&format!("{tag}-writer"))),
+                ("LITE_SPACES", [viv, "Matcherino"].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join(",")),
+                ("LITE_QUERY", "Matcherino".into()),
+                ("LITE_JOINED", json!({ "spaces": expect }).to_string()),
+            ],
+        ));
+        println!("{tag}: reader (full): {written}");
+        expect.extend(written["spaces"].as_array().unwrap().iter().cloned());
+        let read = child_result(spawn_child(
+            "lite_types_reader",
+            &[
+                ("LITE_RELAY_URL", url.clone()),
+                ("LITE_KEY", reader.secret_hex()),
+                ("LITE_DIR", dir(&format!("{tag}-reader"))),
+                ("LITE_EXPECT", json!({ "spaces": expect }).to_string()),
+            ],
+        ));
+        println!("{tag}: reader (lite): {read}");
+    }
+}
+
+/// The type definitions the store's type list reads (`fetch_defs`).
+async fn type_defs(backend: &ReplicaBackend) -> Vec<roostr_core::types::QueryRow> {
+    let body = json!({
+        "filters": [{ "key": "typeKey", "condition": "in", "value": ["type", "relation"] }],
+        "limit": 10_000,
+    });
+    backend
+        .query(&body)
+        .await
+        .unwrap()
+        .records
+        .into_iter()
+        .filter(|r| r.type_key == "type")
+        .collect()
+}
+
+fn row_str<'a>(row: &'a roostr_core::types::QueryRow, key: &str) -> &'a str {
+    row.fields
+        .get(key)
+        .and_then(|v| v.string_value.as_deref())
+        .unwrap_or("")
+}
+
+/// The sidebar's agent type row of `space`: what its click opens.
+async fn agent_type_of(backend: &ReplicaBackend, space: &str) -> Option<String> {
+    type_defs(backend)
+        .await
+        .into_iter()
+        .find(|r| row_str(r, "key") == "agent" && row_str(r, "channel") == space)
+        .map(|r| r.id)
+}
+
+/// The agents the type page of `type_id` lists (`table_body`,
+/// `DataViewKind::Type`); none while the type is not there.
+async fn type_page_rows(backend: &ReplicaBackend, type_id: &str, space: &str) -> BTreeSet<String> {
+    let Ok(object) = backend.object(type_id).await else {
+        return BTreeSet::new();
+    };
+    let key = object.fields.get("key").and_then(|v| v.string_value.clone()).unwrap_or_default();
+    let filter = roostr_core::filters::space_filter_of(&object.fields, space);
+    let body = json!({ "type": key, "filters": [filter], "limit": 10_000 });
+    backend
+        .query(&body)
+        .await
+        .unwrap()
+        .records
+        .into_iter()
+        .map(|r| r.id)
+        .collect()
+}
+
+/// Check, on `backend`, that `space`'s agent type is the one its sidebar
+/// opens and that its page lists the space's own agents.
+async fn check_type_page(backend: &ReplicaBackend, space: &Value) -> Vec<Value> {
+    let id = space["id"].as_str().unwrap();
+    let agent_type = space["agent_type"].as_str().unwrap();
+    let defs: Vec<Value> = type_defs(backend)
+        .await
+        .iter()
+        .filter(|r| row_str(r, "key") == "agent")
+        .map(|r| json!({ "id": r.id, "channel": row_str(r, "channel"), "name": row_str(r, "name") }))
+        .collect();
+    assert_eq!(agent_type_of(backend, id).await.as_deref(), Some(agent_type), "{}: {defs:?}", space["name"]);
+    let opened = backend.object(agent_type).await.unwrap();
+    assert_eq!((opened.id.as_str(), opened.type_key.as_str()), (agent_type, "type"));
+    assert_eq!(opened.field_str("channel"), id);
+    let rows = type_page_rows(backend, agent_type, id).await;
+    assert_eq!(rows, strings(&space["agents"]).into_iter().collect(), "{}'s type page", space["name"]);
+    defs
+}
+
+/// A full replica writes `LITE_SPACES` (comma-separated names), each with
+/// two agents; `LITE_QUERY` also gets a pinned "All Agents" query and
+/// `LITE_MEMBER` is made a writer of every space. The spaces of
+/// `LITE_JOINED` (shared with this identity) must arrive and show their own
+/// agent type pages (child of [`lite_type_pages`]).
+#[test]
+#[ignore]
+fn lite_types_writer() {
+    if var("LITE_DIR").is_empty() {
+        return;
+    }
+    let dir = PathBuf::from(var("LITE_DIR"));
+    let relay = var("LITE_RELAY_URL");
+    let keys = Keys::parse(&var("LITE_KEY")).unwrap();
+    let member = var("LITE_MEMBER");
+    let query_in = var("LITE_QUERY");
+    let joined: Vec<Value> = serde_json::from_str::<Value>(&var("LITE_JOINED"))
+        .ok()
+        .and_then(|j| j["spaces"].as_array().cloned())
+        .unwrap_or_default();
+    logs();
+    block_on(async {
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = sqlite(&dir).await;
+        let backend = signed_in(&dir, store.clone(), &[&relay], &keys).await;
+        backend.start().await.unwrap();
+        assert!(eventually(WAIT, async || directory_built(&backend, "__directory__", None).await).await);
+        let mut spaces = Vec::new();
+        for name in var("LITE_SPACES").split(',') {
+            let id = mutate(&backend, "channel_create", json!({ "name": name })).await;
+            if !member.is_empty() {
+                mutate(
+                    &backend,
+                    "channel_member_add",
+                    json!({ "channel_id": id, "npub": member, "role": "writer" }),
+                )
+                .await;
+            }
+            let channel = json!({ "channel": { "stringValue": id } });
+            let mut agents = Vec::new();
+            for i in 0..2 {
+                agents.push(
+                    mutate(
+                        &backend,
+                        "create",
+                        json!({ "name": format!("{name} agent {i}"), "type_key": "agent", "fields": channel }),
+                    )
+                    .await,
+                );
+            }
+            let mut all_agents = String::new();
+            if name == query_in {
+                let mut fields = channel.clone();
+                fields["setOf"] = json!({ "valuesValue": { "items": [{ "stringValue": "agent" }] } });
+                fields["pin_order"] = json!({ "stringValue": "a0" });
+                all_agents = mutate(
+                    &backend,
+                    "create",
+                    json!({ "name": "All Agents", "type_key": "query", "fields": fields }),
+                )
+                .await;
+            }
+            let agent_type = agent_type_of(&backend, &id).await.expect("the space's agent type");
+            spaces.push(json!({
+                "id": id,
+                "name": name,
+                "agents": agents,
+                "agent_type": agent_type,
+                "all_agents": all_agents,
+            }));
+        }
+        for space in &spaces {
+            let dir_id = format!("__directory__:{}", space["id"].as_str().unwrap());
+            assert!(eventually(WAIT, async || directory_built(&backend, &dir_id, None).await).await);
+            check_type_page(&backend, space).await;
+        }
+        // Spaces shared with this identity arrive by invite.
+        let mut joined_defs = Vec::new();
+        for space in &joined {
+            let id = space["id"].as_str().unwrap();
+            let agents: BTreeSet<String> = strings(&space["agents"]).into_iter().collect();
+            let arrived = eventually(WAIT, async || {
+                backend.channels().await.unwrap().iter().any(|c| c.id == id)
+                    && agent_type_of(&backend, id).await.is_some()
+                    && type_page_rows(&backend, space["agent_type"].as_str().unwrap(), id).await == agents
+            })
+            .await;
+            assert!(arrived, "{} never arrived whole", space["name"]);
+            joined_defs.push(check_type_page(&backend, space).await);
+        }
+        backend.await_idle().await;
+        if !member.is_empty() {
+            // The member's invite is on the relay, the spaces' streams settled.
+            let member_hex = roostr_nostr::keys::npub_to_hex(&member).unwrap();
+            let invited = eventually(WAIT, async || {
+                let filter = Filter::new().kinds([kinds::GIFT_WRAP]).tag('p', [member_hex.clone()]);
+                query_many(&[Relay::new(relay.clone())], &[filter], Duration::from_secs(10))
+                    .await
+                    .is_ok_and(|wraps| !wraps.is_empty())
+            })
+            .await;
+            assert!(invited, "no invite for the member");
+            roostr_nostr::sleep(Duration::from_secs(3)).await;
+            backend.await_idle().await;
+        }
+        println!("RESULT {}", json!({ "spaces": spaces, "joined_agent_types": joined_defs }));
+        backend.stop();
+    });
+}
+
+/// A fresh lite replica of A (child of [`lite_type_pages`]).
+#[test]
+#[ignore]
+fn lite_types_reader() {
+    if var("LITE_DIR").is_empty() {
+        return;
+    }
+    let dir = PathBuf::from(var("LITE_DIR"));
+    let relay = var("LITE_RELAY_URL");
+    let keys = Keys::parse(&var("LITE_KEY")).unwrap();
+    let expect: Value = serde_json::from_str(&var("LITE_EXPECT")).unwrap();
+    logs();
+    block_on(async {
+        let (backend, _store) = lite_replica(&dir, &relay, &keys).await;
+        let lite = backend.lite().unwrap();
+        let checked = eventually(WAIT, async || backend.status().lite.is_some_and(|l| l.checked)).await;
+        assert!(checked, "the directories never arrived");
+        let mut out = Vec::new();
+        for name in ["Viv", "Matcherino"] {
+            let s = space(&expect, name);
+            let id = s["id"].as_str().unwrap().to_string();
+            // The sidebar lists the space's agent type once its directory is in.
+            let listed = eventually(WAIT, async || agent_type_of(&backend, &id).await.is_some()).await;
+            assert!(listed, "no agent type listed for {name}");
+            // Its page downloads the space (`ensure_space`), then lists its agents.
+            lite.load_space(&id).await.unwrap();
+            out.push(json!({ "space": name, "agent_types": check_type_page(&backend, s).await }));
+        }
+        println!("RESULT {}", json!({ "checked": out }));
+        backend.stop();
+    });
+}

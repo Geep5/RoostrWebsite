@@ -95,6 +95,12 @@ impl Route {
         }
     }
 
+    /// A page of a space's workspace (an object, a chat, the graph): not
+    /// the space home or a website page.
+    pub fn is_workspace_page(&self) -> bool {
+        matches!(self, Self::Object(_) | Self::Chat(_) | Self::Graph { .. })
+    }
+
     /// Whether the address bar's `url` already names this route: the same
     /// pathname, parsing to the same web path. Its query and any parameter
     /// [`Self::path`] drops stay, as the Svelte pages never rewrote their
@@ -336,11 +342,15 @@ impl Navigator {
     }
 
     /// Switch to `space`, restoring its saved tab strip (`tabs.use`). When it
-    /// has none, the strip starts at the space home.
+    /// has none, the strip starts at the space home. A workspace page opened
+    /// before any space was picked (a click in the sidebar the shell shows
+    /// meanwhile) stays open, in the restored strip's active tab.
     pub fn use_space(&mut self, space: &str, cx: &mut Context<Self>) {
         if self.space == space {
             return;
         }
+        let opened = (self.space.is_empty() && self.route().is_workspace_page())
+            .then(|| self.route().clone());
         self.save(cx);
         self.space = space.to_string();
         UiState::set(cx, ACTIVE_SPACE_KEY, &space);
@@ -362,6 +372,10 @@ impl Navigator {
         }
         self.active = saved.active.min(tabs.len() - 1);
         self.tabs = tabs;
+        if let Some(route) = opened {
+            self.tabs[self.active].route = route;
+            self.save(cx);
+        }
         self.push_history(self.route().clone());
         cx.emit(NavEvent::SpaceChanged);
         cx.emit(NavEvent::Navigated);

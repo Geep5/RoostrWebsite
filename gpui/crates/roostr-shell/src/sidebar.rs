@@ -708,11 +708,13 @@ impl Workspace {
                         t.name.clone()
                     };
                     let current = open_id == Some(t.id.as_str());
+                    let selector = format!("type:{}", t.id);
                     div()
                         .rounded(theme::radius::sm())
                         .when(current, |d| d.bg(theme::hover()))
                         .child(
                             item(crate::eid("type", &t.id), false)
+                                .debug_selector(move || selector)
                                 .child(obj_icon(&icon))
                                 .child(div().min_w_0().truncate().child(name))
                                 .when(t.builtin, |d| {

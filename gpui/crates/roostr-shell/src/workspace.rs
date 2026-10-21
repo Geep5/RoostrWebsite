@@ -435,6 +435,17 @@ impl Workspace {
         }
         let nav = Navigator::global(cx);
         let route = nav.read(cx).route().clone();
+        // While the shell waits for the remembered space, the sidebar shows
+        // the first space ([`Self::current_space`]): a page opened from it
+        // was opened in that space, so that space is the one picked - the
+        // remembered one arriving later must not swap its saved tabs in.
+        if nav.read(cx).space().is_empty()
+            && route.is_workspace_page()
+            && let Some(shown) = Self::current_space(cx)
+        {
+            nav.update(cx, |nav, cx| nav.use_space(&shown.id, cx));
+            return;
+        }
         // A page that exists already publishes its own pane on Navigated;
         // anything else starts without one.
         let publishes = matches!(route, Route::Object(_)) && self.page_cache.contains_key(&route);
