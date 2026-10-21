@@ -304,6 +304,23 @@ devices unseen for 30 days fold under "Older devices".
 `crates/roostr-replica/tests/devices.rs` runs two replicas of one key end to
 end.
 
+### Sync tracing
+
+When one browser misses what other devices see, switch on tracing in that
+tab's console and reload:
+
+```js
+localStorage.setItem("roostr.syncTrace", "1"); location.reload()
+```
+
+`[trace]` lines then show each relay subscription (its filters) and its
+up/down, every live event (id, kind, signer, `h` tags), what the engine made
+of it (change, base, a part still waiting, decrypt or replay failures),
+imports and authority refusals, each object replayed (changes, bases, heads,
+its latest chat message), each open chat's message count and latest message,
+and what this tab published. `localStorage.removeItem("roostr.syncTrace")`
+turns it off (`roostr_core::sync_trace`).
+
 ## iOS
 
 `crates/roostr-ios` is the iOS app; the sibling `RoostrIOS` repository is

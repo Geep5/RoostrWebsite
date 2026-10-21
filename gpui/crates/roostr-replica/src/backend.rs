@@ -363,6 +363,35 @@ fn heads(o: &Json) -> Vec<&str> {
         .collect()
 }
 
+/// Sync tracing: how many chat blocks a replayed state holds and its latest.
+fn trace_chat_summary(o: &Json) -> String {
+    let chats: Vec<&Json> = o["blocks"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|b| b["content"]["custom"]["contentType"] == "chat")
+        .collect();
+    let ts = |b: &Json| -> i64 {
+        let t = &b["content"]["custom"]["meta"]["ts"];
+        t.as_i64()
+            .or_else(|| t.as_str().and_then(|s| s.parse().ok()))
+            .unwrap_or(0)
+    };
+    match chats.iter().max_by_key(|b| ts(b)) {
+        None => "no chat".to_string(),
+        Some(last) => {
+            let meta = &last["content"]["custom"]["meta"];
+            format!(
+                "{} chat message(s), latest at {} ms by {}: {:?}",
+                chats.len(),
+                ts(last),
+                meta["author"].as_str().unwrap_or("?"),
+                roostr_core::sync_trace::head(meta["text"].as_str().unwrap_or(""), 60)
+            )
+        }
+    }
+}
+
 fn unavailable(error: &anyhow::Error) -> bool {
     matches!(
         error.downcast_ref::<StoreError>(),
@@ -812,11 +841,7 @@ impl Inner {
     fn seed_defaults(self: &Arc<Self>) {
         {
             let mut st = self.state.lock();
-            if st.seeded
-                || st.logging_out
-                || st.lite.is_some()
-                || self.session.lock().is_none()
-            {
+            if st.seeded || st.logging_out || st.lite.is_some() || self.session.lock().is_none() {
                 return;
             }
             st.seeded = true;
@@ -1288,6 +1313,7 @@ impl Inner {
             held.bases.iter().map(|b| b.hash.as_str()),
         );
         if held.changes.is_empty() && held.bases.is_empty() && held.checkpoint.is_none() {
+            roostr_core::sync_trace!("replay {id}: nothing held, dropped from view");
             let mut st = self.state.lock();
             if st.states.remove(id).is_some() {
                 st.query_removed.insert(id.to_string());
@@ -1296,12 +1322,32 @@ impl Inner {
             return Ok(None);
         }
         if self.state.lock().inputs.get(id) == Some(&input) {
+            roostr_core::sync_trace!("replay {id}: inputs unchanged, kept as is");
             return Ok(None);
         }
+        let counts = (
+            held.changes.len(),
+            held.bases.len(),
+            held.checkpoint.is_some(),
+        );
         let inputs = state_inputs(held.changes, held.bases, held.checkpoint, pending)?;
         let Some(state) = self.engine.replay_from_base(&inputs).await? else {
+            roostr_core::sync_trace!(
+                "replay {id}: engine produced NO state from {} change(s), {} base(s), checkpoint {}",
+                counts.0,
+                counts.1,
+                counts.2
+            );
             return Ok(None);
         };
+        roostr_core::sync_trace!(
+            "replay {id}: {} change(s), {} base(s), checkpoint {} -> {} head(s); {}",
+            counts.0,
+            counts.1,
+            counts.2,
+            heads(&state).len(),
+            trace_chat_summary(&state)
+        );
         let bytes = serde_json::to_vec(&state)?;
         let mut st = self.state.lock();
         let changed = st

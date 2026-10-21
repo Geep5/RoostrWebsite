@@ -20,7 +20,9 @@ use roostr_nostr::nip59::WRAP_LOOKBACK_S;
 use roostr_nostr::relay::{LiveItem, live, query_many};
 use roostr_nostr::{Event, Filter, kinds};
 
-use super::{BASE_HASH_BATCH, Inner, PAGE_TIMEOUT, WATCHDOG_PERIOD, now_s, short};
+use super::{
+    BASE_HASH_BATCH, Inner, PAGE_TIMEOUT, WATCHDOG_PERIOD, describe_event, now_s, short, short_id,
+};
 
 /// Remembered live event ids (relays deliver the same event each).
 const LIVE_SEEN_CAP: usize = 20_000;
@@ -84,10 +86,17 @@ impl Inner {
             handles.push(handle);
             let weak: Weak<Inner> = Arc::downgrade(self);
             let tx = self.live_tx.clone();
+            let trace_url = relay.url().to_string();
             let stream = live(relay.clone(), move || {
-                weak.upgrade()
+                let filters = weak
+                    .upgrade()
                     .map(|this| this.live_filters())
-                    .unwrap_or_default()
+                    .unwrap_or_default();
+                roostr_core::sync_trace!(
+                    "live subscribe {trace_url}: {}",
+                    serde_json::to_string(&filters).unwrap_or_default()
+                );
+                filters
             });
             let url = relay.url().to_string();
             let task = async move {
@@ -95,9 +104,15 @@ impl Inner {
                 while let Some(item) = stream.next().await {
                     let msg = match item {
                         LiveItem::Event(event) => LiveMsg::Event(event),
-                        LiveItem::Up { reconnected: true } => LiveMsg::Reconnected,
-                        LiveItem::Up { reconnected: false } => continue,
+                        LiveItem::Up { reconnected } => {
+                            roostr_core::sync_trace!("live {url}: up (reconnected: {reconnected})");
+                            if !reconnected {
+                                continue;
+                            }
+                            LiveMsg::Reconnected
+                        }
                         LiveItem::Down(error) => {
+                            roostr_core::sync_trace!("live {url}: down: {error}");
                             log::debug!("[sync] live {url}: {error}");
                             continue;
                         }
@@ -153,8 +168,13 @@ impl Inner {
                         st.live_seen.insert(event.id.clone())
                     };
                     if !fresh {
+                        roostr_core::sync_trace!(
+                            "live event {} again (already seen)",
+                            short_id(&event.id)
+                        );
                         continue;
                     }
+                    roostr_core::sync_trace!("live event {}", describe_event(&event, &self.pk));
                     if event.kind == kinds::GIFT_WRAP {
                         self.handle_wrap(&event).await;
                     } else if let Err(error) = self.handle_live_event(event).await {

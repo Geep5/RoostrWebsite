@@ -279,6 +279,36 @@ fn short(text: impl std::fmt::Display, max: usize) -> String {
     text.to_string().chars().take(max).collect()
 }
 
+/// An event id or pubkey shortened for trace lines.
+fn short_id(id: &str) -> &str {
+    roostr_core::sync_trace::head(id, 8)
+}
+
+/// One relay event for a trace line: id, kind, signer (`me` for this
+/// identity), its `h`/`c` tags and when it was signed (UTC).
+fn describe_event(event: &roostr_nostr::Event, me: &str) -> String {
+    let by = if event.pubkey == me {
+        "me"
+    } else {
+        short_id(&event.pubkey)
+    };
+    let hs: Vec<&str> = event.tag_values("h").collect();
+    let chunk = event
+        .tag("c")
+        .map(|c| format!(" c={}", short_id(c)))
+        .unwrap_or_default();
+    let s = event.created_at % 86_400;
+    format!(
+        "{} kind {} by {by} h=[{}]{chunk} signed {:02}:{:02}:{:02}Z",
+        short_id(&event.id),
+        event.kind,
+        hs.join(","),
+        s / 3600,
+        s / 60 % 60,
+        s % 60
+    )
+}
+
 /// Relay sync for one identity; cheap to clone.
 #[derive(Clone)]
 pub struct RelaySync {
@@ -650,6 +680,7 @@ impl Inner {
             st.pending_objects.drain().collect()
         };
         if !ids.is_empty() {
+            roostr_core::sync_trace!("objects changed, re-reading: {}", ids.join(", "));
             self.host.on_objects(ids);
         }
     }

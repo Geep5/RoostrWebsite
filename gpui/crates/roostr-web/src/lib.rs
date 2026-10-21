@@ -55,6 +55,19 @@ const UNPAIRED_FLAG: &str = "roostr-gpui.unpaired";
 pub fn run(base: String) -> Result<(), JsValue> {
     gpui_kit::platform::web_init();
     log::set_max_level(log::LevelFilter::Warn);
+    let tracing = web_sys::window()
+        .and_then(|w| w.local_storage().ok().flatten())
+        .and_then(|s| {
+            s.get_item(roostr_core::sync_trace::STORAGE_KEY)
+                .ok()
+                .flatten()
+        })
+        .is_some_and(|v| v == "1");
+    roostr_core::sync_trace::set_enabled(tracing);
+    roostr_core::sync_trace!(
+        "sync tracing on ({} = 1)",
+        roostr_core::sync_trace::STORAGE_KEY
+    );
 
     // Until the bundled color emoji font arrives (`load_emoji_font`), emoji
     // and any glyph the bundled fonts lack come from the browser's own fonts

@@ -243,6 +243,11 @@ impl Inner {
                 .collect::<Result<_, _>>()?;
             for event in &events {
                 publish_any(&self.relays, event, PUBLISH_TIMEOUT).await?;
+                roostr_core::sync_trace!(
+                    "published {} (outbox entry {})",
+                    super::describe_event(event, &self.pk),
+                    item.key
+                );
                 if events.len() > 1 {
                     roostr_nostr::sleep(PUBLISH_SPACING).await;
                 }

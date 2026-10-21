@@ -377,6 +377,9 @@ impl Inner {
             (st.stopped, st.history_complete, st.relay_reached)
         };
         if !stopped {
+            roostr_core::sync_trace!(
+                "history pass done (complete: {complete}, relay reachable: {reachable})"
+            );
             self.host.on_history_pass(complete, reachable);
         }
         Ok(complete)

@@ -316,6 +316,20 @@ impl Discussion {
         } else {
             chat_messages(&object, thread)
         };
+        roostr_core::sync_trace!(
+            "chat view {} thread {thread}: shows {} message(s){}",
+            self.object_id,
+            messages.len(),
+            messages
+                .last()
+                .map(|m| format!(
+                    ", latest at {} ms by {}: {:?}",
+                    m.ts,
+                    m.author,
+                    roostr_core::sync_trace::head(&m.text, 60)
+                ))
+                .unwrap_or_default()
+        );
         self.conversation = object
             .conversations
             .iter()

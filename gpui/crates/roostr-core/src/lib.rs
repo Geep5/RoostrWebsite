@@ -38,6 +38,7 @@ pub mod repeat;
 pub mod serving;
 pub mod store;
 pub mod sync_status;
+pub mod sync_trace;
 pub mod theme;
 pub mod types;
 pub mod ui;

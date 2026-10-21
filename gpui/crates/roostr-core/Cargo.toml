@@ -42,6 +42,7 @@ web-sys = { workspace = true, features = [
     "AbortSignal",
     "Blob",
     "BlobPropertyBag",
+    "console",
     "Document",
     "Element",
     "Event",

@@ -27,7 +27,7 @@ use roostr_nostr::{Event, kinds};
 use roostr_replica_store::{BaseRecord, ChangeRecord, CheckpointRecord, ImportBatch, ObjectInputs};
 use serde_json::Value;
 
-use super::{HeldRow, Inner, now_ms, short};
+use super::{HeldRow, Inner, describe_event, now_ms, short, short_id};
 
 /// One decrypted relay payload.
 pub(super) struct ImportItem {
@@ -115,6 +115,7 @@ impl Inner {
     pub(super) async fn ingest_event(&self, event: &Event) -> anyhow::Result<Option<ImportItem>> {
         self.state.lock().stats.events += 1;
         if !kinds::SPACE.contains(&event.kind) {
+            roostr_core::sync_trace!("ingest {}: not a sync kind, skipped", short_id(&event.id));
             return Ok(None);
         }
         self.ensure_session().await?;
@@ -169,6 +170,43 @@ impl Inner {
             let hs: Vec<&str> = event.tag_values("h").collect();
             format!("{}|{}|{gid}|{group_kind}", event.pubkey, hs.join(","))
         });
+        if roostr_core::sync_trace::enabled() {
+            let what = match &r.item {
+                None => "no payload yet (a part of a split base, or nothing to import)".to_string(),
+                Some(item) => match (&item.base, &item.checkpoint, &item.change) {
+                    (Some(base), _, _) => format!("base of {}", base.object_id),
+                    (_, Some(cp), _) => format!("checkpoint of {}", cp.object_id),
+                    (_, _, Some(change)) => {
+                        format!("change {} of {}", short_id(&change.id), change.object_id)
+                    }
+                    _ => "empty payload".to_string(),
+                },
+            };
+            roostr_core::sync_trace!(
+                "ingest {}: {what}{}{}{}{}",
+                describe_event(event, &self.pk),
+                if r.decrypt_failure {
+                    " | DECRYPT FAILED (no key for this stream?)"
+                } else {
+                    ""
+                },
+                if r.decode_failure {
+                    " | DECODE FAILED"
+                } else {
+                    ""
+                },
+                if r.fault_at.is_some() {
+                    " | REPLAY FAULT"
+                } else {
+                    ""
+                },
+                r.item
+                    .as_ref()
+                    .and_then(|i| i.provenance.as_ref())
+                    .map(|p| format!(" | shared space {} key {}", short_id(&p.space_id), p.key_id))
+                    .unwrap_or_default(),
+            );
+        }
         let Some(item) = r.item else {
             let record = {
                 let mut st = self.state.lock();
@@ -519,9 +557,29 @@ impl Inner {
                     .authorized(item, p, &mut pending, &mut states, imported)
                     .await?
             {
+                roostr_core::sync_trace!(
+                    "import REFUSED for {} (signer {}, space {}): the authority gate said no",
+                    item.object_id,
+                    short_id(&p.signer),
+                    short_id(&p.space_id)
+                );
                 self.state.lock().stats.refused += 1;
                 continue;
             }
+            roostr_core::sync_trace!(
+                "import {} for {}",
+                if item.base.is_some() {
+                    "base".to_string()
+                } else if item.checkpoint.is_some() {
+                    "checkpoint".to_string()
+                } else {
+                    format!(
+                        "change {}",
+                        item.change.as_ref().map_or("?", |c| short_id(&c.id))
+                    )
+                },
+                item.object_id
+            );
             if let Some(base) = &item.base {
                 states.remove(&item.object_id);
                 self.import_base(item, base).await?;
