@@ -306,7 +306,9 @@ impl Inner {
                 if pending.objects.contains(id) {
                     self.flush(pending, imported).await?;
                 }
-                let inputs = self.store.object_inputs(id.clone()).await?;
+                let inputs = self
+                    .without_covered(self.store.object_inputs(id.clone()).await?)
+                    .await?;
                 states.insert(
                     id.clone(),
                     Held {
@@ -464,7 +466,9 @@ impl Inner {
             if pending.is_none() {
                 pending = Some(self.store.pending_change_ids().await?);
             }
-            let input = self.store.object_inputs(object_id.clone()).await?;
+            let input = self
+                .without_covered(self.store.object_inputs(object_id.clone()).await?)
+                .await?;
             if input.bases.is_empty() {
                 continue;
             }
@@ -477,6 +481,13 @@ impl Inner {
                         "rebase of {object_id} refused: {}",
                         short(error, 120)
                     ));
+                    continue;
+                }
+                // Beyond this engine's request memory (the web engine's is
+                // bounded): another device rebases these orphans; the import
+                // that reached here is stored and must not count as failed.
+                Err(error @ (EngineError::Runtime(_) | EngineError::RequestTooLarge(_))) => {
+                    log::warn!("[sync] rebase of {object_id} skipped: {error}");
                     continue;
                 }
                 Err(error) => return Err(error.into()),

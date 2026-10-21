@@ -16,7 +16,7 @@ use std::time::Duration;
 use roostr_engine::{OutboxItem, OutboxPending};
 use roostr_nostr::relay::publish_any;
 use roostr_nostr::{Event, EventTemplate, kinds};
-use roostr_replica_store::PendingPublish;
+use roostr_replica_store::{BaseRecord, ObjectInputs, PendingPublish};
 
 use super::{Inner, PUBLISH_SPACING, PUBLISH_TIMEOUT, now_ms, now_s, short};
 
@@ -178,8 +178,7 @@ impl Inner {
         Ok(())
     }
 
-    /// The object's current base covers `change_id`. Covered ids are cached
-    /// per base hash: a space's whole history is checked against few bases.
+    /// The object's current base covers `change_id`.
     pub(super) async fn base_covers(
         &self,
         object_id: &str,
@@ -196,22 +195,68 @@ impl Inner {
                 let Some(record) = bases.iter().find(|b| b.hash == base.hash) else {
                     return Ok(false);
                 };
-                let ids: HashSet<String> = self
-                    .engine
-                    .base_decode(&record.bytes)
-                    .await?
-                    .covered_ids
-                    .into_iter()
-                    .collect();
-                let ids = Arc::new(ids);
-                self.state
-                    .lock()
-                    .base_covered
-                    .insert(base.hash.clone(), ids.clone());
-                ids
+                self.base_covered_ids(record).await?
             }
         };
         Ok(covered.contains(change_id))
+    }
+
+    /// The change ids `base` covers, cached per base hash: a space's whole
+    /// history is checked against few bases.
+    pub(super) async fn base_covered_ids(
+        &self,
+        base: &BaseRecord,
+    ) -> anyhow::Result<Arc<HashSet<String>>> {
+        if let Some(ids) = self.state.lock().base_covered.get(&base.hash).cloned() {
+            return Ok(ids);
+        }
+        let ids: HashSet<String> = self
+            .engine
+            .base_decode(&base.bytes)
+            .await?
+            .covered_ids
+            .into_iter()
+            .collect();
+        let ids = Arc::new(ids);
+        self.state
+            .lock()
+            .base_covered
+            .insert(base.hash.clone(), ids.clone());
+        Ok(ids)
+    }
+
+    /// `input` without the changes its current base's chain covers. The
+    /// engine skips those anyway, but a browser keeps an object's whole
+    /// history: a long-lived transcript or run log sent whole outgrows the
+    /// web engine's request memory ("core request memory limit exceeded").
+    /// The chain is followed as the engine does (`prev_base`, one epoch
+    /// down), so what the engine classifies is unchanged.
+    pub(super) async fn without_covered(
+        &self,
+        mut input: ObjectInputs,
+    ) -> anyhow::Result<ObjectInputs> {
+        let Some(current) = input
+            .bases
+            .iter()
+            .reduce(|best, base| if base.outranks(best) { base } else { best })
+        else {
+            return Ok(input);
+        };
+        let mut covered: HashSet<String> = HashSet::new();
+        let mut link = Some(current);
+        while let Some(base) = link {
+            covered.extend(self.base_covered_ids(base).await?.iter().cloned());
+            link = if base.epoch > 1 {
+                input
+                    .bases
+                    .iter()
+                    .find(|prev| prev.hash == base.prev_base && prev.epoch == base.epoch - 1)
+            } else {
+                None
+            };
+        }
+        input.changes.retain(|change| !covered.contains(&change.id));
+        Ok(input)
     }
 
     /// A walk completed: drop the obligations the relays already hold, then
