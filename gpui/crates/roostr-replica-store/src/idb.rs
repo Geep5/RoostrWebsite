@@ -909,6 +909,38 @@ impl ChangeStore for IdbChangeStore {
         })
     }
 
+    fn import(&self, batch: ImportBatch) -> StoreFuture<'_, usize> {
+        let this = self.clone();
+        guarded("write", async move {
+            if batch.is_empty() {
+                return Ok(0);
+            }
+            let tx = this.write(&[CHANGES, META, RELAY_EVENTS])?;
+            let added = if batch.changes.is_empty() {
+                0
+            } else {
+                Self::insert_changes(&os(&tx, CHANGES)?, &batch.changes).await?
+            };
+            let meta = os(&tx, META)?;
+            for key in &batch.published {
+                meta.put_with_key(&"1".into(), &format!("{}{key}", keys::PUBLISHED).into())
+                    .map_err(js_error)?;
+                meta.delete(&format!("{}{key}", keys::PENDING).into())
+                    .map_err(js_error)?;
+            }
+            hold(
+                &os(&tx, RELAY_EVENTS)?,
+                batch
+                    .held
+                    .iter()
+                    .map(|(scope, event)| (scope.as_str(), event)),
+            )
+            .await?;
+            done(&tx).await?;
+            Ok(added)
+        })
+    }
+
     fn add_local_change(
         &self,
         record: ChangeRecord,
@@ -957,6 +989,58 @@ impl ChangeStore for IdbChangeStore {
         let this = self.clone();
         guarded("read", async move {
             Self::changes_in(&os(&this.read(&[CHANGES])?, CHANGES)?, &object_id).await
+        })
+    }
+
+    fn unpublished_changes(
+        &self,
+        object_ids: Vec<String>,
+        key_prefix: String,
+    ) -> StoreFuture<'_, Vec<ChangeRecord>> {
+        let this = self.clone();
+        guarded("read", async move {
+            let tx = this.read(&[CHANGES, META])?;
+            let changes = os(&tx, CHANGES)?;
+            let meta = os(&tx, META)?;
+            let by_seq = changes.index("objectSeq").map_err(js_error)?;
+            // The objects' change ids, then their publication marks, then the
+            // rows of the unmarked ones: a few round trips, never one per change.
+            let mut ids = Vec::new();
+            for chunk in object_ids.chunks(CHUNK as usize) {
+                let ranges = chunk
+                    .iter()
+                    .map(|id| prefix(id))
+                    .collect::<Result<Vec<_>, _>>()?;
+                for keys in all(ranges
+                    .iter()
+                    .map(|range| by_seq.get_all_keys_with_key(range)))
+                .await?
+                {
+                    ids.extend(array(keys).iter().filter_map(JsValue::as_string));
+                }
+            }
+            let mut owed = Vec::new();
+            for chunk in ids.chunks(CHUNK as usize) {
+                let marks = all(chunk.iter().map(|id| {
+                    meta.get_key(&format!("{}{key_prefix}{id}", keys::PUBLISHED).into())
+                }))
+                .await?;
+                owed.extend(
+                    chunk
+                        .iter()
+                        .zip(marks)
+                        .filter(|(_, mark)| mark.is_undefined())
+                        .map(|(id, _)| id.clone()),
+                );
+            }
+            let mut out = Vec::with_capacity(owed.len());
+            for chunk in owed.chunks(CHUNK as usize) {
+                let rows = all(chunk.iter().map(|id| changes.get(&id.as_str().into()))).await?;
+                for (id, row) in chunk.iter().zip(rows) {
+                    out.push(change_from(id.clone(), &row)?);
+                }
+            }
+            Ok(out)
         })
     }
 
@@ -1427,24 +1511,11 @@ impl ChangeStore for IdbChangeStore {
                 return Ok(());
             }
             let tx = this.write(&[RELAY_EVENTS])?;
-            let store = os(&tx, RELAY_EVENTS)?;
-            let held = all(events
-                .iter()
-                .map(|event| store.get_key(&key2(scope.as_str(), event.id.as_str()))))
+            hold(
+                &os(&tx, RELAY_EVENTS)?,
+                events.iter().map(|event| (scope.as_str(), event)),
+            )
             .await?;
-            for (event, held) in events.into_iter().zip(held) {
-                if !held.is_undefined() {
-                    continue;
-                }
-                let value = object(&[
-                    ("scope", scope.as_str().into()),
-                    ("id", event.id.as_str().into()),
-                    ("createdAt", (event.created_at as f64).into()),
-                    ("kind", event.kind.into()),
-                    ("b", opt(&event.b)),
-                ]);
-                store.put(&value).map_err(js_error)?;
-            }
             done(&tx).await
         })
     }
@@ -1638,6 +1709,36 @@ impl ChangeStore for IdbChangeStore {
 async fn mark(changes: &IdbObjectStore, id: &str) -> Result<(), StoreError> {
     let row = req(changes.get(&id.into())).await?;
     mark_row(changes, id, row)
+}
+
+/// Puts each `(scope, event)` not already held (inside the caller's
+/// transaction): every lookup issued before any is awaited.
+async fn hold<'a>(
+    store: &IdbObjectStore,
+    rows: impl Iterator<Item = (&'a str, &'a HeldEvent)>,
+) -> Result<(), StoreError> {
+    let rows: Vec<(&str, &HeldEvent)> = rows.collect();
+    if rows.is_empty() {
+        return Ok(());
+    }
+    let held = all(rows
+        .iter()
+        .map(|(scope, event)| store.get_key(&key2(*scope, event.id.as_str()))))
+    .await?;
+    for ((scope, event), held) in rows.into_iter().zip(held) {
+        if !held.is_undefined() {
+            continue;
+        }
+        let value = object(&[
+            ("scope", scope.into()),
+            ("id", event.id.as_str().into()),
+            ("createdAt", (event.created_at as f64).into()),
+            ("kind", event.kind.into()),
+            ("b", opt(&event.b)),
+        ]);
+        store.put(&value).map_err(js_error)?;
+    }
+    Ok(())
 }
 
 /// Writes `row` (change `id` as read, if held) back marked rebased.

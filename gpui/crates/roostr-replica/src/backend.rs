@@ -41,6 +41,17 @@ pub const PROFILE: &str = "roostr-profile";
 /// Persisted replays are valid only for the engine that computed them; the
 /// suffix versions this host's row encoding (Backend.swift `replayCacheVersion`).
 const REPLAY_ROW_VERSION: &str = "rust/1";
+/// How long a full pass replays objects no memo row serves before the
+/// first read returns; the rest are prepared in the background.
+const PREPARE_INLINE_MS: i64 = 1_000;
+/// One background preparation step: the page renders between steps.
+const PREPARE_STEP_MS: i64 = 50;
+/// A preparation step the store failed is retried after this.
+const PREPARE_RETRY: std::time::Duration = std::time::Duration::from_secs(5);
+/// Preparation statuses: at most four a second.
+const PREPARE_EMIT_MS: i64 = 250;
+/// Memo rows the preparation writes at a time: what a reload mid-way loses at most.
+const MEMO_ROWS_PER_WRITE: usize = 50;
 
 /// Everything a replica runs on: built by [`ReplicaBackend::open_native`] /
 /// [`ReplicaBackend::open_browser`], or by hand in tests.
@@ -104,6 +115,22 @@ struct State {
     logging_out: bool,
     mutations: usize,
     shared_refreshes: usize,
+    /// Objects awaiting their first replay this session, the next last
+    /// ([`Inner::ensure`]); those already replayed are skipped.
+    backlog: Vec<String>,
+    /// The backlog's objects not replayed yet.
+    waiting: HashSet<String>,
+    /// How many objects the preparation in flight started with.
+    preparing_total: u64,
+    /// Bumped by every full pass: an older pass's background preparation stops.
+    prepare_generation: u64,
+    /// The pass a background preparation runs for.
+    preparing_driver: Option<u64>,
+    last_prepare_emit: i64,
+    /// Replay memo rows not written yet.
+    memo: Vec<CachedReplay>,
+    /// `bootstrapped` as sync last reported it; shown once prepared.
+    sync_bootstrapped: bool,
 }
 
 struct Inner {
@@ -526,7 +553,10 @@ impl Inner {
         if let Some(session) = self.session.lock().take() {
             session.sync.stop();
         }
-        self.state.lock().seeded = false;
+        // The next start prepares again from what the memo then holds.
+        let mut st = self.state.lock();
+        st.seeded = false;
+        st.prepare_generation += 1;
     }
 
     /// Relays changed: the running sync moves to the new list.
@@ -556,10 +586,15 @@ impl Inner {
         }
         let this = self.clone();
         rt::spawn(async move {
-            if let Err(error) = this
-                .mutate_inner("bootstrap_space_defaults", JsonMap::new(), false)
-                .await
-            {
+            // Converging reads every space: none may be still unprepared.
+            let result = match this.ensure_complete().await {
+                Ok(()) => {
+                    this.mutate_inner("bootstrap_space_defaults", JsonMap::new(), false)
+                        .await
+                }
+                Err(error) => Err(error),
+            };
+            if let Err(error) = result {
                 log::warn!("[replica] bootstrap_space_defaults failed: {error:#}");
             }
         });
@@ -593,6 +628,8 @@ impl Inner {
                 all_dirty: true,
                 logging_out: true,
                 status,
+                // A preparation still running for the old vault stops.
+                prepare_generation: st.prepare_generation + 1,
                 ..State::default()
             };
             Ok(())
@@ -606,6 +643,15 @@ impl Inner {
 
     /// Recompute dirty states: a read waits for the pass already running and
     /// runs at most one more, covering everything dirtied before it was made.
+    ///
+    /// Objects with no state this session that no memo row serves (the
+    /// first open after an import or an engine update: the whole vault) are
+    /// the backlog. A full pass replays it for [`PREPARE_INLINE_MS`] at most
+    /// and leaves the rest to [`Inner::start_preparing`], so the workspace
+    /// opens while the vault is still being prepared: reads see the objects
+    /// prepared so far, what is asked for by id goes first
+    /// ([`Inner::ensure_ids`]), and the status shows the count and withholds
+    /// `bootstrapped` until [`BackendEvent::Prepared`].
     async fn ensure(self: &Arc<Self>) -> Result<()> {
         let _pass = self.ensure_lock.lock().await;
         let needed = {
@@ -618,21 +664,70 @@ impl Inner {
         Ok(())
     }
 
+    /// [`Inner::ensure`] and the whole backlog: for answers about every
+    /// object (the sync digest, serving, reminders, the catalog seeding).
+    async fn ensure_complete(self: &Arc<Self>) -> Result<()> {
+        loop {
+            if self.session().is_none() {
+                // Stopped (a logout, the tab going away): keep what is prepared.
+                self.save_memo(true).await;
+                bail!("the replica stopped");
+            }
+            self.ensure().await?;
+            let more = {
+                let _pass = self.ensure_lock.lock().await;
+                self.prepare(PREPARE_STEP_MS, None).await?
+            };
+            self.save_memo(!more).await;
+            if !more {
+                return Ok(());
+            }
+            // The page renders between steps.
+            roostr_nostr::sleep(std::time::Duration::ZERO).await;
+        }
+    }
+
+    /// [`Inner::ensure`], then those of `ids` still in the backlog, now.
+    async fn ensure_ids(self: &Arc<Self>, ids: &[String]) -> Result<()> {
+        self.ensure().await?;
+        let wanted: Vec<String> = {
+            let st = self.state.lock();
+            ids.iter()
+                .filter(|id| st.waiting.contains(*id))
+                .cloned()
+                .collect()
+        };
+        if wanted.is_empty() {
+            return Ok(());
+        }
+        {
+            let _pass = self.ensure_lock.lock().await;
+            self.prepare(i64::MAX, Some(&wanted)).await?;
+        }
+        self.save_memo(true).await;
+        Ok(())
+    }
+
     async fn rebuild_states(self: &Arc<Self>) -> Result<()> {
         let rebuilt = std::mem::take(&mut self.state.lock().all_dirty);
-        let ids: Vec<String> = if rebuilt {
+        if rebuilt {
             self.state.lock().dirty.clear();
-            match self.restore_cached_states().await {
+            let misses = match self.restore_cached_states().await {
                 Ok(ids) => ids,
                 Err(error) => {
                     self.state.lock().all_dirty = true;
                     return Err(error);
                 }
-            }
-        } else {
-            self.state.lock().dirty.drain().collect()
-        };
-        let mut fresh = Vec::new();
+            };
+            let mut st = self.state.lock();
+            st.prepare_generation += 1;
+            st.waiting = misses.iter().cloned().collect();
+            st.preparing_total = misses.len() as u64;
+            st.backlog = misses;
+            st.backlog.reverse();
+            st.vanished.clear();
+        }
+        let ids: Vec<String> = self.state.lock().dirty.drain().collect();
         if !ids.is_empty() {
             let pending = match self.store.pending_change_ids().await {
                 Ok(pending) => pending,
@@ -643,7 +738,7 @@ impl Inner {
             };
             for (index, id) in ids.iter().enumerate() {
                 match self.replay_one(id, &pending).await {
-                    Ok(Some(row)) => fresh.push(row),
+                    Ok(Some(row)) => self.state.lock().memo.push(row),
                     Ok(None) => {}
                     Err(error) if unavailable(&error) => {
                         // An interrupted pass must run again, or objects it
@@ -654,15 +749,24 @@ impl Inner {
                     // One malformed legacy object must never brick the vault.
                     Err(error) => log::warn!("[replica] replay failed for {id}: {error:#}"),
                 }
+                self.state.lock().waiting.remove(id);
             }
         }
-        if !fresh.is_empty() {
-            let version = self.replay_version();
-            if let Err(error) = self.store.put_cached_replays(fresh, version).await {
-                log::debug!("[replica] replay memo not written: {error}");
+        if rebuilt {
+            // The vanish ledger and the spaces come first (see
+            // `restore_cached_states`): the sweep below reads the ledger.
+            if let Err(error) = self.prepare(PREPARE_INLINE_MS, None).await {
+                self.state.lock().all_dirty = true;
+                return Err(error);
             }
         }
-        self.enforce_vanished(rebuilt, &ids).await
+        self.save_memo(true).await;
+        self.enforce_vanished(rebuilt, &ids).await?;
+        if rebuilt && !self.state.lock().waiting.is_empty() {
+            self.emit_status(true);
+            self.start_preparing();
+        }
+        Ok(())
     }
 
     fn requeue(&self, rebuilt: bool, ids: &[String]) {
@@ -673,12 +777,182 @@ impl Inner {
         st.dirty.extend(ids.iter().cloned());
     }
 
+    /// Replays backlog objects - `only` those, else the next ones - until
+    /// `budget_ms` passed (one at least); whether any are left. Each lands
+    /// in the view as it is replayed. Caller holds `ensure_lock`.
+    async fn prepare(self: &Arc<Self>, budget_ms: i64, only: Option<&[String]>) -> Result<bool> {
+        let started = now_ms();
+        let mut only = only.map(|ids| ids.iter());
+        let mut pending: Option<HashSet<String>> = None;
+        loop {
+            let next = {
+                let mut st = self.state.lock();
+                loop {
+                    let id = match only.as_mut() {
+                        Some(ids) => ids.next().cloned(),
+                        None => st.backlog.pop(),
+                    };
+                    match id {
+                        Some(id) if !st.waiting.contains(&id) => continue,
+                        id => break id,
+                    }
+                }
+            };
+            let Some(id) = next else {
+                break;
+            };
+            if pending.is_none() {
+                pending = Some(self.store.pending_change_ids().await?);
+            }
+            match self
+                .replay_one(&id, pending.as_ref().expect("read above"))
+                .await
+            {
+                Ok(Some(row)) => self.state.lock().memo.push(row),
+                Ok(None) => {}
+                Err(error) if unavailable(&error) => {
+                    // Still waiting: the next step starts with it.
+                    self.state.lock().backlog.push(id);
+                    return Err(error);
+                }
+                Err(error) => log::warn!("[replica] replay failed for {id}: {error:#}"),
+            }
+            self.state.lock().waiting.remove(&id);
+            // The ledger sweeps every state prepared so far; anything else
+            // is checked against it (no refresh: the pass's own follows).
+            if id == VANISH_LOG_ID {
+                self.enforce_vanished(true, &[]).await?;
+            } else {
+                self.enforce_vanished(false, std::slice::from_ref(&id))
+                    .await?;
+            }
+            let touched = [id];
+            self.notify(&touched);
+            if now_ms() - started >= budget_ms {
+                break;
+            }
+        }
+        Ok(!self.state.lock().waiting.is_empty())
+    }
+
+    /// The rest of the backlog in the background, a step at a time with the
+    /// page rendering in between and the memo written as it goes (a reload
+    /// resumes where this left off); then reads see the whole vault again.
+    fn start_preparing(self: &Arc<Self>) {
+        let generation = {
+            let mut st = self.state.lock();
+            if st.preparing_driver == Some(st.prepare_generation) {
+                return;
+            }
+            st.preparing_driver = Some(st.prepare_generation);
+            st.prepare_generation
+        };
+        let this = self.clone();
+        let driver: BoxFuture<()> = Box::pin(async move {
+            let current = || {
+                let st = this.state.lock();
+                st.prepare_generation == generation && !st.logging_out
+            };
+            let mut wait = std::time::Duration::ZERO;
+            while current() {
+                roostr_nostr::sleep(wait).await;
+                let step = {
+                    let _pass = this.ensure_lock.lock().await;
+                    if !current() {
+                        break;
+                    }
+                    this.prepare(PREPARE_STEP_MS, None).await
+                };
+                match step {
+                    Ok(true) => {
+                        wait = std::time::Duration::ZERO;
+                        this.save_memo(false).await;
+                        this.emit_status(false);
+                    }
+                    Ok(false) => break,
+                    Err(error) => {
+                        log::warn!("[replica] preparing paused: {error:#}");
+                        wait = PREPARE_RETRY;
+                    }
+                }
+            }
+            this.save_memo(true).await;
+            let finished = {
+                let mut st = this.state.lock();
+                if st.preparing_driver == Some(generation) {
+                    st.preparing_driver = None;
+                }
+                let finished = st.prepare_generation == generation && st.waiting.is_empty();
+                if finished {
+                    st.preparing_total = 0;
+                }
+                finished
+            };
+            if finished {
+                this.emit_status(true);
+                this.emit(BackendEvent::Prepared);
+                // Shared spaces read every object of theirs.
+                this.spawn_refresh();
+            }
+        });
+        rt::spawn(driver);
+    }
+
+    /// Writes the memo rows replayed since the last write: once enough
+    /// piled up, or all of them when `all`.
+    async fn save_memo(&self, all: bool) {
+        let rows = {
+            let mut st = self.state.lock();
+            if st.memo.is_empty() || (!all && st.memo.len() < MEMO_ROWS_PER_WRITE) {
+                return;
+            }
+            std::mem::take(&mut st.memo)
+        };
+        if let Err(error) = self
+            .store
+            .put_cached_replays(rows, self.replay_version())
+            .await
+        {
+            log::debug!("[replica] replay memo not written: {error}");
+        }
+    }
+
+    /// `(prepared, total)` of the preparation in flight.
+    fn preparing(st: &State) -> Option<(u64, u64)> {
+        (st.preparing_total > 0 && !st.waiting.is_empty()).then(|| {
+            let left = st.waiting.len() as u64;
+            (st.preparing_total.saturating_sub(left), st.preparing_total)
+        })
+    }
+
+    /// Re-sends the status with the preparation folded in: at most every
+    /// [`PREPARE_EMIT_MS`] unless `now`.
+    fn emit_status(&self, now: bool) {
+        let next = {
+            let mut st = self.state.lock();
+            let at = now_ms();
+            if !now && at - st.last_prepare_emit < PREPARE_EMIT_MS {
+                return;
+            }
+            st.last_prepare_emit = at;
+            let preparing = Self::preparing(&st);
+            st.status.preparing = preparing;
+            st.status.bootstrapped = st.sync_bootstrapped && preparing.is_none();
+            st.status.clone()
+        };
+        self.emit(BackendEvent::Status(next));
+    }
+
     fn replay_version(&self) -> String {
         format!("{}/{REPLAY_ROW_VERSION}", self.engine.source_fingerprint())
     }
 
     /// Every persisted replay whose input is exactly what the store holds now
-    /// under this engine; returns the ids that still need a replay.
+    /// under this engine; returns the ids that still need a replay, in the
+    /// order they are prepared: the vanish ledger and the keyring's spaces
+    /// (the sweep and the shared refresh read them), then the objects with
+    /// the fewest changes - spaces, types and properties before long pages,
+    /// and the most objects in view soonest.
     async fn restore_cached_states(&self) -> Result<Vec<String>> {
         let inputs = self.store.replay_inputs().await?;
         let wanted: Vec<String> = {
@@ -721,6 +995,22 @@ impl Inner {
                 None => misses.push(id),
             }
         }
+        drop(st);
+        let first: HashSet<String> = self
+            .keyring
+            .all()
+            .map(|keys| keys.into_keys().collect())
+            .unwrap_or_default();
+        misses.sort_by_cached_key(|id| {
+            let rank = if id == VANISH_LOG_ID {
+                0
+            } else if first.contains(id) {
+                1
+            } else {
+                2
+            };
+            (rank, inputs[id].change_count, id.clone())
+        });
         Ok(misses)
     }
 
@@ -771,10 +1061,13 @@ impl Inner {
         }))
     }
 
-    /// The ledger wins over whatever replayed (backend.ts `enforceVanished`).
-    async fn enforce_vanished(self: &Arc<Self>, rebuilt: bool, touched: &[String]) -> Result<()> {
+    /// The ledger wins over whatever replayed (backend.ts `enforceVanished`):
+    /// every state when `all` (or the ledger is among `touched`), else
+    /// `touched`. A full pass starts its vanished set afresh
+    /// (`rebuild_states`); objects it prepares later add to it.
+    async fn enforce_vanished(self: &Arc<Self>, all: bool, touched: &[String]) -> Result<()> {
         let ledger_changed = touched.iter().any(|id| id == VANISH_LOG_ID);
-        let sweep = rebuilt || ledger_changed;
+        let sweep = all || ledger_changed;
         let (ledger, candidates) = {
             let st = self.state.lock();
             if !sweep && st.vanished.is_empty() {
@@ -798,9 +1091,6 @@ impl Inner {
         let entries = self.engine.vanished(ledger.as_deref(), &candidates).await?;
         {
             let mut st = self.state.lock();
-            if rebuilt {
-                st.vanished.clear();
-            }
             for entry in entries {
                 if st.states.remove(&entry.object_id).is_some() {
                     st.query_removed.insert(entry.object_id.clone());
@@ -809,7 +1099,7 @@ impl Inner {
                 st.vanished.insert(entry.object_id);
             }
         }
-        if ledger_changed && !rebuilt {
+        if ledger_changed && !all {
             self.spawn_refresh();
         }
         Ok(())
@@ -849,9 +1139,13 @@ impl Inner {
     }
 
     async fn refresh_shared_inner(self: &Arc<Self>, session: &Session) -> Result<()> {
-        self.ensure().await?;
         let my_pk = session.keys.pubkey().to_string();
         let keys = self.keyring.all().map_err(|e| anyhow!("{e}"))?;
+        // The spaces' states and the ledger, prepared first if still waiting;
+        // a preparation in flight refreshes again once it has every object.
+        let mut ids: Vec<String> = keys.keys().cloned().collect();
+        ids.push(VANISH_LOG_ID.to_string());
+        self.ensure_ids(&ids).await?;
         let mut infos = Vec::new();
         let mut members_by_space: HashMap<String, Vec<String>> = HashMap::new();
         let mut name_by_space: HashMap<String, String> = HashMap::new();
@@ -966,19 +1260,16 @@ impl Inner {
                     .map(|(id, _)| id.clone())
                     .collect()
             };
-            let mut queued = 0;
-            for object_id in objects {
-                for change in self.store.changes_for(object_id.clone()).await? {
-                    let key = format!("{}/{}/{}", info.space_id, info.key_id, change.id);
-                    if self.store.is_published(key).await? {
-                        continue;
-                    }
-                    session
-                        .sync
-                        .publish(change.bytes, change.id, object_id.clone(), change.b)
-                        .await?;
-                    queued += 1;
-                }
+            let owed = self
+                .store
+                .unpublished_changes(objects, format!("{}/{}/", info.space_id, info.key_id))
+                .await?;
+            let queued = owed.len();
+            for change in owed {
+                session
+                    .sync
+                    .publish(change.bytes, change.id, change.object_id, change.b)
+                    .await?;
             }
             if queued > 0 {
                 log::info!(
@@ -1283,7 +1574,7 @@ impl Inner {
             MutationResponse::Plan(plan) => return Ok(plan),
             MutationResponse::Missing(ids) => ids,
         };
-        self.ensure().await?;
+        self.ensure_ids(&missing).await?;
         let overlay: Vec<Json> = {
             let st = self.state.lock();
             missing
@@ -1440,7 +1731,7 @@ impl Inner {
         limit: usize,
     ) -> Result<Vec<Occurrence>> {
         self.ready().await?;
-        self.ensure().await?;
+        self.ensure_complete().await?;
         let st = self.state.lock();
         let mut out: Vec<Occurrence> = st
             .states
@@ -1466,7 +1757,7 @@ impl Inner {
 
     async fn object(self: &Arc<Self>, id: &str) -> Result<Object> {
         self.ready().await?;
-        self.ensure().await?;
+        self.ensure_ids(&[id.to_string()]).await?;
         let state = self
             .state
             .lock()
@@ -1574,7 +1865,7 @@ impl Inner {
     /// replica's agents, machines, skills and capabilities.
     async fn serving(self: &Arc<Self>, object_ids: &[String]) -> Result<JsonMap> {
         self.ready().await?;
-        self.ensure().await?;
+        self.ensure_complete().await?;
         let (objects, agents, machines, skills, capabilities) = {
             let st = self.state.lock();
             let of = |kind: &str| -> Vec<Json> {
@@ -1627,7 +1918,7 @@ impl Inner {
     /// objects excluded.
     async fn sync_digest(self: &Arc<Self>) -> Result<JsonMap> {
         self.ready().await?;
-        self.ensure().await?;
+        self.ensure_complete().await?;
         let vanished = self.state.lock().vanished.clone();
         let mut ids: Vec<String> = self
             .store
@@ -1841,6 +2132,7 @@ impl SyncHost for Host {
         let next = {
             let mut st = inner.state.lock();
             let previous = &st.status;
+            let preparing = Inner::preparing(&st);
             st.status = SyncStatus {
                 phase: match status.phase {
                     sync::Phase::Idle => SyncPhase::Idle,
@@ -1853,8 +2145,11 @@ impl SyncHost for Host {
                 pending: status.pending.or(previous.pending),
                 received: status.received,
                 expected: status.expected,
-                bootstrapped: status.bootstrapped,
+                // A vault still being prepared reads as one still loading.
+                bootstrapped: status.bootstrapped && preparing.is_none(),
+                preparing,
             };
+            st.sync_bootstrapped = status.bootstrapped;
             st.status.clone()
         };
         inner.emit(BackendEvent::Status(next));

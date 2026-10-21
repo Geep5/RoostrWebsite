@@ -15,7 +15,8 @@
 //! Every composite operation that must be atomic (a local change with its
 //! publication obligation, a rebase with its orphan mark, the cursor with its
 //! replay groups, publication with its pending removal, a base with its
-//! stream floors and current pointer) is one method running in one storage
+//! stream floors and current pointer, a page of relay imports with its
+//! publication marks and held events) is one method running in one storage
 //! transaction; callers never stitch writes together.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -222,6 +223,27 @@ pub struct HeldItem {
     pub id: String,
 }
 
+/// What one page of relay imports writes, as one transaction
+/// ([`ChangeStore::import`]): the page's changes, the publication keys they
+/// settle and the relay events now held. A page of a first sync is a few
+/// hundred events; writing it as one transaction instead of one per change
+/// is what keeps a large vault's first sync fast on a slow disk.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ImportBatch {
+    /// Added unless held (by id, also within the batch), as [`ChangeStore::add_changes`].
+    pub changes: Vec<ChangeRecord>,
+    /// Marked published, any pending obligation removed, as [`ChangeStore::mark_published`].
+    pub published: Vec<String>,
+    /// `(scope, event)`: remembered as [`ChangeStore::record_held`] does.
+    pub held: Vec<(String, HeldEvent)>,
+}
+
+impl ImportBatch {
+    pub fn is_empty(&self) -> bool {
+        self.changes.is_empty() && self.published.is_empty() && self.held.is_empty()
+    }
+}
+
 /// Exactly what a replay consumes for one object: its stored change ids
 /// (rebased orphans excluded) in insertion order, the checkpoint it seeds
 /// from and the bases it holds. Equal inputs replay to equal states.
@@ -324,6 +346,9 @@ pub trait ChangeStore: MaybeSend + MaybeSync {
     /// Adds records not already held (by id, also within the batch), each
     /// with the next insertion sequence. Returns how many were new.
     fn add_changes(&self, records: Vec<ChangeRecord>) -> StoreFuture<'_, usize>;
+    /// Atomically writes one page of relay imports ([`ImportBatch`]).
+    /// Returns how many of its changes were new.
+    fn import(&self, batch: ImportBatch) -> StoreFuture<'_, usize>;
     /// Atomically stores a change this device wrote and its publication obligation.
     fn add_local_change(
         &self,
@@ -336,6 +361,15 @@ pub trait ChangeStore: MaybeSend + MaybeSync {
     fn mark_rebased(&self, ids: Vec<String>) -> StoreFuture<'_, ()>;
     /// Every stored change of the object, rebased included, in insertion order.
     fn changes_for(&self, object_id: String) -> StoreFuture<'_, Vec<ChangeRecord>>;
+    /// The stored changes of `object_ids` (rebased included, each object's
+    /// in insertion order) whose publication key - `key_prefix` followed by
+    /// the change id - is not marked published. One read, however many
+    /// changes: what a shared space's publication sweep owes.
+    fn unpublished_changes(
+        &self,
+        object_ids: Vec<String>,
+        key_prefix: String,
+    ) -> StoreFuture<'_, Vec<ChangeRecord>>;
     /// Every object held as changes, a checkpoint or a base: objects with
     /// changes first, by their first change's insertion, then the rest.
     fn object_ids(&self) -> StoreFuture<'_, Vec<String>>;

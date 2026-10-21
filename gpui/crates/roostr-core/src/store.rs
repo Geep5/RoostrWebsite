@@ -251,6 +251,15 @@ impl Store {
                 self.schedule_refresh(cx);
                 cx.emit(StoreEvent::Committed(id));
             }
+            Ok(BackendEvent::Prepared) => {
+                // Every view may show a partial vault: reload as on a reconnect.
+                let cached: Vec<String> = self.objects.keys().cloned().collect();
+                for id in cached {
+                    self.reload_object(&id, cx);
+                }
+                self.refresh_all(cx);
+                cx.emit(StoreEvent::Reconnected);
+            }
             Ok(BackendEvent::Status(mut status)) => {
                 if status.bootstrapped && !self.status.bootstrapped {
                     status.bootstrapped = false;

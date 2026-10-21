@@ -373,12 +373,16 @@ impl Workspace {
         if !ready || !loaded {
             return;
         }
-        // Boot: the remembered space if it still exists, else the first.
+        // Boot: the remembered space if it still exists, else the first. A
+        // vault still being prepared may not show the remembered one yet.
         let nav = Navigator::global(cx);
         if nav.read(cx).space().is_empty() && has_channels {
-            let remembered = Navigator::remembered_space(cx)
+            let remembered = Navigator::remembered_space(cx);
+            let found = remembered
+                .clone()
                 .filter(|id| Store::global(cx).read(cx).space(id).is_some());
-            if let Some(id) = remembered.or(first) {
+            let wait = remembered.is_some() && found.is_none() && status.preparing.is_some();
+            if let Some(id) = found.or(first).filter(|_| !wait) {
                 nav.update(cx, |nav, cx| nav.use_space(&id, cx));
             }
         }
@@ -390,7 +394,7 @@ impl Workspace {
         {
             self.seed_personal(cx);
         }
-        if !self.space_order_moved {
+        if !self.space_order_moved && status.preparing.is_none() {
             self.space_order_moved = true;
             self.move_space_order(cx);
         }
@@ -694,11 +698,12 @@ impl Workspace {
     }
 
     fn render_boot(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let (connection, has_key) = {
+        let (connection, has_key, progress) = {
             let store = Store::global(cx).read(cx);
             (
                 store.connection.clone(),
                 store.settings.as_ref().map(|s| s.has_key),
+                roostr_core::sync_status::boot_progress(&store.status),
             )
         };
         let status = |text: SharedString, color: Hsla| {
@@ -726,6 +731,7 @@ impl Workspace {
             Connection::Connecting => Some(
                 frame()
                     .child(status("Opening your vault…".into(), theme::fg()))
+                    .children(progress.map(|line| status(line.into(), theme::muted())))
                     .into_any_element(),
             ),
             Connection::Failed(error) => {

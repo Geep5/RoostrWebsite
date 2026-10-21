@@ -18,6 +18,10 @@
 //!
 //! `SEED_OBJECTS` (default 1300) user pages, `SEED_PARTNER_OBJECTS` (300)
 //! partner pages, ~11 changes each; `SEED_BASES` (230) bases.
+//!
+//! `first_sync` (also `--ignored`, same variables) then times this machine's
+//! first sync of that vault into a fresh native (SQLite) replica, signed in
+//! from `SEED_OUT/browser.json`: until the first history walk completes.
 #![cfg(not(target_family = "wasm"))]
 
 mod backend_support;
@@ -465,5 +469,40 @@ fn seed_large_vault() {
         .unwrap();
         eprintln!("[seed] wrote {}", out.join("browser.json").display());
         u.stop();
+    });
+}
+
+#[test]
+#[ignore = "manual: times a native first sync of the seeded vault (SEED_RELAY, SEED_OUT)"]
+fn first_sync() {
+    let out = std::path::PathBuf::from(std::env::var("SEED_OUT").expect("SEED_OUT"));
+    let browser: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(out.join("browser.json")).unwrap()).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let kv = roostr_replica::local::FileLocalKv::open(dir.path().join("local.json")).unwrap();
+    for key in ["roostr-key", "roostr-relays", "roostr-space-keys"] {
+        roostr_replica::local::LocalKv::set(&kv, key, browser[key].as_str());
+    }
+    drop(kv);
+    async_io::block_on(async {
+        let started = std::time::Instant::now();
+        let backend = ReplicaBackend::open_native(dir.path()).await.unwrap();
+        backend.start().await.unwrap();
+        let limit = Duration::from_secs(3600);
+        while !backend.status().bootstrapped && started.elapsed() < limit {
+            roostr_nostr::sleep(Duration::from_millis(100)).await;
+        }
+        let elapsed = started.elapsed();
+        let store = SqliteChangeStore::open(dir.path().join("replica.sqlite"))
+            .await
+            .unwrap();
+        let changes: u64 = store.change_counts().await.unwrap().values().sum();
+        eprintln!(
+            "[first-sync] bootstrapped={} in {:.1}s: {changes} changes, imported {}",
+            backend.status().bootstrapped,
+            elapsed.as_secs_f64(),
+            backend.status().imported
+        );
+        backend.stop();
     });
 }

@@ -6,8 +6,17 @@
 //! engine's authority, stores imports, and keeps the held-events table (the
 //! NIP-77 item set) in step: an event is held only once its payload
 //! imported, so a faulted or unauthorized one is asked for again.
+//!
+//! A batch (one relay page) writes its changes, their publication marks
+//! and its held events as one store transaction
+//! ([`ChangeStore::import`](roostr_replica_store::ChangeStore::import)),
+//! not one per change: a large vault's first sync is thousands of changes.
+//! A shared payload's authorization reads what the store holds for its
+//! space and object; when the batch has buffered changes of either, the
+//! buffer is written first, so every verdict sees exactly what it did when
+//! each change was written on its own.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use roostr_engine::{
@@ -15,7 +24,7 @@ use roostr_engine::{
     SharedProvenance, SpaceAuthority, StateInputs,
 };
 use roostr_nostr::{Event, kinds};
-use roostr_replica_store::{BaseRecord, ChangeRecord, CheckpointRecord, ObjectInputs};
+use roostr_replica_store::{BaseRecord, ChangeRecord, CheckpointRecord, ImportBatch, ObjectInputs};
 use serde_json::Value;
 
 use super::{HeldRow, Inner, now_ms, short};
@@ -32,6 +41,48 @@ pub(super) struct ImportItem {
     /// Relay events this payload came from (every part of its group).
     held: Vec<HeldRow>,
     part_key: Option<String>,
+}
+
+/// One batch's writes not yet in the store ([`Inner::flush`]).
+#[derive(Default)]
+struct Pending {
+    batch: ImportBatch,
+    /// Objects whose changes `batch` holds.
+    objects: HashSet<String>,
+    /// Chunk keys of the items written with `batch`, settled once it commits.
+    settle: Vec<String>,
+}
+
+/// What the store holds for one object as a batch's authorization reads it:
+/// its inputs as read, plus the changes the batch buffered for it since -
+/// exactly what a read after writing them would return - and their
+/// replay, made when first asked.
+struct Held {
+    inputs: ObjectInputs,
+    state: Option<Option<Value>>,
+}
+
+/// One batch's [`Held`] per object id. An entry goes when the batch writes
+/// the object otherwise (a base, a checkpoint), or buffers a change whose
+/// newness the inputs cannot tell (the object holds rebased rows).
+type States = HashMap<String, Held>;
+
+/// `record`, buffered for its object, in `states`.
+fn hold_buffered(states: &mut States, record: &ChangeRecord) {
+    let Some(held) = states.get_mut(&record.object_id) else {
+        return;
+    };
+    // A rebased row is held but not among `changes`: the inputs alone cannot
+    // tell a re-sent orphan from a new change, the store must.
+    if held.inputs.count != held.inputs.changes.len() as u64 {
+        states.remove(&record.object_id);
+        return;
+    }
+    if !held.inputs.changes.iter().any(|c| c.id == record.id) {
+        held.inputs.changes.push(record.clone());
+        held.inputs.count += 1;
+        held.state = None;
+    }
 }
 
 /// Stored changes (engine JSON) → replay input.
@@ -189,16 +240,19 @@ impl Inner {
         }))
     }
 
-    /// Everything the store holds for one object, replayed as the backend does.
-    async fn existing_state(&self, object_id: &str) -> anyhow::Result<Option<Value>> {
-        let input = self.store.object_inputs(object_id.to_string()).await?;
-        let input = state_inputs(input, Vec::new())?;
-        Ok(self.engine.replay_from_base(&input).await?)
-    }
-
     /// Shared authority: existing scope and privileges come from what this
-    /// replica already holds, never from the candidate.
-    async fn authorized(&self, item: &ImportItem, p: &SharedProvenance) -> anyhow::Result<bool> {
+    /// replica already holds, never from the candidate - replayed as the
+    /// backend does, from the inputs as stored plus what this batch
+    /// buffered for them ([`Held`]). An object read with buffered changes
+    /// the inputs cannot account for writes the buffer first.
+    async fn authorized(
+        &self,
+        item: &ImportItem,
+        p: &SharedProvenance,
+        pending: &mut Pending,
+        states: &mut States,
+        imported: &mut HashSet<String>,
+    ) -> anyhow::Result<bool> {
         let Some(space) = self
             .state
             .lock()
@@ -208,8 +262,33 @@ impl Inner {
         else {
             return Ok(false);
         };
-        let trusted = self.existing_state(&p.space_id).await?;
-        let existing = self.existing_state(&item.object_id).await?;
+        for id in [&p.space_id, &item.object_id] {
+            if !states.contains_key(id) {
+                if pending.objects.contains(id) {
+                    self.flush(pending, imported).await?;
+                }
+                let inputs = self.store.object_inputs(id.clone()).await?;
+                states.insert(
+                    id.clone(),
+                    Held {
+                        inputs,
+                        state: None,
+                    },
+                );
+            }
+            let held = states.get_mut(id).expect("inserted above");
+            if held.state.is_none() {
+                let input = state_inputs(held.inputs.clone(), Vec::new())?;
+                held.state = Some(self.engine.replay_from_base(&input).await?);
+            }
+        }
+        let state = |id: &String| {
+            states
+                .get(id)
+                .and_then(|held| held.state.as_ref()?.as_ref())
+        };
+        let trusted = state(&p.space_id);
+        let existing = state(&item.object_id);
         let subject = if item.base.is_some() {
             AuthorizeSubject::Base(&item.bytes)
         } else if item.checkpoint.is_some() {
@@ -226,7 +305,7 @@ impl Inner {
         };
         match self
             .engine
-            .authorize(subject, p, &authority, trusted.as_ref(), existing.as_ref())
+            .authorize(subject, p, &authority, trusted, existing)
             .await
         {
             Ok(verdict) => Ok(verdict.ok),
@@ -428,45 +507,50 @@ impl Inner {
         imported: &mut HashSet<String>,
         immediate_notify: bool,
     ) -> anyhow::Result<()> {
-        let mut held = Vec::new();
+        let mut pending = Pending::default();
+        let mut states = States::new();
         let mut parts = Vec::new();
         let mut touched = Vec::new();
         for item in batch {
+            // Unauthorized payloads stay unheld: a later reconcile re-judges them.
             if let Some(p) = &item.provenance
-                && !self.authorized(item, p).await?
+                && !self
+                    .authorized(item, p, &mut pending, &mut states, imported)
+                    .await?
             {
                 continue;
             }
             if let Some(base) = &item.base {
+                states.remove(&item.object_id);
                 self.import_base(item, base).await?;
             } else if let Some(checkpoint) = &item.checkpoint {
+                states.remove(&item.object_id);
                 self.import_checkpoint(item, checkpoint).await?;
             } else if let Some(change) = &item.change {
-                let added = self
-                    .store
-                    .add_changes(vec![ChangeRecord {
-                        id: change.id.clone(),
-                        object_id: change.object_id.clone(),
-                        bytes: item.bytes.clone(),
-                        json: serde_json::to_string(change)?,
-                        b: change.b.clone(),
-                        rebased: false,
-                    }])
-                    .await?;
-                let key = match &item.provenance {
+                let record = ChangeRecord {
+                    id: change.id.clone(),
+                    object_id: change.object_id.clone(),
+                    bytes: item.bytes.clone(),
+                    json: serde_json::to_string(change)?,
+                    b: change.b.clone(),
+                    rebased: false,
+                };
+                hold_buffered(&mut states, &record);
+                pending.batch.changes.push(record);
+                pending.batch.published.push(match &item.provenance {
                     Some(p) => format!("{}/{}/{}", p.space_id, p.key_id, change.id),
                     None => change.id.clone(),
-                };
-                self.store.mark_published(key).await?;
-                let mut st = self.state.lock();
-                st.stats.imported += added as u64;
-                st.pending_objects.insert(change.object_id.clone());
+                });
+                pending.objects.insert(change.object_id.clone());
             }
             if let Some(key) = &item.chunk_key {
-                imported.insert(key.clone());
-                self.settle(key, true).await;
+                pending.settle.push(key.clone());
             }
-            held.extend(item.held.iter().cloned());
+            pending.batch.held.extend(
+                item.held
+                    .iter()
+                    .map(|row| (row.scope.clone(), row.event.clone())),
+            );
             if let Some(key) = &item.part_key {
                 parts.push(key.clone());
             }
@@ -475,8 +559,7 @@ impl Inner {
                 *received += 1;
             }
         }
-        // Unauthorized payloads stay unheld: a later reconcile re-judges them.
-        self.record_held(held).await?;
+        self.flush(&mut pending, imported).await?;
         self.state.lock().imported_parts.extend(parts);
         // A new base can orphan held deltas, and a delta can arrive orphaned.
         self.rebase_orphans(touched).await?;
@@ -484,6 +567,28 @@ impl Inner {
             self.flush_object_notify();
         } else {
             self.schedule_object_notify();
+        }
+        Ok(())
+    }
+
+    /// Writes the batch's buffered changes, publication marks and held
+    /// events in one transaction, then settles their groups and owes the
+    /// host their objects.
+    async fn flush(
+        &self,
+        pending: &mut Pending,
+        imported: &mut HashSet<String>,
+    ) -> anyhow::Result<()> {
+        let batch = std::mem::take(&mut pending.batch);
+        if !batch.is_empty() {
+            let added = self.store.import(batch).await?;
+            let mut st = self.state.lock();
+            st.stats.imported += added as u64;
+            st.pending_objects.extend(pending.objects.drain());
+        }
+        for key in std::mem::take(&mut pending.settle) {
+            self.settle(&key, true).await;
+            imported.insert(key);
         }
         Ok(())
     }

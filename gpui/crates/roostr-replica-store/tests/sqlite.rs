@@ -1144,3 +1144,92 @@ fn store_is_usable_as_a_shared_trait_object() {
     assert_eq!(worker.join().unwrap(), 1);
     assert_eq!(block_on(store.change_counts()).unwrap()["o"], 1);
 }
+
+#[test]
+fn an_import_writes_a_pages_changes_marks_and_held_events_in_one_go() {
+    let store = store();
+    let held = |id: &str, created_at: i64| HeldEvent {
+        id: id.into(),
+        created_at,
+        kind: 1078,
+        b: None,
+    };
+    let query = HeldQuery {
+        kinds: vec![1078],
+        ..Default::default()
+    };
+    let page = ImportBatch {
+        changes: vec![
+            record("c1", "o1", 1),
+            record("c2", "o1", 2),
+            record("c3", "o2", 3),
+            record("c3", "o2", 3),
+        ],
+        published: vec!["c1".into(), "s/1/c2".into(), "c3".into()],
+        held: vec![
+            ("".into(), held("e1", 10)),
+            ("tag".into(), held("e2", 11)),
+            ("".into(), held("e1", 10)),
+        ],
+    };
+    block_on(async {
+        store
+            .add_changes(vec![record("c1", "o1", 1)])
+            .await
+            .unwrap();
+        store
+            .save_pending(pending("s/1/c2", "o1", "c2"))
+            .await
+            .unwrap();
+        assert_eq!(store.import(page.clone()).await.unwrap(), 2, "c1 was held");
+        assert_eq!(
+            ids(&store.changes_for("o1".into()).await.unwrap()),
+            ["c1", "c2"]
+        );
+        assert_eq!(ids(&store.changes_for("o2".into()).await.unwrap()), ["c3"]);
+        for key in ["c1", "s/1/c2", "c3"] {
+            assert!(store.is_published(key.into()).await.unwrap(), "{key}");
+        }
+        assert_eq!(store.pending("s/1/c2".into()).await.unwrap(), None);
+        let scope = |scope: &str| store.held_events(scope.into(), query.clone());
+        assert_eq!(scope("").await.unwrap().len(), 1);
+        assert_eq!(scope("tag").await.unwrap()[0].id, "e2");
+
+        // The same page again (a reload re-reading it) adds nothing.
+        assert_eq!(store.import(page).await.unwrap(), 0);
+        assert_eq!(store.import(ImportBatch::default()).await.unwrap(), 0);
+        assert_eq!(store.changes_for("o1".into()).await.unwrap().len(), 2);
+        assert_eq!(scope("").await.unwrap().len(), 1);
+    });
+}
+
+#[test]
+fn unpublished_changes_are_those_without_a_mark_under_the_prefix() {
+    let store = store();
+    block_on(async {
+        store
+            .add_changes(vec![
+                record("c1", "o1", 1),
+                record("c2", "o1", 2),
+                record("c3", "o2", 3),
+                record("c4", "o3", 4),
+            ])
+            .await
+            .unwrap();
+        store.mark_published("s/1/c2".into()).await.unwrap();
+        store.mark_published("c1".into()).await.unwrap();
+        let owed =
+            |prefix: &str| store.unpublished_changes(vec!["o1".into(), "o2".into()], prefix.into());
+        assert_eq!(ids(&owed("s/1/").await.unwrap()), ["c1", "c3"]);
+        assert_eq!(ids(&owed("").await.unwrap()), ["c2", "c3"]);
+        let all = owed("s/1/").await.unwrap();
+        assert_eq!(all[1], record("c3", "o2", 3), "the whole row");
+        assert!(
+            store
+                .unpublished_changes(Vec::new(), "".into())
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    });
+}

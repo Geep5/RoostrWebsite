@@ -210,7 +210,9 @@ pub fn follow(backend: ReplicaBackend, cx: &mut App) -> Task<()> {
             loop {
                 match events.next().await {
                     None => return,
-                    Some(Ok(BackendEvent::Committed(_) | BackendEvent::Hello)) => break,
+                    Some(Ok(
+                        BackendEvent::Committed(_) | BackendEvent::Hello | BackendEvent::Prepared,
+                    )) => break,
                     Some(_) => {}
                 }
             }

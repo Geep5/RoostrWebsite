@@ -11,6 +11,7 @@ mod hooked_store;
 mod space_fixture;
 mod support;
 
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
@@ -24,7 +25,7 @@ use roostr_nostr::spacekeys::{InMemorySpaceKeyring, KeyFile};
 use roostr_nostr::{Event, EventTemplate, Filter, Keys, kinds};
 use roostr_replica::local::{InMemoryLocalKv, LocalKv};
 use roostr_replica::sync::{Keyring, PAGE_LIMIT, Phase, RelaySync, SyncHost};
-use roostr_replica_store::{ChangeStore, SqliteChangeStore, StoreError};
+use roostr_replica_store::{ChangeStore, HeldQuery, SqliteChangeStore, StoreError};
 use serde_json::{Value, json};
 use space_fixture::{SPACE_ID, World};
 use support::relay::TestRelay;
@@ -386,7 +387,7 @@ fn an_import_failure_survives_reload_and_a_later_clean_scan_retires_it() {
         store.set_cursor(200, None).await.unwrap();
         let failed = Arc::new(AtomicBool::new(false));
         let once = failed.clone();
-        store.on_add_changes(move |_| {
+        store.on_import(move |_| {
             let fail = !once.swap(true, Ordering::SeqCst);
             Box::pin(async move {
                 if fail {
@@ -485,13 +486,13 @@ fn a_fresh_conflict_in_an_otherwise_complete_scan_needs_another_clean_covering_p
     });
 }
 
-/// Arms `store` so the next `add_changes` reports entry, waits for the
+/// Arms `store` so the next page import reports entry, waits for the
 /// release, then fails (`Err`) or commits (`Ok`).
 fn gate_next_write(store: &HookedStore) -> (oneshot::Receiver<()>, oneshot::Sender<bool>) {
     let (entered_tx, entered_rx) = oneshot::channel::<()>();
     let (release_tx, release_rx) = oneshot::channel::<bool>();
     let mut gate = Some((entered_tx, release_rx));
-    store.on_add_changes(move |_| match gate.take() {
+    store.on_import(move |_| match gate.take() {
         Some((entered, release)) => Box::pin(async move {
             let _ = entered.send(());
             match release.await {
@@ -864,7 +865,7 @@ fn a_full_page_is_in_the_store_before_the_walk_asks_for_the_next() {
         // When the newest event's change is written, has the walk asked for page two yet?
         let paged_at_write = Arc::new(parking_lot::Mutex::new(None));
         let (seen, relay_ref) = (paged_at_write.clone(), relay.clone());
-        store.on_add_changes(move |records| {
+        store.on_import(move |records| {
             if records.iter().any(|r| r.object_id == "space-note") {
                 *seen.lock() = Some(relay_ref.world().paged_reqs);
             }
@@ -936,6 +937,158 @@ fn per_relay_paging_loses_no_change_held_by_only_one_relay() {
             held += d.changes(&object).await;
         }
         assert_eq!(held, ids.len());
+        d.sync.stop();
+    });
+}
+
+/// Every change id the store holds, counted once per stored row.
+async fn stored_change_ids(store: &HookedStore) -> Vec<String> {
+    let mut ids = Vec::new();
+    for object in store.object_ids().await.unwrap() {
+        ids.extend(
+            store
+                .changes_for(object)
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|c| c.id),
+        );
+    }
+    ids
+}
+
+/// The personal stream's held change events.
+async fn held_personal(store: &HookedStore) -> HashSet<String> {
+    let query = HeldQuery {
+        kinds: vec![kinds::CHANGE],
+        ..HeldQuery::default()
+    };
+    store
+        .held_events(String::new(), query)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|item| item.id)
+        .collect()
+}
+
+#[test]
+fn a_page_lands_in_one_write_and_a_reload_mid_walk_loses_and_duplicates_nothing() {
+    let _turn = ENGINE_TURN.lock();
+    let relay = TestRelay::start();
+    relay.world().no_nip77 = true;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("replica.sqlite");
+    block_on(async {
+        let w = World::new(Engine::native().unwrap()).await;
+        let total = 2 * PAGE_LIMIT + 40;
+        let (mut change_ids, mut event_ids) = (HashSet::new(), HashSet::new());
+        for i in 0..total {
+            let change = page(&w, &format!("note-{i:03}")).await;
+            let event = personal_event(&w, &change, 1_000 + i).await;
+            change_ids.insert(change.id);
+            event_ids.insert(event.id.clone());
+            relay.insert(event);
+        }
+        let store = file_store(&path).await;
+        // The first page commits; the tab goes away while the second is written.
+        let writes = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let seen = writes.clone();
+        store.on_import(move |records| {
+            let mut writes = seen.lock();
+            writes.push(records.len());
+            let cut = writes.len() > 1;
+            Box::pin(async move {
+                if cut {
+                    Err(store_error("the tab went away"))
+                } else {
+                    Ok(())
+                }
+            })
+        });
+        let d = Device::new(&w.owner, vec![relay.url.clone()], store);
+        d.start(&w).await;
+        d.sync.stop();
+        // One write per page, the whole page in it (the second page repeats
+        // the first's oldest second, seen already).
+        let pages = writes.lock().clone();
+        assert_eq!(pages.len(), 2, "{pages:?}");
+        assert_eq!(pages[0], PAGE_LIMIT as usize);
+        assert!(pages[1] >= PAGE_LIMIT as usize - 1, "{pages:?}");
+        // All of the first page, nothing of the second: no change, no held
+        // event (which would keep a reconcile from asking for it again), no
+        // publication mark.
+        let first = stored_change_ids(&d.store).await;
+        assert_eq!(first.len(), PAGE_LIMIT as usize);
+        let held = held_personal(&d.store).await;
+        assert_eq!(held.len(), PAGE_LIMIT as usize);
+        assert!(held.is_subset(&event_ids));
+        let mut marked = 0;
+        for id in &change_ids {
+            marked += usize::from(d.store.is_published(id.clone()).await.unwrap());
+        }
+        assert_eq!(marked, PAGE_LIMIT as usize);
+        d.store.close().await.unwrap();
+
+        // The reload: a fresh sync over the same database finishes the walk.
+        let e = Device::new(&w.owner, vec![relay.url.clone()], file_store(&path).await);
+        e.start(&w).await;
+        assert_eq!(e.last_pass(), Some((true, true)));
+        let stored = stored_change_ids(&e.store).await;
+        assert_eq!(stored.len(), total as usize, "every change exactly once");
+        assert_eq!(stored.into_iter().collect::<HashSet<_>>(), change_ids);
+        assert_eq!(held_personal(&e.store).await, event_ids);
+        for id in &change_ids {
+            assert!(e.store.is_published(id.clone()).await.unwrap(), "{id}");
+        }
+        assert_eq!(
+            e.sync.stats().imported,
+            total - PAGE_LIMIT,
+            "what the first session stored is not imported again"
+        );
+        e.sync.stop();
+    });
+}
+
+#[test]
+fn a_shared_page_editing_what_it_creates_is_judged_against_its_own_earlier_changes() {
+    let _turn = ENGINE_TURN.lock();
+    let relay = TestRelay::start();
+    block_on(async {
+        let w = World::new(Engine::native().unwrap()).await;
+        // One page: the doc's create, then edits each naming the previous.
+        let mut previous = create_doc(&w).await;
+        relay.insert(w.change_event(&previous, &w.owner, 100).await);
+        for i in 0..3u64 {
+            let edit = w
+                .change(
+                    "doc",
+                    json!([{"fieldSet": {"key": "name", "value": {"stringValue": format!("v{i}")}}}]),
+                    &[&previous.id],
+                    None,
+                )
+                .await;
+            relay.insert(w.change_event(&edit, &w.owner, 101 + i).await);
+            previous = edit;
+        }
+        let writes = Arc::new(AtomicUsize::new(0));
+        let seen = writes.clone();
+        let store = memory_store().await;
+        store.on_import(move |_| {
+            seen.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async { Ok(()) })
+        });
+        // A member's device: every payload is authorized against the space.
+        let d = Device::new(&space_fixture::keys(5), vec![relay.url.clone()], store);
+        d.start(&w).await;
+        assert_eq!(d.last_pass(), Some((true, true)));
+        assert_eq!(
+            d.changes("doc").await,
+            4,
+            "every edit authorized and stored"
+        );
+        // Each verdict saw its predecessors, still buffered: one write.
+        assert_eq!(writes.load(Ordering::SeqCst), 1);
         d.sync.stop();
     });
 }

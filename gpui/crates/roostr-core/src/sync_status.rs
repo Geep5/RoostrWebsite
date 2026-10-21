@@ -15,16 +15,23 @@ pub fn count(n: u64) -> String {
     out
 }
 
-/// The history pass in flight: what it received and, when known, the expected
+/// The history pass in flight - or, with none, the replica preparing its
+/// objects: what it received (prepared) and, when known, the expected
 /// count and a percentage (capped at 99 until live).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SyncProgress {
     pub received: u64,
     pub expected: Option<u64>,
     pub pct: Option<u64>,
+    /// Objects prepared ([`SyncStatus::preparing`]), not changes received.
+    pub preparing: bool,
 }
 
 pub fn sync_progress(s: &SyncStatus) -> Option<SyncProgress> {
+    pass_progress(s).or_else(|| preparing_progress(s))
+}
+
+fn pass_progress(s: &SyncStatus) -> Option<SyncProgress> {
     let syncing =
         s.phase == SyncPhase::Backfill || (s.phase == SyncPhase::Live && s.received.is_some());
     if !syncing {
@@ -36,6 +43,7 @@ pub fn sync_progress(s: &SyncStatus) -> Option<SyncProgress> {
             received,
             expected: None,
             pct: None,
+            preparing: false,
         });
     };
     let cap = if s.phase == SyncPhase::Live { 100 } else { 99 };
@@ -44,13 +52,30 @@ pub fn sync_progress(s: &SyncStatus) -> Option<SyncProgress> {
         received,
         expected: Some(expected),
         pct: Some(pct),
+        preparing: false,
     })
 }
 
-/// "Syncing · 1,234 of 5,000 (24%)" or "Syncing · 1,234 received".
+fn preparing_progress(s: &SyncStatus) -> Option<SyncProgress> {
+    let (prepared, total) = s.preparing.filter(|(_, total)| *total > 0)?;
+    Some(SyncProgress {
+        received: prepared,
+        expected: Some(total),
+        pct: Some((prepared * 100 / total).min(99)),
+        preparing: true,
+    })
+}
+
+/// "Syncing · 1,234 of 5,000 (24%)", "Syncing · 1,234 received" or
+/// "Preparing · 400 of 1,900 objects".
 pub fn progress_text(p: &SyncProgress) -> String {
-    match (p.expected, p.pct) {
-        (Some(expected), Some(pct)) => format!(
+    match (p.preparing, p.expected, p.pct) {
+        (true, Some(total), _) => format!(
+            "Preparing · {} of {} objects",
+            count(p.received),
+            count(total)
+        ),
+        (_, Some(expected), Some(pct)) => format!(
             "Syncing · {} of {} ({pct}%)",
             count(p.received),
             count(expected)
@@ -59,13 +84,17 @@ pub fn progress_text(p: &SyncProgress) -> String {
     }
 }
 
-/// The sync dot's tooltip. Unsent changes come with what sync says right now.
+/// The sync dot's tooltip. Unsent changes come with what sync says right
+/// now, and a preparation in flight with both.
 pub fn sync_tip(s: &SyncStatus) -> String {
     let pending = match s.pending {
         Some(n) if n > 0 => format!("{} change(s) not yet published", count(n)),
         _ => String::new(),
     };
-    let progress = sync_progress(s);
+    let preparing = preparing_progress(s)
+        .map(|p| progress_text(&p))
+        .unwrap_or_default();
+    let progress = pass_progress(s);
     let state = match s.phase {
         SyncPhase::Error => format!("Error: {}", s.detail.as_deref().unwrap_or("sync stopped")),
         SyncPhase::Live => {
@@ -87,11 +116,28 @@ pub fn sync_tip(s: &SyncStatus) -> String {
         },
         SyncPhase::Idle => "Not syncing".into(),
     };
-    [pending, state]
+    [pending, preparing, state]
         .into_iter()
         .filter(|x| !x.is_empty())
         .collect::<Vec<_>>()
         .join(" · ")
+}
+
+/// The boot screen's line under "Opening your vault…": the preparation's
+/// count, else what sync says it is doing (as the tip words a backfill),
+/// else the history pass's count once it received anything.
+pub fn boot_progress(s: &SyncStatus) -> Option<String> {
+    if let Some(p) = preparing_progress(s) {
+        return Some(progress_text(&p));
+    }
+    if s.phase == SyncPhase::Backfill
+        && let Some(detail) = s.detail.as_ref().filter(|d| *d != "catching up")
+    {
+        return Some(detail.clone());
+    }
+    pass_progress(s)
+        .filter(|_| s.received.is_some())
+        .map(|p| progress_text(&p))
 }
 
 #[cfg(test)]
@@ -214,5 +260,53 @@ mod tests {
         };
         assert_eq!(sync_tip(&done), "Synced · 2,500 changes");
         assert_eq!(sync_progress(&done), None);
+    }
+
+    #[test]
+    fn a_preparation_counts_objects_in_the_tip_the_ring_and_the_boot_line() {
+        let preparing = SyncStatus {
+            imported: 0,
+            preparing: Some((400, 1900)),
+            ..status(SyncPhase::Live)
+        };
+        assert_eq!(
+            sync_tip(&preparing),
+            "Preparing · 400 of 1,900 objects · Synced · 0 changes"
+        );
+        let ring = sync_progress(&preparing).unwrap();
+        assert_eq!((ring.pct, ring.preparing), (Some(21), true));
+        assert_eq!(
+            boot_progress(&preparing).as_deref(),
+            Some("Preparing · 400 of 1,900 objects")
+        );
+        // A history pass in flight keeps the ring; the tip names both.
+        let both = SyncStatus {
+            received: Some(3200),
+            expected: Some(15000),
+            preparing: Some((400, 1900)),
+            ..status(SyncPhase::Backfill)
+        };
+        assert_eq!(
+            sync_tip(&both),
+            "Preparing · 400 of 1,900 objects · Syncing · 3,200 of 15,000 (21%)"
+        );
+        assert!(!sync_progress(&both).unwrap().preparing);
+        let syncing = SyncStatus {
+            preparing: None,
+            ..both
+        };
+        assert_eq!(
+            boot_progress(&syncing).as_deref(),
+            Some("Syncing · 3,200 of 15,000 (21%)")
+        );
+        let importing = SyncStatus {
+            detail: Some("Importing this browser's earlier vault".into()),
+            ..status(SyncPhase::Backfill)
+        };
+        assert_eq!(
+            boot_progress(&importing).as_deref(),
+            Some("Importing this browser's earlier vault")
+        );
+        assert_eq!(boot_progress(&status(SyncPhase::Backfill)), None);
     }
 }

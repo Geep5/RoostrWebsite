@@ -357,9 +357,9 @@ fn a_batch_whose_import_fails_holds_nothing_and_is_fetched_again() {
         let store = Arc::new(HookedStore::new(
             SqliteChangeStore::in_memory().await.unwrap(),
         ));
-        // The next add_changes fails with a full disk.
+        // The next page import fails with a full disk.
         let failed = AtomicBool::new(false);
-        store.on_add_changes(move |_| {
+        store.on_import(move |_| {
             let fail = !failed.swap(true, Ordering::SeqCst);
             Box::pin(async move {
                 if fail {

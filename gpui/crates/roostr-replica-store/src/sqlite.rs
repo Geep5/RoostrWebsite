@@ -343,12 +343,39 @@ const CURRENT_BASES: &str = "SELECT object_id, hash, created_at FROM bases AS b 
     SELECT 1 FROM bases AS o WHERE o.object_id = b.object_id AND (o.epoch > b.epoch OR (o.epoch = b.epoch AND
         (o.created_at > b.created_at OR (o.created_at = b.created_at AND o.hash > b.hash)))))";
 
+const INSERT_HELD: &str =
+    "INSERT OR IGNORE INTO held (scope, id, created_at, kind, b) VALUES (?, ?, ?, ?, ?)";
+
 impl ChangeStore for SqliteChangeStore {
     fn add_changes(&self, records: Vec<ChangeRecord>) -> StoreFuture<'_, usize> {
         if records.is_empty() {
             return Box::pin(async { Ok(0) });
         }
         self.write(move |tx| insert_changes(tx, &records))
+    }
+
+    fn import(&self, batch: ImportBatch) -> StoreFuture<'_, usize> {
+        if batch.is_empty() {
+            return Box::pin(async { Ok(0) });
+        }
+        self.write(move |tx| {
+            let added = insert_changes(tx, &batch.changes)?;
+            for key in &batch.published {
+                put_meta(tx, &format!("{}{key}", keys::PUBLISHED), "1")?;
+                delete_meta(tx, &format!("{}{key}", keys::PENDING))?;
+            }
+            let mut insert = tx.prepare_cached(INSERT_HELD)?;
+            for (scope, event) in &batch.held {
+                insert.execute(params![
+                    scope,
+                    event.id,
+                    event.created_at,
+                    event.kind,
+                    event.b
+                ])?;
+            }
+            Ok(added)
+        })
     }
 
     fn add_local_change(
@@ -387,6 +414,38 @@ impl ChangeStore for SqliteChangeStore {
 
     fn changes_for(&self, object_id: String) -> StoreFuture<'_, Vec<ChangeRecord>> {
         self.run(move |connection| select_changes(connection, &object_id))
+    }
+
+    fn unpublished_changes(
+        &self,
+        object_ids: Vec<String>,
+        key_prefix: String,
+    ) -> StoreFuture<'_, Vec<ChangeRecord>> {
+        self.run(move |connection| {
+            let tx = connection.transaction()?;
+            let marked = format!("{}{key_prefix}", keys::PUBLISHED);
+            let mut select = tx.prepare_cached(
+                "SELECT id, bytes, json, b, rebased FROM changes AS c WHERE object_id = ?
+                    AND NOT EXISTS (SELECT 1 FROM meta WHERE key = ? || c.id) ORDER BY seq",
+            )?;
+            let mut out = Vec::new();
+            for object_id in &object_ids {
+                let rows = select.query_map(params![object_id, marked], |row| {
+                    Ok(ChangeRecord {
+                        id: row.get(0)?,
+                        object_id: object_id.clone(),
+                        bytes: row.get(1)?,
+                        json: row.get(2)?,
+                        b: row.get(3)?,
+                        rebased: row.get(4)?,
+                    })
+                })?;
+                for row in rows {
+                    out.push(row?);
+                }
+            }
+            Ok(out)
+        })
     }
 
     fn object_ids(&self) -> StoreFuture<'_, Vec<String>> {
@@ -729,10 +788,15 @@ impl ChangeStore for SqliteChangeStore {
             return Box::pin(async { Ok(()) });
         }
         self.write(move |tx| {
-            let mut insert =
-                tx.prepare_cached("INSERT OR IGNORE INTO held (scope, id, created_at, kind, b) VALUES (?, ?, ?, ?, ?)")?;
+            let mut insert = tx.prepare_cached(INSERT_HELD)?;
             for event in events {
-                insert.execute(params![scope, event.id, event.created_at, event.kind, event.b])?;
+                insert.execute(params![
+                    scope,
+                    event.id,
+                    event.created_at,
+                    event.kind,
+                    event.b
+                ])?;
             }
             Ok(())
         })

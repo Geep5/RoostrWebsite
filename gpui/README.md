@@ -132,11 +132,14 @@ first sync (`roostr_replica_store::svelte_import`): every change (bytes,
 JSON, base tag, rebased mark), checkpoint, base, held relay event and
 publication record, the walk's cursor, floors and replay groups when this
 store has none yet, and every unpublished change, which the outbox then
-publishes. The replay memo (`states`) is not carried; the replica replays
-anyway. It imports only the stored key's vault - the Svelte app deleted the
-database on every identity change, so it belongs to that key; it must also
-hold a change authored by the key - and stamps it (`gpui-import` in its
-`meta`) so no later identity, nor this one after a logout, imports it again.
+publishes. The replay memo (`states`) is not carried: its rows name no
+engine (only a change count, checkpoint and base), so nothing proves they
+are what this engine replays the inputs to. The first open prepares the
+vault instead (below). It imports only the stored key's vault - the Svelte
+app deleted the database on every identity change, so it belongs to that
+key; it must also hold a change authored by the key - and stamps it
+(`gpui-import` in its `meta`) so no later identity, nor this one after a
+logout, imports it again.
 The Svelte database is otherwise left as it was. A visitor without one never
 gets one (`indexedDB.databases()`, else an open that aborts its upgrade). A
 failed import logs a warning and retries on the next start; it never keeps
@@ -153,6 +156,35 @@ operation used to fail every start of a ~2,000-object vault on slower
 disks, at `cached_replays`). `cargo test --release -p roostr-replica --test
 large_vault -- --ignored` (with `SEED_RELAY`, `SEED_OUT`) seeds a throwaway
 ~18k-change vault with bases and shared spaces onto a relay, to load against.
+
+A history page (up to 128 events, or 100 fetched ids) is written as one
+transaction - its changes, their publication marks and its held relay
+events (`ChangeStore::import`; the SQLite store does the same for the iOS
+app and the desktop) - instead of two per change, so a first sync of a large
+vault is not thousands of transactions. A shared payload's authorization
+reads what the store holds for its space and object; a page with buffered
+changes of either writes them first, so every verdict sees what it did when
+each change was written on its own. A page cut off mid-write leaves none of
+its changes and none of its events held: the next walk asks for it again
+and stores each change once. Each shared-space refresh (every start, and
+on space changes) finds the space's unacknowledged changes in a few
+requests (`unpublished_changes`), not two reads per change.
+
+Objects no replay memo row serves (the first open after the Svelte import,
+or after an engine update) do not hold the workspace back: a full pass
+replays them for a second at most (the vanish ledger and the keyring's
+spaces first, then the objects with the fewest changes) and prepares the
+rest in the background in 50 ms steps, the page rendering in between and
+the memo written every 50 objects, so a reload resumes where it stopped.
+Meanwhile the status carries `preparing` (shown as "Preparing · 400 of 1,900
+objects" on the boot screen and the sync dot, whose ring fills with it),
+reads serve what is prepared, anything asked for by id (an open object, a
+mutation's missing ids, the shared spaces) is prepared first, and
+`bootstrapped` is withheld - nothing seeds a Personal space or migrates
+the space order against a partial vault; `BackendEvent::Prepared` then
+reloads every view. The sync digest, serving, reminders and the catalog
+seeding wait for the whole vault. The boot screen also shows the history
+pass's count ("Syncing · 3,200 of 15,000 (21%)") while it loads.
 
 The alternative is the daemon and harness on the visitor's own computer, like
 the hosted Svelte app in paired mode ("Pair with Roostr on this computer

@@ -221,3 +221,89 @@ async fn write_read_reopen_round_trip() {
     store.close().await.unwrap();
     IdbChangeStore::destroy(NAME).await.unwrap();
 }
+
+#[wasm_bindgen_test]
+async fn an_import_is_one_transaction_and_the_publication_sweep_reads_marks_in_bulk() {
+    const NAME: &str = "roostr-replica-import";
+    IdbChangeStore::destroy(NAME).await.unwrap();
+    let store = IdbChangeStore::open(NAME).await.unwrap();
+    let held = |id: &str, created_at: i64| HeldEvent {
+        id: id.into(),
+        created_at,
+        kind: 1078,
+        b: None,
+    };
+    let query = HeldQuery {
+        kinds: vec![1078],
+        ..Default::default()
+    };
+    let page = ImportBatch {
+        changes: vec![
+            record("c1", "o1", 1),
+            record("c2", "o1", 2),
+            record("c3", "o2", 3),
+            record("c3", "o2", 3),
+        ],
+        published: vec!["c1".into(), "s/1/c2".into(), "c3".into()],
+        held: vec![
+            ("".into(), held("e1", 10)),
+            ("tag".into(), held("e2", 11)),
+            ("".into(), held("e1", 10)),
+        ],
+    };
+    store
+        .add_changes(vec![record("c1", "o1", 1)])
+        .await
+        .unwrap();
+    store
+        .save_pending(PendingPublish {
+            key: "s/1/c2".into(),
+            object_id: "o1".into(),
+            change_id: "c2".into(),
+            bytes: vec![9],
+            space_id: Some("s".into()),
+            key_id: Some(1),
+            base: None,
+            events: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(store.import(page.clone()).await.unwrap(), 2, "c1 was held");
+    let ids = |records: Vec<ChangeRecord>| records.into_iter().map(|r| r.id).collect::<Vec<_>>();
+    assert_eq!(
+        ids(store.changes_for("o1".into()).await.unwrap()),
+        ["c1", "c2"]
+    );
+    for key in ["c1", "s/1/c2", "c3"] {
+        assert!(store.is_published(key.into()).await.unwrap(), "{key}");
+    }
+    assert_eq!(store.pending("s/1/c2".into()).await.unwrap(), None);
+    assert_eq!(
+        store
+            .held_events("".into(), query.clone())
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        store
+            .held_events("tag".into(), query.clone())
+            .await
+            .unwrap()[0]
+            .id,
+        "e2"
+    );
+    // The same page again (a reload re-reading it) adds nothing.
+    assert_eq!(store.import(page).await.unwrap(), 0);
+    assert_eq!(store.import(ImportBatch::default()).await.unwrap(), 0);
+    assert_eq!(store.held_events("".into(), query).await.unwrap().len(), 1);
+
+    let owed =
+        |prefix: &str| store.unpublished_changes(vec!["o1".into(), "o2".into()], prefix.into());
+    assert_eq!(ids(owed("s/1/").await.unwrap()), ["c1", "c3"]);
+    assert_eq!(ids(owed("").await.unwrap()), ["c2"]);
+    assert_eq!(owed("s/1/").await.unwrap()[1], record("c3", "o2", 3));
+    store.close().await.unwrap();
+    IdbChangeStore::destroy(NAME).await.unwrap();
+}

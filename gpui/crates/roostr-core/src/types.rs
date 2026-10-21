@@ -610,6 +610,11 @@ pub struct SyncStatus {
     /// Ids the pass's reconciles said are missing so far (approximate); `None` when unknown.
     pub expected: Option<u64>,
     pub bootstrapped: bool,
+    /// `(prepared, total)`: a replica opened without a replay of every
+    /// object (the first open after an import or an engine update) replays
+    /// them in the background with the workspace already open; reads see
+    /// what is prepared so far. `None` once every object is.
+    pub preparing: Option<(u64, u64)>,
 }
 
 /// glon.Position values.

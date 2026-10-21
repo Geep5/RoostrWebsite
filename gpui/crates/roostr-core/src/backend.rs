@@ -25,6 +25,10 @@ pub enum BackendEvent {
     Committed(String),
     /// The replica's relay sync moved (a daemon sends none).
     Status(SyncStatus),
+    /// The replica finished preparing the objects it opened without
+    /// ([`SyncStatus::preparing`]): reads see the whole vault now, so
+    /// anything shown may have been partial.
+    Prepared,
 }
 
 pub trait Backend: MaybeSend + MaybeSync + 'static {

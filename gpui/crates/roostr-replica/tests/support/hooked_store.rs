@@ -9,8 +9,8 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 use roostr_replica_store::{
     BaseRecord, BoxFuture, CachedReplay, ChangeRecord, ChangeStore, CheckpointRecord, CurrentBase,
-    HeldEvent, HeldItem, HeldQuery, ObjectHistory, ObjectInputs, PendingPublish, ReplayInput,
-    SqliteChangeStore, StoreError, StoreFuture,
+    HeldEvent, HeldItem, HeldQuery, ImportBatch, ObjectHistory, ObjectInputs, PendingPublish,
+    ReplayInput, SqliteChangeStore, StoreError, StoreFuture,
 };
 
 type Gate = Box<dyn FnMut(&[ChangeRecord]) -> BoxFuture<'static, Result<(), StoreError>> + Send>;
@@ -19,7 +19,7 @@ type HeldHook = Box<dyn FnMut(&str) + Send>;
 
 #[derive(Default)]
 struct Hooks {
-    add_changes: Option<Gate>,
+    import: Option<Gate>,
     set_cursor: Option<CursorGate>,
     held_events: Option<HeldHook>,
 }
@@ -37,12 +37,13 @@ impl HookedStore {
         }
     }
 
-    /// Runs before every `add_changes`; an `Err` fails the write unapplied.
-    pub fn on_add_changes(
+    /// Runs before every `import` carrying changes (a page of relay imports)
+    /// with those changes; an `Err` fails the write unapplied.
+    pub fn on_import(
         &self,
         hook: impl FnMut(&[ChangeRecord]) -> BoxFuture<'static, Result<(), StoreError>> + Send + 'static,
     ) {
-        self.hooks.lock().add_changes = Some(Box::new(hook));
+        self.hooks.lock().import = Some(Box::new(hook));
     }
 
     /// Runs before every `set_cursor` with the value about to be written.
@@ -62,17 +63,23 @@ impl HookedStore {
 
 impl ChangeStore for HookedStore {
     fn add_changes(&self, records: Vec<ChangeRecord>) -> StoreFuture<'_, usize> {
-        let gate = self
-            .hooks
-            .lock()
-            .add_changes
-            .as_mut()
-            .map(|hook| hook(&records));
+        self.inner.add_changes(records)
+    }
+    fn import(&self, batch: ImportBatch) -> StoreFuture<'_, usize> {
+        let gate = if batch.changes.is_empty() {
+            None
+        } else {
+            self.hooks
+                .lock()
+                .import
+                .as_mut()
+                .map(|hook| hook(&batch.changes))
+        };
         Box::pin(async move {
             if let Some(gate) = gate {
                 gate.await?;
             }
-            self.inner.add_changes(records).await
+            self.inner.import(batch).await
         })
     }
     fn add_local_change(
@@ -90,6 +97,13 @@ impl ChangeStore for HookedStore {
     }
     fn changes_for(&self, object_id: String) -> StoreFuture<'_, Vec<ChangeRecord>> {
         self.inner.changes_for(object_id)
+    }
+    fn unpublished_changes(
+        &self,
+        object_ids: Vec<String>,
+        key_prefix: String,
+    ) -> StoreFuture<'_, Vec<ChangeRecord>> {
+        self.inner.unpublished_changes(object_ids, key_prefix)
     }
     fn object_ids(&self) -> StoreFuture<'_, Vec<String>> {
         self.inner.object_ids()
