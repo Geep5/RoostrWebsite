@@ -118,6 +118,39 @@ impl Workspace {
                 }
             });
 
+        // The active space's highlight is one element that slides to the
+        // picked tile, under the tiles (tiles are fixed-size: 44px narrow,
+        // 52px wide, 4px apart below the 10px top padding).
+        let tile_h = if wide { 52. } else { 44. };
+        if let Some(index) = current
+            .as_deref()
+            .and_then(|c| spaces.iter().position(|s| s.id == c))
+        {
+            let top = motion::animate(
+                "rail-active-top",
+                10. + index as f32 * (tile_h + 4.),
+                motion::Tween::bezier(260, [0.22, 1.0, 0.36, 1.0]),
+                window,
+                cx,
+            );
+            rail = rail.child(
+                div()
+                    .absolute()
+                    .top(px(top))
+                    .h(px(tile_h))
+                    .map(|d| {
+                        if wide {
+                            d.left(px(8.)).right(px(8.))
+                        } else {
+                            d.left(px((width - 44.) / 2.)).w(px(44.))
+                        }
+                    })
+                    .rounded(px(10.))
+                    .bg(mix(user_color, 0.16, theme::panel()))
+                    .border_2()
+                    .border_color(user_color),
+            );
+        }
         for space in spaces {
             let id = space.id.clone();
             let active = current.as_deref() == Some(&id);
@@ -155,15 +188,6 @@ impl Workspace {
                 .map(|d| {
                     if active {
                         d.text_color(theme::fg())
-                            .bg(mix(user_color, 0.16, theme::panel()))
-                            .child(
-                                div()
-                                    .absolute()
-                                    .inset_0()
-                                    .rounded(px(10.))
-                                    .border_2()
-                                    .border_color(user_color),
-                            )
                     } else {
                         d.hover(|s| s.bg(theme::panel()))
                     }
