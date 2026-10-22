@@ -770,7 +770,20 @@ impl Inner {
         let this = self.clone();
         crate::rt::spawn(async move {
             let since = if bootstrapped { cursor + 1 } else { 1 };
-            match this.backfill(since, floor).await {
+            let mut walked = this.backfill(since, floor).await;
+            // Space obligations restored at start may be history another
+            // device of the account already published under the space key,
+            // older than the cursor: walk every stream from the start (only
+            // what is not held is fetched), which marks what the relays
+            // hold, before they are released and the rest sealed.
+            if bootstrapped
+                && walked.is_ok()
+                && !this.stopped()
+                && this.space_pending_restored().await
+            {
+                walked = this.backfill(1, None).await;
+            }
+            match walked {
                 Ok(complete) if !this.stopped() => {
                     if !bootstrapped && complete {
                         this.mark_bootstrapped().await;

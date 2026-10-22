@@ -178,6 +178,14 @@ impl Inner {
         Ok(())
     }
 
+    /// The store holds space obligations from an earlier session.
+    pub(super) async fn space_pending_restored(&self) -> bool {
+        self.store
+            .pending_publishes()
+            .await
+            .is_ok_and(|pending| pending.iter().any(|p| p.space_id.is_some()))
+    }
+
     /// The object's current base covers `change_id`.
     pub(super) async fn base_covers(
         &self,
