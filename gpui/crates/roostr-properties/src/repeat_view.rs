@@ -1319,16 +1319,14 @@ impl Render for RepeatView {
         }
         // Footer
         let busy = self.busy;
+        // Turn off / Skip: bordered like the other footer buttons, red on hover.
         let rm = |id: &'static str, label: &'static str| {
-            div()
-                .id(id)
-                .text_size(px(11.))
+            small_btn(id, label)
                 .text_color(theme::muted())
-                .when(busy, |e| e.opacity(0.5))
+                .when(busy, |e| e.opacity(0.5).cursor_default())
                 .when(!busy, |e| {
-                    e.cursor_pointer().hover(|s| s.text_color(theme::red()))
+                    e.hover(|s| s.text_color(theme::red()).border_color(theme::red()))
                 })
-                .child(label)
         };
         let mut foot = div().flex().items_center().gap(px(6.));
         if rule.is_some() {
