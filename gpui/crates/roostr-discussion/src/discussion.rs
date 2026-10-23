@@ -169,6 +169,8 @@ pub struct Discussion {
     mention: Option<TagQuery>,
     mention_index: usize,
     tagged: Vec<ObjectAgentOption>,
+    /// A tag was made from typed text: re-create the composer's pills.
+    repill: bool,
     object_tag: Option<TagQuery>,
     object_tag_index: usize,
     tagged_objects: Vec<ObjectTag>,
@@ -265,6 +267,7 @@ impl Discussion {
             mention: None,
             mention_index: 0,
             tagged: Vec::new(),
+            repill: false,
             object_tag: None,
             object_tag_index: 0,
             tagged_objects: Vec::new(),
@@ -942,6 +945,23 @@ impl Discussion {
             self.mention = None;
             return;
         }
+        // `@Name ` typed out in full (not picked from the menu) tags the agent
+        // as a pick would - once the agents are known (re-run when they load).
+        if hit.query.ends_with(char::is_whitespace)
+            && let Some(options) = &self.tag_options
+        {
+            let name = hit.query.trim_end();
+            if let Some(option) = options
+                .iter()
+                .find(|o| o.agent_name == name && !self.tagged.iter().any(|t| t.key() == o.key()))
+            {
+                self.tagged.push(option.clone());
+                self.repill = true;
+                self.mention = None;
+                cx.notify();
+                return;
+            }
+        }
         if self.mention.as_ref().is_none_or(|m| m.query != hit.query) {
             self.mention_index = 0;
         }
@@ -962,6 +982,7 @@ impl Discussion {
             let _ = this.update(cx, |this, cx| {
                 this.tag_options = Some(options);
                 this.tag_loading = None;
+                this.update_mention(cx);
                 cx.notify();
             });
         }));
@@ -978,7 +999,8 @@ impl Discussion {
         let (Some(mention), Some(options)) = (&self.mention, &self.tag_options) else {
             return Vec::new();
         };
-        let q = mention.query.to_lowercase();
+        // "@Grant Email " (a space typed after the name) still lists it.
+        let q = mention.query.trim_end().to_lowercase();
         options
             .iter()
             .filter(|o| !self.tagged.iter().any(|t| t.key() == o.key()))
@@ -1262,13 +1284,32 @@ impl Discussion {
         });
     }
 
-    /// Tags whose @Name survived editing and are present in this text.
+    /// Tags whose @Name survived editing and are present in this text, plus
+    /// any agent of this object whose `@Name` was typed out in full (ending
+    /// the text or followed by a non-word character) without picking it.
     fn live_tags(&self, text: &str) -> Vec<ObjectAgentOption> {
-        self.tagged
+        let mut tags: Vec<ObjectAgentOption> = self
+            .tagged
             .iter()
             .filter(|o| text.contains(&format!("@{}", o.agent_name)))
             .cloned()
-            .collect()
+            .collect();
+        for option in self.tag_options.iter().flatten() {
+            if option.agent_name.is_empty() || tags.iter().any(|t| t.key() == option.key()) {
+                continue;
+            }
+            let label = format!("@{}", option.agent_name);
+            let typed = text.match_indices(&label).any(|(at, _)| {
+                text[at + label.len()..]
+                    .chars()
+                    .next()
+                    .is_none_or(|c| !is_word_char(c))
+            });
+            if typed {
+                tags.push(option.clone());
+            }
+        }
+        tags
     }
 
     fn clear_composer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -2407,6 +2448,7 @@ impl Discussion {
                 return Some(
                     menu(frame)
                         .id("mention-menu")
+                        .debug_selector(|| "mention-menu".into())
                         .p(px(4.))
                         .flex()
                         .flex_col()
@@ -2420,6 +2462,7 @@ impl Discussion {
             if self.tag_options.is_some() {
                 return Some(
                     menu(appear(window, cx))
+                        .debug_selector(|| "mention-none".into())
                         .px(px(12.))
                         .py(px(10.))
                         .child(format!("No agent matches “{}”.", mention.query))
@@ -2859,6 +2902,14 @@ fn typing_dots() -> impl IntoElement {
 
 impl Render for Discussion {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if std::mem::take(&mut self.repill) {
+            cx.defer_in(window, |this, window, cx| {
+                let caret = this.caret(cx);
+                let draft = this.draft.clone();
+                this.set_draft(draft, Some(caret), window, cx);
+                cx.notify();
+            });
+        }
         if self.is_open() && !self.focused_once && self.object.is_some() {
             self.focused_once = true;
             let composer = self.composer.clone();
