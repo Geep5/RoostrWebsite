@@ -17,9 +17,6 @@ use gpui_kit::*;
 use roostr_core::repeat::{
     DAY, DAY_MINUTES, RepeatDraft, WD, describe_draft, ordinal_of, sod, sorted_times, to_draft,
 };
-use roostr_core::serving::{
-    MachineRow, fetch_machines, machine_name, resolve_serving, serving_copy,
-};
 use roostr_core::types::{guest_agents, repeat_of};
 use roostr_core::{Fields, Glyph, Object, RepeatFreq, RepeatRule, Store, Value, api, theme, ui};
 
@@ -290,11 +287,6 @@ pub(crate) struct RepeatView {
     assignee: String,
     busy: bool,
     error: String,
-    serving_name: String,
-    serving_warning: String,
-    machines_known: Vec<MachineRow>,
-    /// The object state serving was last resolved for.
-    resolved_for: Option<(String, i64)>,
     agent_picker: Picker,
     freq_picker: Picker,
     calendar: Option<Entity<CalendarPicker>>,
@@ -323,16 +315,6 @@ impl RepeatView {
         let interval = cx.new(|cx| InputState::new(window, cx));
         let window_from = cx.new(|cx| InputState::new(window, cx).placeholder("HH:MM"));
         let window_until = cx.new(|cx| InputState::new(window, cx).placeholder("HH:MM"));
-        let roster = fetch_machines(cx);
-        cx.spawn(async move |this, cx| {
-            if let Ok((_, machines)) = roster.await {
-                let _ = this.update(cx, |this, cx| {
-                    this.machines_known = machines;
-                    cx.notify();
-                });
-            }
-        })
-        .detach();
         let subs = vec![
             cx.observe(&Store::global(cx), |_, _, cx| cx.notify()),
             cx.subscribe(&interval, |this, input, ev: &InputEvent, cx| {
@@ -390,10 +372,6 @@ impl RepeatView {
             assignee: String::new(),
             busy: false,
             error: String::new(),
-            serving_name: String::new(),
-            serving_warning: String::new(),
-            machines_known: vec![],
-            resolved_for: None,
             agent_picker,
             freq_picker,
             calendar: None,
@@ -426,45 +404,6 @@ impl RepeatView {
 
     fn object(&self, cx: &App) -> Option<std::sync::Arc<Object>> {
         Store::global(cx).read(cx).object(&self.object_id)
-    }
-
-    /// Re-resolve which computer runs the object's occurrences when it changes.
-    fn resolve(&mut self, object: &Object, cx: &mut Context<Self>) {
-        let key = (object.id.clone(), object.updated_at);
-        if self.resolved_for.as_ref() == Some(&key) {
-            return;
-        }
-        self.resolved_for = Some(key);
-        let agent_owned =
-            object.fields.contains_key("assignee") || object.fields.contains_key("agent");
-        if !agent_owned {
-            self.serving_name.clear();
-            self.serving_warning.clear();
-            return;
-        }
-        let task = resolve_serving(&object.id, cx);
-        cx.spawn(async move |this, cx| {
-            let result = task.await;
-            let _ = this.update(cx, |this, cx| {
-                match result {
-                    Ok((serving, machines)) => {
-                        this.serving_name = machine_name(&machines, &serving.machine_id);
-                        let copy = serving_copy(&serving, &machines);
-                        this.serving_warning = if copy.warning {
-                            copy.text
-                        } else {
-                            String::new()
-                        };
-                    }
-                    Err(_) => {
-                        this.serving_name.clear();
-                        this.serving_warning.clear();
-                    }
-                }
-                cx.notify();
-            });
-        })
-        .detach();
     }
 
     fn sync_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -847,26 +786,13 @@ impl Render for RepeatView {
         let Some(object) = self.object(cx) else {
             return div();
         };
-        self.resolve(&object, cx);
         let rule = repeat_of(&object.fields);
         let view = rule.as_ref().map(to_draft);
-        let now = chrono::Utc::now().timestamp_millis();
-        let overdue = rule.as_ref().is_some_and(|r| r.next < now);
-        let stuck = object
-            .field_str("error")
-            .starts_with("run never finished: ");
-        let agent_owned =
-            object.fields.contains_key("assignee") || object.fields.contains_key("agent");
         let requested = object.fields.contains_key("run_now");
         let active_run = object
             .field("run_active")
             .and_then(|v| v.entries())
             .is_some();
-        let running_on = if active_run {
-            self.serving_name.clone()
-        } else {
-            String::new()
-        };
         let open_run = rule
             .as_ref()
             .is_some_and(|r| r.fired_for == Some(r.next) && !r.freq.is_sub_daily());
@@ -945,108 +871,10 @@ impl Render for RepeatView {
                             ),
                     ),
             );
-        let meta = || {
-            div()
-                .flex()
-                .flex_wrap()
-                .gap_x(px(6.))
-                .gap_y(px(2.))
-                .pl(px(136.))
-        };
-        // One meta span: an 11.5px muted note; errors in red.
-        let line = |text: String| note(text, 11.5).line_height(rems(1.25));
-        let red = theme::red();
-        if let Some(rule) = &rule {
-            if stuck || overdue || (agent_owned && !self.serving_warning.is_empty()) {
-                let mut m = meta();
-                if stuck || overdue {
-                    m = m.child(
-                        line(if stuck {
-                            format!("Stuck since {} - see Error", fmt_long(rule.next))
-                        } else {
-                            format!("Overdue since {}", fmt_long(rule.next))
-                        })
-                        .text_color(red),
-                    );
-                }
-                if agent_owned && !self.serving_warning.is_empty() {
-                    m = m.child(line(self.serving_warning.clone()).text_color(red));
-                }
-                root = root.child(m);
-            }
-            if let Some(moved) = &rule.moved {
-                let reason = if moved.reason.is_empty() {
-                    String::new()
-                } else {
-                    format!(": {}", moved.reason)
-                };
-                root = root.child(meta().child(line(format!(
-                    "Next run moved to {} (was {}){reason}",
-                    fmt_long(rule.next),
-                    fmt_long(moved.from)
-                ))));
-            }
-            if rule.fired_at.is_some() || rule.last_run.is_some() {
-                let mut m = meta();
-                let mut first = true;
-                if let Some(at) = rule.fired_at {
-                    let by = rule
-                        .fired_by
-                        .as_ref()
-                        .filter(|b| !b.is_empty())
-                        .map(|b| format!(" by {}", machine_name(&self.machines_known, b)))
-                        .unwrap_or_default();
-                    m = m.child(line(format!("fired {}{by}", fmt_long(at))));
-                    first = false;
-                }
-                if let Some(last) = &rule.last_run {
-                    let on = if last.machine.is_empty() {
-                        String::new()
-                    } else {
-                        format!(" on {}", machine_name(&self.machines_known, &last.machine))
-                    };
-                    let mut span = div().flex().child(line(format!(
-                        "{}last run {}{on}",
-                        if first { "" } else { "· " },
-                        fmt_long(last.at)
-                    )));
-                    if let Some(e) = last.error.as_ref().filter(|e| !e.is_empty()) {
-                        span = span.child(line(format!(" · {e}")).text_color(red));
-                    }
-                    m = m.child(span);
-                }
-                root = root.child(m);
-            }
-        }
         if !self.error.is_empty() {
             root = root.child(error_alert("repeat-error", self.error.clone()).text_size(px(12.5)));
         }
-        if active_run {
-            let on = if running_on.is_empty() {
-                String::new()
-            } else {
-                format!(" on {running_on}")
-            };
-            root = root.child(
-                note(
-                    format!(
-                        "Running now{on} - the result lands in the agent's chat and under “last run”."
-                    ),
-                    12.,
-                )
-                .ml(px(26.))
-                .mt(px(2.)),
-            );
-        } else if requested {
-            root = root.child(
-                note(
-                    "Run now asked for - waiting for its computer to start it.",
-                    12.,
-                )
-                .ml(px(26.))
-                .mt(px(2.)),
-            );
-        }
+        let red = theme::red();
         if !self.open {
             return root;
         }
