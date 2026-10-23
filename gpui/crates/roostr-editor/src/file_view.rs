@@ -11,6 +11,8 @@ use gpui_kit::component::attachment::{
 };
 use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
 use gpui_kit::component::description_list::DescriptionList;
+use gpui_kit::component::link::Link;
+use gpui_kit::component::{Icon, IconName};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use roostr_core::serving::{self, MachineRow};
@@ -458,56 +460,34 @@ impl Render for FileView {
                             _ => "Open in the system viewer",
                         };
                         sec = sec.child(
-                            // The frame keeps the hover border (the kit card can
-                            // only tint its fill).
-                            div()
+                            Attachment::new()
+                                .id("file-open")
+                                .on_click(move |_, _, cx| {
+                                    crate::files::open_externally(
+                                        open_bytes.clone(),
+                                        &open_name,
+                                        cx,
+                                    )
+                                    .detach_and_log_err(cx)
+                                })
+                                .media(AttachmentMedia::new().child(Icon::new(match kind {
+                                    Kind::Pdf => IconName::FileText,
+                                    _ => IconName::Play,
+                                })))
+                                .content(
+                                    AttachmentContent::new().title(
+                                        AttachmentTitle::new(label)
+                                            .font_weight(FontWeight::NORMAL)
+                                            .text_color(theme::fg()),
+                                    ),
+                                )
                                 .w_full()
-                                .border_1()
-                                .border_color(theme::border())
+                                .h_auto()
+                                .gap(px(10.))
+                                .px(px(14.))
+                                .py(px(12.))
                                 .rounded(px(10.))
-                                .bg(theme::bg())
-                                .hover(|s| s.border_color(theme::muted()))
-                                .child(
-                                    Attachment::new()
-                                        .id("file-open")
-                                        .on_click(move |_, _, cx| {
-                                            crate::files::open_externally(
-                                                open_bytes.clone(),
-                                                &open_name,
-                                                cx,
-                                            )
-                                            .detach_and_log_err(cx)
-                                        })
-                                        .media(
-                                            AttachmentMedia::new()
-                                                .size(px(28.))
-                                                .bg(transparent_black())
-                                                .child(div().text_size(px(22.)).child(
-                                                    match kind {
-                                                        Kind::Video => "🎬",
-                                                        Kind::Audio => "🎵",
-                                                        _ => "📄",
-                                                    },
-                                                )),
-                                        )
-                                        .content(
-                                            AttachmentContent::new().title(
-                                                AttachmentTitle::new(label)
-                                                    .font_weight(FontWeight::NORMAL)
-                                                    .text_color(theme::fg()),
-                                            ),
-                                        )
-                                        .w_full()
-                                        .h_auto()
-                                        .gap(px(10.))
-                                        .px(px(14.))
-                                        .py(px(12.))
-                                        .rounded(px(9.))
-                                        .border_0()
-                                        .bg(transparent_black())
-                                        .text_size(px(13.))
-                                        .cursor_pointer(),
-                                ),
+                                .text_size(px(13.)),
                         );
                     }
                     Kind::None => {}
@@ -567,12 +547,8 @@ impl Render for FileView {
                                 .gap(px(6.))
                                 .child(machine_icon.clone())
                                 .child(match row {
-                                    Some(row) => div()
-                                        .id(("holder", i))
-                                        .cursor_pointer()
+                                    Some(row) => Link::new(("holder", i))
                                         .text_color(theme::fg())
-                                        .underline()
-                                        .hover(|s| s.text_color(theme::accent()))
                                         .on_click(move |_, _, cx| {
                                             roostr_core::nav::navigate(
                                                 Route::Object(row.id.clone()),

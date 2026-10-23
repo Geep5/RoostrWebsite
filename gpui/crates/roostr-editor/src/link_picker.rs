@@ -99,16 +99,14 @@ impl Render for LinkPicker {
                     .py(px(4.))
                     .child("No matching objects.")
             });
-        for (i, (_, icon, name, tk)) in rows.into_iter().enumerate() {
+        for (_, icon, name, tk) in rows {
             list = list.item(CommandItem::new().label(name.clone()).child(move |_, _| {
                 div()
-                    .id(("link-row", i))
                     .flex()
                     .flex_1()
                     .items_center()
                     .gap(px(8.))
                     .min_w_0()
-                    .cursor_pointer()
                     .text_size(px(13.))
                     .text_color(theme::fg())
                     .child(roostr_core::ui::emoji_or_image_icon(&icon, px(16.)))
@@ -204,11 +202,12 @@ impl Render for LinkPrompt {
                 }))
                 .child("Link URL:")
                 .child(
-                    div()
-                        .rounded(px(6.))
+                    Input::new(&self.input)
+                        .bordered(false)
                         .bg(theme::hl_med())
+                        .rounded(px(6.))
                         .px(px(8.))
-                        .child(Input::new(&self.input).appearance(false).text_size(px(13.))),
+                        .text_size(px(13.)),
                 )
                 .child(
                     div()
@@ -233,8 +232,7 @@ impl Render for LinkPrompt {
 
 /// A kit popover held open (it opens with its owner and closes with it) at
 /// the point a zero-size trigger marks: the caller places that point.
-/// Roostr's surface (panel, border, 10px radius, menu shadow); `on_close`
-/// runs when the popover dismisses itself on an outside click.
+/// `on_close` runs when the popover dismisses itself on an outside click.
 fn held_popover(
     id: &'static str,
     focus: &FocusHandle,
@@ -252,11 +250,6 @@ fn held_popover(
                 on_close(window, cx);
             }
         })
-        .bg(theme::panel())
-        .border_1()
-        .border_color(theme::border())
-        .rounded(px(10.))
-        .shadow(roostr_core::ui::menu_shadow())
 }
 
 /// The point a held popover hangs from.

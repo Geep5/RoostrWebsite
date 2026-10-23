@@ -12,6 +12,8 @@
 
 use chrono::{Local, NaiveDate, TimeZone as _, Weekday};
 use gpui_kit::base::{Calendar, CalendarItemKind};
+use gpui_kit::component::Sizable as _;
+use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
 use gpui_kit::component::calendar::{CalendarEvent as KitCalendarEvent, CalendarState, Date};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -103,17 +105,30 @@ impl Focusable for CalendarPicker {
     }
 }
 
-fn foot_button(id: &'static str, label: &'static str) -> Stateful<Div> {
-    div()
-        .id(id)
+/// A footer action ("Today" / "Clear"): kit [`Button`] (muted, hover fill),
+/// small, 12px label (in a child: the kit sizes its own label text) that
+/// turns fg while hovered.
+fn foot_button(id: &'static str, label: &'static str, cx: &App) -> Button {
+    Button::new(id)
+        .custom(
+            ButtonCustomVariant::new(cx)
+                .foreground(theme::muted())
+                .hover(theme::hover())
+                .active(theme::hover()),
+        )
+        .small()
+        .group(id)
+        .accessibility_label(label)
+        .h_auto()
         .px(px(6.))
         .py(px(2.))
         .rounded(theme::radius::sm())
-        .text_size(px(12.))
-        .text_color(theme::muted())
-        .cursor_pointer()
-        .hover(|s| s.bg(theme::hover()).text_color(theme::fg()))
-        .child(label)
+        .child(
+            div()
+                .text_size(px(12.))
+                .group_hover(id, |s| s.text_color(theme::fg()))
+                .child(label),
+        )
 }
 
 /// What a calendar control reads as.
@@ -241,13 +256,13 @@ impl Render for CalendarPicker {
                     .pt(px(8.))
                     .border_t_1()
                     .border_color(theme::border())
-                    .child(foot_button("today", "Today").on_click(cx.listener(
+                    .child(foot_button("today", "Today", cx).on_click(cx.listener(
                         move |_, _, _, cx| {
                             cx.emit(CalendarEvent::Pick(Some(local_midnight_ms(today))))
                         },
                     )))
                     .child(
-                        foot_button("clear", "Clear").on_click(
+                        foot_button("clear", "Clear", cx).on_click(
                             cx.listener(|_, _, _, cx| cx.emit(CalendarEvent::Pick(None))),
                         ),
                     ),

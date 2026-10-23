@@ -3,6 +3,8 @@
 //! each value rendered in the property's own format.
 
 use gpui_kit::component::input::{InputEvent, TextareaState};
+use gpui_kit::component::link::Link;
+use gpui_kit::component::tag::Tag;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use roostr_core::dates::show_date;
@@ -191,6 +193,14 @@ fn fmt(v: Option<&Value>, format: &str) -> String {
     }
     String::new()
 }
+/// A cell opening an object: the kit [`Link`] in Roostr's look, the cell's
+/// own text colour with no underline at rest (the kit adds its underline on
+/// hover).
+fn roostr_link(id: impl Into<ElementId>) -> Link {
+    Link::new(id)
+        .text_color(theme::fg())
+        .text_decoration_color(transparent_black())
+}
 
 impl Render for PropertyPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -229,31 +239,29 @@ impl Render for PropertyPanel {
             .flex_col()
             .text_color(theme::fg())
             .child(
-                div()
-                    .ml(px(-8.))
-                    .mb(px(8.))
-                    .group("def")
-                    // A textarea blurs on any outside click (the web's onblur save).
-                    .on_mouse_down_out(cx.listener(|this, _, window, cx| {
-                        if this.definition.focus_handle(cx).is_focused(window) {
-                            window.blur(cx);
-                        }
-                    }))
-                    .child(
-                        text_area(
-                            &self.definition,
-                            window,
-                            cx,
-                            transparent_black(),
-                            theme::radius::md(),
-                            (6., 8.),
-                        )
-                        .text_size(px(13.5))
-                        .when(!focused, |d| {
-                            d.border_color(transparent_black())
-                                .group_hover("def", |s| s.border_color(theme::border()))
-                        }),
-                    ),
+                // The textarea itself (no wrapper): border only on hover, and it
+                // blurs on any outside click (the web's onblur save).
+                text_area(
+                    &self.definition,
+                    window,
+                    cx,
+                    transparent_black(),
+                    theme::radius::md(),
+                    (6., 8.),
+                )
+                .w_auto()
+                .ml(px(-8.))
+                .mb(px(8.))
+                .text_size(px(13.5))
+                .on_mouse_down_out(cx.listener(|this, _, window, cx| {
+                    if this.definition.focus_handle(cx).is_focused(window) {
+                        window.blur(cx);
+                    }
+                }))
+                .when(!focused, |d| {
+                    d.border_color(transparent_black())
+                        .hover(|s| s.border_color(theme::border()))
+                }),
             )
             .child(
                 div()
@@ -264,10 +272,10 @@ impl Render for PropertyPanel {
                     .text_size(px(13.))
                     .text_color(theme::muted())
                     .child(
-                        div()
-                            .border_1()
-                            .border_color(theme::border())
+                        Tag::new()
+                            .outline()
                             .rounded(theme::radius::sm())
+                            .border_color(theme::border())
                             .px(px(8.))
                             .py(px(2.))
                             .text_size(px(12.))
@@ -320,16 +328,13 @@ impl Render for PropertyPanel {
                     Some(field_str(&r.fields, "name").to_string()).filter(|n| !n.is_empty())
                 })
                 .unwrap_or_else(|| "Untitled".into());
-            let name_cell = div()
-                .id(SharedString::from(format!("name-{}", r.id)))
+            let name_cell = roostr_link(SharedString::from(format!("name-{}", r.id)))
                 .p(px(8.))
                 .text_size(px(14.))
                 .font_weight(FontWeight::MEDIUM)
                 .overflow_hidden()
                 .whitespace_nowrap()
                 .text_ellipsis()
-                .cursor_pointer()
-                .hover(|s| s.underline())
                 .on_click(move |_, _, cx| nav::navigate(Route::Object(rid.clone()), cx))
                 .child(format!(
                     "{} {name}",
@@ -360,14 +365,11 @@ impl Render for PropertyPanel {
                     };
                     let target = id.clone();
                     value = value.child(
-                        div()
-                            .id(SharedString::from(format!("link-{}-{id}", r.id)))
+                        roostr_link(SharedString::from(format!("link-{}-{id}", r.id)))
                             .flex()
                             .items_center()
                             .gap(px(4.))
                             .mr(px(10.))
-                            .cursor_pointer()
-                            .hover(|s| s.underline())
                             .on_click(move |_, _, cx| {
                                 nav::navigate(Route::Object(target.clone()), cx)
                             })

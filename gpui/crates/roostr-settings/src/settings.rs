@@ -8,9 +8,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures::FutureExt as _;
+use gpui_kit::component::Sizable as _;
 use gpui_kit::component::WindowExt as _;
+use gpui_kit::component::avatar::Avatar;
 use gpui_kit::component::color_picker::{ColorPicker, ColorPickerEvent, ColorPickerState};
+use gpui_kit::component::group_box::{GroupBox, GroupBoxVariants as _};
 use gpui_kit::component::input::{InputEvent, InputState};
+use gpui_kit::component::tag::Tag;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use roostr_core::color::{DEFAULT_CHAT_COLOR, hex, normalize_hex};
@@ -22,7 +26,7 @@ use roostr_core::profile as nostr_profile;
 use roostr_core::serving::{MachineRow, fetch_machines, machine_name};
 use roostr_core::sync_status::{progress_text, sync_progress};
 use roostr_core::ui::data_url_image;
-use roostr_core::{Store, StoreEvent, UiState, api, lite_ui, motion, theme};
+use roostr_core::{Glyph, Store, StoreEvent, UiState, api, lite_ui, motion, theme};
 use serde_json::{Value as Json, json};
 
 use crate::export::{ExportFormat, export_all};
@@ -752,17 +756,7 @@ impl Settings {
                             .text_color(theme::muted())
                             .child("nsec"),
                     )
-                    .child(
-                        div()
-                            .px(px(8.))
-                            .rounded_full()
-                            .border_1()
-                            .border_color(theme::red())
-                            .text_color(theme::red())
-                            .text_size(px(10.))
-                            .line_height(px(16.))
-                            .child("SECRET"),
-                    ),
+                    .child(key_tag("SECRET", theme::red(), theme::red())),
             )
             .child(
                 div()
@@ -838,39 +832,39 @@ impl Settings {
                     None => vec!["Estimating what a full sync downloads…".into()],
                 };
                 d.child(
-                    div()
-                        .mt(px(8.))
-                        .p(px(12.))
-                        .rounded(px(8.))
-                        .border_1()
-                        .border_color(theme::border())
-                        .bg(theme::bg())
-                        .flex()
-                        .flex_col()
-                        .gap(px(4.))
-                        .children(lines.into_iter().map(p))
-                        .child(
-                            div()
-                                .mt(px(6.))
-                                .flex()
-                                .gap(px(8.))
-                                .child(
-                                    Btn::action("sync-fully-confirm", "Fully sync this device")
-                                        .armed()
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.confirm_full = false;
-                                            this.full_requested = true;
-                                            lite_ui::sync_fully(cx);
-                                            cx.notify();
-                                        })),
-                                )
-                                .child(Btn::small("sync-fully-cancel", "Cancel").on_click(
-                                    cx.listener(|this, _, _, cx| {
+                    card(
+                        "sync-fully-panel",
+                        StyleRefinement::default()
+                            .p(px(12.))
+                            .rounded(px(8.))
+                            .border_color(theme::border())
+                            .bg(theme::bg())
+                            .gap(px(4.)),
+                    )
+                    .mt(px(8.))
+                    .children(lines.into_iter().map(p))
+                    .child(
+                        div()
+                            .mt(px(6.))
+                            .flex()
+                            .gap(px(8.))
+                            .child(
+                                Btn::action("sync-fully-confirm", "Fully sync this device")
+                                    .armed()
+                                    .on_click(cx.listener(|this, _, _, cx| {
                                         this.confirm_full = false;
+                                        this.full_requested = true;
+                                        lite_ui::sync_fully(cx);
                                         cx.notify();
-                                    }),
-                                )),
-                        ),
+                                    })),
+                            )
+                            .child(Btn::small("sync-fully-cancel", "Cancel").on_click(
+                                cx.listener(|this, _, _, cx| {
+                                    this.confirm_full = false;
+                                    cx.notify();
+                                }),
+                            )),
+                    ),
                 )
             })
             .when(self.full_requested, |d| {
@@ -998,7 +992,7 @@ impl Settings {
         now: i64,
         window: &Window,
         cx: &mut Context<Self>,
-    ) -> Div {
+    ) -> GroupBox {
         let this_device = record.device_id() == self.device_id;
         let name = if this_device {
             format!("{} (this device)", record.name)
@@ -1012,22 +1006,19 @@ impl Settings {
         };
         let id = record.id.clone();
         let renaming = self.renaming_device.as_deref() == Some(record.id.as_str());
-        let row = div()
+        let surface = StyleRefinement::default()
             .px(px(10.))
             .py(px(8.))
             .rounded(px(8.))
-            .border_1()
-            .flex()
-            .flex_col()
-            .gap(px(6.))
-            .map(|d| {
-                if record.lite {
-                    d.border_color(theme::orange().opacity(0.4))
-                        .bg(theme::orange().opacity(0.06))
-                } else {
-                    d.border_color(theme::border())
-                }
-            });
+            .gap(px(6.));
+        let surface = if record.lite {
+            surface
+                .border_color(theme::orange().opacity(0.4))
+                .bg(theme::orange().opacity(0.06))
+        } else {
+            surface.border_color(theme::border())
+        };
+        let row = card(SharedString::from(format!("device-{id}")), surface);
         if renaming {
             return row.child(
                 div()
@@ -1482,6 +1473,24 @@ fn error_p(text: impl Into<SharedString>) -> Div {
     p(text)
 }
 
+/// A bordered settings card (holding confirm, device rows): a kit outline
+/// [`GroupBox`] with the surface restyled by `surface`.
+fn card(id: impl Into<ElementId>, surface: StyleRefinement) -> GroupBox {
+    GroupBox::new().id(id).outline().content_style(surface)
+}
+
+/// The small outline label beside a key ("SECRET", "SHAREABLE").
+fn key_tag(text: &'static str, color: Hsla, border: Hsla) -> Tag {
+    Tag::custom(color, color, border)
+        .outline()
+        .rounded_full()
+        .px(px(8.))
+        .py_0()
+        .text_size(px(10.))
+        .line_height(px(16.))
+        .child(text)
+}
+
 /// The rounded outline badge of the mode line ("Full mode") and the device rows.
 fn pill(text: impl Into<SharedString>, color: Hsla) -> gpui_kit::component::tag::Tag {
     gpui_kit::component::tag::Tag::custom(color, color, color)
@@ -1527,31 +1536,17 @@ impl Render for Settings {
             .when(narrow, |d| d.child(self.sheet_grip(cx)));
 
         // ── Profile
-        let avatar = match (&self.profile_image, self.profile_picture.is_empty()) {
-            (Some(image), _) => img(image.clone())
-                .size(px(56.))
-                .rounded_full()
-                .flex_none()
-                .into_any_element(),
-            (None, false) => img(SharedString::from(self.profile_picture.clone()))
-                .size(px(56.))
-                .rounded_full()
-                .flex_none()
-                .into_any_element(),
-            (None, true) => div()
-                .size(px(56.))
-                .flex_none()
-                .rounded_full()
-                .flex()
-                .items_center()
-                .justify_center()
-                .bg(theme::hover())
-                .border_1()
-                .border_color(theme::border())
-                .text_size(px(22.))
-                .child("⚙")
-                .into_any_element(),
-        };
+        let avatar = Avatar::new()
+            .with_size(px(56.))
+            .flex_none()
+            .map(
+                |a| match (&self.profile_image, self.profile_picture.is_empty()) {
+                    (Some(image), _) => a.src(image.clone()),
+                    (None, false) => a.src(SharedString::from(self.profile_picture.clone())),
+                    (None, true) => a.placeholder(Glyph::Settings),
+                },
+            )
+            .into_any_element();
         let has_picture = !self.profile_picture.is_empty();
         let profile = section("Profile")
             .child(p(
@@ -1640,17 +1635,11 @@ impl Render for Settings {
                                 .text_color(theme::muted())
                                 .child("npub"),
                         )
-                        .child(
-                            div()
-                                .px(px(8.))
-                                .rounded_full()
-                                .border_1()
-                                .border_color(rgba(0x35b57f73))
-                                .text_color(rgb(0x35b57f))
-                                .text_size(px(10.))
-                                .line_height(px(16.))
-                                .child("SHAREABLE"),
-                        ),
+                        .child(key_tag(
+                            "SHAREABLE",
+                            rgb(0x35b57f).into(),
+                            rgba(0x35b57f73).into(),
+                        )),
                 )
                 .child(
                     div()
@@ -1967,17 +1956,12 @@ impl Render for Settings {
             dictionary = dictionary.child(div().flex().flex_wrap().gap(px(6.)).children(
                 self.ignored.iter().map(|w| {
                     let word = w.clone();
-                    div()
-                        .flex()
-                        .items_center()
+                    Tag::custom(theme::bg(), theme::fg(), theme::border())
+                        .rounded_full()
                         .gap(px(2.))
                         .pl(px(12.))
                         .pr(px(4.))
                         .py(px(2.))
-                        .rounded_full()
-                        .bg(theme::bg())
-                        .border_1()
-                        .border_color(theme::border())
                         .font_family(theme::fonts::MONO)
                         .text_size(px(13.))
                         .child(w.clone())

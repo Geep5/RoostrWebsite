@@ -22,14 +22,18 @@ use gpui_kit::component::input::{
     TextareaState,
 };
 use gpui_kit::component::label::Label;
+use gpui_kit::component::link::Link;
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::message::{
     Message, MessageAlignment, MessageAvatar, MessageContent, MessageFooter, MessageHeader,
 };
 use gpui_kit::component::message_scroller::{MessageScroller, MessageScrollerState};
+use gpui_kit::component::popover::Popover;
 use gpui_kit::component::tag::Tag;
 use gpui_kit::component::tooltip::Tooltip;
-use gpui_kit::component::{Disableable as _, ElementExt as _, IconName, IndexPath, Sizable as _};
+use gpui_kit::component::{
+    Disableable as _, ElementExt as _, IconName, IndexPath, Selectable, Sizable as _,
+};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use roostr_core::color::bubble;
@@ -1602,6 +1606,12 @@ impl Discussion {
         cx.notify();
     }
 
+    fn close_picker(&mut self, cx: &mut Context<Self>) {
+        self.picker_for.clear();
+        self.sync_list(cx);
+        cx.notify();
+    }
+
     fn scroll_to_message(&mut self, id: &str, cx: &mut Context<Self>) {
         if let Some(ix) = self.message_index(id)
             && self.own_scroller()
@@ -2121,13 +2131,11 @@ impl Discussion {
             let name = self.who(&m.author, store);
             meta = meta.child(if self.author_links(&m.author, store) {
                 let target = m.author.clone();
-                div()
-                    .id(("author", ix))
+                Link::new(("author", ix))
                     .text_size(px(12.))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(theme::fg())
-                    .cursor_pointer()
-                    .hover(|s| s.underline())
+                    .text_decoration_color(theme::fg().opacity(0.4))
                     .on_click(move |_, _, cx| nav::navigate(Route::Object(target.clone()), cx))
                     .child(name)
                     .into_any_element()
@@ -2468,47 +2476,45 @@ impl Discussion {
                 )
         });
 
-        // Reaction picker.
+        // Reaction picker: a kit popover held open under the actions' right
+        // edge. The picker draws its own surface; Escape (the popover's) and
+        // an outside press close it.
         let picker = picker_frame.map(|frame| {
             let id = m.id.clone();
             let entity = cx.entity().downgrade();
             let entity2 = entity.clone();
-            div()
-                .absolute()
-                .right_0()
-                .top(px(24.))
-                .size_0()
-                .child(deferred(
-                    anchored()
-                        .anchor(Anchor::TopRight)
-                        .snap_to_window_with_margin(px(8.))
-                        .child(
-                            frame
-                                .apply(div())
-                                .occlude()
-                                .on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                                    this.picker_for.clear();
-                                    this.sync_list(cx);
-                                    cx.notify();
-                                }))
-                                .child(
-                                    roostr_properties::EmojiPicker::new(("emoji-picker", ix))
-                                        .on_pick(move |emoji, _, cx| {
-                                            let (id, emoji) = (id.clone(), emoji.to_string());
-                                            let _ = entity.update(cx, |this, cx| {
-                                                this.toggle_reaction(id, emoji, cx)
-                                            });
-                                        })
-                                        .on_close(move |_, cx| {
-                                            let _ = entity2.update(cx, |this, cx| {
-                                                this.picker_for.clear();
-                                                this.sync_list(cx);
-                                                cx.notify();
-                                            });
-                                        }),
-                                ),
-                        ),
-                ))
+            let entity3 = entity.clone();
+            div().absolute().right_0().top(px(24.)).size_0().child(
+                Popover::new(("react-popover", ix))
+                    .trigger(HeldAt(true))
+                    .open(true)
+                    .appearance(false)
+                    .anchor(Anchor::TopRight)
+                    .offset(px(0.))
+                    .on_open_change(move |open, _, cx| {
+                        if !*open {
+                            let _ = entity3.update(cx, |this, cx| this.close_picker(cx));
+                        }
+                    })
+                    .child(
+                        frame
+                            .apply(div())
+                            .on_mouse_down_out(cx.listener(|this, _, _, cx| this.close_picker(cx)))
+                            .child(
+                                roostr_properties::EmojiPicker::new(("emoji-picker", ix))
+                                    .on_pick(move |emoji, _, cx| {
+                                        let (id, emoji) = (id.clone(), emoji.to_string());
+                                        let _ = entity.update(cx, |this, cx| {
+                                            this.toggle_reaction(id, emoji, cx)
+                                        });
+                                    })
+                                    .on_close(move |_, cx| {
+                                        let _ =
+                                            entity2.update(cx, |this, cx| this.close_picker(cx));
+                                    }),
+                            ),
+                    ),
+            )
         });
 
         // The bubble column is at most 78% of the row. It stays full-width
@@ -2740,7 +2746,9 @@ impl Discussion {
         let appear = |window: &mut Window, cx: &mut App| {
             motion::appear_frame("composer-menu-appear", 4., window, cx).target()
         };
-        let menu = |frame: motion::Target| {
+        // The kit command palette draws the frame (panel, border, menu
+        // radius); this places it above the composer with its shadow.
+        let menu = |frame: motion::Target, command: Command| {
             div()
                 .absolute()
                 .bottom_full()
@@ -2748,27 +2756,22 @@ impl Discussion {
                 .right_0()
                 .mb(px(6. - frame.y_px()))
                 .opacity(frame.alpha())
-                .bg(theme::panel())
-                .border_1()
-                .border_color(theme::border())
-                .rounded(theme::radius::menu())
-                .shadow(vec![BoxShadow {
-                    color: hsla(0., 0., 0., 0.35),
-                    offset: point(px(0.), px(6.)),
-                    blur_radius: px(24.),
-                    spread_radius: px(0.),
-                    inset: false,
-                }])
-                .max_h(px(260.))
-                .overflow_hidden()
-                .flex()
-                .flex_col()
-                .text_size(px(13.))
-                .text_color(theme::muted())
                 .occlude()
                 // The composer keeps the focus: a press in the menu picks
                 // without moving it there.
                 .capture_any_mouse_down(|_, window, _| window.prevent_default())
+                .child(
+                    command
+                        .shadow(vec![BoxShadow {
+                            color: hsla(0., 0., 0., 0.35),
+                            offset: point(px(0.), px(6.)),
+                            blur_radius: px(24.),
+                            spread_radius: px(0.),
+                            inset: false,
+                        }])
+                        .text_size(px(13.))
+                        .text_color(theme::muted()),
+                )
         };
         let entity = cx.entity().downgrade();
         if let Some(mention) = &self.mention {
@@ -2792,11 +2795,7 @@ impl Discussion {
                 let selected = entity.clone();
                 let command = Command::new(&self.mention_menu)
                     .searchable(false)
-                    .bordered(false)
                     .max_h(px(252.))
-                    .bg(transparent_black())
-                    .text_size(px(13.))
-                    .text_color(theme::muted())
                     .items(items)
                     .on_select(move |ix, _, cx| {
                         let _ = selected.update(cx, |this, cx| {
@@ -2823,7 +2822,7 @@ impl Discussion {
                         Self::lite_agents_notice(cx).unwrap_or_else(|| div().into_any_element())
                     });
                 return Some(
-                    menu(frame)
+                    menu(frame, command)
                         .debug_selector(move || {
                             if found {
                                 "mention-menu".into()
@@ -2831,7 +2830,6 @@ impl Discussion {
                                 "mention-none".into()
                             }
                         })
-                        .child(command)
                         .into_any_element(),
                 );
             }
@@ -2867,11 +2865,7 @@ impl Discussion {
         let selected = entity.clone();
         let command = Command::new(&self.object_menu)
             .searchable(false)
-            .bordered(false)
             .max_h(px(220.))
-            .bg(transparent_black())
-            .text_size(px(13.))
-            .text_color(theme::muted())
             .header(move |_, _, _| object_search_row(&search))
             .items(items)
             .on_select(move |ix, _, cx| {
@@ -2896,7 +2890,7 @@ impl Discussion {
                     .py(px(6.))
                     .child(format!("No object matches “{q}”."))
             });
-        Some(menu(frame).child(command).into_any_element())
+        Some(menu(frame, command).into_any_element())
     }
 
     fn render_composer(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
@@ -3154,25 +3148,46 @@ impl Discussion {
     }
 }
 
-/// An inline pill: icon, then the name (mentions in the composer and messages).
-pub(crate) fn pill(line: Pixels, bg: Hsla, ink: Hsla, icon: String, name: String) -> Div {
+/// An inline pill (kit `Tag`): icon, then the name, one composer line tall
+/// (mention and object tokens in the composer).
+pub(crate) fn pill(line: Pixels, bg: Hsla, ink: Hsla, icon: String, name: String) -> Tag {
     let icon_el = if is_image_icon(&icon) {
         div().child(roostr_core::ui::emoji_or_image_icon(&icon, px(13.)))
     } else {
         div().text_size(px(12.)).child(icon)
     };
-    div()
+    Tag::custom(bg, ink, transparent_black())
+        .rounded(px(3.))
         .h(line)
-        .flex()
-        .items_center()
         .gap(px(3.))
         .px(px(2.))
-        .rounded(px(3.))
-        .bg(bg)
-        .text_color(ink)
+        .py_0()
+        .border_0()
+        .text_size(px(14.))
+        .line_height(line)
         .font_weight(FontWeight::MEDIUM)
         .child(icon_el)
         .child(name)
+}
+
+/// The zero-size point a held-open kit popover hangs from.
+#[derive(IntoElement)]
+struct HeldAt(bool);
+
+impl Selectable for HeldAt {
+    fn selected(self, selected: bool) -> Self {
+        Self(selected)
+    }
+
+    fn is_selected(&self) -> bool {
+        self.0
+    }
+}
+
+impl RenderOnce for HeldAt {
+    fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
+        div().size_0()
+    }
 }
 
 /// Three pulsing dots (`.dots`): the agent composing.
@@ -3413,10 +3428,9 @@ impl Render for Discussion {
             if self.is_exchange && !self.members.is_empty() {
                 let links = self.members.iter().enumerate().map(|(i, member)| {
                     let target = member.object_id.clone();
-                    div()
-                        .id(("member", i))
+                    Link::new(("member", i))
                         .text_color(theme::fg())
-                        .cursor_pointer()
+                        .text_decoration_color(theme::fg().opacity(0.4))
                         .on_click(move |_, _, cx| nav::navigate(Route::Object(target.clone()), cx))
                         .child(self.member_name(member, store))
                 });

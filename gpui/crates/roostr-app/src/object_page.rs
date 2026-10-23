@@ -4,6 +4,7 @@
 
 use std::sync::Arc;
 
+use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Enter, InputEvent, Textarea, TextareaState};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -434,49 +435,56 @@ impl Render for ObjectPage {
                 )
                 .with_priority(5)
             });
-            let button = div()
-                .id("obj-emoji")
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded(px(14.))
-                .map(|d| {
-                    if !image.is_empty() {
-                        let size = px(if mobile { 72. } else { 96. });
-                        d.size(size).child(
-                            img(SharedString::from(image.clone()))
-                                .size(size)
-                                .rounded(px(18.))
-                                .object_fit(ObjectFit::Cover),
-                        )
-                    } else if emoji.is_empty() {
-                        d.size(px(if mobile { 56. } else { 80. }))
-                            .text_size(px(32.))
-                            .line_height(px(32.))
-                            .text_color(theme::muted())
-                            .opacity(0.5)
-                            .child(icon)
-                    } else if mobile {
-                        d.size(px(56.))
-                            .text_size(px(42.))
-                            .line_height(px(42.))
-                            .child(ui::emoji_or_image_icon(&icon, px(47.25)))
-                    } else {
-                        d.size(px(80.))
-                            .text_size(px(64.))
-                            .line_height(px(64.))
-                            .child(ui::emoji_or_image_icon(&icon, px(72.)))
-                    }
-                })
-                .when(!builtin_tool, |d| {
-                    d.cursor_pointer()
-                        .hover(|s| s.bg(theme::hover()))
-                        .tooltip(ui::tooltip("Set icon"))
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.show_emoji = !this.show_emoji;
-                            cx.notify();
-                        }))
-                });
+            // Built-in tools show their icon without any affordance; everything
+            // else gets a kit ghost button that toggles the emoji picker.
+            let content = div().flex().items_center().justify_center().map(|d| {
+                if !image.is_empty() {
+                    let size = px(if mobile { 72. } else { 96. });
+                    d.size(size).child(
+                        img(SharedString::from(image.clone()))
+                            .size(size)
+                            .rounded(px(18.))
+                            .object_fit(ObjectFit::Cover),
+                    )
+                } else if emoji.is_empty() {
+                    d.size(px(if mobile { 56. } else { 80. }))
+                        .text_size(px(32.))
+                        .line_height(px(32.))
+                        .text_color(theme::muted())
+                        .opacity(0.5)
+                        .child(icon)
+                } else if mobile {
+                    d.size(px(56.))
+                        .text_size(px(42.))
+                        .line_height(px(42.))
+                        .child(ui::emoji_or_image_icon(&icon, px(47.25)))
+                } else {
+                    d.size(px(80.))
+                        .text_size(px(64.))
+                        .line_height(px(64.))
+                        .child(ui::emoji_or_image_icon(&icon, px(72.)))
+                }
+            });
+            let button = if builtin_tool {
+                div()
+                    .id("obj-emoji")
+                    .rounded(px(14.))
+                    .child(content)
+                    .into_any_element()
+            } else {
+                Button::new("obj-emoji")
+                    .ghost()
+                    .p_0()
+                    .h_auto()
+                    .rounded(px(14.))
+                    .child(content)
+                    .tooltip("Set icon")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.show_emoji = !this.show_emoji;
+                        cx.notify();
+                    }))
+                    .into_any_element()
+            };
             article = article.child(
                 div()
                     .relative()
@@ -489,6 +497,7 @@ impl Render for ObjectPage {
                     })
                     .flex()
                     .flex_col()
+                    .items_start()
                     .child(button)
                     .children(picker),
             );
@@ -531,35 +540,16 @@ impl Render for ObjectPage {
                 .when(!task, |d| d.pl(px(if mobile { 16. } else { 48. })))
                 .when(task, |d| {
                     d.child(
-                        div()
-                            .id("done-check")
+                        ui::checkbox("done-check", done)
                             .flex_none()
-                            .size(px(20.))
-                            .ml(px(14.))
-                            .mr(px(6.))
-                            .mt(px(if mobile { 14. } else { 19. }))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded(px(4.))
-                            .border_1()
-                            .text_size(px(12.))
-                            .text_color(theme::white())
-                            .cursor_pointer()
-                            .map(|d| {
-                                if done {
-                                    d.bg(theme::accent()).border_color(theme::accent())
-                                } else {
-                                    d.bg(theme::panel())
-                                        .border_color(theme::border())
-                                        .hover(|s| s.border_color(theme::accent()))
-                                }
-                            })
-                            .when(done, |d| d.child("✓"))
-                            .tooltip(ui::tooltip(if done { "Done" } else { "Mark done" }))
-                            .on_click(
-                                cx.listener(move |this, _, _, cx| this.toggle_done(done, cx)),
-                            ),
+                            .ml(px(15.))
+                            .mr(px(7.))
+                            .mt(px(if mobile { 15. } else { 20. }))
+                            .tooltip(if done { "Done" } else { "Mark done" })
+                            .on_change(cx.listener(move |this, _: &bool, _, cx| {
+                                cx.stop_propagation();
+                                this.toggle_done(done, cx)
+                            })),
                     )
                 })
                 .child(title),

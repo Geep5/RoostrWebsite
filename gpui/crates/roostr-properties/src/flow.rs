@@ -6,17 +6,22 @@
 use std::cell::Cell;
 use std::rc::Rc;
 
-use gpui_kit::component::Sizable as _;
+use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Escape, InputEvent, InputState};
+use gpui_kit::component::label::Label;
+use gpui_kit::component::list::ListItem;
+use gpui_kit::component::separator::Separator;
 use gpui_kit::component::switch::Switch;
+use gpui_kit::component::{Icon, Sizable as _};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use roostr_core::relations::{create_relation, is_reserved_key, space_relations};
-use roostr_core::{RelationDef, Store, motion, theme};
+use roostr_core::ui::{disabled as ui_disabled, prop_icon};
+use roostr_core::{Glyph, RelationDef, Store, motion, theme};
 
 use crate::credentials::{COOKIE_META, is_secret_field};
 use crate::type_limit::{TypeLimitPicker, toggled};
-use crate::widgets::{FieldSkin, empty_note, field, pop_shadow};
+use crate::widgets::{FieldSkin, empty_note, field, pop_shadow, rule};
 
 /// A stage-1 row: a current/available property and its toggle state.
 #[derive(Clone, Debug, PartialEq)]
@@ -40,23 +45,19 @@ pub enum FlowEvent {
 }
 
 /// Anytype getRelationTypes order, mapped to our formats.
-const FORMATS: &[(&str, &str, &str)] = &[
-    ("object", "Object", "◈"),
-    ("longtext", "Text", "≡"),
-    ("number", "Number", "#"),
-    ("status", "Select", "◉"),
-    ("tag", "Multi-select", "▤"),
-    ("date", "Date", "▦"),
-    ("checkbox", "Checkbox", "☑"),
-    ("url", "URL", "⌁"),
-    ("email", "Email", "@"),
-    ("phone", "Phone", "☏"),
-    ("shorttext", "Short text", "–"),
+const FORMATS: &[(&str, &str)] = &[
+    ("object", "Object"),
+    ("longtext", "Text"),
+    ("number", "Number"),
+    ("status", "Select"),
+    ("tag", "Multi-select"),
+    ("date", "Date"),
+    ("checkbox", "Checkbox"),
+    ("url", "URL"),
+    ("email", "Email"),
+    ("phone", "Phone"),
+    ("shorttext", "Short text"),
 ];
-
-fn glyph_for(format: &str) -> &'static str {
-    FORMATS.iter().find(|f| f.0 == format).map_or("≡", |f| f.2)
-}
 
 fn format_name(format: &str) -> String {
     FORMATS
@@ -263,12 +264,9 @@ impl PropertyFlow {
     }
 }
 
-fn row(id: impl Into<ElementId>) -> Stateful<Div> {
-    div()
-        .id(id.into())
-        .flex()
-        .items_center()
-        .gap(px(8.))
+/// A flow list row (kit `ListItem`): 13px, 8px glyph gap, list hover.
+fn row(id: impl Into<ElementId>) -> ListItem {
+    ListItem::new(id)
         .px(px(8.))
         .py(px(5.))
         .rounded(theme::radius::sm())
@@ -276,20 +274,20 @@ fn row(id: impl Into<ElementId>) -> Stateful<Div> {
         .text_color(theme::fg())
 }
 
-fn pick_row(id: impl Into<ElementId>) -> Stateful<Div> {
-    row(id)
-        .w_full()
-        .cursor_pointer()
-        .hover(|s| s.bg(theme::hl_med()))
+/// A row's content: the 18px glyph column, name, then any trailing marks.
+fn line() -> Div {
+    div().flex().items_center().gap(px(8.)).w_full().min_w_0()
 }
 
-fn glyph(text: impl Into<SharedString>, emoji: bool) -> Div {
-    div()
-        .flex_none()
-        .w(px(18.))
-        .text_center()
-        .text_color(if emoji { theme::fg() } else { theme::muted() })
-        .child(text.into())
+/// The 18px glyph column: the property's emoji, else its format's line icon.
+fn glyph(emoji: Option<String>, format: Option<&str>) -> Div {
+    let col = div().flex_none().w(px(18.)).flex().justify_center();
+    match emoji {
+        Some(e) => col.text_color(theme::fg()).child(e),
+        None => col
+            .text_color(theme::muted())
+            .child(Icon::new(format.map_or(Glyph::PropText, prop_icon)).size(px(14.))),
+    }
 }
 
 fn r_name(text: impl Into<SharedString>) -> Div {
@@ -299,21 +297,27 @@ fn r_name(text: impl Into<SharedString>) -> Div {
         .overflow_hidden()
         .whitespace_nowrap()
         .text_ellipsis()
+        .text_left()
         .child(text.into())
 }
 
-fn sep() -> Div {
-    div().flex_none().h(px(1.)).bg(theme::border()).my(px(4.))
+fn chevron() -> Icon {
+    Icon::new(Glyph::ChevronRight)
+        .size(px(14.))
+        .text_color(theme::muted())
 }
 
-fn section(text: &'static str) -> Div {
-    div()
+fn sep() -> Separator {
+    rule().flex_none().my(px(4.))
+}
+
+fn section(text: &'static str) -> Label {
+    Label::new(text)
         .px(px(8.))
         .pt(px(4.))
         .pb(px(2.))
         .text_size(px(11.))
         .text_color(theme::muted())
-        .child(text)
 }
 
 /// Anytype's switch as the kit `Switch` (small: 28×16 track, 12px knob).
@@ -386,19 +390,16 @@ impl Render for PropertyFlow {
                     let key = it.key.clone();
                     let on = it.on;
                     list = list.child(
-                        row(SharedString::from(format!("item-{}", it.key)))
-                            .child(glyph(
-                                it.emoji
-                                    .clone()
-                                    .unwrap_or_else(|| glyph_for(&it.format).to_string()),
-                                it.emoji.is_some(),
-                            ))
-                            .child(r_name(it.name.clone()))
-                            .child(switch(&it.key, on, window, cx).on_click(cx.listener(
-                                move |_, next: &bool, _, cx| {
-                                    cx.emit(FlowEvent::Toggle(key.clone(), *next))
-                                },
-                            ))),
+                        row(SharedString::from(format!("item-{}", it.key))).child(
+                            line()
+                                .child(glyph(it.emoji.clone(), Some(&it.format)))
+                                .child(r_name(it.name.clone()))
+                                .child(switch(&it.key, on, window, cx).on_click(cx.listener(
+                                    move |_, next: &bool, _, cx| {
+                                        cx.emit(FlowEvent::Toggle(key.clone(), *next))
+                                    },
+                                ))),
+                        ),
                     );
                 }
                 if self.items.is_empty() {
@@ -410,18 +411,27 @@ impl Render for PropertyFlow {
                     );
                 }
                 flow = flow.child(list).child(sep()).child(
-                    div()
-                        .id("add-row")
+                    Button::new("add-row")
+                        .ghost()
+                        .w_full()
+                        .justify_start()
                         .px(px(8.))
                         .py(px(6.))
+                        .h_auto()
                         .rounded(theme::radius::sm())
-                        .text_size(px(13.))
-                        .cursor_pointer()
-                        .hover(|s| s.bg(theme::hl_med()))
+                        .text_color(theme::fg())
+                        .tab_stop(false)
                         .on_click(cx.listener(|this, _, window, cx| {
                             this.set_stage(Stage::Suggest, window, cx)
                         }))
-                        .child("＋ Add property"),
+                        // The kit's inner label box forces 14px and centres:
+                        // the row's 13px and left alignment live on the child.
+                        .child(
+                            line()
+                                .text_size(px(13.))
+                                .child(Icon::new(Glyph::Plus).size(px(14.)))
+                                .child("Add property"),
+                        ),
                 );
             }
             Stage::Suggest => {
@@ -443,19 +453,15 @@ impl Render for PropertyFlow {
                 let rel_row = |rel: &RelationDef, cx: &mut Context<Self>| {
                     let r = rel.clone();
                     let emoji = rel.icon_emoji.clone().filter(|e| !e.is_empty());
-                    pick_row(SharedString::from(format!("rel-{}", rel.key)))
+                    row(SharedString::from(format!("rel-{}", rel.key)))
                         .on_click(cx.listener(move |this, _, _, cx| this.add(r.clone(), cx)))
-                        .child(glyph(
-                            emoji
-                                .clone()
-                                .unwrap_or_else(|| glyph_for(&rel.format).to_string()),
-                            emoji.is_some(),
-                        ))
-                        .child(r_name(if rel.name.is_empty() {
-                            rel.key.clone()
-                        } else {
-                            rel.name.clone()
-                        }))
+                        .child(line().child(glyph(emoji, Some(&rel.format))).child(r_name(
+                            if rel.name.is_empty() {
+                                rel.key.clone()
+                            } else {
+                                rel.name.clone()
+                            },
+                        )))
                 };
                 if !library.is_empty() {
                     scroll = scroll.child(section("My properties"));
@@ -480,7 +486,7 @@ impl Render for PropertyFlow {
                     if can_create {
                         let name = q.clone();
                         scroll = scroll.child(
-                            pick_row("create")
+                            row("create")
                                 .text_color(theme::accent())
                                 .on_click(cx.listener(move |this, _, window, cx| {
                                     this.open_edit(name.clone(), None, window, cx)
@@ -492,13 +498,16 @@ impl Render for PropertyFlow {
                         let name = q.clone();
                         let id = f.0;
                         scroll = scroll.child(
-                            pick_row(SharedString::from(format!("fmt-{id}")))
+                            row(SharedString::from(format!("fmt-{id}")))
                                 .on_click(cx.listener(move |this, _, window, cx| {
                                     this.open_edit(name.clone(), Some(id), window, cx)
                                 }))
-                                .child(glyph(f.2, false))
-                                .child(r_name(f.1))
-                                .child(div().text_color(theme::muted()).child("›")),
+                                .child(
+                                    line()
+                                        .child(glyph(None, Some(id)))
+                                        .child(r_name(f.1))
+                                        .child(chevron()),
+                                ),
                         );
                     }
                 }
@@ -507,28 +516,37 @@ impl Render for PropertyFlow {
             Stage::Edit => {
                 let fmt = self.edit_format.clone();
                 let label = |t: &'static str| {
-                    div()
+                    Label::new(t)
                         .px(px(2.))
                         .pt(px(2.))
                         .text_size(px(11.))
                         .text_color(theme::muted())
-                        .child(t)
                 };
                 let mut type_wrap = div().relative().child(
-                    pick_row("type-row")
-                        .border_1()
-                        .border_color(theme::border())
+                    Button::new("type-row")
+                        .outline()
+                        .w_full()
+                        .h(px(30.))
+                        .px(px(8.))
+                        .justify_start()
                         .rounded(theme::radius::md())
+                        .border_color(theme::border())
+                        .text_color(theme::fg())
+                        .tab_stop(false)
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.format_menu = !this.format_menu;
                             cx.notify();
                         }))
-                        .child(glyph(fmt.as_deref().map_or("?", glyph_for), false))
-                        .child(r_name(fmt.as_deref().map_or_else(
-                            || "Select property type".to_string(),
-                            format_name,
-                        )))
-                        .child(div().text_color(theme::muted()).child("›")),
+                        .child(
+                            line()
+                                .text_size(px(13.))
+                                .child(glyph(None, fmt.as_deref()))
+                                .child(r_name(fmt.as_deref().map_or_else(
+                                    || "Select property type".to_string(),
+                                    format_name,
+                                )))
+                                .child(chevron()),
+                        ),
                 );
                 if self.format_menu {
                     let mut menu = div()
@@ -555,18 +573,16 @@ impl Render for PropertyFlow {
                         let active = fmt.as_deref() == Some(f.0);
                         let id = f.0;
                         menu = menu.child(
-                            pick_row(SharedString::from(format!("menu-{id}")))
+                            row(SharedString::from(format!("menu-{id}")))
                                 .when(active, |d| d.bg(theme::hl_med()))
+                                .check_icon(Icon::new(Glyph::Check))
+                                .confirmed(active)
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     this.edit_format = Some(id.to_string());
                                     this.format_menu = false;
                                     cx.notify();
                                 }))
-                                .child(glyph(f.2, false))
-                                .child(r_name(f.1))
-                                .when(active, |d| {
-                                    d.child(div().text_color(theme::muted()).child("✓"))
-                                }),
+                                .child(line().child(glyph(None, Some(id))).child(r_name(f.1))),
                         );
                     }
                     let menu =
@@ -602,20 +618,28 @@ impl Render for PropertyFlow {
                     ));
                 }
                 form = form.child(
-                    div()
-                        .id("submit")
-                        .mt(px(4.))
-                        .bg(theme::accent())
-                        .rounded(theme::radius::md())
-                        .py(px(7.))
-                        .text_center()
-                        .text_size(px(13.))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(rgb(0x14161a))
-                        .when(disabled, |d| d.opacity(0.4))
-                        .when(!disabled, |d| d.cursor_pointer())
-                        .on_click(cx.listener(|this, _, window, cx| this.submit(window, cx)))
-                        .child("Create"),
+                    ui_disabled(
+                        Button::new("submit")
+                            .primary()
+                            .accessibility_label("Create")
+                            .w_full()
+                            .h(px(32.))
+                            .mt(px(4.))
+                            .rounded(theme::radius::md())
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _, window, cx| this.submit(window, cx)))
+                            // Text styles on the child: the kit's label box
+                            // ignores them on the root.
+                            .child(
+                                div()
+                                    .text_size(px(13.))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(rgb(0x14161a))
+                                    .child("Create"),
+                            ),
+                        disabled,
+                    )
+                    .when(disabled, |b| b.opacity(0.4)),
                 );
                 flow = flow.child(form);
             }

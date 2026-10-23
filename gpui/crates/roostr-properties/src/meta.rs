@@ -2,8 +2,10 @@
 //! the type), who runs a recurring object, a query's source types (each
 //! removable, more addable) and how many objects link here (`backlinks.ts`).
 
-use gpui_kit::component::Icon;
+use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
+use gpui_kit::component::label::Label;
 use gpui_kit::component::tag::Tag;
+use gpui_kit::component::{Icon, IconName, Sizable as _};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use roostr_core::objects::{builtin_glyph, kind_name, object_icon, type_glyph};
@@ -15,8 +17,9 @@ use roostr_core::ui::brighten;
 use roostr_core::{Fields, Glyph, Route, Store, StoreEvent, Value, api, lite_ui, nav, theme};
 use serde_json::json;
 
+use crate::pane::hover_tint;
 use crate::suggest::{SuggestEvent, TypeSuggest};
-use crate::widgets::{backdrop, below, pop_shadow, prefix, tip};
+use crate::widgets::{backdrop, below, pop_shadow, prefix};
 
 #[derive(Clone)]
 struct Backlink {
@@ -190,23 +193,33 @@ fn object_space(fields: &Fields, cx: &App) -> String {
     }
 }
 
-/// An `ObjectMeta` badge: a kit `Tag` (h26, padding 0 10 0 6, gap 6,
-/// radius 8, 13/500, neutral badge colours) inside the interactive shell
-/// that carries its id, hover brighten, click and tooltip (`Tag` has none).
+/// A badge: the kit `Tag` inside a kit ghost `Button` that carries its id,
+/// hover brighten, click and tooltip (`Tag` has none).
 fn badge(
     id: impl Into<ElementId>,
     lead: AnyElement,
     text: impl Into<SharedString>,
     clickable: bool,
-) -> Stateful<Div> {
+    cx: &App,
+) -> Button {
     let c = badge_colors("");
-    div()
-        .id(id.into())
-        .flex()
+    Button::new(id)
+        .ghost()
         .flex_none()
+        .h(px(26.))
+        .p_0()
         .rounded(theme::radius::md())
+        .custom(
+            ButtonCustomVariant::new(cx)
+                .color(c.bg)
+                .foreground(c.fg)
+                .hover(brighten(c.bg, 1.18))
+                .active(brighten(c.bg, 1.18)),
+        )
+        // The kit paints a custom variant's resting fill at 20% of `color`:
+        // the badge's own fill is the instance style.
         .bg(c.bg)
-        .hover(move |s| s.bg(brighten(c.bg, 1.18)))
+        .when(!clickable, |d| d.cursor_default())
         .when(clickable, |d| d.cursor_pointer())
         .child(
             Tag::custom(transparent_black(), c.fg, transparent_black())
@@ -304,11 +317,11 @@ impl Render for ObjectMeta {
         row = row.child(match &type_def {
             Some(t) => {
                 let id = t.id.clone();
-                badge("type", lead(), type_name, true)
-                    .tooltip(tip("Type"))
+                badge("type", lead(), type_name, true, cx)
+                    .tooltip("Type")
                     .on_click(move |_, _, cx| nav::navigate(Route::Object(id.clone()), cx))
             }
-            None => badge("type", lead(), type_name, false).tooltip(tip("Type")),
+            None => badge("type", lead(), type_name, false, cx).tooltip("Type"),
         });
         if let Some(rule) = repeat_of(&object.fields) {
             let mut ids = guest_agents(&object.fields);
@@ -332,8 +345,8 @@ impl Render for ObjectMeta {
                         .unwrap_or_else(|| format!("{}…", prefix(id, 8)));
                     let target = id.clone();
                     row = row.child(
-                        badge("runner", emoji(icon), name.clone(), true)
-                            .tooltip(tip(format!("{name} runs this · {desc}")))
+                        badge("runner", emoji(icon), name.clone(), true, cx)
+                            .tooltip(format!("{name} runs this · {desc}"))
                             .on_click(move |_, _, cx| {
                                 nav::navigate(Route::Object(target.clone()), cx)
                             }),
@@ -341,9 +354,9 @@ impl Render for ObjectMeta {
                 }
                 None => {
                     row = row.child(
-                        badge("runner", emoji("↻".into()), "Repeats", false).tooltip(tip(format!(
+                        badge("runner", emoji("↻".into()), "Repeats", false, cx).tooltip(format!(
                             "Repeats · {desc} · no agent: add one to its Agent property"
-                        ))),
+                        )),
                     );
                 }
             }
@@ -400,8 +413,8 @@ impl Render for ObjectMeta {
                 None => (glyph(Glyph::BadgeDot), "All objects".to_string()),
             };
             let mut wrap = div().relative().flex().child(
-                badge("sources", lead, text, true)
-                    .tooltip(tip("What this query shows"))
+                badge("sources", lead, text, true, cx)
+                    .tooltip("What this query shows")
                     .on_click(
                         cx.listener(|this, _, window, cx| this.toggle(Open::Sources, window, cx)),
                     ),
@@ -447,11 +460,13 @@ impl Render for ObjectMeta {
                     let main = if id.is_empty() {
                         main.into_any_element()
                     } else {
-                        div()
-                            .id(SharedString::from(format!("src-{key}")))
+                        Button::new(SharedString::from(format!("src-{key}")))
+                            .ghost()
                             .flex_1()
                             .min_w_0()
-                            .flex()
+                            .h_auto()
+                            .p_0()
+                            .justify_start()
                             .cursor_pointer()
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.close(cx);
@@ -471,26 +486,32 @@ impl Render for ObjectMeta {
                             .bg(theme::hl_med())
                             .child(main)
                             .child(
-                                div()
-                                    .id(SharedString::from(format!("src-rm-{key}")))
-                                    .px(px(4.))
-                                    .text_color(theme::muted())
-                                    .cursor_pointer()
-                                    .hover(|s| s.text_color(theme::fg()))
-                                    .tooltip(tip("Remove"))
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        let Some(object) =
-                                            Store::global(cx).read(cx).object(&this.object_id)
-                                        else {
-                                            return;
-                                        };
-                                        let keys = source_keys(&object.fields)
-                                            .into_iter()
-                                            .filter(|x| *x != k)
-                                            .collect();
-                                        this.save_sources(keys, cx);
-                                    }))
-                                    .child("×"),
+                                div().group(format!("g-src-rm-{key}")).child(
+                                    Button::new(SharedString::from(format!("src-rm-{key}")))
+                                        .ghost()
+                                        .xsmall()
+                                        .px(px(4.))
+                                        .text_color(theme::muted())
+                                        .cursor_pointer()
+                                        .tooltip("Remove")
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            let Some(object) =
+                                                Store::global(cx).read(cx).object(&this.object_id)
+                                            else {
+                                                return;
+                                            };
+                                            let keys = source_keys(&object.fields)
+                                                .into_iter()
+                                                .filter(|x| *x != k)
+                                                .collect();
+                                            this.save_sources(keys, cx);
+                                        }))
+                                        .child(hover_tint(
+                                            format!("g-src-rm-{key}").into(),
+                                            theme::fg(),
+                                            Icon::new(IconName::Close).size(px(12.)),
+                                        )),
+                                ),
                             ),
                     );
                 }
@@ -509,54 +530,60 @@ impl Render for ObjectMeta {
                     glyph(Glyph::BadgeLink),
                     format!("{n} backlink{}", if n == 1 { "" } else { "s" }),
                     true,
+                    cx,
                 )
-                .tooltip(tip("Backlinks"))
+                .tooltip("Backlinks")
                 .on_click(
                     cx.listener(|this, _, window, cx| this.toggle(Open::Backlinks, window, cx)),
                 ),
             );
             if self.open == Some(Open::Backlinks) {
                 let mut pop = meta_pop().child(
-                    div()
+                    Label::new("LINKED FROM")
                         .mb(px(4.))
                         .text_size(px(11.))
-                        .text_color(theme::muted())
-                        .child("LINKED FROM"),
+                        .text_color(theme::muted()),
                 );
                 for b in &self.backlinks {
                     let id = b.id.clone();
-                    pop = pop.child(
-                        div()
-                            .id(SharedString::from(format!("bl-{}", b.id)))
-                            .flex()
-                            .items_center()
-                            .gap(px(8.))
-                            .px(px(8.))
-                            .py(px(5.))
-                            .rounded(theme::radius::sm())
-                            .text_size(px(13.))
-                            .cursor_pointer()
-                            .hover(|s| s.bg(theme::hover()))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.close(cx);
-                                nav::navigate(Route::Object(id.clone()), cx);
-                            }))
-                            .child(
-                                div()
-                                    .flex_none()
-                                    .w(px(18.))
-                                    .text_center()
-                                    .child(object_icon(store, &b.icon, &b.type_key, &space)),
-                            )
-                            .child(b.name.clone())
-                            .child(
-                                div()
-                                    .ml_auto()
-                                    .text_size(px(11.))
-                                    .text_color(theme::muted())
-                                    .child(b.type_key.clone()),
-                            ),
-                    );
+                    pop =
+                        pop.child(
+                            Button::new(SharedString::from(format!("bl-{}", b.id)))
+                                .ghost()
+                                .w_full()
+                                .h_auto()
+                                .px(px(8.))
+                                .py(px(5.))
+                                .rounded(theme::radius::sm())
+                                .cursor_pointer()
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.close(cx);
+                                    nav::navigate(Route::Object(id.clone()), cx);
+                                }))
+                                // The kit centres its content and forces its own
+                                // text size: the row's layout and 13px are the child's.
+                                .child(
+                                    div()
+                                        .w_full()
+                                        .min_w_0()
+                                        .flex()
+                                        .items_center()
+                                        .justify_start()
+                                        .gap(px(8.))
+                                        .text_size(px(13.))
+                                        .child(div().flex_none().w(px(18.)).text_center().child(
+                                            object_icon(store, &b.icon, &b.type_key, &space),
+                                        ))
+                                        .child(b.name.clone())
+                                        .child(
+                                            div()
+                                                .ml_auto()
+                                                .text_size(px(11.))
+                                                .text_color(theme::muted())
+                                                .child(b.type_key.clone()),
+                                        ),
+                                ),
+                        );
                 }
                 wrap = wrap.child(below("backlinks-pop", 6., pop));
             }
@@ -572,10 +599,10 @@ impl Render for ObjectMeta {
             };
             let target = space.clone();
             row = row.child(
-                badge("backlinks-lite", glyph(Glyph::BadgeLink), label, true)
-                    .tooltip(tip(
+                badge("backlinks-lite", glyph(Glyph::BadgeLink), label, true, cx)
+                    .tooltip(
                         "Backlinks from what this device holds; load the space for all of them",
-                    ))
+                    )
                     .on_click(move |_, _, cx| lite_ui::load_space(&target, cx)),
             );
         }

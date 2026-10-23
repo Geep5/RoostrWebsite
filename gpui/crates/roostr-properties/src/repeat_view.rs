@@ -4,10 +4,14 @@
 //! turn repeating off.
 
 use chrono::{Datelike as _, Local, NaiveDate, TimeZone as _};
-use gpui_kit::component::FocusableExt as _;
+use gpui_kit::component::button::{
+    Button, ButtonCustomVariant, ButtonVariants as _, Toggle, ToggleGroup, ToggleVariants as _,
+};
 use gpui_kit::component::input::{InputEvent, InputState};
+use gpui_kit::component::label::Label;
 use gpui_kit::component::searchable_list::SearchableListItem;
 use gpui_kit::component::select::{Select, SelectEvent, SelectState};
+use gpui_kit::component::{FocusableExt as _, Sizable as _};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use roostr_core::repeat::{
@@ -17,10 +21,12 @@ use roostr_core::serving::{
     MachineRow, fetch_machines, machine_name, resolve_serving, serving_copy,
 };
 use roostr_core::types::{guest_agents, repeat_of};
-use roostr_core::{Fields, Glyph, Object, RepeatFreq, RepeatRule, Store, Value, api, theme};
+use roostr_core::{Fields, Glyph, Object, RepeatFreq, RepeatRule, Store, Value, api, theme, ui};
 
 use crate::calendar::{CalendarEvent, CalendarPicker, local_date, local_midnight_ms};
-use crate::widgets::{FieldSkin, backdrop, below, field, placeholder, pop_shadow, tip};
+use crate::widgets::{
+    FieldSkin, backdrop, below, error_alert, field, note, placeholder, pop_shadow,
+};
 use gpui_kit::component::Icon;
 
 const FREQS: [RepeatFreq; 6] = [
@@ -719,54 +725,66 @@ impl RepeatView {
     }
 }
 
-fn lbl(text: &'static str) -> Div {
-    div()
-        .flex_none()
-        .w(px(52.))
-        .text_size(px(12.))
-        .text_color(theme::muted())
-        .child(text)
+/// A form row's caption (kit [`Label`]): 12px muted, a 52px column.
+fn lbl(text: &'static str) -> Label {
+    note(text, 12.).flex_none().w(px(52.))
 }
 
 fn fieldrow() -> Div {
     div().flex().flex_wrap().items_center().gap(px(6.))
 }
 
-fn small_btn(id: impl Into<ElementId>, label: impl Into<SharedString>) -> Stateful<Div> {
-    div()
-        .id(id.into())
-        .border_1()
-        .border_color(theme::border())
-        .rounded(theme::radius::sm())
+/// A footer button: kit outline [`Button`] (kit hover fill), small, 12px
+/// label; `hover_fg` recolours the label while the button is hovered.
+fn small_btn(id: &'static str, label: impl Into<SharedString>, hover_fg: Option<Hsla>) -> Button {
+    let label: SharedString = label.into();
+    Button::new(id)
+        .outline()
+        .small()
+        .group(id)
+        .accessibility_label(label.clone())
+        .h_auto()
         .px(px(9.))
         .py(px(3.))
-        .text_size(px(12.))
-        .text_color(theme::fg())
-        .cursor_pointer()
-        .hover(|s| s.bg(theme::hover()))
-        .child(label.into())
-}
-
-fn select_box(id: impl Into<ElementId>, label: impl Into<SharedString>) -> Stateful<Div> {
-    div()
-        .id(id.into())
-        .flex()
-        .items_center()
-        .gap(px(6.))
-        .bg(hsla(0., 0., 1., 0.05))
-        .border_1()
-        .border_color(theme::border())
         .rounded(theme::radius::sm())
-        .px(px(6.))
-        .py(px(3.))
-        .text_size(px(12.5))
-        .cursor_pointer()
-        .child(label.into())
+        .bg(transparent_black())
+        .border_color(theme::border())
+        .text_color(theme::fg())
         .child(
             div()
-                .text_size(px(10.))
-                .text_color(theme::muted())
-                .child("▾"),
+                .text_size(px(12.))
+                .when_some(hover_fg, |d, fg| d.group_hover(id, |s| s.text_color(fg)))
+                .child(label),
+        )
+}
+
+/// The Starts date trigger: kit outline [`Button`] dressed as the selects
+/// (white 5% fill, radius 6, 3px 6px, 12.5px) with a chevron.
+fn date_button(id: impl Into<ElementId>, label: impl Into<SharedString>) -> Button {
+    let label: SharedString = label.into();
+    Button::new(id)
+        .outline()
+        .small()
+        .accessibility_label(label.clone())
+        .h_auto()
+        .px(px(6.))
+        .py(px(3.))
+        .rounded(theme::radius::sm())
+        .bg(hsla(0., 0., 1., 0.05))
+        .border_color(theme::border())
+        .text_color(theme::fg())
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .text_size(px(12.5))
+                .child(label)
+                .child(
+                    Icon::new(Glyph::ChevronDown)
+                        .size(px(10.))
+                        .text_color(theme::muted()),
+                ),
         )
 }
 
@@ -792,22 +810,36 @@ fn choice_select(select: &ChoiceSelect, id: &'static str, menu_w: f32) -> impl I
     )
 }
 
-fn seg(
-    id: impl Into<ElementId>,
-    label: impl Into<SharedString>,
-    on: bool,
-    first: bool,
-) -> Stateful<Div> {
-    div()
-        .id(id.into())
+/// A joined single-choice control (kit segmented outline [`ToggleGroup`]);
+/// its `on_click` gets the toggles' next states, see [`clicked`].
+fn seg_group(id: impl Into<ElementId>) -> ToggleGroup {
+    ToggleGroup::new(id).segmented().outline()
+}
+
+/// One segment of [`seg_group`]: 12px, muted when off, blue tint when on.
+fn seg(id: impl Into<ElementId>, label: impl Into<SharedString>, on: bool) -> Toggle {
+    Toggle::new(id)
+        .checked(on)
+        .label(label)
+        .h_auto()
+        .min_w_0()
         .px(px(9.))
         .py(px(3.))
         .text_size(px(12.))
         .cursor_pointer()
-        .when(!first, |d| d.border_l_1().border_color(theme::border()))
+        .border_color(theme::border())
         .text_color(if on { theme::fg() } else { theme::muted() })
-        .when(on, |d| d.bg(rgba(0x7896ff2e)))
-        .child(label.into())
+        .bg(if on {
+            rgba(0x7896ff2e).into()
+        } else {
+            transparent_black()
+        })
+}
+
+/// The toggle a [`ToggleGroup`] click flipped: where `next` differs from
+/// the states it was drawn with.
+fn clicked(before: &[bool], next: &[bool]) -> Option<usize> {
+    before.iter().zip(next).position(|(a, b)| a != b)
 }
 
 impl Render for RepeatView {
@@ -854,52 +886,63 @@ impl Render for RepeatView {
             .gap(px(2.))
             .text_size(px(13.))
             .child(
-                div()
-                    .id("repeat-row")
+                Button::new("repeat-row")
+                    .custom(
+                        ButtonCustomVariant::new(cx)
+                            .foreground(theme::fg())
+                            .hover(theme::hover())
+                            .active(theme::hover()),
+                    )
                     .group(hover_group.clone())
-                    .flex()
-                    .gap(px(10.))
+                    .accessibility_label("Repeat")
+                    .tooltip("Repeat")
+                    .w_full()
+                    .h_auto()
                     .min_h(px(30.))
                     .pl(px(6.))
                     .pr(px(24.))
                     .py(px(4.))
                     .rounded(theme::radius::sm())
-                    .line_height(px(22.))
                     .cursor_pointer()
-                    .hover(|s| s.bg(theme::hover()))
-                    .tooltip(tip("Repeat"))
                     .on_click(cx.listener(|this, _, window, cx| this.open_editor(window, cx)))
                     .child(
-                        label_col
-                            .flex()
-                            .items_center()
-                            .gap(px(7.))
-                            .min_h(px(22.))
-                            .text_color(theme::muted())
-                            .child(
-                                Icon::new(Glyph::PropRepeat)
-                                    .size(px(14.))
-                                    .text_color(theme::muted()),
-                            )
-                            .child("Repeat"),
-                    )
-                    .child(
                         div()
-                            .flex_1()
-                            .min_w_0()
+                            .w_full()
                             .flex()
-                            .items_center()
-                            .min_h(px(22.))
-                            .map(|d| match &view {
-                                Some(v) => d.child(
-                                    div()
-                                        .overflow_hidden()
-                                        .whitespace_nowrap()
-                                        .text_ellipsis()
-                                        .child(describe_draft(v)),
-                                ),
-                                None => d.child(placeholder(hover_group.clone(), "Off")),
-                            }),
+                            .gap(px(10.))
+                            .text_size(px(13.))
+                            .line_height(px(22.))
+                            .child(
+                                label_col
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(7.))
+                                    .min_h(px(22.))
+                                    .child(
+                                        Icon::new(Glyph::PropRepeat)
+                                            .size(px(14.))
+                                            .text_color(theme::muted()),
+                                    )
+                                    .child(note("Repeat", 13.).line_height(px(22.))),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .flex()
+                                    .items_center()
+                                    .min_h(px(22.))
+                                    .map(|d| match &view {
+                                        Some(v) => d.child(
+                                            div()
+                                                .overflow_hidden()
+                                                .whitespace_nowrap()
+                                                .text_ellipsis()
+                                                .child(describe_draft(v)),
+                                        ),
+                                        None => d.child(placeholder(hover_group.clone(), "Off")),
+                                    }),
+                            ),
                     ),
             );
         let meta = || {
@@ -909,22 +952,25 @@ impl Render for RepeatView {
                 .gap_x(px(6.))
                 .gap_y(px(2.))
                 .pl(px(136.))
-                .text_size(px(11.5))
-                .text_color(theme::muted())
         };
+        // One meta span: an 11.5px muted note; errors in red.
+        let line = |text: String| note(text, 11.5).line_height(rems(1.25));
         let red = theme::red();
         if let Some(rule) = &rule {
             if stuck || overdue || (agent_owned && !self.serving_warning.is_empty()) {
                 let mut m = meta();
                 if stuck || overdue {
-                    m = m.child(div().text_color(red).child(if stuck {
-                        format!("Stuck since {} - see Error", fmt_long(rule.next))
-                    } else {
-                        format!("Overdue since {}", fmt_long(rule.next))
-                    }));
+                    m = m.child(
+                        line(if stuck {
+                            format!("Stuck since {} - see Error", fmt_long(rule.next))
+                        } else {
+                            format!("Overdue since {}", fmt_long(rule.next))
+                        })
+                        .text_color(red),
+                    );
                 }
                 if agent_owned && !self.serving_warning.is_empty() {
-                    m = m.child(div().text_color(red).child(self.serving_warning.clone()));
+                    m = m.child(line(self.serving_warning.clone()).text_color(red));
                 }
                 root = root.child(m);
             }
@@ -934,11 +980,11 @@ impl Render for RepeatView {
                 } else {
                     format!(": {}", moved.reason)
                 };
-                root = root.child(meta().child(format!(
+                root = root.child(meta().child(line(format!(
                     "Next run moved to {} (was {}){reason}",
                     fmt_long(rule.next),
                     fmt_long(moved.from)
-                )));
+                ))));
             }
             if rule.fired_at.is_some() || rule.last_run.is_some() {
                 let mut m = meta();
@@ -950,7 +996,7 @@ impl Render for RepeatView {
                         .filter(|b| !b.is_empty())
                         .map(|b| format!(" by {}", machine_name(&self.machines_known, b)))
                         .unwrap_or_default();
-                    m = m.child(format!("fired {}{by}", fmt_long(at)));
+                    m = m.child(line(format!("fired {}{by}", fmt_long(at))));
                     first = false;
                 }
                 if let Some(last) = &rule.last_run {
@@ -959,13 +1005,13 @@ impl Render for RepeatView {
                     } else {
                         format!(" on {}", machine_name(&self.machines_known, &last.machine))
                     };
-                    let mut span = div().flex().child(format!(
+                    let mut span = div().flex().child(line(format!(
                         "{}last run {}{on}",
                         if first { "" } else { "· " },
                         fmt_long(last.at)
-                    ));
+                    )));
                     if let Some(e) = last.error.as_ref().filter(|e| !e.is_empty()) {
-                        span = span.child(div().text_color(red).child(format!(" · {e}")));
+                        span = span.child(line(format!(" · {e}")).text_color(red));
                     }
                     m = m.child(span);
                 }
@@ -973,17 +1019,7 @@ impl Render for RepeatView {
             }
         }
         if !self.error.is_empty() {
-            root = root.child(
-                div()
-                    .px(px(10.))
-                    .py(px(6.))
-                    .rounded(theme::radius::sm())
-                    .bg(rgba(0xe5484d1a))
-                    .border_1()
-                    .border_color(rgba(0xe5484d4d))
-                    .text_size(px(12.5))
-                    .child(self.error.clone()),
-            );
+            root = root.child(error_alert("repeat-error", self.error.clone()).text_size(px(12.5)));
         }
         if active_run {
             let on = if running_on.is_empty() {
@@ -991,17 +1027,24 @@ impl Render for RepeatView {
             } else {
                 format!(" on {running_on}")
             };
-            root = root.child(div().ml(px(26.)).mt(px(2.)).text_size(px(12.)).text_color(theme::muted()).child(format!(
-                "Running now{on} - the result lands in the agent's chat and under “last run”."
-            )));
+            root = root.child(
+                note(
+                    format!(
+                        "Running now{on} - the result lands in the agent's chat and under “last run”."
+                    ),
+                    12.,
+                )
+                .ml(px(26.))
+                .mt(px(2.)),
+            );
         } else if requested {
             root = root.child(
-                div()
-                    .ml(px(26.))
-                    .mt(px(2.))
-                    .text_size(px(12.))
-                    .text_color(theme::muted())
-                    .child("Run now asked for - waiting for its computer to start it."),
+                note(
+                    "Run now asked for - waiting for its computer to start it.",
+                    12.,
+                )
+                .ml(px(26.))
+                .mt(px(2.)),
             );
         }
         if !self.open {
@@ -1032,18 +1075,10 @@ impl Render for RepeatView {
             .text_color(theme::fg())
             .text_size(px(13.))
             .occlude()
-            .child(
-                div()
-                    .text_size(px(11.))
-                    .text_color(theme::muted())
-                    .child("REPEAT"),
-            );
+            .child(note("REPEAT", 11.));
         if !has_guests {
             pop = pop.child(
-                div()
-                    .text_size(px(12.5))
-                    .text_color(theme::muted())
-                    .child("Add an agent to this object's Agent property first. A repeat needs an agent on the guest list to run each occurrence."),
+                note("Add an agent to this object's Agent property first. A repeat needs an agent on the guest list to run each occurrence.", 12.5),
             );
         } else {
             // Agent
@@ -1092,7 +1127,7 @@ impl Render for RepeatView {
             if !sub {
                 let date = date_of(d.anchor).format("%m/%d/%Y").to_string();
                 let mut starts =
-                    div().relative().child(select_box("anchor", date).on_click(
+                    div().relative().child(date_button("anchor", date).on_click(
                         cx.listener(|this, _, window, cx| this.open_calendar(window, cx)),
                     ));
                 if let Some(cal) = &self.calendar {
@@ -1102,33 +1137,23 @@ impl Render for RepeatView {
             }
 
             if sub {
+                let before = [d.window.is_none(), d.window.is_some()];
                 pop = pop.child(
                     fieldrow().child(lbl("Hours")).child(
-                        div()
-                            .flex()
-                            .border_1()
-                            .border_color(theme::border())
-                            .rounded(theme::radius::sm())
-                            .overflow_hidden()
-                            .child(
-                                seg("all-day", "All day", d.window.is_none(), true).on_click(
-                                    cx.listener(|this, _, _, cx| {
-                                        this.draft.window = None;
-                                        cx.notify();
-                                    }),
-                                ),
-                            )
-                            .child(
-                                seg("between", "Only between", d.window.is_some(), false).on_click(
-                                    cx.listener(|this, _, window, cx| {
-                                        if this.draft.window.is_none() {
-                                            this.draft.window = Some([8 * 60, 20 * 60]);
-                                            this.sync_inputs(window, cx);
-                                        }
-                                        cx.notify();
-                                    }),
-                                ),
-                            ),
+                        seg_group("hours")
+                            .child(seg("all-day", "All day", before[0]))
+                            .child(seg("between", "Only between", before[1]))
+                            .on_click(cx.listener(move |this, next: &Vec<bool>, window, cx| {
+                                match clicked(&before, next) {
+                                    Some(0) => this.draft.window = None,
+                                    Some(_) if this.draft.window.is_none() => {
+                                        this.draft.window = Some([8 * 60, 20 * 60]);
+                                        this.sync_inputs(window, cx);
+                                    }
+                                    _ => {}
+                                }
+                                cx.notify();
+                            })),
                     ),
                 );
                 if d.window.is_some() {
@@ -1138,12 +1163,7 @@ impl Render for RepeatView {
                             .child(
                                 field(&self.window_from, FieldSkin::Compact, window, cx).w(px(64.)),
                             )
-                            .child(
-                                div()
-                                    .text_size(px(12.))
-                                    .text_color(theme::muted())
-                                    .child("–"),
-                            )
+                            .child(note("–", 12.))
                             .child(
                                 field(&self.window_until, FieldSkin::Compact, window, cx)
                                     .w(px(64.)),
@@ -1153,43 +1173,41 @@ impl Render for RepeatView {
             }
 
             if d.freq == RepeatFreq::Week || sub {
-                let mut days = div().flex().gap(px(3.));
-                for (i, name) in WD.iter().enumerate() {
-                    let on = d.weekdays.contains(&(i as u8));
-                    days = days.child(
-                        div()
-                            .id(("day", i))
+                let before: Vec<bool> = (0..WD.len())
+                    .map(|i| d.weekdays.contains(&(i as u8)))
+                    .collect();
+                let days = ToggleGroup::new("days")
+                    .gap(px(3.))
+                    .children(WD.iter().enumerate().map(|(i, name)| {
+                        let on = before[i];
+                        Toggle::new(("day", i))
+                            .checked(on)
+                            .label(name[..1].to_string())
                             .size(px(26.))
+                            .min_w(px(26.))
+                            .p_0()
                             .rounded_full()
                             .border_1()
-                            .flex()
-                            .items_center()
-                            .justify_center()
                             .text_size(px(11.))
                             .cursor_pointer()
-                            .map(|e| {
+                            .map(|t| {
                                 if on {
-                                    e.bg(theme::accent())
+                                    t.bg(theme::accent())
                                         .border_color(theme::accent())
                                         .text_color(theme::white())
                                 } else {
-                                    e.border_color(theme::border()).text_color(theme::muted())
+                                    t.border_color(theme::border()).text_color(theme::muted())
                                 }
                             })
-                            .on_click(
-                                cx.listener(move |this, _, _, cx| this.toggle_weekday(i as u8, cx)),
-                            )
-                            .child(name[..1].to_string()),
-                    );
-                }
+                    }))
+                    .on_click(cx.listener(move |this, next: &Vec<bool>, _, cx| {
+                        if let Some(i) = clicked(&before, next) {
+                            this.toggle_weekday(i as u8, cx)
+                        }
+                    }));
                 let mut row = fieldrow().child(lbl("On")).child(days);
                 if d.weekdays.is_empty() {
-                    row = row.child(
-                        div()
-                            .text_size(px(12.))
-                            .text_color(theme::muted())
-                            .child("every day"),
-                    );
+                    row = row.child(note("every day", 12.));
                 }
                 pop = pop.child(row);
             }
@@ -1197,53 +1215,34 @@ impl Render for RepeatView {
             if d.freq == RepeatFreq::Month {
                 let anchor = date_of(d.anchor);
                 let ord = ["", "First", "Second", "Third", "Fourth", "Last"][ordinal_of(d.anchor)];
+                let before = [d.monthly == "date", d.monthly == "weekday"];
                 pop = pop.child(
                     fieldrow()
                         .child(lbl("On"))
                         .child(
-                            div()
-                                .flex()
-                                .border_1()
-                                .border_color(theme::border())
-                                .rounded(theme::radius::sm())
-                                .overflow_hidden()
+                            seg_group("monthly")
                                 .child(
-                                    seg(
-                                        "by-date",
-                                        format!("Day {}", anchor.day()),
-                                        d.monthly == "date",
-                                        true,
-                                    )
-                                    .tooltip(tip("The same date every month"))
-                                    .on_click(cx.listener(
-                                        |this, _, _, cx| {
-                                            this.draft.monthly = "date".into();
-                                            cx.notify();
-                                        },
-                                    )),
+                                    seg("by-date", format!("Day {}", anchor.day()), before[0])
+                                        .tooltip("The same date every month"),
                                 )
                                 .child(
                                     seg(
                                         "by-weekday",
                                         format!("{ord} {}", anchor.format("%A")),
-                                        d.monthly == "weekday",
-                                        false,
+                                        before[1],
                                     )
-                                    .tooltip(tip("The same weekday of the same week every month"))
-                                    .on_click(cx.listener(
-                                        |this, _, _, cx| {
-                                            this.draft.monthly = "weekday".into();
-                                            cx.notify();
-                                        },
-                                    )),
-                                ),
+                                    .tooltip("The same weekday of the same week every month"),
+                                )
+                                .on_click(cx.listener(move |this, next: &Vec<bool>, _, cx| {
+                                    match clicked(&before, next) {
+                                        Some(0) => this.draft.monthly = "date".into(),
+                                        Some(_) => this.draft.monthly = "weekday".into(),
+                                        None => {}
+                                    }
+                                    cx.notify();
+                                })),
                         )
-                        .child(
-                            div()
-                                .text_size(px(12.))
-                                .text_color(theme::muted())
-                                .child("of the month"),
-                        ),
+                        .child(note("of the month", 12.)),
                 );
             }
 
@@ -1265,33 +1264,45 @@ impl Render for RepeatView {
                             .child(field(input, FieldSkin::Compact, window, cx).w(px(64.)))
                             .when(many, |e| {
                                 e.child(
-                                    div()
-                                        .id(("time-rm", i))
+                                    Button::new(("time-rm", i))
+                                        .custom(
+                                            ButtonCustomVariant::new(cx).foreground(theme::muted()),
+                                        )
+                                        .group("time-rm")
+                                        .accessibility_label("Remove time")
+                                        .tooltip("Remove time")
+                                        .h_auto()
                                         .px(px(3.))
-                                        .text_size(px(14.))
-                                        .text_color(theme::muted())
-                                        .cursor_pointer()
-                                        .hover(|s| s.text_color(theme::red()))
-                                        .tooltip(tip("Remove time"))
                                         .on_click(cx.listener(move |this, _, window, cx| {
                                             this.remove_time(i, window, cx)
                                         }))
-                                        .child("×"),
+                                        .child(
+                                            div()
+                                                .text_size(px(14.))
+                                                .group_hover("time-rm", |s| {
+                                                    s.text_color(theme::red())
+                                                })
+                                                .child("×"),
+                                        ),
                                 )
                             }),
                     );
                 }
                 list = list.child(
-                    div()
-                        .id("add-time")
+                    Button::new("add-time")
+                        .custom(ButtonCustomVariant::new(cx).foreground(theme::muted()))
+                        .group("add-time")
+                        .accessibility_label("Add time")
+                        .h_auto()
                         .px(px(4.))
                         .py(px(3.))
-                        .text_size(px(12.))
-                        .text_color(theme::muted())
-                        .cursor_pointer()
-                        .hover(|s| s.text_color(theme::fg()))
                         .on_click(cx.listener(|this, _, window, cx| this.add_time(window, cx)))
-                        .child("+ Add time"),
+                        .child(
+                            div()
+                                .text_size(px(12.))
+                                .group_hover("add-time", |s| s.text_color(theme::fg()))
+                                .child("+ Add time"),
+                        ),
                 );
                 pop = pop.child(
                     div()
@@ -1305,21 +1316,12 @@ impl Render for RepeatView {
 
             let invalid = self.invalid();
             let next = preview(&d);
-            let mut nexts = div()
-                .flex()
-                .flex_wrap()
-                .gap_x(px(10.))
-                .gap_y(px(4.))
-                .text_size(px(11.5))
-                .text_color(theme::muted());
+            let mut nexts = div().flex().flex_wrap().gap_x(px(10.)).gap_y(px(4.));
             for (i, p) in next.iter().enumerate() {
-                nexts = nexts.child(
-                    div()
-                        .when(i == 0, |e| e.text_color(theme::fg()))
-                        .child(fmt_long(*p)),
-                );
+                nexts = nexts
+                    .child(note(fmt_long(*p), 11.5).when(i == 0, |e| e.text_color(theme::fg())));
             }
-            nexts = nexts.child("…");
+            nexts = nexts.child(note("…", 11.5));
             pop = pop.child(
                 div()
                     .flex()
@@ -1329,14 +1331,13 @@ impl Render for RepeatView {
                     .border_color(theme::border())
                     .pt(px(8.))
                     .child(
-                        div()
-                            .text_size(px(12.5))
-                            .when(!invalid.is_empty(), |e| e.text_color(red))
-                            .child(if invalid.is_empty() {
-                                describe_draft(&d)
-                            } else {
-                                invalid.to_string()
-                            }),
+                        Label::new(if invalid.is_empty() {
+                            describe_draft(&d)
+                        } else {
+                            invalid.to_string()
+                        })
+                        .text_size(px(12.5))
+                        .text_color(if invalid.is_empty() { theme::fg() } else { red }),
                     )
                     .child(nexts),
             );
@@ -1345,12 +1346,11 @@ impl Render for RepeatView {
         let busy = self.busy;
         // Turn off / Skip: bordered like the other footer buttons, red on hover.
         let rm = |id: &'static str, label: &'static str| {
-            small_btn(id, label)
-                .text_color(theme::muted())
-                .when(busy, |e| e.opacity(0.5).cursor_default())
-                .when(!busy, |e| {
-                    e.hover(|s| s.text_color(theme::red()).border_color(theme::red()))
-                })
+            let hover_fg = (!busy).then(theme::red);
+            ui::disabled(
+                small_btn(id, label, hover_fg).text_color(theme::muted()),
+                busy,
+            )
         };
         let mut foot = div().flex().items_center().gap(px(6.));
         if rule.is_some() {
@@ -1365,9 +1365,9 @@ impl Render for RepeatView {
         if rule.is_some() && open_run && !active_run {
             foot = foot.child(
                 rm("skip", "Skip this run")
-                    .tooltip(tip(
+                    .tooltip(
                         "Finish the open run without doing it; the next run follows on schedule",
-                    ))
+                    )
                     .on_click(cx.listener(move |this, _, _, cx| {
                         if !busy {
                             this.skip_run(cx)
@@ -1394,33 +1394,38 @@ impl Render for RepeatView {
                 "Run now"
             };
             foot = foot.child(
-                small_btn("run-now", label)
-                    .tooltip(tip(title))
-                    .when(disabled, |e| e.opacity(0.5))
-                    .on_click(cx.listener(move |this, _, _, cx| {
+                ui::disabled(small_btn("run-now", label, None).tooltip(title), disabled).on_click(
+                    cx.listener(move |this, _, _, cx| {
                         if !disabled {
                             this.run_now(cx)
                         }
-                    })),
+                    }),
+                ),
             );
         }
         let save_disabled = busy || !has_guests || !self.invalid().is_empty();
         foot = foot
             .child(div().flex_1())
             .child(
-                small_btn("cancel", "Cancel").on_click(cx.listener(|this, _, _, cx| {
+                small_btn("cancel", "Cancel", None).on_click(cx.listener(|this, _, _, cx| {
                     this.open = false;
                     cx.notify();
                 })),
             )
             .child(
-                small_btn("save", if rule.is_some() { "Update" } else { "Repeat" })
-                    .when(save_disabled, |e| e.opacity(0.5))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        if !save_disabled {
-                            this.save(cx)
-                        }
-                    })),
+                ui::disabled(
+                    small_btn(
+                        "save",
+                        if rule.is_some() { "Update" } else { "Repeat" },
+                        None,
+                    ),
+                    save_disabled,
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    if !save_disabled {
+                        this.save(cx)
+                    }
+                })),
             );
         pop = pop.child(foot);
         let close = cx.entity().downgrade();

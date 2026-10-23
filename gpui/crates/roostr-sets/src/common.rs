@@ -6,7 +6,11 @@ use std::cell::Cell;
 use std::rc::Rc;
 use std::sync::Arc;
 
+use gpui_kit::component::button::Button;
+use gpui_kit::component::empty::{Empty, EmptyDescription, EmptyHeader};
+use gpui_kit::component::list::ListItem;
 use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
+use gpui_kit::component::separator::Separator;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use roostr_core::filters::{engine_filters_of, serving_filters_of, space_filter_of};
@@ -384,13 +388,11 @@ pub(crate) fn appear<E: Styled>(
     motion::appear_frame(id, -4., window, cx).apply(menu)
 }
 
-/// A `.vrow` menu row: label left, trailer right; hover/active hl-med.
-pub(crate) fn vrow(id: impl Into<ElementId>, active: bool) -> Stateful<Div> {
-    div()
-        .id(id)
-        .flex()
-        .items_center()
-        .justify_between()
+/// A `.vrow` menu row, the kit list row; hover/active hl-med. Give it one
+/// child: [`vrow_content`] (label left, trailer right).
+pub(crate) fn vrow(id: impl Into<ElementId>, active: bool) -> ListItem {
+    ListItem::new(id)
+        .selected(active)
         .gap(px(12.))
         .rounded(px(6.))
         .px(px(8.))
@@ -398,8 +400,18 @@ pub(crate) fn vrow(id: impl Into<ElementId>, active: bool) -> Stateful<Div> {
         .text_size(px(13.))
         .text_color(theme::fg())
         .cursor_pointer()
-        .when(active, |d| d.bg(theme::hl_med()))
-        .hover(|s| s.bg(theme::hl_med()))
+}
+
+/// A [`vrow`]'s content: `label` left, `trailer` right.
+pub(crate) fn vrow_content(label: impl IntoElement, trailer: Option<AnyElement>) -> Div {
+    div()
+        .w_full()
+        .flex()
+        .items_center()
+        .justify_between()
+        .gap(px(12.))
+        .child(label)
+        .children(trailer)
 }
 
 /// The uppercase title of a menu (`.ptitle`, `.more-title`).
@@ -413,9 +425,26 @@ pub(crate) fn menu_title(text: impl Into<SharedString>) -> Div {
         .child(text.into().to_uppercase())
 }
 
-/// A 1px separator (`.sort-div`).
-pub(crate) fn separator() -> Div {
-    div().flex_none().h(px(1.)).bg(theme::border()).my(px(4.))
+/// A 1px separator (`.sort-div`), the kit separator.
+pub(crate) fn separator() -> Separator {
+    Separator::horizontal().color(theme::border()).my(px(4.))
+}
+
+/// The kit empty state with one muted line of `size` px (`.empty`, e.g. "No
+/// objects match."); callers set the padding.
+pub(crate) fn empty_state(text: impl Into<SharedString>, size: f32) -> Empty {
+    Empty::new()
+        .p(px(0.))
+        .flex_none()
+        .items_start()
+        .text_left()
+        .header(
+            EmptyHeader::new().items_start().description(
+                EmptyDescription::new()
+                    .text_size(px(size))
+                    .child(text.into()),
+            ),
+        )
 }
 
 /// Arc-friendly read of the cached object.
@@ -423,22 +452,10 @@ pub(crate) fn cached_object(id: &str, cx: &App) -> Option<Arc<Object>> {
     Store::global(cx).read(cx).object(id)
 }
 
-/// The accent "New" button (`.new-btn`).
-pub(crate) fn new_button(id: impl Into<ElementId>, disabled: bool) -> Stateful<Div> {
-    div()
-        .id(id)
-        .flex()
-        .items_center()
-        .h(px(28.))
-        .px(px(12.))
-        .rounded(px(8.))
-        .bg(theme::accent())
-        .text_color(theme::white())
-        .text_size(px(13.))
-        .font_weight(FontWeight::MEDIUM)
-        .cursor_pointer()
-        .when(disabled, |d| d.opacity(0.5))
-        .when(!disabled, |d| d.hover(|s| s.bg(rgb(0x2b95ff))))
+/// The accent "New" button (`.new-btn`), the kit primary button; `disabled`
+/// while a create runs.
+pub(crate) fn new_button(id: impl Into<ElementId>, disabled: bool) -> Button {
+    roostr_core::ui::disabled(roostr_core::ui::primary_button(id, "New"), disabled)
 }
 
 /// One outer box shadow.

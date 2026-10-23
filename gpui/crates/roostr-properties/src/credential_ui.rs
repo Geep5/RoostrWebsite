@@ -4,6 +4,9 @@
 
 use std::rc::Rc;
 
+use gpui_kit::component::IconName;
+use gpui_kit::component::label::Label;
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use roostr_core::create::this_machine_id;
 use roostr_core::serving::{MachineRow, fetch_machines, machine_name, served_by_machine_id};
@@ -16,29 +19,25 @@ use crate::credentials::{
     check_says, connect_label, connecting_hint, credential_status_text, credentials_for_error,
     linked_credential_ids, run_action, signed_out_names,
 };
-use crate::widgets::{act_button, backdrop, below, tip};
+use crate::widgets::{act_button, backdrop, below, error_alert, note, tip};
 
-fn muted_line(text: impl Into<SharedString>) -> Div {
-    div()
-        .text_size(px(12.5))
-        .line_height(relative(1.45))
-        .text_color(theme::muted())
-        .child(text.into())
+/// A muted note line (kit [`Label`]), 12.5px.
+fn muted_line(text: impl Into<SharedString>) -> Label {
+    note(text, 12.5).line_height(relative(1.45))
 }
 
-fn tone_line(text: String, tone: &str) -> Div {
+/// A Check / sign-in outcome: "ok" a semibold [`Label`], "error" the kit
+/// destructive [`Alert`](gpui_kit::component::alert::Alert) (`id` keys it),
+/// anything else a muted line.
+fn tone_line(id: &'static str, text: String, tone: &str) -> AnyElement {
     match tone {
-        "ok" => div()
+        "ok" => Label::new(text)
             .text_size(px(12.5))
             .font_weight(FontWeight::SEMIBOLD)
             .text_color(theme::fg())
-            .child(text),
-        "error" => div()
-            .text_size(px(12.5))
-            .line_height(relative(1.45))
-            .text_color(rgb(0xff6961))
-            .child(text),
-        _ => muted_line(text),
+            .into_any_element(),
+        "error" => error_alert(id, text).text_size(px(12.5)).into_any_element(),
+        _ => muted_line(text).into_any_element(),
     }
 }
 
@@ -184,10 +183,10 @@ impl Render for CredentialStatus {
         let waiting_for_check = progress.checking(&self.object_id, fields);
         let says = check_says(progress, &self.object_id, fields, &computer);
         let mut col = div().flex().flex_col().gap(px(8.)).min_w(px(220.)).child(
-            div()
+            Label::new(credential_status_text(&status))
                 .text_size(px(14.))
                 .font_weight(FontWeight::SEMIBOLD)
-                .child(credential_status_text(&status)),
+                .text_color(theme::fg()),
         );
         if is_template {
             col = col.child(muted_line(
@@ -214,14 +213,14 @@ impl Render for CredentialStatus {
                     let f = fields.clone();
                     actions = actions.child(
                         act_button("check", "Check now", waiting_for_check)
-                            .tooltip(tip(format!(
+                            .tooltip(format!(
                                 "{} tests the login now",
                                 if computer.is_empty() {
                                     "The computer serving it"
                                 } else {
                                     &computer
                                 }
-                            )))
+                            ))
                             .on_click(move |_, _, cx| {
                                 if !waiting_for_check {
                                     Progress::global(cx)
@@ -233,7 +232,7 @@ impl Render for CredentialStatus {
                 if gate.can_connect {
                     actions = actions.child(
                         act_button("disconnect", "Disconnect", busy)
-                            .tooltip(tip("Stops a sign-in running on this computer. The saved login stays on the credential and keeps working until the site refuses it - clear its Cookie or key properties to remove it."))
+                            .tooltip("Stops a sign-in running on this computer. The saved login stays on the credential and keeps working until the site refuses it - clear its Cookie or key properties to remove it.")
                             .on_click(cx.listener(move |this, _, _, cx| if !busy { this.run("disconnect", cx) })),
                     );
                 }
@@ -256,7 +255,7 @@ impl Render for CredentialStatus {
                 col = col.child(muted_line(text));
             }
             if let Some((text, tone)) = says {
-                col = col.child(tone_line(text, tone));
+                col = col.child(tone_line("says", text, tone));
             }
         }
         let error = if self.action_error.is_empty() {
@@ -265,7 +264,7 @@ impl Render for CredentialStatus {
             self.action_error.clone()
         };
         if !error.is_empty() {
-            col = col.child(tone_line(error, "error"));
+            col = col.child(tone_line("error", error, "error"));
         }
         col
     }
@@ -322,7 +321,9 @@ impl Render for CredentialReconnect {
         let mut col = div().flex().flex_col().items_start().gap(px(6.));
         let object = match slot {
             Some(ObjectSlot::Failed(error)) => {
-                return col.child(tone_line(error.to_string(), "error")).child(open);
+                return col
+                    .child(tone_line("load-error", error.to_string(), "error"))
+                    .child(open);
             }
             Some(ObjectSlot::Ready(o)) if self.machines.ready => o,
             _ => return col.child(muted_line("Loading…")).child(open),
@@ -375,9 +376,17 @@ impl Render for CredentialReconnect {
         col = col.child(
             div()
                 .flex()
-                .text_size(px(13.))
-                .child(div().font_weight(FontWeight::SEMIBOLD).child(name.clone()))
-                .child(format!(" · {}", credential_status_text(&status))),
+                .child(
+                    Label::new(name.clone())
+                        .text_size(px(13.))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(theme::fg()),
+                )
+                .child(
+                    Label::new(format!(" · {}", credential_status_text(&status)))
+                        .text_size(px(13.))
+                        .text_color(theme::fg()),
+                ),
         );
         let connectable = can_connect(fields);
         if (connectable && gate.can_connect) || gate.can_check {
@@ -385,7 +394,11 @@ impl Render for CredentialReconnect {
             if connectable && gate.can_connect {
                 let id = self.id.clone();
                 actions = actions.child(
-                    act_button("run", format!("{} {name}", connect_label(&status)), running)
+                    // Busy while the sign-in starts or waits: the kit loading
+                    // state (spinner, no clicks) on the accent-bordered button.
+                    act_button("run", format!("{} {name}", connect_label(&status)), false)
+                        .loading(running)
+                        .when(running, |b| b.icon(IconName::Loader))
                         .border_color(theme::accent())
                         .on_click(cx.listener(move |this, _, _, cx| {
                             if !running {
@@ -402,14 +415,14 @@ impl Render for CredentialReconnect {
                 let f = fields.clone();
                 actions = actions.child(
                     act_button("check", "Check now", waiting_for_check)
-                        .tooltip(tip(format!(
+                        .tooltip(format!(
                             "{} tests the login now",
                             if computer.is_empty() {
                                 "The computer serving it"
                             } else {
                                 &computer
                             }
-                        )))
+                        ))
                         .on_click(move |_, _, cx| {
                             if !waiting_for_check {
                                 Progress::global(cx)
@@ -450,9 +463,12 @@ impl Render for CredentialReconnect {
                 };
                 col = col.child(muted_line(format!("Waiting for sign-in… {detail}")));
             }
-            Some(ReconnectPhase::Connected) => col = col.child(tone_line("Connected".into(), "ok")),
+            Some(ReconnectPhase::Connected) => {
+                col = col.child(tone_line("connected", "Connected".into(), "ok"))
+            }
             Some(ReconnectPhase::Failed) => {
                 col = col.child(tone_line(
+                    "failed",
                     state.map(|s| s.error).unwrap_or_default(),
                     "error",
                 ))
@@ -460,7 +476,7 @@ impl Render for CredentialReconnect {
             _ => {}
         }
         if let Some((text, tone)) = says {
-            col = col.child(tone_line(text, tone));
+            col = col.child(tone_line("says", text, tone));
         }
         col.child(open)
     }
@@ -618,6 +634,9 @@ impl RenderOnce for CredentialCell {
         let target = Rc::new(self.target);
         let mut root = div().relative().max_w_full().flex();
         let trigger_state = state.clone();
+        // Kept as a plain div: it wraps the caller's arbitrary cell content
+        // (ellipsised, full width), which the kit Button's fixed-height,
+        // centred, padded content row would re-lay out.
         let trigger = div()
             .id(self.id.clone())
             .group("cred-cell")
@@ -703,10 +722,8 @@ impl RenderOnce for CredentialCell {
                     }
                     if !s.find_error.is_empty() {
                         pop = pop.child(
-                            div()
-                                .text_size(px(12.5))
-                                .text_color(theme::red())
-                                .child(s.find_error.clone()),
+                            error_alert("cred-find-error", s.find_error.clone())
+                                .text_size(px(12.5)),
                         );
                     }
                 }

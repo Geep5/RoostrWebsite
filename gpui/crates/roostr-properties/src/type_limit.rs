@@ -4,11 +4,14 @@
 
 use std::rc::Rc;
 
+use gpui_kit::component::list::ListItem;
+use gpui_kit::component::{Sizable as _, h_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+use roostr_core::ui::{checkbox_display, section_label};
 use roostr_core::{Store, theme};
 
-use crate::widgets::empty_note;
+use crate::widgets::{empty_note, note};
 
 type ToggleFn = Rc<dyn Fn(&str, &mut Window, &mut App)>;
 
@@ -56,7 +59,7 @@ impl RenderOnce for TypeLimitPicker {
             .filter(|t| t.space.is_empty() || t.space == self.space)
             .cloned()
             .collect();
-        let note = if self.selected.is_empty() {
+        let note_text = if self.selected.is_empty() {
             "Any object can be linked."
         } else {
             "Only these types can be linked."
@@ -71,51 +74,47 @@ impl RenderOnce for TypeLimitPicker {
             let on = self.selected.contains(&t.id);
             let id = t.id.clone();
             let toggle = self.on_toggle.clone();
-            list =
-                list.child(
-                    div()
-                        .id(SharedString::from(format!("limit-{}", t.id)))
-                        .flex()
-                        .items_center()
-                        .gap(px(8.))
-                        .px(px(8.))
-                        .py(px(6.))
-                        .rounded(theme::radius::sm())
-                        .text_size(px(13.))
-                        .cursor_pointer()
-                        .when(on, |d| d.bg(theme::hl_light()))
-                        .hover(|s| s.bg(theme::hover()))
-                        .on_click(move |_, window, cx| toggle(&id, window, cx))
-                        .child(div().flex_none().w(px(18.)).text_center().child(
-                            if t.icon.is_empty() {
-                                "▣".to_string()
-                            } else {
-                                t.icon.clone()
-                            },
-                        ))
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .overflow_hidden()
-                                .whitespace_nowrap()
-                                .text_ellipsis()
-                                .child(if t.name.is_empty() {
-                                    t.key.clone()
+            list = list.child(
+                ListItem::new(SharedString::from(format!("limit-{}", t.id)))
+                    .px(px(8.))
+                    .py(px(6.))
+                    .rounded(theme::radius::sm())
+                    .text_size(px(13.))
+                    .cursor_pointer()
+                    .when(on, |d| d.bg(theme::hl_light()))
+                    .on_click(move |_, window, cx| toggle(&id, window, cx))
+                    .child(
+                        h_flex()
+                            .gap(px(8.))
+                            .child(div().flex_none().w(px(18.)).text_center().child(
+                                if t.icon.is_empty() {
+                                    "▣".to_string()
                                 } else {
-                                    t.name.clone()
-                                }),
-                        )
-                        .when(on, |d| {
-                            d.child(
+                                    t.icon.clone()
+                                },
+                            ))
+                            .child(
                                 div()
-                                    .flex_none()
-                                    .text_size(px(12.))
-                                    .text_color(theme::accent())
-                                    .child("✓"),
+                                    .flex_1()
+                                    .min_w_0()
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .text_ellipsis()
+                                    .child(if t.name.is_empty() {
+                                        t.key.clone()
+                                    } else {
+                                        t.name.clone()
+                                    }),
                             )
-                        }),
-                );
+                            .child(
+                                checkbox_display(
+                                    SharedString::from(format!("limit-chk-{}", t.id)),
+                                    on,
+                                )
+                                .small(),
+                            ),
+                    ),
+            );
         }
         if types.is_empty() {
             list = list.child(
@@ -136,21 +135,9 @@ impl RenderOnce for TypeLimitPicker {
                     .px(px(6.))
                     .pt(px(6.))
                     .pb(px(2.))
-                    .text_size(px(11.))
-                    .text_color(theme::muted())
-                    .child("LIMIT OBJECT TYPES"),
+                    .child(section_label("Limit object types")),
             )
             .child(list)
-            .child(limit_note(note))
+            .child(note(note_text, 11.).px(px(6.)).pt(px(2.)).pb(px(4.)))
     }
-}
-
-fn limit_note(text: &'static str) -> Div {
-    div()
-        .px(px(6.))
-        .pt(px(2.))
-        .pb(px(4.))
-        .text_size(px(11.))
-        .text_color(theme::muted())
-        .child(text)
 }

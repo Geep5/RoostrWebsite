@@ -5,10 +5,13 @@
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use gpui_kit::component::Icon;
-use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
+use gpui_kit::component::collapsible::Collapsible;
 use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
+use gpui_kit::component::separator::Separator;
+use gpui_kit::component::tag::Tag;
 use gpui_kit::component::toolbar::Toolbar;
+use gpui_kit::component::{Disableable as _, Icon, Sizable as _, Size, ThemeStyled as _};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use roostr_core::motion::{self, HoverMotion};
@@ -546,7 +549,7 @@ impl Editor {
                         )
                     })
                     .when(!dots, |d| {
-                        d.child(div().w_full().h(px(1.)).bg(theme::border()))
+                        d.child(Separator::horizontal().color(theme::border()).w_full())
                     })
                     .into_any_element()
             }
@@ -575,15 +578,17 @@ impl Editor {
                     .py(px(1.))
                     .child(self.geom(id, false, false))
                     .child(
-                        div()
-                            .text_size(px(11.))
-                            .text_color(theme::muted())
-                            .border_1()
-                            .border_color(theme::border())
-                            .rounded(px(6.))
-                            .px(px(8.))
-                            .py(px(2.))
-                            .child(other.to_string()),
+                        Tag::custom(
+                            gpui_kit::transparent_black(),
+                            theme::muted(),
+                            theme::border(),
+                        )
+                        .rounded(px(6.))
+                        .text_size(px(11.))
+                        .line_height(px(15.))
+                        .px(px(8.))
+                        .py(px(2.))
+                        .child(other.to_string()),
                     )
                     .children(self.row_decor(id));
                 return Some(
@@ -690,41 +695,27 @@ impl Editor {
         match s {
             style::CHECKBOX => {
                 let toggle_id = id.to_string();
+                let read_only = self.read_only;
                 row = row.child(
                     div()
-                        .id(Self::row_id("check", id))
                         .size(px(24.))
                         .flex_none()
                         .mt(px(3.))
                         .flex()
                         .items_center()
                         .justify_center()
-                        .when(!self.read_only, |d| d.cursor_pointer())
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.toggle_checked(&toggle_id, !checked, cx)
-                        }))
-                        .child(if checked {
-                            div()
-                                .size(px(16.))
-                                .rounded_full()
-                                .bg(theme::accent())
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .child(
-                                    Icon::new(Glyph::Check)
-                                        .size(px(11.))
-                                        .text_color(theme::white()),
-                                )
-                        } else {
-                            div()
-                                .size(px(15.))
-                                .rounded_full()
-                                .border_1()
-                                .border_color(theme::muted())
-                                .hover(|s| s.bg(rgba(0x4f4f4f14)))
-                        }),
+                        .child(
+                            roostr_core::ui::checkbox(Self::row_id("check", id), checked)
+                                .with_size(Size::Medium)
+                                .when(read_only, |c| c.tab_stop(false))
+                                .when(!read_only, |c| {
+                                    c.on_change(cx.listener(move |this, done: &bool, _, cx| {
+                                        cx.stop_propagation();
+                                        this.toggle_checked(&toggle_id, *done, cx)
+                                    }))
+                                }),
+                        ),
                 );
             }
             style::BULLET => {
@@ -753,21 +744,21 @@ impl Editor {
             style::TOGGLE => {
                 let flip = id.to_string();
                 row = row.child(
-                    div()
-                        .id(Self::row_id("toggle", id))
+                    Button::new(Self::row_id("toggle", id))
+                        .ghost()
+                        .xsmall()
                         .size(px(24.))
+                        .p_0()
                         .flex_none()
                         .mr(px(6.))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .cursor_pointer()
                         .text_color(theme::fg())
+                        .accessibility_label(if open { "Collapse" } else { "Expand" })
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .on_click(cx.listener(move |this, _, _, cx| this.flip_toggle(&flip, cx)))
                         .child(
                             Icon::new(Glyph::ChevronRight)
                                 .size(px(16.))
+                                .text_color(theme::fg())
                                 .when(turn > 0., |i| {
                                     i.rotate(radians(std::f32::consts::FRAC_PI_2 * turn))
                                 }),
@@ -781,32 +772,32 @@ impl Editor {
             let copied = self.copied.contains(id);
             let copy_id = id.to_string();
             row = row.child(
-                div()
-                    .id(Self::row_id("copy", id))
+                Button::new(Self::row_id("copy", id))
+                    .outline()
+                    .xsmall()
+                    .accessibility_label("Copy code")
+                    .child(
+                        div()
+                            .text_size(px(11.))
+                            .child(if copied { "Copied" } else { "Copy" }),
+                    )
                     .absolute()
                     .top(px(7.))
                     .right(px(6.))
                     .w(px(58.))
-                    .px(px(8.))
-                    .py(px(2.))
-                    .text_size(px(11.))
-                    .text_center()
-                    .rounded(px(4.))
-                    .border_1()
-                    .border_color(theme::border())
-                    .bg(theme::panel())
-                    .text_color(theme::muted())
-                    .cursor_pointer()
                     .opacity(if copied { 1. } else { copy_reveal })
-                    .hover(|s| s.text_color(theme::fg()).bg(theme::hover()))
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .on_click(cx.listener(move |this, _, _, cx| this.copy_code(&copy_id, cx)))
-                    .child(if copied { "Copied" } else { "Copy" }),
+                    .on_click(cx.listener(move |this, _, _, cx| this.copy_code(&copy_id, cx))),
             );
         }
         row = row.children(self.row_decor(id));
 
-        let mut tree = div()
+        // A toggle's children are its collapsible content (shown only while
+        // open, so a closed toggle neither holds the caret nor reports row
+        // geometry); the arrow turn and the children fade share `turn`.
+        let shown = !is_toggle || open;
+        let mut tree = Collapsible::new()
+            .open(shown)
             .relative()
             .rounded(px(4.))
             .when(dragging, |d| d.opacity(0.4));
@@ -849,16 +840,16 @@ impl Editor {
                     })),
             );
         }
-        if !block.children_ids.is_empty() && (!is_toggle || open) {
+        if !block.children_ids.is_empty() && shown {
             let kids: Vec<AnyElement> = block
                 .children_ids
                 .iter()
                 .filter_map(|cid| self.render_block(cid, f, window, cx))
                 .collect();
-            tree = tree.child(div().pl(px(26.)).opacity(turn).children(kids));
+            tree = tree.content(div().pl(px(26.)).opacity(turn).children(kids));
             // Anytype targetBot: a thin strip below the children; a drop there lands after the subtree.
             let over = matches!(&self.drop_hint, Some(h) if h.id == block.id && h.bot);
-            tree = tree.child(
+            tree = tree.content(
                 div()
                     .absolute()
                     .left_0()
@@ -878,9 +869,9 @@ impl Editor {
                         )
                     }),
             );
-        } else if is_toggle && open && block.children_ids.is_empty() && !self.read_only {
+        } else if is_toggle && shown && !self.read_only {
             let empty_id = id.to_string();
-            tree = tree.child(
+            tree = tree.content(
                 div()
                     .id(Self::row_id("empty-toggle", id))
                     .ml(px(30.))
@@ -955,18 +946,56 @@ impl Editor {
             );
             (t, Some(state))
         };
-        let mini = |id: ElementId, enabled: bool| {
-            div()
-                .id(id)
+        // `×` row/column deletes: muted marks whose `×` turns red under the
+        // pointer (a group hover: the kit button owns its own hover style).
+        let del_look = ButtonCustomVariant::new(cx).foreground(theme::muted());
+        let mini = |id: ElementId, enabled: bool, tip: &'static str| {
+            Button::new(id)
+                .custom(del_look)
+                .xsmall()
+                .group("table-del")
+                .h(px(14.))
                 .px(px(4.))
-                .text_size(px(12.))
-                .line_height(px(14.))
-                .text_color(theme::muted())
-                .when(enabled, |d| {
-                    d.cursor_pointer().hover(|s| s.text_color(theme::red()))
-                })
-                .when(!enabled, |d| d.opacity(0.3))
-                .child("×")
+                .tooltip(tip)
+                .accessibility_label(tip)
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .disabled(!enabled)
+                .when(!enabled, |b| b.opacity(0.3))
+                .child(
+                    div()
+                        .text_size(px(12.))
+                        .line_height(px(14.))
+                        .when(enabled, |d| {
+                            d.group_hover("table-del", |s| s.text_color(theme::red()))
+                        })
+                        .child("×"),
+                )
+        };
+        // Dashed `+` edges that add a row or a column; under the pointer the
+        // border (the custom colour) and the `+` (a group hover) turn accent.
+        let add_look = ButtonCustomVariant::new(cx)
+            .foreground(theme::muted())
+            .color(theme::accent());
+        let add = |id: ElementId, tip: &'static str| {
+            Button::new(id)
+                .custom(add_look)
+                .xsmall()
+                .group("table-add")
+                .bg(gpui_kit::transparent_black())
+                .border_1()
+                .border_dashed()
+                .border_color(theme::border())
+                .rounded(px(6.))
+                .opacity(reveal)
+                .tooltip(tip)
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .accessibility_label(tip)
+                .child(
+                    div()
+                        .text_size(px(13.))
+                        .group_hover("table-add", |s| s.text_color(theme::accent()))
+                        .child("+"),
+                )
         };
         let mut wrap = div()
             .id(Self::row_id("table", &block.id))
@@ -980,29 +1009,27 @@ impl Editor {
             .flex_col();
         if !ro {
             let can = cols.len() > 1;
-            wrap = wrap.child(
-                div()
-                    .flex()
-                    .h(px(14.))
-                    .mr(px(20.))
-                    .opacity(reveal)
-                    .children(cols.iter().enumerate().map(|(i, col)| {
-                        let (t, c) = (table_id.clone(), col.clone());
-                        div().flex_1().flex().justify_center().child(
-                            mini(
-                                ElementId::Name(format!("delcol-{}-{i}", table_id).into()),
-                                can,
+            wrap =
+                wrap.child(
+                    div()
+                        .flex()
+                        .h(px(14.))
+                        .mr(px(20.))
+                        .opacity(reveal)
+                        .children(cols.iter().enumerate().map(|(i, col)| {
+                            let (t, c) = (table_id.clone(), col.clone());
+                            div().flex_1().flex().justify_center().child(
+                                mini(
+                                    ElementId::Name(format!("delcol-{}-{i}", table_id).into()),
+                                    can,
+                                    "Delete column",
+                                )
+                                .on_click(cx.listener(
+                                    move |this, _, _, cx| this.table_col_remove(&t, &c, cx),
+                                )),
                             )
-                            .tooltip(roostr_core::ui::tooltip("Delete column"))
-                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                            .when(can, |d| {
-                                d.on_click(cx.listener(move |this, _, _, cx| {
-                                    this.table_col_remove(&t, &c, cx)
-                                }))
-                            }),
-                        )
-                    })),
-            );
+                        })),
+                );
         }
         let mut grid = div()
             .flex_1()
@@ -1081,70 +1108,34 @@ impl Editor {
                                     mini(
                                         ElementId::Name(format!("delrow-{}-{i}", block.id).into()),
                                         can,
+                                        "Delete row",
                                     )
-                                    .tooltip(roostr_core::ui::tooltip("Delete row"))
-                                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                                        cx.stop_propagation()
-                                    })
-                                    .when(can, |d| {
-                                        d.on_click(cx.listener(move |this, _, _, cx| {
-                                            this.table_row_remove(&r, cx)
-                                        }))
-                                    }),
+                                    .on_click(cx.listener(
+                                        move |this, _, _, cx| this.table_row_remove(&r, cx),
+                                    )),
                                 )
                             })),
                     ),
             );
             let t = table_id.clone();
             grid_row = grid_row.child(
-                div()
-                    .id(Self::row_id("addcol", &block.id))
+                add(Self::row_id("addcol", &block.id), "Add column")
                     .w(px(16.))
+                    .h_auto()
                     .mr(px(2.))
                     .flex_none()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .border_1()
-                    .border_dashed()
-                    .border_color(theme::border())
-                    .rounded(px(6.))
-                    .text_size(px(13.))
-                    .text_color(theme::muted())
-                    .cursor_pointer()
-                    .opacity(reveal)
-                    .hover(|s| s.text_color(theme::accent()).border_color(theme::accent()))
-                    .tooltip(roostr_core::ui::tooltip("Add column"))
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .on_click(cx.listener(move |this, _, _, cx| this.table_col_add(&t, cx)))
-                    .child("+"),
+                    .on_click(cx.listener(move |this, _, _, cx| this.table_col_add(&t, cx))),
             );
         }
         wrap = wrap.child(grid_row);
         if !ro {
             let t = table_id.clone();
             wrap = wrap.child(
-                div()
-                    .id(Self::row_id("addrow", &block.id))
+                add(Self::row_id("addrow", &block.id), "Add row")
                     .mt(px(2.))
                     .h(px(16.))
                     .mr(px(20.))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .border_1()
-                    .border_dashed()
-                    .border_color(theme::border())
-                    .rounded(px(6.))
-                    .text_size(px(13.))
-                    .text_color(theme::muted())
-                    .cursor_pointer()
-                    .opacity(reveal)
-                    .hover(|s| s.text_color(theme::accent()).border_color(theme::accent()))
-                    .tooltip(roostr_core::ui::tooltip("Add row"))
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .on_click(cx.listener(move |this, _, _, cx| this.table_row_add(&t, cx)))
-                    .child("+"),
+                    .on_click(cx.listener(move |this, _, _, cx| this.table_row_add(&t, cx))),
             );
         }
         wrap.into_any_element()
@@ -1458,22 +1449,19 @@ impl Editor {
                                 .line_height(px(19.))
                                 .child(div().flex_1().child(self.file_notice.clone()))
                                 .child(
-                                    div()
-                                        .id("file-notice-dismiss")
+                                    Button::new("file-notice-dismiss")
+                                        .outline()
+                                        .small()
                                         .flex_none()
-                                        .border_1()
-                                        .border_color(theme::border())
                                         .rounded(px(7.))
                                         .px(px(10.))
-                                        .py(px(3.))
                                         .text_color(theme::muted())
-                                        .cursor_pointer()
-                                        .hover(|s| s.text_color(theme::fg()))
+                                        .accessibility_label("Dismiss")
+                                        .child(div().text_size(px(13.)).child("Dismiss"))
                                         .on_click(cx.listener(|this, _, _, cx| {
                                             this.file_notice.clear();
                                             cx.notify();
-                                        }))
-                                        .child("Dismiss"),
+                                        })),
                                 ),
                         ),
                 )
@@ -1497,20 +1485,7 @@ impl Editor {
                     anchored()
                         .position(point(menu.pos.x, menu.pos.y + px(6.)))
                         .snap_to_window_with_margin(px(8.))
-                        .child(
-                            popup_frame(
-                                "spell-menu",
-                                px(8.),
-                                vec![BoxShadow {
-                                    color: hsla(0., 0., 0., 0.5),
-                                    offset: point(px(0.), px(8.)),
-                                    blur_radius: px(24.),
-                                    spread_radius: px(0.),
-                                    inset: false,
-                                }],
-                            )
-                            .child(popup),
-                        ),
+                        .child(popup_holder("spell-menu").child(popup)),
                 )
                 .with_priority(5)
                 .into_any_element(),
@@ -1578,20 +1553,7 @@ impl Editor {
                     anchored()
                         .position(menu.pos)
                         .snap_to_window_with_margin(px(8.))
-                        .child(
-                            popup_frame(
-                                "paste-menu",
-                                px(10.),
-                                vec![BoxShadow {
-                                    color: hsla(0., 0., 0., 0.45),
-                                    offset: point(px(0.), px(12.)),
-                                    blur_radius: px(32.),
-                                    spread_radius: px(0.),
-                                    inset: false,
-                                }],
-                            )
-                            .child(popup),
-                        ),
+                        .child(popup_holder("paste-menu").child(popup)),
                 )
                 .with_priority(5)
                 .into_any_element(),
@@ -1693,18 +1655,8 @@ impl Editor {
                             .id("turn-pop")
                             .occlude()
                             .w(px(260.))
-                            .bg(theme::panel())
-                            .border_1()
-                            .border_color(theme::border())
-                            .rounded(px(10.))
+                            .popover_style(cx)
                             .p(px(6.))
-                            .shadow(vec![BoxShadow {
-                                color: hsla(0., 0., 0., 0.35),
-                                offset: point(px(0.), px(8.)),
-                                blur_radius: px(24.),
-                                spread_radius: px(0.),
-                                inset: false,
-                            }])
                             .child(view.clone()),
                     )
                     .into_any_element(),
@@ -2500,21 +2452,12 @@ impl Editor {
     }
 }
 
-/// Roostr's frame around a kit popup menu: its border, radius and shadow
-/// (the kit draws a ring at the theme radius, clipped away here). The editor
-/// keeps focus: a click in the menu must not move it there.
-fn popup_frame(id: &'static str, radius: Pixels, shadow: Vec<BoxShadow>) -> Stateful<Div> {
+/// Holds a kit popup menu (its own popover chrome draws the frame) where the
+/// editor keeps focus: a click in the menu must not move it there.
+fn popup_holder(id: &'static str) -> Stateful<Div> {
     div()
         .id(id)
         .occlude()
-        .bg(theme::panel())
-        .border_1()
-        .border_color(theme::border())
-        .rounded(radius)
-        .overflow_hidden()
-        .p(px(2.))
-        .shadow(shadow)
-        .text_color(theme::fg())
         .capture_any_mouse_down(|_, window, _| window.prevent_default())
 }
 

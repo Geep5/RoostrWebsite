@@ -347,11 +347,11 @@ fn css_named_color(name: &str) -> Option<Hsla> {
 impl Render for KanbanView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let Some(rel) = self.rel(cx) else {
-            return div()
-                .text_size(px(13.))
-                .text_color(theme::muted())
-                .child("Pick a property to group by (a status, tag, or checkbox).")
-                .into_any_element();
+            return common::empty_state(
+                "Pick a property to group by (a status, tag, or checkbox).",
+                13.,
+            )
+            .into_any_element();
         };
         let mut board = div()
             .id("board")

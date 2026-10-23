@@ -5,6 +5,7 @@
 use std::time::Duration;
 
 use gpui_kit::component::avatar::Avatar;
+use gpui_kit::component::button::Button;
 use gpui_kit::component::progress::ProgressCircle;
 use gpui_kit::component::{self, Sizable as _};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -14,6 +15,7 @@ use roostr_core::sync_status::{sync_progress, sync_tip};
 use roostr_core::types::{Space, SyncPhase};
 use roostr_core::{Glyph, Navigator, motion, theme};
 
+use crate::Tip as _;
 use crate::modal::Prompt;
 use crate::workspace::{RailDrag, Workspace};
 
@@ -52,6 +54,41 @@ fn motion_color(color: Hsla) -> motion::Color {
     let Rgba { r, g, b, a } = color.to_rgb();
     let channel = |v: f32| f64::from(v.clamp(0., 1.));
     motion::Color::rgba(channel(r), channel(g), channel(b), channel(a))
+}
+
+/// A rail tile button below the spaces (New space, Settings): radius 10,
+/// muted → fg on an `hl-med` fill; a 52px row in a wide rail, else a 44px
+/// square.
+fn rail_tile(id: &'static str, wide: bool, cx: &App) -> Button {
+    crate::fill_button(id, theme::hl_med(), cx)
+        .rounded(px(10.))
+        .map(|b| {
+            if wide {
+                b.w_full().h(px(52.)).px(px(8.))
+            } else {
+                b.size(px(44.))
+            }
+        })
+}
+
+/// A rail tile's content at `text` size (the kit sizes its own content
+/// box, so the tile's text lives here): its square, then (wide rail) its
+/// label, left-aligned in a wide rail.
+fn tile_row(wide: bool, text: f32) -> Div {
+    div()
+        .w_full()
+        .flex()
+        .items_center()
+        .gap(px(12.))
+        .text_size(px(text))
+        .line_height(relative(1.2))
+        .map(|d| {
+            if wide {
+                d.justify_start()
+            } else {
+                d.justify_center()
+            }
+        })
 }
 
 fn space_icon(space: &Space, size: Pixels, font: Pixels) -> AnyElement {
@@ -229,7 +266,7 @@ impl Workspace {
                             }),
                     )
                 })
-                .tooltip(crate::tip(title))
+                .tooltip(roostr_core::ui::tooltip(title))
                 .debug_selector({
                     let id = id.clone();
                     move || format!("space:{id}")
@@ -294,46 +331,34 @@ impl Workspace {
 
         // New space.
         rail = rail.child(
-            div()
-                .id("new-space")
-                .flex()
-                .items_center()
-                .gap(px(12.))
-                .rounded(px(10.))
-                .text_color(theme::muted())
-                .text_size(px(15.))
-                .cursor_pointer()
-                .hover(|s| s.bg(theme::hl_med()).text_color(theme::fg()))
-                .map(|d| {
-                    if wide {
-                        d.w_full().h(px(52.)).px(px(8.))
-                    } else {
-                        d.size(px(44.)).justify_center()
-                    }
-                })
+            rail_tile("new-space", wide, cx)
+                .accessibility_label("New space")
                 .child(
-                    div()
-                        .flex_none()
-                        .size(px(if wide { 38. } else { 36. }))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .rounded(px(9.))
-                        .bg(theme::panel())
-                        .text_color(theme::fg())
-                        .text_size(px(if wide { 16. } else { 15. }))
-                        .child("+"),
+                    tile_row(wide, 15.)
+                        .child(
+                            div()
+                                .flex_none()
+                                .size(px(if wide { 38. } else { 36. }))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .rounded(px(9.))
+                                .bg(theme::panel())
+                                .text_color(theme::fg())
+                                .text_size(px(if wide { 16. } else { 15. }))
+                                .child("+"),
+                        )
+                        .when(wide, |d| {
+                            d.child(
+                                div()
+                                    .min_w_0()
+                                    .truncate()
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .child("New space"),
+                            )
+                        }),
                 )
-                .when(wide, |d| {
-                    d.child(
-                        div()
-                            .min_w_0()
-                            .truncate()
-                            .font_weight(FontWeight::MEDIUM)
-                            .child("New space"),
-                    )
-                })
-                .tooltip(crate::tip("New space"))
+                .tip("New space")
                 .on_click(cx.listener(|this, _, window, cx| this.new_space(window, cx))),
         );
         rail = rail.child(div().flex_1());
@@ -351,7 +376,7 @@ impl Workspace {
                 .mx_auto()
                 .mb(px(6.))
                 .rounded_full()
-                .tooltip(crate::tip(sync_tip(&status)));
+                .tooltip(roostr_core::ui::tooltip(sync_tip(&status)));
             // The state colours cross-fade over 200ms.
             let color = match (err, pct) {
                 (true, _) => theme::red(),
@@ -408,40 +433,28 @@ impl Workspace {
             format!("@{}", profile_name.trim_start_matches('@'))
         };
         rail = rail.child(
-            div()
-                .id("rail-settings")
-                .flex()
-                .items_center()
-                .gap(px(12.))
-                .rounded(px(10.))
-                .text_color(theme::muted())
-                .text_size(px(17.))
-                .cursor_pointer()
-                .hover(|s| s.bg(theme::hl_med()).text_color(theme::fg()))
-                .map(|d| {
-                    if wide {
-                        d.w_full().h(px(52.)).px(px(8.))
-                    } else {
-                        d.size(px(44.)).justify_center()
-                    }
-                })
+            rail_tile("rail-settings", wide, cx)
+                .accessibility_label(SharedString::from(label.clone()))
                 .child(
-                    account_avatar(px(if wide { 38. } else { 36. }), Glyph::Person, cx)
-                        .border_0()
-                        .bg(gpui_kit::transparent_black())
-                        .text_color(theme::muted()),
+                    tile_row(wide, 17.)
+                        .child(
+                            account_avatar(px(if wide { 38. } else { 36. }), Glyph::Person, cx)
+                                .border_0()
+                                .bg(gpui_kit::transparent_black())
+                                .text_color(theme::muted()),
+                        )
+                        .when(wide, |d| {
+                            d.child(
+                                div()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_size(px(15.))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .child(label),
+                            )
+                        }),
                 )
-                .when(wide, |d| {
-                    d.child(
-                        div()
-                            .min_w_0()
-                            .truncate()
-                            .text_size(px(15.))
-                            .font_weight(FontWeight::MEDIUM)
-                            .child(label),
-                    )
-                })
-                .tooltip(crate::tip("Settings"))
+                .tip("Settings")
                 .on_click(cx.listener(|this, _, window, cx| this.settings(window, cx))),
         );
         rail

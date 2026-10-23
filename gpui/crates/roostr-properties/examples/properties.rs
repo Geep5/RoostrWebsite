@@ -235,27 +235,11 @@ impl Example {
 }
 
 fn heading(text: &str) -> Div {
-    div()
-        .mt(px(28.))
-        .mb(px(10.))
-        .text_size(px(11.))
-        .font_weight(FontWeight::SEMIBOLD)
-        .text_color(theme::muted())
-        .child(text.to_uppercase())
+    roostr_core::ui::section_label(text).mt(px(28.)).mb(px(10.))
 }
 
-fn button(id: &'static str, label: &'static str) -> Stateful<Div> {
-    div()
-        .id(id)
-        .border_1()
-        .border_color(theme::border())
-        .rounded(theme::radius::md())
-        .px(px(14.))
-        .py(px(7.))
-        .text_size(px(13.))
-        .cursor_pointer()
-        .hover(|s| s.bg(theme::hover()))
-        .child(label)
+fn button(id: &'static str, label: &'static str) -> gpui_kit::component::button::Button {
+    roostr_core::ui::outline_button(id, label)
 }
 
 impl Render for Example {

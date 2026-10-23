@@ -9,13 +9,13 @@ use std::collections::BTreeMap;
 use std::io::Cursor;
 use std::sync::Arc;
 
-use gpui_kit::component::Sizable as _;
 use gpui_kit::component::alert::Alert;
 use gpui_kit::component::attachment::{
     Attachment, AttachmentContent, AttachmentDescription, AttachmentMedia, AttachmentStatus,
     AttachmentTitle,
 };
 use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::{Icon, IconName, Sizable as _};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use roostr_core::motion::{self, HoverMotion};
@@ -393,15 +393,9 @@ impl Render for FileBlock {
             let bytes = self.bytes.clone();
             let open_name = name.clone();
             root = root.child(
-                // The frame keeps the card's hover border (the kit card can only tint
-                // its fill), and the press must not reach the editor (block selection/drag).
+                // The press must not reach the editor (block selection/drag).
                 div()
                     .w_full()
-                    .border_1()
-                    .border_color(theme::border())
-                    .rounded(px(8.))
-                    .bg(theme::panel())
-                    .hover(|s| s.border_color(theme::muted()))
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .child(
                         Attachment::new()
@@ -412,12 +406,7 @@ impl Render for FileBlock {
                                         .detach_and_log_err(cx);
                                 }
                             })
-                            .media(
-                                AttachmentMedia::new()
-                                    .size(px(28.))
-                                    .bg(transparent_black())
-                                    .child(div().text_size(px(22.)).child("📄")),
-                            )
+                            .media(AttachmentMedia::new().child(Icon::new(IconName::FileText)))
                             .content(
                                 AttachmentContent::new()
                                     .title(
@@ -436,11 +425,8 @@ impl Render for FileBlock {
                             .gap(px(10.))
                             .px(px(14.))
                             .py(px(12.))
-                            .rounded(px(7.))
-                            .border_0()
-                            .bg(transparent_black())
-                            .text_size(px(13.))
-                            .cursor_pointer(),
+                            .rounded(px(8.))
+                            .text_size(px(13.)),
                     ),
             );
         }

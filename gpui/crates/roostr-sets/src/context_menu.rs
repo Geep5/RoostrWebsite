@@ -7,7 +7,9 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use gpui_kit::component::Icon;
+use gpui_kit::component::empty::Empty;
 use gpui_kit::component::input::{Escape as InputEscape, Input, InputEvent, InputState};
+use gpui_kit::component::list::ListItem;
 use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -509,7 +511,7 @@ impl RowContextMenu {
                 }
                 for (key, label) in types {
                     list = list.child(
-                        menu_item(SharedString::from(format!("type-{key}")), false)
+                        menu_item(SharedString::from(format!("type-{key}")))
                             .child(label)
                             .on_click(
                                 cx.listener(move |this, _, _, cx| this.retype(key.clone(), cx)),
@@ -547,7 +549,7 @@ impl RowContextMenu {
                 }
                 for (id, label) in cols {
                     list = list.child(
-                        menu_item(SharedString::from(format!("col-{id}")), false)
+                        menu_item(SharedString::from(format!("col-{id}")))
                             .child(label)
                             .on_click(
                                 cx.listener(move |this, _, _, cx| this.add_to(id.clone(), cx)),
@@ -575,10 +577,16 @@ impl RowContextMenu {
                     let save_rel = rel.clone();
                     fly = fly
                         .child(
-                            menu_item("ctx-back", false)
+                            menu_item("ctx-back")
                                 .font_weight(FontWeight::SEMIBOLD)
-                                .child(Icon::new(Glyph::ChevronLeft).size(px(14.)))
-                                .child(label)
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap(px(9.))
+                                        .child(Icon::new(Glyph::ChevronLeft).size(px(14.)))
+                                        .child(label),
+                                )
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.edit_key.clear();
                                     this.edit_value = None;
@@ -637,7 +645,7 @@ impl RowContextMenu {
                         if r.name.is_empty() { &r.key } else { &r.name }
                     );
                     list = list.child(
-                        menu_item(SharedString::from(format!("prop-{key}")), false)
+                        menu_item(SharedString::from(format!("prop-{key}")))
                             .child(label)
                             .on_click(
                                 cx.listener(move |this, _, _, cx| this.open_prop(key.clone(), cx)),
@@ -654,11 +662,9 @@ fn menu_shadow() -> Vec<BoxShadow> {
     vec![common::shadow(hsla(0., 0., 0., 0.4), 0., 8., 24., 0.)]
 }
 
-fn menu_item(id: impl Into<ElementId>, hovered: bool) -> Stateful<Div> {
-    div()
-        .id(id)
-        .flex()
-        .items_center()
+/// A flyout row (`.ctx-item`), the kit list row.
+fn menu_item(id: impl Into<ElementId>) -> ListItem {
+    ListItem::new(id)
         .gap(px(9.))
         .w_full()
         .px(px(10.))
@@ -667,17 +673,11 @@ fn menu_item(id: impl Into<ElementId>, hovered: bool) -> Stateful<Div> {
         .text_size(px(13.))
         .text_color(theme::fg())
         .cursor_pointer()
-        .when(hovered, |d| d.bg(theme::hover()))
-        .hover(|s| s.bg(theme::hover()))
 }
 
-fn none_row(text: String) -> Div {
-    div()
-        .text_size(px(12.))
-        .text_color(theme::muted())
-        .px(px(8.))
-        .py(px(4.))
-        .child(text)
+/// A flyout's "nothing here" line, the kit empty state.
+fn none_row(text: String) -> Empty {
+    common::empty_state(text, 12.).px(px(8.)).py(px(4.))
 }
 
 /// One top-level row's content (`.ctx-item`: 16px icon, 9px gap, 13px label,

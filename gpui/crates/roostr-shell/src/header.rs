@@ -3,10 +3,15 @@
 //! the More menu with every item and submenu, the pane button with its badge,
 //! and the delete-property modal (1623-1638).
 
+use std::cell::Cell;
+use std::rc::Rc;
+
+use gpui_kit::component::badge::Badge;
 use gpui_kit::component::breadcrumb::{Breadcrumb, BreadcrumbItem};
+use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
 use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
-use gpui_kit::component::{Disableable as _, Icon, IconNamed as _};
+use gpui_kit::component::{ElementExt as _, Icon, IconNamed as _, WindowExt as _};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use roostr_core::nav::{Navigator, Route, navigate, open_tab};
@@ -16,8 +21,9 @@ use roostr_core::types::{Block, Fields, RelationDef, Value, pos};
 use roostr_core::{Glyph, PaneState, api, theme, ui};
 use serde_json::json;
 
-use crate::modal::{dialog_appear, outline_button, overlay, small_card};
+use crate::modal::{first_height, small_dialog, track_height};
 use crate::workspace::Workspace;
+use crate::{Search, TIP_DELAY, Tip as _};
 
 pub(crate) fn init(_: &mut App) {}
 
@@ -71,36 +77,8 @@ pub(crate) struct DeleteProp {
     /// Objects holding a value (`None` while counting).
     usage: Option<usize>,
     deleting: bool,
-}
-
-/// `.hbtn`: 28×28, radius 7, muted, hover `--hover`.
-fn hbtn(id: impl Into<ElementId>) -> Stateful<Div> {
-    hbtn_base(id).hover(|s| s.bg(theme::hover()).text_color(theme::fg()))
-}
-
-/// `.hbtn` without its hover, for buttons whose hover adds to it (GPUI takes
-/// one hover style per element).
-fn hbtn_base(id: impl Into<ElementId>) -> Stateful<Div> {
-    div()
-        .id(id)
-        .relative()
-        .flex_none()
-        .size(px(28.))
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded(theme::radius::tab())
-        .text_color(theme::muted())
-        .text_size(px(16.))
-        .cursor_pointer()
-}
-
-fn glyph(glyph: Glyph, size: f32) -> Svg {
-    svg()
-        .path(glyph.path())
-        .size(px(size))
-        .flex_none()
-        .text_color(theme::muted())
+    /// The card's laid-out height, to seat it in the window's middle.
+    height: Rc<Cell<Pixels>>,
 }
 
 fn refresh(cx: &mut App) {
@@ -130,56 +108,67 @@ impl Workspace {
             let closed = (pane.available && !pane.is_open(primary)).then_some(primary);
             (has_more, closed, pane.count)
         };
-        let path = div()
-            .id("path")
-            .flex()
-            .items_center()
-            .gap(px(8.))
+        // The path pill: one ghost kit button (the whole pill opens search).
+        let path = crate::fill_button("path", theme::hover(), cx)
+            .flex_shrink(1.)
             .max_w(relative(0.6))
             .min_w_0()
+            .h_auto()
             .px(px(10.))
             .py(px(4.))
             .rounded(theme::radius::md())
-            .text_size(px(14.))
-            .font_weight(FontWeight::SEMIBOLD)
             .text_color(theme::fg())
-            .cursor_pointer()
-            .hover(|s| s.bg(theme::hover()))
-            .map(|d| {
-                if graph_path {
-                    d.child(
-                        svg()
-                            .path(Glyph::Graph.path())
-                            .size(px(15.))
-                            .flex_none()
-                            .text_color(theme::fg()),
-                    )
-                } else if is_image_icon(&path_icon) {
-                    d.child(ui::emoji_or_image_icon(&path_icon, px(18.)))
-                } else {
-                    d.child(
-                        div()
-                            .flex_none()
-                            .text_size(px(15.))
-                            .child(path_icon.clone()),
-                    )
-                }
-            })
-            // The path is one crumb (the open object, space or graph); the
-            // whole pill opens search, so the crumb itself takes no click.
+            .accessibility_label(SharedString::from(path_name.clone()))
+            // The kit sizes its own content box: the pill's 14/600 text and
+            // the icon + crumb row live on a child.
             .child(
-                Breadcrumb::new()
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
                     .min_w_0()
-                    .overflow_hidden()
                     .text_size(px(14.))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .line_height(relative(1.2))
+                    .text_color(theme::fg())
+                    .map(|d| {
+                        if graph_path {
+                            d.child(
+                                svg()
+                                    .path(Glyph::Graph.path())
+                                    .size(px(15.))
+                                    .flex_none()
+                                    .text_color(theme::fg()),
+                            )
+                        } else if is_image_icon(&path_icon) {
+                            d.child(ui::emoji_or_image_icon(&path_icon, px(18.)))
+                        } else {
+                            d.child(
+                                div()
+                                    .flex_none()
+                                    .text_size(px(15.))
+                                    .child(path_icon.clone()),
+                            )
+                        }
+                    })
+                    // The path is one crumb (the open object, space or
+                    // graph); the whole pill opens search, so the crumb
+                    // itself takes no click.
                     .child(
-                        BreadcrumbItem::new(path_name)
+                        Breadcrumb::new()
                             .min_w_0()
-                            .truncate()
-                            .text_color(theme::fg()),
+                            .overflow_hidden()
+                            .text_size(px(14.))
+                            .child(
+                                BreadcrumbItem::new(path_name)
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_color(theme::fg()),
+                            ),
                     ),
             )
-            .map(|d| self.data_tip(d, "tip-path", "Search (⌘K)", cx))
+            .tooltip_with_action("Search", &Search, None)
+            .tooltip_show_delay(TIP_DELAY)
             .on_click(cx.listener(|this, _, window, cx| this.open_search(window, cx)));
 
         let graph_focus = object_id.clone();
@@ -189,9 +178,9 @@ impl Workspace {
             .items_center()
             .gap(px(2.))
             .child(
-                hbtn("graph-link")
-                    .child(glyph(Glyph::Graph, 16.))
-                    .map(|d| self.data_tip(d, "tip-graph", "Graph", cx))
+                ui::icon_button("graph-link", Glyph::Graph)
+                    .accessibility_label("Graph")
+                    .tip("Graph")
                     .on_click(move |_, _, cx| {
                         navigate(
                             Route::Graph {
@@ -203,47 +192,38 @@ impl Workspace {
             )
             .when(has_more, |d| d.child(self.render_more(window, cx)))
             .when_some(pane_closed, |d, primary| {
-                let badge = if count > 99 {
-                    "99+".to_string()
-                } else {
-                    count.to_string()
-                };
+                // `.hbtn` at 30px with a border (muted under the pointer)
+                // and the pane's message count (hidden at 0, capped at 99+).
+                let fill = ButtonCustomVariant::new(cx)
+                    .color(theme::muted())
+                    .foreground(theme::fg())
+                    .hover(theme::hover())
+                    .active(theme::hover())
+                    .shadow(false);
                 d.child(
-                    hbtn_base("pane-open")
-                        .size(px(30.))
-                        .border_1()
-                        .border_color(theme::border())
-                        .text_size(px(14.))
-                        .hover(|s| {
-                            s.bg(theme::hover())
-                                .border_color(theme::muted())
-                                .text_color(theme::fg())
-                        })
-                        .child(glyph(Glyph::Pane, 16.))
-                        .when(count > 0, |d| {
-                            d.child(
-                                div()
-                                    .absolute()
-                                    .top(px(-4.))
-                                    .right(px(-4.))
-                                    .min_w(px(16.))
-                                    .h(px(16.))
-                                    .px(px(4.))
-                                    .rounded(px(8.))
-                                    .bg(theme::accent())
-                                    .text_color(theme::white())
-                                    .text_size(px(10.))
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .line_height(px(16.))
-                                    .flex()
-                                    .justify_center()
-                                    .child(badge),
-                            )
-                        })
-                        .map(|d| self.data_tip(d, "tip-pane", "Chat & properties", cx))
-                        .on_click(move |_, _, cx| {
-                            PaneState::global(cx).update(cx, |p, cx| p.set_open(primary, true, cx))
-                        }),
+                    Badge::new()
+                        .count(count)
+                        .max(99)
+                        .color(theme::accent())
+                        .child(
+                            Button::new("pane-open")
+                                .custom(fill)
+                                .rounded(theme::radius::tab())
+                                .size(px(30.))
+                                .p_0()
+                                .border_1()
+                                .border_color(theme::border())
+                                .bg(transparent_black())
+                                .text_color(theme::muted())
+                                .cursor_pointer()
+                                .child(Icon::new(Glyph::Pane).size(px(16.)))
+                                .accessibility_label("Chat & properties")
+                                .tip("Chat & properties")
+                                .on_click(move |_, _, cx| {
+                                    PaneState::global(cx)
+                                        .update(cx, |p, cx| p.set_open(primary, true, cx))
+                                }),
+                        ),
                 )
             });
 
@@ -268,17 +248,17 @@ impl Workspace {
                     .items_center()
                     .gap(px(2.))
                     .child(
-                        hbtn("back")
-                            .child(glyph(Glyph::NavBack, 16.))
-                            .map(|d| self.data_tip(d, "tip-back", "Back", cx))
+                        ui::icon_button("back", Glyph::NavBack)
+                            .accessibility_label("Back")
+                            .tip("Back")
                             .on_click(|_, _, cx| {
                                 Navigator::global(cx).update(cx, |n, cx| n.back(cx))
                             }),
                     )
                     .child(
-                        hbtn("forward")
-                            .child(glyph(Glyph::NavForward, 16.))
-                            .map(|d| self.data_tip(d, "tip-forward", "Forward", cx))
+                        ui::icon_button("forward", Glyph::NavForward)
+                            .accessibility_label("Forward")
+                            .tip("Forward")
                             .on_click(|_, _, cx| {
                                 Navigator::global(cx).update(cx, |n, cx| n.forward(cx))
                             }),
@@ -397,13 +377,23 @@ impl Workspace {
     }
 
     fn render_more(&mut self, _: &mut Window, cx: &mut Context<Self>) -> Div {
-        div().relative().child(
-            hbtn("more")
-                .child("⋯")
-                .child(self.anchor_probe("more"))
-                .map(|d| self.data_tip(d, "tip-more", "More", cx))
-                .on_click(cx.listener(|this, _, window, cx| this.toggle_more(window, cx))),
-        )
+        div()
+            .relative()
+            .flex_none()
+            .child(
+                Button::new("more")
+                    .ghost()
+                    .rounded(theme::radius::tab())
+                    .size(px(28.))
+                    .p_0()
+                    .text_color(theme::muted())
+                    .cursor_pointer()
+                    .child(div().text_size(px(16.)).child("⋯"))
+                    .accessibility_label("More")
+                    .tip("More")
+                    .on_click(cx.listener(|this, _, window, cx| this.toggle_more(window, cx))),
+            )
+            .child(self.anchor_probe("more"))
     }
 
     /// What the More menu shows for the open object, `None` without one.
@@ -548,13 +538,20 @@ impl Workspace {
         });
     }
 
-    fn open_delete_property(&mut self, rel: RelationDef, cx: &mut Context<Self>) {
+    fn open_delete_property(
+        &mut self,
+        rel: RelationDef,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.more = None;
         self.delete_prop = Some(DeleteProp {
             rel: rel.clone(),
             usage: None,
             deleting: false,
+            height: first_height(),
         });
+        self.open_delete_dialog(window, cx);
         let query = api::query(
             json!({ "filters": [{ "key": rel.key, "condition": "exists" }], "limit": 1000 }),
             cx,
@@ -632,58 +629,58 @@ impl Workspace {
         .detach();
     }
 
-    pub(crate) fn render_delete_prop(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let Some(d) = &self.delete_prop else {
-            return div().into_any_element();
-        };
-        let name = if d.rel.name.is_empty() {
-            d.rel.key.clone()
-        } else {
-            d.rel.name.clone()
-        };
-        let usage = match d.usage {
-            None => "…".to_string(),
-            Some(n) => format!("{n} object{}", if n == 1 { "" } else { "s" }),
-        };
-        let deleting = d.deleting;
-        let enter = dialog_appear("prop-del-appear", window, cx);
-        deferred(
-            overlay("prop-del-overlay", enter.target().alpha())
-                .flex()
-                .items_center()
-                .justify_center()
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(|this, _, _, cx| {
-                        if !this.delete_prop.as_ref().is_some_and(|d| d.deleting) {
-                            this.delete_prop = None;
-                            cx.notify();
-                        }
-                    }),
-                )
+    /// The delete-property confirmation (`.prop-del-modal`) in the window's
+    /// dialog layer, drawn from [`Self::delete_prop`] each frame and taken
+    /// down once that clears. A click outside or Escape cancels, except
+    /// while deleting.
+    fn open_delete_dialog(&self, window: &mut Window, cx: &mut Context<Self>) {
+        let this = cx.weak_entity();
+        window.open_dialog(cx, move |dialog, window, cx| {
+            let Some(d) = this
+                .upgrade()
+                .and_then(|ws| ws.read(cx).delete_prop.as_ref().map(DeleteView::of))
+            else {
+                window.defer(cx, |window, cx| window.close_dialog(cx));
+                return dialog.close_button(false);
+            };
+            let (cancel, back, delete) = (this.clone(), this.clone(), this.clone());
+            small_dialog(dialog, "prop-del-appear", &d.height, window, cx)
+                .overlay_closable(!d.deleting)
+                .keyboard(!d.deleting)
+                .on_cancel(move |_, _, cx| {
+                    cancel
+                        .update(cx, |this, cx| {
+                            let busy = this.delete_prop.as_ref().is_some_and(|d| d.deleting);
+                            if !busy {
+                                this.delete_prop = None;
+                                cx.notify();
+                            }
+                            !busy
+                        })
+                        .unwrap_or(true)
+                })
                 .child(
-                    enter
-                        .apply(small_card(window))
+                    div()
                         .id("prop-del-modal")
-                        .gap_0()
-                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .flex()
+                        .flex_col()
                         .child(
                             div()
                                 .mb(px(8.))
                                 .text_size(px(16.))
                                 .font_weight(FontWeight::BOLD)
-                                .child(format!("Delete \"{name}\"?")),
+                                .child(format!("Delete \"{}\"?", d.name)),
                         )
                         .child(
-                            div().mb(px(14.)).text_size(px(13.)).line_height(relative(1.5)).text_color(theme::muted()).child(
-                                format!(
-                                    "This deletes the property and removes its value from {usage} — on every device, forever. This cannot be undone."
-                                ),
-                            ),
+                            div()
+                                .mb(px(14.))
+                                .text_size(px(13.))
+                                .line_height(relative(1.5))
+                                .text_color(theme::muted())
+                                .child(format!(
+                                    "This deletes the property and removes its value from {} — on every device, forever. This cannot be undone.",
+                                    d.usage
+                                )),
                         )
                         .child(
                             div()
@@ -691,38 +688,64 @@ impl Workspace {
                                 .justify_end()
                                 .gap(px(8.))
                                 .child(
-                                    outline_button("prop-del-cancel", "Cancel", false, cx)
-                                        .disabled(deleting)
-                                        .when(deleting, |b| b.opacity(0.5))
-                                        .when(!deleting, |b| {
-                                            b.on_click(cx.listener(|this, _, _, cx| {
-                                                this.delete_prop = None;
-                                                cx.notify();
-                                            }))
-                                        }),
+                                    ui::disabled(
+                                        ui::outline_button("prop-del-cancel", "Cancel"),
+                                        d.deleting,
+                                    )
+                                    .on_click(move |_, _, cx| {
+                                        let _ = back.update(cx, |this, cx| {
+                                            this.delete_prop = None;
+                                            cx.notify();
+                                        });
+                                    }),
                                 )
                                 .child(
-                                    outline_button(
-                                        "prop-del-ok",
-                                        if deleting { "Deleting…" } else { "Delete property" },
-                                        !deleting,
-                                        cx,
+                                    ui::disabled(
+                                        ui::danger_button(
+                                            "prop-del-ok",
+                                            if d.deleting {
+                                                "Deleting…"
+                                            } else {
+                                                "Delete property"
+                                            },
+                                        ),
+                                        d.deleting,
                                     )
-                                    .when(deleting, |b| {
-                                        b.border_color(theme::red())
-                                            .text_color(theme::red())
-                                            .opacity(0.5)
-                                    })
-                                    .disabled(deleting)
-                                    .when(!deleting, |b| {
-                                        b.on_click(cx.listener(|this, _, _, cx| this.delete_property(cx)))
+                                    .on_click(move |_, _, cx| {
+                                        let _ =
+                                            delete.update(cx, |this, cx| this.delete_property(cx));
                                     }),
                                 ),
-                        ),
-                ),
-        )
-        .with_priority(10)
-        .into_any_element()
+                        )
+                        .on_prepaint(track_height(d.height.clone())),
+                )
+        });
+    }
+}
+
+/// What the delete-property card shows this frame.
+struct DeleteView {
+    name: String,
+    usage: String,
+    deleting: bool,
+    height: Rc<Cell<Pixels>>,
+}
+
+impl DeleteView {
+    fn of(d: &DeleteProp) -> Self {
+        Self {
+            name: if d.rel.name.is_empty() {
+                d.rel.key.clone()
+            } else {
+                d.rel.name.clone()
+            },
+            usage: match d.usage {
+                None => "…".to_string(),
+                Some(n) => format!("{n} object{}", if n == 1 { "" } else { "s" }),
+            },
+            deleting: d.deleting,
+            height: d.height.clone(),
+        }
     }
 }
 
@@ -752,7 +775,7 @@ fn blocked_item(blocker: &str) -> PopupMenuItem {
             .flex_1()
             .text_size(px(12.))
             .child(text.clone())
-            .tooltip(crate::tip(BLOCKED_TIP))
+            .tooltip(ui::tooltip(BLOCKED_TIP))
     })
     .icon(Icon::new(Glyph::Lock))
     .disabled(true)
@@ -811,7 +834,7 @@ fn more_items(
     match &m.kind {
         MoreKind::Property => menu.separator().item(if m.blocker.is_empty() {
             let ws = workspace.clone();
-            danger_item("Delete property").on_click(move |_, _, cx| {
+            danger_item("Delete property").on_click(move |_, window, cx| {
                 let rel = Store::global(cx)
                     .read(cx)
                     .relations
@@ -819,7 +842,7 @@ fn more_items(
                     .find(|r| r.id == id)
                     .cloned();
                 if let Some(rel) = rel {
-                    let _ = ws.update(cx, |this, cx| this.open_delete_property(rel, cx));
+                    let _ = ws.update(cx, |this, cx| this.open_delete_property(rel, window, cx));
                 }
             })
         } else {

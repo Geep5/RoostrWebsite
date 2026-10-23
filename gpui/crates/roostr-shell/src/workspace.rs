@@ -8,6 +8,7 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use gpui_kit::component::IconNamed as _;
+use gpui_kit::component::spinner::Spinner;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use roostr_core::nav::Route;
@@ -55,9 +56,6 @@ fn drawer_tab_spill() -> f32 {
         0.
     }
 }
-/// `[data-tip]` appears after this much hover (`animation: tip-in 0.12s ease 0.4s`),
-/// then fades in over [`motion::FADE`].
-const TIP_DELAY: Duration = Duration::from_millis(400);
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum DwellTab {
@@ -166,11 +164,6 @@ pub struct Workspace {
     seeding_personal: bool,
     /// Window bounds of the dropdown anchors (New pill, More, Properties ＋), from the last frame.
     anchors: Rc<std::cell::RefCell<HashMap<&'static str, Bounds<Pixels>>>>,
-    /// The hovered `[data-tip]` control: (anchor key, text, past the delay).
-    tip: Option<(&'static str, SharedString, bool)>,
-    _tip_timer: Option<Task<()>>,
-    /// The `[data-tip]` controls drawn by the last frame that drew this view.
-    tips_drawn: Rc<std::cell::RefCell<std::collections::HashSet<&'static str>>>,
     /// Keyboard focus handles of the tabs, by uid.
     pub(crate) tab_focus: HashMap<u64, FocusHandle>,
     // Mobile shell (`isMobile`).
@@ -303,9 +296,6 @@ impl Workspace {
             space_order_moved: false,
             seeding_personal: false,
             anchors: Rc::default(),
-            tip: None,
-            _tip_timer: None,
-            tips_drawn: Rc::default(),
             tab_focus: HashMap::new(),
             mobile_space_open: false,
             mobile_collapsed: HashMap::new(),
@@ -754,7 +744,17 @@ impl Workspace {
             Connection::Ready => None,
             Connection::Connecting => Some(
                 frame()
-                    .child(status("Opening your vault…".into(), theme::fg()))
+                    .child(
+                        div()
+                            .w_full()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .gap(px(8.))
+                            .my(px(16.))
+                            .child(Spinner::new().color(theme::muted()))
+                            .child("Opening your vault…"),
+                    )
                     .children(progress.map(|line| status(line.into(), theme::muted())))
                     .into_any_element(),
             ),
@@ -779,16 +779,11 @@ impl Workspace {
                                 .gap(px(16.))
                                 .child("Your identity and local changes remain on this device.")
                                 .child(
-                                    crate::modal::outline_button(
-                                        "retry",
-                                        "Retry opening vault",
-                                        false,
-                                        cx,
-                                    )
-                                    .on_click(|_, _, cx| {
-                                        Store::global(cx)
-                                            .update(cx, |store, cx| store.reconnect(cx));
-                                    }),
+                                    roostr_core::ui::outline_button("retry", "Retry opening vault")
+                                        .on_click(|_, _, cx| {
+                                            Store::global(cx)
+                                                .update(cx, |store, cx| store.reconnect(cx));
+                                        }),
                                 ),
                         )
                         .child(status(error, theme::fg()))
@@ -873,7 +868,7 @@ impl Workspace {
             })
             .cursor_pointer()
             .child(pill)
-            .tooltip(crate::tip(tip))
+            .tooltip(roostr_core::ui::tooltip(tip))
             .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
                 motion::HoverMotion::set(&hover_state, *hovered, cx);
                 if *hovered {
@@ -953,7 +948,7 @@ impl Workspace {
             .cursor_pointer()
             .text_color(theme::muted())
             .hover(|s| s.bg(theme::hover()).text_color(theme::fg()))
-            .tooltip(crate::tip(tip))
+            .tooltip(roostr_core::ui::tooltip(tip))
             .on_click(move |_, _, cx| {
                 PaneState::global(cx).update(cx, |p, cx| p.set_open(tab, true, cx))
             })
@@ -1288,37 +1283,6 @@ impl Workspace {
                     .into_any_element(),
             );
         }
-        if self.delete_prop.is_some() {
-            out.push(self.render_delete_prop(window, cx));
-        }
-        if let Some((key, text, true)) = self.tip.clone()
-            && let Some(b) = anchors.get(key)
-        {
-            let fade = motion::appear_frame(key, 0., window, cx);
-            out.push(
-                anchored()
-                    .position(point(b.center().x, b.bottom() + px(6.)))
-                    .anchor(Anchor::TopCenter)
-                    .snap_to_window_with_margin(px(8.))
-                    .child(
-                        fade.apply(div())
-                            .bg(theme::panel())
-                            .border_1()
-                            .border_color(theme::border())
-                            .rounded(theme::radius::sm())
-                            .px(px(8.))
-                            .py(px(3.))
-                            .text_size(px(11.))
-                            .font_weight(FontWeight::NORMAL)
-                            .line_height(relative(theme::LINE_HEIGHT_NORMAL))
-                            .text_color(theme::fg())
-                            .whitespace_nowrap()
-                            .shadow(roostr_core::ui::tooltip_shadow())
-                            .child(crate::tip_content(&text)),
-                    )
-                    .into_any_element(),
-            );
-        }
         if let Some(search) = &self.search {
             out.push(search.clone().into_any_element());
         }
@@ -1326,60 +1290,6 @@ impl Workspace {
             out.push(prompt.clone().into_any_element());
         }
         out
-    }
-
-    /// `[data-tip]`: a pill centred 6px below the control, after 400ms
-    /// hover, fading in over 120ms. Like CSS's `:hover::after`, it goes with
-    /// the control (see [`Self::drop_orphan_tip`]).
-    pub(crate) fn data_tip(
-        &self,
-        el: Stateful<Div>,
-        key: &'static str,
-        text: &'static str,
-        cx: &Context<Self>,
-    ) -> Stateful<Div> {
-        let anchors = self.anchors.clone();
-        let drawn = self.tips_drawn.clone();
-        el.relative()
-            .child(probe(move |bounds| {
-                anchors.borrow_mut().insert(key, bounds);
-                drawn.borrow_mut().insert(key);
-            }))
-            .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
-                if *hovered {
-                    this.tip = Some((key, text.into(), false));
-                    this._tip_timer = Some(cx.spawn(async move |this, cx| {
-                        cx.background_executor().timer(TIP_DELAY).await;
-                        let _ = this.update(cx, |this, cx| {
-                            if let Some(tip) = this.tip.as_mut().filter(|t| t.0 == key) {
-                                tip.2 = true;
-                                cx.notify();
-                            }
-                        });
-                    }));
-                } else if this.tip.as_ref().is_some_and(|t| t.0 == key) {
-                    this.tip = None;
-                    this._tip_timer = None;
-                }
-                cx.notify();
-            }))
-    }
-
-    /// Forget the tip of a control the last frame no longer drew. A control
-    /// taken off screen under the pointer (the back button a tap navigated
-    /// away from) never hears its hover end, so its tip would come up after
-    /// the delay and stay, at the control's old place. Runs at the start of
-    /// each render, before this frame's controls are drawn.
-    fn drop_orphan_tip(&mut self) {
-        let drawn = std::mem::take(&mut *self.tips_drawn.borrow_mut());
-        if self
-            .tip
-            .as_ref()
-            .is_some_and(|(key, ..)| !drawn.contains(key))
-        {
-            self.tip = None;
-            self._tip_timer = None;
-        }
     }
 
     /// An invisible probe recording its parent's window bounds under `key`
@@ -1415,7 +1325,6 @@ pub(crate) fn arrow_at(turn: f32, size: f32) -> Svg {
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.drop_orphan_tip();
         let root = div()
             .id("workspace")
             .key_context("Workspace")

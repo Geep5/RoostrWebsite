@@ -339,12 +339,7 @@ impl Render for GalleryView {
             .child(measure)
             .child(grid)
             .when(empty, |d| {
-                d.child(
-                    div()
-                        .text_size(px(13.))
-                        .text_color(theme::muted())
-                        .child("No objects match."),
-                )
+                d.child(common::empty_state("No objects match.", 13.))
             })
             .into_any_element()
     }

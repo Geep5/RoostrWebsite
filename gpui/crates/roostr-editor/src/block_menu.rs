@@ -577,8 +577,8 @@ impl BlockMenu {
             .text_color(if active { theme::accent() } else { theme::fg() })
     }
 
-    fn check() -> Div {
-        div().ml_auto().child("✓")
+    fn check() -> Icon {
+        Icon::new(Glyph::Check).size(px(14.)).ml_auto()
     }
 
     fn dot(color: Hsla, ring: bool) -> Div {
@@ -688,8 +688,8 @@ impl BlockMenu {
         };
         PopupMenu::build(window, cx, move |mut m, _, _| {
             m = m
-                .min_w(px(SUB_W - 2.))
-                .max_w(px(SUB_W - 2.))
+                .min_w(px(SUB_W))
+                .max_w(px(SUB_W))
                 .max_h(px(418.))
                 .scrollable(true)
                 .check_side(Side::Right);
@@ -1050,7 +1050,7 @@ impl Render for BlockMenu {
         let mut list = Command::new(&self.cmd)
             // The menu answers the filter itself: typing flattens the menu.
             .filterable(false)
-            .bordered(false)
+            .shadow(roostr_core::ui::menu_shadow())
             .placeholder("Filter actions…")
             .max_h(px(390.))
             .on_query(move |_, _, cx| {
@@ -1104,12 +1104,6 @@ impl Render for BlockMenu {
             .max_h(px(440.))
             .flex()
             .flex_col()
-            .bg(theme::panel())
-            .border_1()
-            .border_color(theme::border())
-            .rounded(px(10.))
-            .shadow(roostr_core::ui::menu_shadow())
-            .overflow_hidden()
             .child(record(bounds.clone()))
             .child(list);
 
@@ -1139,12 +1133,6 @@ impl Render for BlockMenu {
                                 .occlude()
                                 .relative()
                                 .w(px(SUB_W))
-                                .bg(theme::panel())
-                                .border_1()
-                                .border_color(theme::border())
-                                .rounded(px(10.))
-                                .shadow(roostr_core::ui::menu_shadow())
-                                .overflow_hidden()
                                 // Focus stays in the filter field.
                                 .capture_any_mouse_down(|_, window, _| window.prevent_default())
                                 .on_hover(cx.listener(|this, hovered: &bool, _, _| {

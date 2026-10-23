@@ -2,9 +2,11 @@
 //! space head (settings link, search, New pill + menu), one card per pinned
 //! object, then Recently edited, Types and Properties.
 
-use gpui_kit::component::IconNamed as _;
+use gpui_kit::component::button::Button;
 use gpui_kit::component::empty::Empty;
+use gpui_kit::component::group_box::GroupBox;
 use gpui_kit::component::sidebar::{SidebarItem, SidebarMenuItem};
+use gpui_kit::component::{Icon, Sizable as _, Size};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use roostr_core::motion::{self, HoverMotion};
@@ -13,15 +15,15 @@ use roostr_core::objects::{object_icon, type_glyph};
 use roostr_core::relations::{format_glyph, is_reserved_key, space_relations};
 use roostr_core::store::Store;
 use roostr_core::types::{ObjectSummary, RelationDef, Space, Value, is_system_type};
-use roostr_core::{Glyph, TypeDef, UiState, theme};
+use roostr_core::{Glyph, TypeDef, UiState, theme, ui};
 use roostr_properties::{PropertyPick, PropertySuggest, SuggestEvent};
 
+use crate::Tip as _;
 use crate::create_menu::{CreateMenu, CreateMenuEvent};
 use crate::list_motion::{self, PinMotion, Pins};
 use crate::modal::{Prompt, PromptEvent};
 use crate::pinned::PinnedWidget;
 use crate::rail::DragGhost;
-use crate::tabs::checkbox_icon;
 use crate::workspace::{self, Workspace};
 
 #[derive(Clone)]
@@ -42,8 +44,9 @@ pub(crate) fn obj_icon(icon: &str) -> Div {
         .child(roostr_core::ui::icon_text(icon, px(16.)))
 }
 
-/// The Builtin mark: a muted lock pushed to the row's end.
-fn builtin_mark(id: impl Into<ElementId>) -> Stateful<Div> {
+/// The Builtin mark (`.builtin-mark`): a muted 11px lock pushed to the
+/// row's end, explaining itself in a tooltip.
+pub(crate) fn builtin_mark(id: impl Into<ElementId>) -> Stateful<Div> {
     div()
         .id(id)
         .ml_auto()
@@ -52,12 +55,11 @@ fn builtin_mark(id: impl Into<ElementId>) -> Stateful<Div> {
         .flex_none()
         .opacity(0.55)
         .child(
-            svg()
-                .path(Glyph::Lock.path())
+            Icon::new(Glyph::Lock)
                 .size(px(11.))
                 .text_color(theme::muted()),
         )
-        .tooltip(crate::tip("Roostr default - can't be deleted"))
+        .tooltip(ui::tooltip("Roostr default - can't be deleted"))
 }
 
 /// A sidebar row (`.item`) as gpui-kit's [`SidebarMenuItem`], held to
@@ -124,6 +126,17 @@ impl Row {
 
 fn open(id: String) -> impl Fn(&ClickEvent, &mut Window, &mut App) + 'static {
     move |_, _, cx| navigate(Route::Object(id.clone()), cx)
+}
+
+/// Write a task's `done` (a row's checkbox), then refresh the lists.
+pub(crate) fn set_done(id: &str, done: bool, cx: &mut App) {
+    let task = roostr_core::api::note::set_field(id, "done", Value::bool(done), cx);
+    cx.spawn(async move |cx| {
+        if task.await.is_ok() {
+            cx.update(|cx| Store::global(cx).update(cx, |s, cx| s.refresh_all(cx)));
+        }
+    })
+    .detach();
 }
 
 impl Workspace {
@@ -195,96 +208,83 @@ impl Workspace {
             .pb(px(6.))
             .bg(theme::bg())
             .child(
-                div()
-                    .id("space-head")
+                crate::fill_button("space-head", theme::hl_med(), cx)
                     .flex_1()
                     .min_w_0()
-                    .flex()
-                    .items_center()
-                    .gap(px(4.))
+                    .h_auto()
                     .px(px(6.))
                     .py(px(4.))
                     .rounded(theme::radius::sm())
-                    .text_size(px(15.))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .line_height(px(22.))
-                    .cursor_pointer()
-                    .hover(|s| s.bg(theme::hl_med()))
+                    .text_color(theme::fg())
+                    .accessibility_label(current.name.clone())
                     .child(
                         div()
-                            .flex_none()
-                            .size(px(22.))
-                            .mr(px(6.))
+                            .w_full()
+                            .min_w_0()
                             .flex()
                             .items_center()
-                            .justify_center()
-                            .rounded(theme::radius::sm())
-                            .overflow_hidden()
-                            .text_size(px(17.))
-                            .child(roostr_core::ui::icon_text(&icon, px(22.))),
+                            .justify_start()
+                            .gap(px(10.))
+                            .text_size(px(15.))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .line_height(px(22.))
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .size(px(22.))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .rounded(theme::radius::sm())
+                                    .overflow_hidden()
+                                    .text_size(px(17.))
+                                    .child(roostr_core::ui::icon_text(&icon, px(22.))),
+                            )
+                            .child(div().min_w_0().truncate().child(current.name.clone())),
                     )
-                    .child(div().min_w_0().truncate().child(current.name.clone()))
-                    .tooltip(crate::tip("Space settings"))
+                    .tip("Space settings")
                     .on_click(open(current.id.clone())),
             )
             .child(
-                div()
-                    .id("head-search")
-                    .flex_none()
+                crate::fill_button("head-search", theme::hl_med(), cx)
                     .size(px(30.))
-                    .flex()
-                    .items_center()
-                    .justify_center()
                     .rounded(theme::radius::md())
-                    .text_color(theme::muted())
-                    .cursor_pointer()
-                    .hover(|s| s.bg(theme::hl_med()).text_color(theme::fg()))
-                    .child(
-                        svg()
-                            .path(Glyph::Search.path())
-                            .size(px(17.))
-                            .text_color(theme::muted()),
-                    )
-                    .map(|d| self.data_tip(d, "tip-search", "Search (⌘K)", cx))
+                    .child(Icon::new(Glyph::Search).size(px(17.)))
+                    .accessibility_label("Search")
+                    .tooltip_with_action("Search", &crate::Search, None)
+                    .tooltip_show_delay(crate::TIP_DELAY)
                     .on_click(cx.listener(|this, _, window, cx| this.open_search(window, cx))),
             )
             .child(
-                div().relative().child(
-                    div()
-                        .id("create-btn")
-                        .flex()
-                        .items_center()
-                        .gap(px(3.))
-                        .h(px(30.))
-                        .px(px(7.))
-                        .rounded(theme::radius::pill())
-                        .bg(theme::hl_med())
-                        .text_color(theme::muted())
-                        .cursor_pointer()
-                        .hover(|s| s.bg(theme::hover()).text_color(theme::fg()))
-                        .child(
-                            svg()
-                                .path(Glyph::Compose.path())
-                                .size(px(15.))
-                                .text_color(theme::muted()),
-                        )
-                        .child(
-                            svg()
-                                .path(Glyph::ChevronDown.path())
-                                .size(px(11.))
-                                .text_color(theme::muted()),
-                        )
-                        .tooltip(crate::tip("New object"))
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            if this.create_menu.is_some() {
-                                this.create_menu = None;
-                                cx.notify();
-                            } else {
-                                this.open_create_menu(window, cx);
-                            }
-                        }))
-                        .child(self.anchor_probe("create")),
-                ),
+                div()
+                    .relative()
+                    .flex_none()
+                    .child(
+                        crate::fill_button("create-btn", theme::hover(), cx)
+                            .h(px(30.))
+                            .px(px(7.))
+                            .rounded(theme::radius::pill())
+                            .bg(theme::hl_med())
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(3.))
+                                    .child(Icon::new(Glyph::Compose).size(px(15.)))
+                                    .child(Icon::new(Glyph::ChevronDown).size(px(11.))),
+                            )
+                            .accessibility_label("New object")
+                            .tip("New object")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                if this.create_menu.is_some() {
+                                    this.create_menu = None;
+                                    cx.notify();
+                                } else {
+                                    this.open_create_menu(window, cx);
+                                }
+                            })),
+                    )
+                    .child(self.anchor_probe("create")),
             )
     }
 
@@ -381,74 +381,87 @@ impl Workspace {
                 icon: icon.clone(),
                 name: name.clone(),
             };
+            let collapse_group = SharedString::from(format!("widget-collapse:{id}"));
             let card = div()
                 .id(crate::eid("widget", &id))
                 .relative()
-                .bg(theme::panel())
-                .border_1()
-                .border_color(theme::border())
-                .rounded(theme::radius::menu())
-                .p(px(8.))
                 .when(drag_id.as_deref() == Some(&id), |d| d.opacity(0.4))
                 .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .child(
-                            div()
-                                .id(crate::eid("widget-collapse", &id))
-                                .group(SharedString::from(format!("widget-collapse:{id}")))
-                                .flex_none()
-                                .w(px(16.))
-                                .h(px(24.))
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .opacity(0.6)
-                                .cursor_pointer()
-                                .hover(|s| s.opacity(1.))
-                                .child(
-                                    workspace::arrow_at(fold.turn(), 7.)
-                                        .text_color(theme::muted())
-                                        .group_hover(format!("widget-collapse:{id}"), |s| {
-                                            s.text_color(theme::fg())
-                                        }),
-                                )
-                                .on_click(cx.listener({
-                                    let id = id.clone();
-                                    move |this, _, _, cx| this.toggle_pin_collapsed(&id, cx)
-                                })),
+                    GroupBox::new()
+                        .id(crate::eid("widget-box", &id))
+                        .content_style(
+                            StyleRefinement::default()
+                                .bg(theme::panel())
+                                .border_1()
+                                .border_color(theme::border())
+                                .rounded(theme::radius::menu())
+                                .p(px(8.))
+                                .gap_0(),
                         )
                         .child(
                             div()
-                                .id(crate::eid("widget-head", &id))
-                                .flex_1()
-                                .min_w_0()
                                 .flex()
                                 .items_center()
-                                .gap(px(6.))
-                                .h(px(28.))
-                                .pl(px(2.))
-                                .pr(px(8.))
-                                .rounded(theme::radius::sm())
-                                .text_size(px(14.))
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .line_height(px(22.))
-                                .overflow_hidden()
-                                .cursor_pointer()
-                                .map(|d| {
-                                    if is_current {
-                                        d.bg(theme::hl_med())
-                                    } else {
-                                        d.hover(|s| s.bg(theme::hl_med()))
-                                    }
-                                })
-                                .child(obj_icon(&icon))
-                                .child(div().min_w_0().truncate().child(name.clone()))
-                                .on_click(open(id.clone())),
-                        ),
+                                .child(
+                                    // The fold arrow: no fill, fg and full
+                                    // opacity under the pointer.
+                                    crate::fill_button(
+                                        crate::eid("widget-collapse", &id),
+                                        transparent_black(),
+                                        cx,
+                                    )
+                                    .group(collapse_group.clone())
+                                    .w(px(16.))
+                                    .h(px(24.))
+                                    .opacity(0.6)
+                                    .group_hover(collapse_group, |s| s.opacity(1.))
+                                    .accessibility_label("Fold")
+                                    .child(
+                                        workspace::arrow_at(fold.turn(), 7.)
+                                            .text_color(theme::muted())
+                                            .group_hover(format!("widget-collapse:{id}"), |s| {
+                                                s.text_color(theme::fg())
+                                            }),
+                                    )
+                                    .on_click(cx.listener({
+                                        let id = id.clone();
+                                        move |this, _, _, cx| this.toggle_pin_collapsed(&id, cx)
+                                    })),
+                                )
+                                .child(
+                                    crate::fill_button(
+                                        crate::eid("widget-head", &id),
+                                        theme::hl_med(),
+                                        cx,
+                                    )
+                                    .flex_1()
+                                    .min_w_0()
+                                    .h(px(28.))
+                                    .pl(px(2.))
+                                    .pr(px(8.))
+                                    .rounded(theme::radius::sm())
+                                    .text_color(theme::fg())
+                                    .when(is_current, |d| d.bg(theme::hl_med()))
+                                    .accessibility_label(name.clone())
+                                    .child(
+                                        div()
+                                            .w_full()
+                                            .min_w_0()
+                                            .flex()
+                                            .items_center()
+                                            .justify_start()
+                                            .gap(px(6.))
+                                            .text_size(px(14.))
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .line_height(px(22.))
+                                            .child(obj_icon(&icon))
+                                            .child(div().min_w_0().truncate().child(name.clone())),
+                                    )
+                                    .on_click(open(id.clone())),
+                                ),
+                        )
+                        .children(body.map(|view| fold.wrap(view))),
                 )
-                .children(body.map(|view| fold.wrap(view)))
                 .when_some(over_here, |d, bottom| {
                     d.child(
                         div()
@@ -561,22 +574,23 @@ impl Workspace {
             cx,
         );
         let tint = motion::mix(theme::muted(), theme::fg(), hover);
-        let mut body = div()
-            .bg(theme::panel())
-            .border_1()
-            .border_color(theme::border())
-            .rounded(theme::radius::menu())
-            .px(px(8.))
-            .py(px(4.))
-            .flex()
-            .flex_col();
-        for (i, row) in rows.into_iter().enumerate() {
-            body = body.child(
+        let body = GroupBox::new()
+            .id(crate::eid("section-box", key))
+            .content_style(
+                StyleRefinement::default()
+                    .bg(theme::panel())
+                    .border_1()
+                    .border_color(theme::border())
+                    .rounded(theme::radius::menu())
+                    .px(px(8.))
+                    .py(px(4.))
+                    .gap_0(),
+            )
+            .children(rows.into_iter().enumerate().map(|(i, row)| {
                 div()
                     .when(i > 0, |d| d.border_t_1().border_color(theme::border()))
-                    .child(row),
-            );
-        }
+                    .child(row)
+            }));
         div()
             .flex()
             .flex_col()
@@ -616,30 +630,20 @@ impl Workspace {
             .when(fold.shown(), |d| d.child(fold.wrap(body)))
     }
 
-    fn section_add(id: &'static str, tip: &'static str) -> Stateful<Div> {
+    /// `.section-add`: a 20px ＋, half faded until the pointer is over it.
+    fn section_add(id: &'static str, tip: &'static str, cx: &App) -> Button {
         let group = SharedString::from(format!("section-add:{id}"));
-        div()
-            .id(id)
+        crate::fill_button(id, theme::hl_med(), cx)
             .group(group.clone())
             .relative()
-            .flex_none()
             .size(px(20.))
             .mr(px(2.))
-            .flex()
-            .items_center()
-            .justify_center()
             .rounded(theme::radius::xs())
             .opacity(0.5)
-            .cursor_pointer()
-            .hover(|s| s.opacity(1.).bg(theme::hl_med()))
-            .child(
-                svg()
-                    .path(Glyph::Plus.path())
-                    .size(px(12.))
-                    .text_color(theme::muted())
-                    .group_hover(group, |s| s.text_color(theme::fg())),
-            )
-            .tooltip(crate::tip(tip))
+            .group_hover(group, |s| s.opacity(1.))
+            .child(Icon::new(Glyph::Plus).size(px(12.)))
+            .accessibility_label(tip)
+            .tip(tip)
     }
 
     fn render_recent(
@@ -668,35 +672,14 @@ impl Workspace {
                         r.name.clone()
                     };
                     let lead = if store.layout_of(&r.type_key) == "task" {
-                        let done = r.done == Some(true);
                         let id = r.id.clone();
-                        div()
-                            .id(crate::eid("row-check", &r.id))
-                            .flex()
+                        ui::checkbox(crate::eid("row-check", &r.id), r.done == Some(true))
+                            .with_size(Size::Medium)
                             .flex_none()
                             .mr(px(6.))
-                            .text_color(if done {
-                                theme::accent()
-                            } else {
-                                theme::muted()
-                            })
-                            .child(checkbox_icon(done, 16.))
-                            .on_click(move |_, _, cx| {
+                            .on_change(move |done: &bool, _, cx| {
                                 cx.stop_propagation();
-                                let task = roostr_core::api::note::set_field(
-                                    &id,
-                                    "done",
-                                    Value::bool(!done),
-                                    cx,
-                                );
-                                cx.spawn(async move |cx| {
-                                    if task.await.is_ok() {
-                                        cx.update(|cx| {
-                                            Store::global(cx).update(cx, |s, cx| s.refresh_all(cx))
-                                        });
-                                    }
-                                })
-                                .detach();
+                                set_done(&id, *done, cx);
                             })
                             .into_any_element()
                     } else {
@@ -765,7 +748,7 @@ impl Workspace {
             .into_iter()
             .map(|row| row.render(window, cx).into_any_element())
             .collect();
-        let add = Self::section_add("new-type", "New type")
+        let add = Self::section_add("new-type", "New type", cx)
             .on_click(cx.listener(|this, _, window, cx| this.new_type(window, cx)))
             .into_any_element();
         self.section("types", "Types", Some(add), rows, window, cx)
@@ -820,7 +803,7 @@ impl Workspace {
                 .collect()
         };
         let rows = Row::render_all(rows, "No properties yet", window, cx);
-        let add = Self::section_add("new-prop", "New property")
+        let add = Self::section_add("new-prop", "New property", cx)
             .child(self.anchor_probe("new-prop"))
             .on_click(cx.listener(|this, _, window, cx| this.open_new_property(window, cx)))
             .into_any_element();

@@ -1,12 +1,11 @@
 //! Small modals standing in for the web's `prompt()` / `alert()` (New space,
-//! New type, the type-key clash) on gpui-kit's [`Dialog`], skinned like the
-//! delete-property modal (`.prop-del-modal`: panel, radius 12, padding 20,
-//! width min(420, vw−40), centred), plus the shared outline button.
+//! New type, the type-key clash) and the delete-property confirmation, on
+//! gpui-kit's [`Dialog`] skinned as `.prop-del-modal` (panel, radius 12,
+//! padding 20, width min(420, vw−40), centred): [`small_dialog`].
 
 use std::cell::Cell;
 use std::rc::Rc;
 
-use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
 use gpui_kit::component::dialog::{
     Dialog, DialogAction, DialogClose, DialogEntrance, DialogFooter,
 };
@@ -14,7 +13,7 @@ use gpui_kit::component::input::{Enter, Escape, Input, InputState};
 use gpui_kit::component::{ElementExt as _, WindowExt as _};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use roostr_core::{motion, theme};
+use roostr_core::{motion, theme, ui};
 
 actions!(roostr_shell_prompt, [Cancel, Confirm]);
 
@@ -63,7 +62,7 @@ impl Prompt {
             message: message.into(),
             input: Some(input),
             focus: cx.focus_handle(),
-            height: Rc::new(Cell::new(FIRST_HEIGHT)),
+            height: first_height(),
         }
     }
 
@@ -80,7 +79,7 @@ impl Prompt {
             message: message.into(),
             input: None,
             focus,
-            height: Rc::new(Cell::new(FIRST_HEIGHT)),
+            height: first_height(),
         }
     }
 
@@ -132,30 +131,15 @@ impl Prompt {
     /// It rises 8px into place ([`dialog_appear`]) while the layer, dim
     /// included, fades in.
     fn dialog(this: &Entity<Self>, dialog: Dialog, window: &mut Window, cx: &mut App) -> Dialog {
-        let enter = dialog_appear("prompt-appear", window, cx);
         let prompt = this.read(cx);
         let message = prompt.message.clone();
         let input = prompt.input.clone();
         let focus = prompt.focus.clone();
         let height = prompt.height.clone();
-        let viewport = window.viewport_size();
-        // Centred like the overlay's flex centring: the card's last height
-        // (body + 2×20 padding + 2×1 border), then the rise.
-        let card = height.get() + px(42.);
-        let top = ((viewport.height - card) / 2.).max(px(0.)) + px(enter.target().y_px());
         let (ok, cancel) = (this.clone(), this.clone());
         let (key_ok, key_cancel) = (this.clone(), this.clone());
         let (enter_ok, escape_cancel) = (this.clone(), this.clone());
-        dialog
-            .entrance(DialogEntrance::Fade)
-            .close_button(false)
-            .w(card_width(window))
-            .margin_top(top)
-            .p(px(20.))
-            .bg(theme::panel())
-            .border_color(theme::border())
-            .rounded(theme::radius::pane())
-            .line_height(relative(1.2))
+        small_dialog(dialog, "prompt-appear", &height, window, cx)
             .on_ok(move |_, _, cx| {
                 ok.update(cx, |this, cx| this.submit(cx));
                 true
@@ -196,86 +180,67 @@ impl Prompt {
                     .child(
                         DialogFooter::new()
                             .when(input.is_some(), |d| {
-                                d.child(div().flex_none().child(
-                                    DialogClose::new().child(outline_button(
-                                        "prompt-cancel",
-                                        "Cancel",
-                                        false,
-                                        cx,
-                                    )),
-                                ))
+                                d.child(
+                                    div().flex_none().child(
+                                        DialogClose::new()
+                                            .child(ui::outline_button("prompt-cancel", "Cancel")),
+                                    ),
+                                )
                             })
                             .child(div().flex_none().child(
-                                DialogAction::new().child(outline_button(
-                                    "prompt-ok",
-                                    "OK",
-                                    false,
-                                    cx,
-                                )),
+                                DialogAction::new().child(ui::outline_button("prompt-ok", "OK")),
                             )),
                     )
-                    .on_prepaint(move |bounds, window, _| {
-                        if height.get() != bounds.size.height {
-                            height.set(bounds.size.height);
-                            window.request_animation_frame();
-                        }
-                    }),
+                    .on_prepaint(track_height(height)),
             )
     }
 }
 
-/// `.prop-del-row button`: 1px border, transparent, radius 8, padding 7×14,
-/// 13px; hover fills `hover`. Danger: red border and text, hover fills red
-/// with white text.
-pub(crate) fn outline_button(
-    id: impl Into<ElementId>,
-    label: impl Into<SharedString>,
-    danger: bool,
-    cx: &App,
-) -> Button {
-    let label = label.into();
-    let (color, border, fill, hover_fg) = if danger {
-        (theme::red(), theme::red(), theme::red(), theme::white())
-    } else {
-        (theme::fg(), theme::border(), theme::hover(), theme::fg())
-    };
-    // The kit paints hover / press from the variant (fill, `color` as the
-    // border, `foreground` as the text); the rest state is set below.
-    let variant = ButtonCustomVariant::new(cx)
-        .color(border)
-        .foreground(hover_fg)
-        .hover(fill)
-        .active(fill)
-        .shadow(false);
-    Button::new(id)
-        .custom(variant)
-        .rounded(theme::radius::md())
-        .accessibility_label(label.clone())
-        .flex_none()
-        .h_auto()
-        .px(px(14.))
-        .py(px(7.))
-        .border_1()
-        .border_color(border)
-        .bg(transparent_black())
-        .text_color(color)
+/// `dialog` as the small modal card, centred on its last laid-out `height`
+/// (record it with [`track_height`] on the card's body): it rises 8px into
+/// place ([`dialog_appear`] keyed `appear`) while the layer, dim included,
+/// fades in. No close button; callers add the body and handlers.
+pub(crate) fn small_dialog(
+    dialog: Dialog,
+    appear: &'static str,
+    height: &Rc<Cell<Pixels>>,
+    window: &mut Window,
+    cx: &mut App,
+) -> Dialog {
+    let enter = dialog_appear(appear, window, cx);
+    let viewport = window.viewport_size();
+    // Centred like a flex-centring overlay: the card's last height (body +
+    // 2×20 padding + 2×1 border), then the rise.
+    let card = height.get() + px(42.);
+    let top = ((viewport.height - card) / 2.).max(px(0.)) + px(enter.target().y_px());
+    dialog
+        .entrance(DialogEntrance::Fade)
+        .close_button(false)
+        .w(card_width(window))
+        .margin_top(top)
+        .p(px(20.))
+        .bg(theme::panel())
+        .border_color(theme::border())
+        .rounded(theme::radius::pane())
         .line_height(relative(1.2))
-        .cursor_pointer()
-        .child(div().text_size(px(13.)).child(label))
 }
 
-/// The full-window dimmed overlay every modal sits on, its dim at `shown`
-/// (0..=1) while it fades in.
-pub(crate) fn overlay(id: impl Into<ElementId>, shown: f32) -> Stateful<Div> {
-    div()
-        .id(id)
-        .absolute()
-        .top_0()
-        .left_0()
-        .size_full()
-        .bg(theme::overlay().opacity(shown))
-        .occlude()
-        .line_height(relative(1.2))
+/// A prepaint hook recording the small modal body's height into `height`
+/// (asking for another frame when it changed, to re-centre the card).
+pub(crate) fn track_height(
+    height: Rc<Cell<Pixels>>,
+) -> impl FnOnce(Bounds<Pixels>, &mut Window, &mut App) + 'static {
+    move |bounds, window, _| {
+        if height.get() != bounds.size.height {
+            height.set(bounds.size.height);
+            window.request_animation_frame();
+        }
+    }
+}
+
+/// The card's height before its first layout (message, field, buttons).
+pub(crate) fn first_height() -> Rc<Cell<Pixels>> {
+    Rc::new(Cell::new(FIRST_HEIGHT))
 }
 
 /// A dialog appearing: the card fades in rising 8px over [`motion::FADE`]
@@ -293,20 +258,6 @@ pub(crate) fn dialog_appear(
 /// 2×20 padding and 2×1 border.
 fn card_width(window: &Window) -> Pixels {
     (window.viewport_size().width - px(40.)).min(px(420.)) + px(42.)
-}
-
-/// The small modal card.
-pub(crate) fn small_card(window: &Window) -> Div {
-    div()
-        .w(card_width(window))
-        .p(px(20.))
-        .bg(theme::panel())
-        .border_1()
-        .border_color(theme::border())
-        .rounded(theme::radius::pane())
-        .flex()
-        .flex_col()
-        .gap(px(12.))
 }
 
 impl Render for Prompt {

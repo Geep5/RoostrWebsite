@@ -5,6 +5,7 @@
 use std::sync::Arc;
 
 use chrono::{Datelike, Local, NaiveDate, TimeZone};
+use gpui_kit::component::list::ListItem;
 use gpui_kit::component::shimmer::ShimmerText;
 use gpui_kit::component::skeleton::Skeleton;
 use gpui_kit::prelude::FluentBuilder as _;
@@ -450,26 +451,29 @@ impl Render for PinnedWidget {
         let body = div().flex().flex_col().gap(px(1.)).pt(px(2.));
         let set_id = self.id.clone();
 
-        let line = |id: ElementId, current: bool| {
-            div()
-                .id(id)
-                .flex()
-                .items_center()
-                .gap(px(6.))
+        // `.w-line`: a kit list row, 24px, 12px muted (fg under the pointer
+        // and while current, the current one on `hl-med`).
+        let line = |id: ElementId, current: bool, content: Div| {
+            ListItem::new(id)
+                .group("w-line")
                 .h(px(24.))
                 .px(px(8.))
+                .py_0()
                 .rounded(theme::radius::sm())
                 .text_size(px(12.))
                 .overflow_hidden()
                 .cursor_pointer()
-                .map(|d| {
-                    if current {
-                        d.bg(theme::hl_med()).text_color(theme::fg())
-                    } else {
-                        d.text_color(theme::muted())
-                            .hover(|s| s.bg(theme::hl_med()).text_color(theme::fg()))
-                    }
-                })
+                .text_color(if current { theme::fg() } else { theme::muted() })
+                .when(current, |d| d.bg(theme::hl_med()))
+                .child(
+                    content
+                        .w_full()
+                        .flex()
+                        .items_center()
+                        .gap(px(6.))
+                        .min_w_0()
+                        .group_hover("w-line", |s| s.text_color(theme::fg())),
+                )
         };
 
         if view_type == "kanban"
@@ -557,10 +561,14 @@ impl Render for PinnedWidget {
                     .transition(COUNT.transition())
                     .animate_initial(false);
                 body = body.child(
-                    line(("w-group", i).into(), false)
-                        .child(div().flex_1().min_w_0().truncate().child(name))
-                        .child(div().text_size(px(11.)).child(shown))
-                        .on_click(open(set_id.clone())),
+                    line(
+                        ("w-group", i).into(),
+                        false,
+                        div()
+                            .child(div().flex_1().min_w_0().truncate().child(name))
+                            .child(div().text_size(px(11.)).child(shown)),
+                    )
+                    .on_click(open(set_id.clone())),
                 );
             }
             return body;
@@ -631,16 +639,16 @@ impl Render for PinnedWidget {
             }
             let nav_btn =
                 |id: &'static str, glyph: &'static str, delta: i32, cx: &mut Context<Self>| {
-                    div()
-                        .id(id)
+                    crate::fill_button(id, transparent_black(), cx)
+                        .h_auto()
                         .px(px(5.))
                         .py(px(2.))
-                        .text_size(px(16.))
-                        .line_height(px(16.))
-                        .text_color(theme::muted())
-                        .cursor_pointer()
-                        .hover(|s| s.text_color(theme::fg()))
-                        .child(glyph)
+                        .accessibility_label(if delta < 0 {
+                            "Previous month"
+                        } else {
+                            "Next month"
+                        })
+                        .child(div().text_size(px(16.)).line_height(px(16.)).child(glyph))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.month_off += delta;
                             cx.notify();
@@ -661,15 +669,18 @@ impl Render for PinnedWidget {
                             .pb(px(6.))
                             .pl(px(6.))
                             .child(
-                                div()
-                                    .id("w-cal-title")
-                                    .flex()
-                                    .text_size(px(15.))
-                                    .font_weight(FontWeight::BOLD)
+                                crate::fill_button("w-cal-title", transparent_black(), cx)
+                                    .h_auto()
                                     .text_color(theme::fg())
-                                    .cursor_pointer()
-                                    .child(label)
-                                    .child(div().ml(px(4.)).child(year.to_string()))
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .text_size(px(15.))
+                                            .font_weight(FontWeight::BOLD)
+                                            .line_height(relative(1.2))
+                                            .child(label)
+                                            .child(div().ml(px(4.)).child(year.to_string())),
+                                    )
                                     .on_click(open(set_id.clone())),
                             )
                             .child(
@@ -775,23 +786,29 @@ impl Render for PinnedWidget {
         let mut body = body;
         for r in self.rows.iter().take(LIMIT) {
             body = body.child(
-                line(crate::eid("w-row", &r.id), r.id == current_id)
-                    .child(div().flex_none().text_size(px(11.)).child(row_icon(r)))
-                    .child(div().min_w_0().truncate().child(row_name(r)))
-                    .on_click(open(r.id.clone())),
+                line(
+                    crate::eid("w-row", &r.id),
+                    r.id == current_id,
+                    div()
+                        .child(div().flex_none().text_size(px(11.)).child(row_icon(r)))
+                        .child(div().min_w_0().truncate().child(row_name(r))),
+                )
+                .on_click(open(r.id.clone())),
             );
         }
         if self.rows.len() > LIMIT {
             body = body.child(
-                div()
-                    .id("w-more")
+                crate::fill_button("w-more", transparent_black(), cx)
+                    .h_auto()
                     .px(px(8.))
                     .py(px(2.))
-                    .text_size(px(11.))
-                    .text_color(theme::muted())
-                    .cursor_pointer()
-                    .hover(|s| s.text_color(theme::fg()))
-                    .child(format!("+{} more", self.rows.len() - LIMIT))
+                    .justify_start()
+                    .child(
+                        div()
+                            .w_full()
+                            .text_size(px(11.))
+                            .child(format!("+{} more", self.rows.len() - LIMIT)),
+                    )
                     .on_click(open(set_id)),
             );
         }

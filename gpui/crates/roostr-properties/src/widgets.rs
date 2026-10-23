@@ -4,11 +4,15 @@
 
 use std::rc::Rc;
 
+use gpui_kit::component::Sizable as _;
+use gpui_kit::component::alert::Alert;
+use gpui_kit::component::button::Button;
 use gpui_kit::component::empty::Empty;
 use gpui_kit::component::input::{Input, InputState, Textarea, TextareaState};
-use gpui_kit::prelude::FluentBuilder as _;
+use gpui_kit::component::label::Label;
+use gpui_kit::component::separator::Separator;
 use gpui_kit::*;
-pub(crate) use roostr_core::ui::{menu_shadow, modal_shadow, tooltip as tip};
+pub(crate) use roostr_core::ui::{menu_shadow, tooltip as tip};
 use roostr_core::{motion, theme};
 
 /// `0 12px 32px rgba(0,0,0,.45)`: the popovers' shadow.
@@ -255,30 +259,49 @@ pub(crate) fn empty_note(text: impl Into<SharedString>) -> Empty {
         .child(text.into())
 }
 
-/// A plain outline action button (`.act`): bg, 1px border, radius 7, 5px 12px, 12px.
+/// A plain outline action button (`.act`): kit outline [`Button`], bg, 1px
+/// border, radius 7, 5px 12px, 12px label (on the child: the kit's inner
+/// content box sets its own text size); kit hover fill; `disabled` greys it
+/// and blocks clicks.
 pub(crate) fn act_button(
     id: impl Into<ElementId>,
     label: impl Into<SharedString>,
     disabled: bool,
-) -> Stateful<Div> {
+) -> Button {
     let label: SharedString = label.into();
-    div()
-        .id(id.into())
-        .flex_none()
-        .bg(theme::bg())
-        .border_1()
-        .border_color(theme::border())
-        .rounded(px(7.))
-        .px(px(12.))
-        .py(px(5.))
-        .text_size(px(12.))
-        .text_color(theme::fg())
-        .when(disabled, |d| d.opacity(0.5))
-        .when(!disabled, |d| {
-            d.cursor_pointer()
-                .hover(|s| s.border_color(theme::accent()))
-        })
-        .child(label)
+    roostr_core::ui::disabled(
+        Button::new(id)
+            .outline()
+            .small()
+            .accessibility_label(label.clone())
+            .rounded(px(7.))
+            .h_auto()
+            .px(px(12.))
+            .py(px(5.))
+            .bg(theme::bg())
+            .border_color(theme::border())
+            .text_color(theme::fg())
+            .child(div().text_size(px(12.)).child(label)),
+        disabled,
+    )
+}
+
+/// A muted one-line note (kit [`Label`]): `size`px in the muted colour.
+pub(crate) fn note(text: impl Into<SharedString>, size: f32) -> Label {
+    Label::new(text)
+        .text_size(px(size))
+        .text_color(theme::muted())
+}
+
+/// An error line under a control: the kit destructive [`Alert`], compact.
+pub(crate) fn error_alert(id: impl Into<ElementId>, text: impl Into<SharedString>) -> Alert {
+    let text: SharedString = text.into();
+    Alert::error(id, text).xsmall().text_size(px(12.))
+}
+
+/// A 1px horizontal rule in the border colour (kit [`Separator`]).
+pub(crate) fn rule() -> Separator {
+    Separator::horizontal().color(theme::border())
 }
 
 /// The first `n` characters of `s` (char-safe `slice(0, n)`).

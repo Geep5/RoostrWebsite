@@ -2,15 +2,17 @@
 //! open route of the active space, live titles from the store, drag reorder,
 //! middle-click close, separators hidden beside the active tab.
 
-use gpui_kit::component::IconNamed as _;
+use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::tab::{Tab, TabBar};
+use gpui_kit::component::{Icon, Sizable as _};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use roostr_core::nav::{Navigator, Route};
 use roostr_core::objects::{object_icon, type_glyph};
 use roostr_core::store::Store;
-use roostr_core::{Glyph, theme};
+use roostr_core::{Glyph, theme, ui};
 
+use crate::Tip as _;
 use crate::rail::DragGhost;
 use crate::workspace::Workspace;
 
@@ -100,23 +102,6 @@ fn tab_info(route: &Route, cx: &App) -> TabInfo {
     }
 }
 
-/// Display-only Anytype checkbox (CheckboxIcon), accent when checked.
-pub(crate) fn checkbox_icon(checked: bool, size: f32) -> Svg {
-    svg()
-        .path(if checked {
-            Glyph::CheckboxChecked.path()
-        } else {
-            Glyph::CheckboxUnchecked.path()
-        })
-        .size(px(size))
-        .flex_none()
-        .text_color(if checked {
-            theme::accent()
-        } else {
-            theme::muted()
-        })
-}
-
 impl Workspace {
     pub(crate) fn render_tab_strip(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let nav = Navigator::global(cx).read(cx);
@@ -170,7 +155,7 @@ impl Workspace {
                 .gap(px(7.))
                 .min_w_0()
                 .map(|d| match info.task {
-                    Some(done) => d.child(checkbox_icon(done, 14.)),
+                    Some(done) => d.child(ui::checkbox_display(("tab-check", uid), done).small()),
                     None => d.child(
                         div()
                             .flex_none()
@@ -206,19 +191,21 @@ impl Workspace {
                 .items_center()
                 .pr(px(6.))
                 .child(
-                    div()
-                        .id(("tab-x", uid))
+                    Button::new(("tab-x", uid))
+                        .ghost()
                         .flex_none()
-                        .text_size(px(15.))
-                        .line_height(px(15.))
+                        .h(px(17.))
+                        .w_auto()
                         .px(px(3.))
                         .py(px(1.))
                         .rounded(theme::radius::xs())
                         .text_color(theme::muted())
                         .opacity(if is_active { 1. } else { 0. })
                         .group_hover(group.clone(), |s| s.opacity(1.))
-                        .hover(|s| s.bg(theme::hover()).text_color(theme::fg()))
-                        .child("×")
+                        .tab_stop(false)
+                        .cursor_pointer()
+                        .accessibility_label("Close tab")
+                        .child(div().text_size(px(15.)).line_height(px(15.)).child("×"))
                         .on_click(cx.listener(move |_, _, _, cx| {
                             cx.stop_propagation();
                             Navigator::global(cx).update(cx, |nav, cx| nav.close(i, cx));
@@ -310,26 +297,13 @@ impl Workspace {
             bar = bar.child(tab);
         }
         bar.suffix(
-            div()
-                .id("tab-new")
-                .group("tab-new")
-                .flex_none()
+            crate::fill_button("tab-new", theme::hl_med(), cx)
                 .size(px(26.))
                 .ml(px(4.))
-                .flex()
-                .items_center()
-                .justify_center()
                 .rounded(theme::radius::sm())
-                .cursor_pointer()
-                .hover(|s| s.bg(theme::hl_med()))
-                .child(
-                    svg()
-                        .path(Glyph::Plus.path())
-                        .size(px(14.))
-                        .text_color(theme::muted())
-                        .group_hover("tab-new", |s| s.text_color(theme::fg())),
-                )
-                .map(|d| self.data_tip(d, "tip-new-tab", "New tab", cx))
+                .child(Icon::new(Glyph::Plus).size(px(14.)))
+                .accessibility_label("New tab")
+                .tip("New tab")
                 .on_click(|_, _, cx| roostr_core::nav::open_tab(Route::Home, false, cx)),
         )
     }

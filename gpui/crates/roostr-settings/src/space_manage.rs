@@ -6,8 +6,10 @@ use std::cell::Cell;
 use std::rc::Rc;
 
 use gpui_kit::component::WindowExt as _;
+use gpui_kit::component::avatar::Avatar;
 use gpui_kit::component::dialog::{Dialog, DialogEntrance};
 use gpui_kit::component::input::{InputEvent, InputState};
+use gpui_kit::component::{Sizable as _, Size};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use roostr_core::create::NOT_DEFAULTABLE;
@@ -15,7 +17,7 @@ use roostr_core::dates::show_date;
 use roostr_core::invite::{SpaceJoinLink, join_url};
 use roostr_core::objects::{object_icon, type_glyph};
 use roostr_core::types::{Space, field_str};
-use roostr_core::ui::{CheckboxIcon, tooltip};
+use roostr_core::ui::{checkbox_display, tooltip};
 use roostr_core::{Navigator, Route, Store, StoreEvent, Value, api, motion, nav, theme};
 use serde_json::json;
 
@@ -986,24 +988,14 @@ impl Render for SpaceManage {
         if !self.join_requests.is_empty() {
             root = root.child(h3("Join requests"));
             for r in &self.join_requests {
-                let avatar = match r.picture.as_deref().filter(|p| !p.is_empty()) {
-                    Some(picture) => img(SharedString::from(picture.to_string()))
-                        .size(px(28.))
-                        .rounded_full()
-                        .flex_none()
-                        .into_any_element(),
-                    None => div()
-                        .size(px(28.))
-                        .rounded_full()
-                        .flex_none()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .bg(theme::hover())
-                        .text_size(px(14.))
-                        .child("👤")
-                        .into_any_element(),
-                };
+                let avatar = Avatar::new()
+                    .with_size(px(28.))
+                    .flex_none()
+                    .when_some(
+                        r.picture.as_deref().filter(|p| !p.is_empty()),
+                        |a, picture| a.src(SharedString::from(picture.to_string())),
+                    )
+                    .into_any_element();
                 let name = r.name.clone().filter(|n| !n.is_empty());
                 let approve = r.clone();
                 let deny = r.clone();
@@ -1110,13 +1102,10 @@ impl Render for SpaceManage {
                 for (id, name, is_task, done, icon) in rows {
                     let busy = self.bin_busy == id;
                     let leading = if is_task {
-                        div()
-                            .flex_none()
-                            .child(CheckboxIcon::new(done).size(px(16.)).color(if done {
-                                theme::accent()
-                            } else {
-                                theme::muted()
-                            }))
+                        div().flex_none().child(
+                            checkbox_display(SharedString::from(format!("bin-check-{id}")), done)
+                                .with_size(Size::Medium),
+                        )
                     } else {
                         div().flex_none().child(icon)
                     };

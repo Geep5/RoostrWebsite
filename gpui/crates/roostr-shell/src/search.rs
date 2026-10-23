@@ -9,8 +9,10 @@
 use std::ops::Range;
 use std::time::Duration;
 
+use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
 use gpui_kit::component::command::{Command, CommandGroup, CommandItem, CommandState};
 use gpui_kit::component::input::{Enter, Escape, Input, InputEvent, InputState, MoveDown, MoveUp};
+use gpui_kit::component::tag::Tag;
 use gpui_kit::component::{Disableable as _, IndexPath};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -150,6 +152,17 @@ fn highlighted(text: String, q: &str, selected: bool, mobile: bool) -> StyledTex
         )]),
         None => styled,
     }
+}
+
+/// A kit button skin that keeps its fill under the pointer (the modal's
+/// pills: no hover change, as in the web).
+fn still(bg: Hsla, fg: Hsla, cx: &App) -> ButtonCustomVariant {
+    ButtonCustomVariant::new(cx)
+        .color(bg)
+        .foreground(fg)
+        .hover(bg)
+        .active(bg)
+        .shadow(false)
 }
 
 /// `text-transform: capitalize`.
@@ -688,12 +701,11 @@ impl SearchModal {
             .child(label.to_uppercase())
             .when_some(count, |d, n| {
                 d.child(
-                    div()
+                    Tag::custom(hsla(0., 0., 1., 0.08), theme::muted(), transparent_black())
+                        .rounded_full()
+                        .border_0()
                         .px(px(7.))
                         .py(px(1.))
-                        .rounded_full()
-                        .bg(hsla(0., 0., 1., 0.08))
-                        .text_color(theme::muted())
                         .text_size(px(10.5))
                         .font_weight(FontWeight::SEMIBOLD)
                         .child(n.to_string()),
@@ -1120,16 +1132,17 @@ impl Render for SearchModal {
                             })
                             .when(!mobile, |d| {
                                 d.child(
-                                    div()
-                                        .flex_none()
-                                        .text_size(px(12.))
-                                        .text_color(theme::accent())
-                                        .border_1()
-                                        .border_color(theme::border())
-                                        .rounded(theme::radius::sm())
-                                        .px(px(8.))
-                                        .py(px(2.))
-                                        .child(space_name),
+                                    Tag::custom(
+                                        transparent_black(),
+                                        theme::accent(),
+                                        theme::border(),
+                                    )
+                                    .flex_none()
+                                    .text_size(px(12.))
+                                    .rounded(theme::radius::sm())
+                                    .px(px(8.))
+                                    .py(px(2.))
+                                    .child(space_name),
                                 )
                             })
                             .when(mobile, |d| {
@@ -1176,20 +1189,18 @@ impl Render for SearchModal {
                             })
                             .when(mobile && has_query, |d| {
                                 d.child(
-                                    div()
-                                        .id("search-clear")
-                                        .flex()
+                                    Button::new("search-clear")
+                                        .custom(still(theme::hover(), theme::muted(), cx))
                                         .flex_none()
-                                        .items_center()
-                                        .justify_center()
                                         .size(px(28.))
+                                        .p_0()
                                         .ml(px(-36.))
-                                        .rounded_full()
+                                        .rounded(px(14.))
                                         .bg(theme::hover())
                                         .text_color(theme::muted())
-                                        .text_size(px(15.))
                                         .cursor_pointer()
-                                        .child("×")
+                                        .accessibility_label("Clear")
+                                        .child(div().text_size(px(15.)).child("×"))
                                         .on_click(cx.listener(|this, _, window, cx| {
                                             this.input.update(cx, |input, cx| {
                                                 input.set_value("", window, cx);
@@ -1219,38 +1230,44 @@ impl Render for SearchModal {
                             });
                         for (key, label, count) in chips {
                             let on = self.chips.contains(&key);
+                            let (bg, fg) = if on {
+                                (theme::accent(), theme::white())
+                            } else {
+                                (theme::hover(), theme::fg())
+                            };
                             row = row.child(
-                                div()
-                                    .id(crate::eid("chip", &key))
-                                    .flex()
+                                Button::new(crate::eid("chip", &key))
+                                    .custom(still(bg, fg, cx))
                                     .flex_none()
-                                    .gap(px(2.))
+                                    .h_auto()
                                     .map(|d| {
                                         if mobile {
-                                            d.px(px(14.)).py(px(7.)).text_size(px(14.))
+                                            d.px(px(14.)).py(px(7.))
                                         } else {
-                                            d.px(px(11.)).py(px(4.)).text_size(px(12.5))
+                                            d.px(px(11.)).py(px(4.))
                                         }
                                     })
-                                    .rounded_full()
-                                    .whitespace_nowrap()
+                                    .rounded(px(999.))
+                                    .bg(bg)
+                                    .text_color(fg)
                                     .cursor_pointer()
-                                    .map(|d| {
-                                        if on {
-                                            d.bg(theme::accent()).text_color(theme::white())
-                                        } else {
-                                            d.bg(theme::hover()).text_color(theme::fg())
-                                        }
-                                    })
-                                    .child(label)
-                                    .when_some(count, |d, n| {
-                                        d.child(
-                                            div()
-                                                .ml(px(2.))
-                                                .text_color(theme::muted())
-                                                .child(n.to_string()),
-                                        )
-                                    })
+                                    .toggled(on)
+                                    .accessibility_label(label.clone())
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .gap(px(4.))
+                                            .whitespace_nowrap()
+                                            .text_size(px(if mobile { 14. } else { 12.5 }))
+                                            .child(label)
+                                            .when_some(count, |d, n| {
+                                                d.child(
+                                                    div()
+                                                        .text_color(theme::muted())
+                                                        .child(n.to_string()),
+                                                )
+                                            }),
+                                    )
                                     .on_click(cx.listener(move |this, _, _, cx| {
                                         this.toggle_chip(key.clone(), cx)
                                     })),

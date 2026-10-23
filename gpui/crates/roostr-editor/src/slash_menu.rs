@@ -333,7 +333,6 @@ impl Editor {
         let editor = cx.entity().downgrade();
         let mut list = Command::new(&cmd)
             .searchable(false)
-            .bordered(false)
             .max_h(px(348.))
             .on_confirm(move |ix, window, cx| {
                 let Some(pick) = picks.get(ix.section).and_then(|s| s.get(ix.row)).cloned() else {
@@ -350,10 +349,6 @@ impl Editor {
             })
             .w(w)
             .p(px(2.))
-            .bg(theme::panel())
-            .border_1()
-            .border_color(theme::border())
-            .rounded(px(10.))
             .shadow(roostr_core::ui::menu_shadow());
         let mut i = 0;
         for (section, items) in groups {

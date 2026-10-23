@@ -10,8 +10,12 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
 
-use gpui_kit::component::Icon;
+use gpui_kit::component::alert::Alert;
+use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::label::Label;
 use gpui_kit::component::tag::Tag;
+use gpui_kit::component::text::TextView;
+use gpui_kit::component::{Disableable as _, Icon, IconName, Sizable as _};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use roostr_core::color::normalize_hex;
@@ -24,7 +28,7 @@ use roostr_core::serving::{
     MachineRow, machine_name, resolve_serving, served_by_machine_id, serving_copy,
 };
 use roostr_core::types::{field_str, is_builtin_tool, is_locked_tool, repeat_of};
-use roostr_core::ui::{CheckboxIcon, prop_line_icon};
+use roostr_core::ui::{checkbox, checkbox_display, prop_line_icon};
 use roostr_core::{
     Fields, Glyph, Object, QueryRow, RelationDef, Route, Store, StoreEvent, Value, api, motion,
     nav, theme,
@@ -971,35 +975,58 @@ fn rm_reveal(
     )
 }
 
+/// A chip's × as a kit ghost icon button, pinned to the chip's top-right
+/// corner and revealed by the chip's hover (`reveal`). The shell stops the
+/// press so the chip under it doesn't start its own.
 fn chip_rm(
     id: SharedString,
     label: String,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     reveal: f32,
-) -> Stateful<Div> {
+) -> Div {
+    let group = SharedString::from(format!("g-{id}"));
     div()
-        .id(id)
+        .group(group.clone())
         .absolute()
         .top(px(-6.))
         .right(px(-6.))
-        .size(px(15.))
+        .opacity(reveal)
+        .when(reveal <= 0., |d| d.invisible())
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .child(
+            Button::new(id)
+                .ghost()
+                .size(px(15.))
+                .p_0()
+                .rounded_full()
+                .bg(theme::panel())
+                .border_1()
+                .border_color(theme::border())
+                .text_color(theme::muted())
+                .cursor_pointer()
+                .tooltip(label)
+                .on_click(move |e, w, cx| {
+                    cx.stop_propagation();
+                    on_click(e, w, cx)
+                })
+                .child(hover_tint(
+                    group,
+                    theme::red(),
+                    Icon::new(IconName::Close).size(px(9.)),
+                )),
+        )
+}
+
+/// Content of a kit `Button` that recolours to `color` while the `group`
+/// shell around the button is hovered (kit Buttons set their own hover
+/// style, so a second `.hover(..)` on them is not allowed).
+pub(crate) fn hover_tint(group: SharedString, color: Hsla, child: impl IntoElement) -> Div {
+    div()
         .flex()
         .items_center()
         .justify_center()
-        .rounded_full()
-        .bg(theme::panel())
-        .border_1()
-        .border_color(theme::border())
-        .text_size(px(11.))
-        .text_color(theme::muted())
-        .cursor_pointer()
-        .opacity(reveal)
-        .when(reveal <= 0., |d| d.invisible())
-        .hover(|s| s.text_color(theme::red()).bg(theme::hover()))
-        .tooltip(tip(label))
-        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-        .on_click(on_click)
-        .child("×")
+        .group_hover(group, move |s| s.text_color(color))
+        .child(child)
 }
 
 /// A neutral chip as the kit `Tag`: plain text on a quiet outline; colour
@@ -1116,14 +1143,13 @@ impl Render for PropertiesPane {
                 continue;
             }
             let mut group = div().flex().flex_col().pt(px(4.)).pb(px(6.)).child(
-                div()
+                Label::new(label)
                     .px(px(6.))
                     .pt(px(6.))
                     .pb(px(4.))
                     .text_size(px(12.))
                     .font_weight(FontWeight::MEDIUM)
-                    .text_color(theme::muted())
-                    .child(label),
+                    .text_color(theme::muted()),
             );
             for rel in rows {
                 group = group.child(self.render_row(
@@ -1142,33 +1168,20 @@ impl Render for PropertiesPane {
             root = root.child(group);
         }
         if object.type_key == "skill" && object.field_str("key").is_empty() {
-            let b = |t: &'static str| div().font_weight(FontWeight::BOLD).child(t);
-            let code = |t: &'static str| {
-                div()
-                    .font_family(theme::fonts::MONO)
-                    .text_size(px(11.))
-                    .child(t)
-            };
             root = root.child(
-                div()
-                    .mx(px(4.))
-                    .mt(px(6.))
-                    .flex()
-                    .flex_wrap()
-                    .text_size(px(12.))
-                    .line_height(relative(1.45))
-                    .text_color(theme::muted())
-                    .child("Give this Skill an ")
-                    .child(b("Answer"))
-                    .child(" to make it a Jev Skill: its page becomes the question (a numbered list of levels for a Score, bullets for a Choice, ")
-                    .child(code("Yes:"))
-                    .child(" / ")
-                    .child(code("No:"))
-                    .child(" lines for Yes or no), and agents that have it in their Skills run it with ")
-                    .child(code("jev_score"))
-                    .child(", filling ")
-                    .child(b("Writes to"))
-                    .child(" (default: this Skill's name). They need a TypeSafe credential."),
+                Alert::info(
+                    "skill-help",
+                    TextView::markdown(
+                        "skill-help-text",
+                        "Give this Skill an **Answer** to make it a Jev Skill: its page becomes the question (a numbered list of levels for a Score, bullets for a Choice, `Yes:` / `No:` lines for Yes or no), and agents that have it in their Skills run it with `jev_score`, filling **Writes to** (default: this Skill's name). They need a TypeSafe credential.",
+                    ),
+                )
+                .xsmall()
+                .mx(px(4.))
+                .mt(px(6.))
+                .text_size(px(12.))
+                .line_height(relative(1.45))
+                .text_color(theme::muted()),
             );
         }
         if self.editing.is_some() {
@@ -1183,19 +1196,27 @@ impl Render for PropertiesPane {
         if !locked {
             let exclude: Vec<String> = shown.iter().map(|r| r.key.clone()).collect();
             let mut add = div().relative().child(
-                div()
-                    .id("add-prop")
-                    .w_full()
-                    .p(px(6.))
-                    .rounded(theme::radius::sm())
-                    .text_size(px(13.))
-                    .text_color(theme::muted())
-                    .cursor_pointer()
-                    .hover(|s| s.bg(theme::hover()).text_color(theme::fg()))
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.open_suggest(exclude.clone(), window, cx)
-                    }))
-                    .child("＋ Add property"),
+                div().group("g-add-prop").child(
+                    Button::new("add-prop")
+                        .ghost()
+                        .w_full()
+                        .p(px(6.))
+                        .h_auto()
+                        .rounded(theme::radius::sm())
+                        .text_color(theme::muted())
+                        .cursor_pointer()
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.open_suggest(exclude.clone(), window, cx)
+                        }))
+                        // The kit centres its content and forces its own
+                        // text size: the row's text is the child's.
+                        .child(
+                            hover_tint("g-add-prop".into(), theme::fg(), "＋ Add property")
+                                .w_full()
+                                .justify_start()
+                                .text_size(px(13.)),
+                        ),
+                ),
             );
             if let Some(s) = &self.suggest {
                 add = add.child(below("add-suggest", 4., s.clone()));
@@ -1342,36 +1363,17 @@ impl PropertiesPane {
             let k = key.clone();
             value = value.child(
                 div()
-                    .id(SharedString::from(format!("chk-{key}")))
-                    .size(px(18.))
                     .flex_none()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(theme::radius::xs())
-                    .border_1()
-                    .text_size(px(11.))
-                    .text_color(theme::white())
-                    .map(|d| {
-                        if on {
-                            d.bg(theme::accent()).border_color(theme::accent())
-                        } else {
-                            d.bg(theme::panel()).border_color(theme::border())
-                        }
-                    })
-                    .when(editable, |d| {
-                        d.cursor_pointer()
-                            .hover(|s| s.border_color(theme::accent()))
-                    })
-                    .tooltip(tip(label.clone()))
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        cx.stop_propagation();
-                        if editable {
-                            this.save_value(&k, Value::bool(!on), cx);
-                        }
-                    }))
-                    .when(on, |d| d.child("✓")),
+                    .child(
+                        checkbox(SharedString::from(format!("chk-{key}")), on)
+                            .disabled(!editable)
+                            .tooltip(label.clone())
+                            .on_change(cx.listener(move |this, v: &bool, _, cx| {
+                                cx.stop_propagation();
+                                this.save_value(&k, Value::bool(*v), cx);
+                            })),
+                    ),
             );
         } else if rel.format == "tag" {
             if list.is_empty() {
@@ -1679,9 +1681,8 @@ impl PropertiesPane {
                 let lead: AnyElement = match o {
                     Some(o) if store.layout_of(&o.type_key) == "task" => {
                         let on = o.done == Some(true);
-                        CheckboxIcon::new(on)
-                            .size(px(13.))
-                            .color(if on { theme::green() } else { theme::muted() })
+                        checkbox_display(SharedString::from(format!("obj-chk-{id}")), on)
+                            .xsmall()
                             .into_any_element()
                     }
                     _ => {
@@ -1790,11 +1791,13 @@ impl PropertiesPane {
                 div()
                     .id(SharedString::from(format!("judged-{key}")))
                     .ml(px(6.))
-                    .text_size(px(11.5))
-                    .text_color(theme::muted())
-                    .whitespace_nowrap()
                     .tooltip(tip(j.title.clone()))
-                    .child(j.text.clone()),
+                    .child(
+                        Label::new(j.text.clone())
+                            .text_size(px(11.5))
+                            .text_color(theme::muted())
+                            .whitespace_nowrap(),
+                    ),
             );
         }
 
@@ -1887,29 +1890,35 @@ impl PropertiesPane {
         );
         if row_removable && editable {
             let k = key.clone();
+            let g = SharedString::from(format!("g-row-rm-{key}"));
             wrap = wrap.child(
                 div()
-                    .id(SharedString::from(format!("row-rm-{key}")))
+                    .group(g.clone())
                     .absolute()
                     .right(px(2.))
                     .top(px(6.))
-                    .size(px(18.))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded_full()
-                    .text_size(px(13.))
-                    .text_color(theme::muted())
-                    .cursor_pointer()
                     .opacity(reveal)
                     .when(reveal <= 0., |d| d.invisible())
-                    .hover(|s| s.text_color(theme::red()).bg(theme::hover()))
-                    .tooltip(tip("Remove property"))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        cx.stop_propagation();
-                        this.remove_prop(&k, cx);
-                    }))
-                    .child("×"),
+                    .child(
+                        Button::new(SharedString::from(format!("row-rm-{key}")))
+                            .ghost()
+                            .xsmall()
+                            .size(px(18.))
+                            .p_0()
+                            .rounded_full()
+                            .text_color(theme::muted())
+                            .cursor_pointer()
+                            .tooltip("Remove property")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                cx.stop_propagation();
+                                this.remove_prop(&k, cx);
+                            }))
+                            .child(hover_tint(
+                                g,
+                                theme::red(),
+                                Icon::new(IconName::Close).size(px(11.)),
+                            )),
+                    ),
             );
         }
         if editing {
@@ -1996,13 +2005,19 @@ impl PropertiesPane {
         } else {
             rel.name.clone()
         };
-        let pop_rm = |id: SharedString, text: String| {
-            div()
-                .id(id)
-                .text_size(px(11.))
-                .text_color(theme::muted())
-                .cursor_pointer()
-                .child(text)
+        // Each action sits in a hover group so its text can tint on hover.
+        let pop_rm = |id: &'static str, text: String, hover: Hsla| {
+            let group = SharedString::from(format!("g-{id}"));
+            (
+                group.clone(),
+                Button::new(id)
+                    .text()
+                    .h_auto()
+                    .p_0()
+                    .text_color(theme::muted())
+                    .cursor_pointer()
+                    .child(hover_tint(group, hover, text).text_size(px(11.))),
+            )
         };
         let mut head = div()
             .flex()
@@ -2020,39 +2035,47 @@ impl PropertiesPane {
             let asking = self.asking == key;
             let k = key.clone();
             let skill = j.skill_id.clone();
+            let (g_ask, ask) = pop_rm(
+                "ask",
+                if asking {
+                    "Asking…".into()
+                } else {
+                    "Ask again".into()
+                },
+                theme::fg(),
+            );
+            let (g_q, question) = pop_rm("question", "Edit question →".into(), theme::fg());
             actions = actions
                 .child(
-                    pop_rm(
-                        "ask".into(),
-                        if asking {
-                            "Asking…".into()
-                        } else {
-                            "Ask again".into()
-                        },
-                    )
-                    .hover(|s| s.text_color(theme::fg()))
-                    .tooltip(tip(j.title.clone()))
-                    .when(asking, |d| d.opacity(0.5))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        if !asking {
-                            this.ask_again(&k, cx)
-                        }
-                    })),
+                    div().group(g_ask).child(
+                        ask.tooltip(j.title.clone())
+                            .when(asking, |d| d.opacity(0.5))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                if !asking {
+                                    this.ask_again(&k, cx)
+                                }
+                            })),
+                    ),
                 )
                 .child(
-                    pop_rm("question".into(), "Edit question →".into())
-                        .hover(|s| s.text_color(theme::fg()))
-                        .tooltip(tip("Open the Jev Skill whose page is the question"))
-                        .on_click(move |_, _, cx| nav::navigate(Route::Object(skill.clone()), cx)),
+                    div().group(g_q).child(
+                        question
+                            .tooltip("Open the Jev Skill whose page is the question")
+                            .on_click(move |_, _, cx| {
+                                nav::navigate(Route::Object(skill.clone()), cx)
+                            }),
+                    ),
                 );
         }
         if key != "done" && !((is_credential || is_capability) && key == "status") {
             let k = key.clone();
+            let (g_rm, remove) = pop_rm("remove", "Remove".into(), theme::red());
             actions = actions.child(
-                pop_rm("remove".into(), "Remove".into())
-                    .hover(|s| s.text_color(theme::red()))
-                    .tooltip(tip("Remove property"))
-                    .on_click(cx.listener(move |this, _, _, cx| this.remove_prop(&k, cx))),
+                div().group(g_rm).child(
+                    remove
+                        .tooltip("Remove property")
+                        .on_click(cx.listener(move |this, _, _, cx| this.remove_prop(&k, cx))),
+                ),
             );
         }
         head = head.child(actions);

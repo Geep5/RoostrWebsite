@@ -6,7 +6,9 @@
 
 use gpui_kit::component::IndexPath;
 use gpui_kit::component::command::{Command, CommandGroup, CommandItem, CommandState};
+use gpui_kit::component::empty::Empty;
 use gpui_kit::component::input::{Enter, Escape, Input, InputEvent, InputState, MoveDown, MoveUp};
+use gpui_kit::component::tag::Tag;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use roostr_core::create::{creatable_types, default_type_key};
@@ -219,9 +221,14 @@ impl Render for CreateMenu {
                 let _ = this.update(cx, |this, cx| this.pick(path, cx));
             })
             .empty(|_, _, _| {
-                div()
+                Empty::new()
+                    .flex_none()
+                    .items_start()
+                    .gap_0()
+                    .p_0()
                     .px(px(8.))
                     .py(px(6.))
+                    .rounded(px(0.))
                     .text_size(px(12.5))
                     .text_color(theme::muted())
                     .child("No matching type")
@@ -259,11 +266,13 @@ impl Render for CreateMenu {
                     .child(name.clone())
                     .when(default, |d| {
                         d.child(
-                            div()
+                            Tag::custom(transparent_black(), theme::muted(), transparent_black())
+                                .border_0()
                                 .ml_auto()
                                 .pl(px(12.))
+                                .pr_0()
+                                .py_0()
                                 .text_size(px(11.))
-                                .text_color(theme::muted())
                                 .child("Default"),
                         )
                     })
@@ -306,27 +315,21 @@ impl Render for CreateMenu {
     }
 }
 
-/// `.type-search`: margin 4×6, padding 5×8, 13px, bg `--bg`, 1px border, radius 6.
-pub(crate) fn type_search(input: &Entity<InputState>) -> Div {
-    div()
+/// `.type-search`: the kit input at margin 4×6, padding 5×8, 13px, bg
+/// `--bg`, 1px border, radius 6 (h28).
+pub(crate) fn type_search(input: &Entity<InputState>) -> Input {
+    Input::new(input)
         .flex_none()
+        .w_auto()
+        .h(px(28.))
         .mx(px(6.))
         .my(px(4.))
         .px(px(8.))
         .py(px(5.))
         .bg(theme::bg())
-        .border_1()
         .border_color(theme::border())
         .rounded(theme::radius::sm())
         .text_size(px(13.))
-        .child(
-            Input::new(input)
-                .appearance(false)
-                .text_size(px(13.))
-                .h(px(16.))
-                .px_0()
-                .py_0(),
-        )
 }
 
 impl Workspace {

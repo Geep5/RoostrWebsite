@@ -9,9 +9,9 @@ use std::rc::Rc;
 
 use gpui_kit::component::combobox::{Combobox, ComboboxEvent, ComboboxState};
 use gpui_kit::component::searchable_list::{SearchableListDelegate, SearchableListItem};
-use gpui_kit::component::{FocusableExt as _, IndexPath};
+use gpui_kit::component::{FocusableExt as _, Icon, IndexPath};
 use gpui_kit::*;
-use roostr_core::theme;
+use roostr_core::{Glyph, theme};
 
 use crate::widgets::empty_note;
 
@@ -242,10 +242,9 @@ impl Render for KeyPickerState {
                         .whitespace_nowrap()
                         .child(current.clone())
                         .child(
-                            div()
-                                .text_size(px(10.))
-                                .text_color(theme::muted())
-                                .child("▾"),
+                            Icon::new(Glyph::ChevronDown)
+                                .size(px(10.))
+                                .text_color(theme::muted()),
                         )
                 })
                 .empty(move |_, _| {

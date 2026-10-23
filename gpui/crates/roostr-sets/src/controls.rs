@@ -5,8 +5,10 @@
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
+use gpui_kit::component::button::{Button, ButtonVariants as _, Toggle, ToggleGroup};
 use gpui_kit::component::input::{Escape as InputEscape, Input, InputEvent, InputState};
-use gpui_kit::component::{Icon, IconNamed as _};
+use gpui_kit::component::tag::Tag;
+use gpui_kit::component::{Icon, IconName, IconNamed as _, Selectable as _, Sizable as _};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use roostr_core::filters::space_filter_of;
@@ -20,6 +22,7 @@ use crate::DataViewKind;
 use crate::common::{
     self, BoundsCell, Place, appear, bounds_cell, floating, inside_any, kit_menu, kit_row,
     kit_title, menu_surface, menu_title, new_button, separator, tag_pill, track_bounds, vrow,
+    vrow_content,
 };
 use crate::config::{self, FilterRule, SortRule, ViewProp};
 use crate::layout_icon::layout_icon;
@@ -663,22 +666,20 @@ impl QueryControls {
             .into_any_element()
     }
 
-    fn cbtn(&self, id: &'static str, glyph: Glyph, on: bool) -> Stateful<Div> {
-        div()
-            .id(id)
-            .flex()
+    /// A controls-row toggle (`.cbtn`): the kit toggle, on = the accent glyph.
+    fn cbtn(&self, id: &'static str, glyph: Glyph, on: bool) -> Toggle {
+        Toggle::new(id)
+            .checked(on)
+            .icon(Icon::new(glyph).size(px(20.)))
             .flex_none()
-            .items_center()
-            .justify_center()
             .size(px(28.))
+            .min_w(px(28.))
+            .p_0()
             .rounded(px(6.))
             .cursor_pointer()
             .text_color(if on { theme::accent() } else { theme::muted() })
-            .hover(|s| {
-                s.bg(theme::hl_med())
-                    .text_color(if on { theme::accent() } else { theme::fg() })
-            })
-            .child(Icon::new(glyph).size(px(20.)))
+            // On reads as the accent glyph alone, not the kit's pressed fill.
+            .when(on, |t| t.bg(transparent_black()))
     }
 
     fn prop_caption(&self, current: Option<&ViewProp>, current_key: &str) -> Div {
@@ -725,7 +726,7 @@ impl QueryControls {
         let row = |p: &ViewProp, cx: &mut Context<Self>| {
             let key = p.key.clone();
             vrow(SharedString::from(format!("plist-{}", p.key)), false)
-                .child(
+                .child(vrow_content(
                     div()
                         .flex()
                         .items_center()
@@ -739,10 +740,13 @@ impl QueryControls {
                                 .child(p.emoji.clone()),
                         )
                         .child(p.name.clone()),
-                )
-                .when(p.key == current_key, |d| {
-                    d.child(div().text_color(theme::accent()).child("✓"))
-                })
+                    (p.key == current_key).then(|| {
+                        div()
+                            .text_color(theme::accent())
+                            .child("✓")
+                            .into_any_element()
+                    }),
+                ))
                 .on_click(cx.listener(move |this, _, _, cx| this.pick_prop(key.clone(), cx)))
         };
         let mut scroll = div()
@@ -818,9 +822,11 @@ impl QueryControls {
                         let current = f.value.clone();
                         let o = opt.clone();
                         tags = tags.child(
-                            div()
-                                .id(SharedString::from(format!("ftag-{i}-{opt}")))
-                                .cursor_pointer()
+                            Toggle::new(SharedString::from(format!("ftag-{i}-{opt}")))
+                                .checked(on)
+                                .p_0()
+                                .h_auto()
+                                .min_w_0()
                                 .rounded(px(999.))
                                 .border_1()
                                 .border_color(if on {
@@ -828,8 +834,9 @@ impl QueryControls {
                                 } else {
                                     transparent_black()
                                 })
+                                .bg(transparent_black())
                                 .opacity(if on { 1. } else { 0.45 })
-                                .hover(|s| if on { s } else { s.opacity(0.75) })
+                                .cursor_pointer()
                                 .child(
                                     tag_pill(opt.clone(), &color, false, theme::fg())
                                         .px(px(10.))
@@ -856,26 +863,16 @@ impl QueryControls {
                         for (j, v) in f.value.iter().enumerate() {
                             let current = f.value.clone();
                             multi = multi.child(
-                                div()
-                                    .flex()
-                                    .items_center()
+                                Tag::custom(theme::border(), theme::fg(), theme::border())
+                                    .rounded_full()
                                     .gap(px(4.))
-                                    .bg(theme::border())
-                                    .rounded(px(999.))
                                     .pl(px(10.))
                                     .pr(px(4.))
                                     .py(px(2.))
                                     .text_size(px(12.))
                                     .child(v.clone())
                                     .child(
-                                        div()
-                                            .id(("fval-x", i * 1000 + j))
-                                            .px(px(4.))
-                                            .text_size(px(13.))
-                                            .text_color(theme::muted())
-                                            .cursor_pointer()
-                                            .hover(|s| s.text_color(theme::fg()))
-                                            .child("×")
+                                        x_button(("fval-x", i * 1000 + j), "Remove value")
                                             .on_click(cx.listener(move |this, _, _, cx| {
                                                 let next = current
                                                     .iter()
@@ -904,30 +901,25 @@ impl QueryControls {
                 }
             }
             let all = filters.clone();
-            rule = rule.child(
-                div()
-                    .id(("fx", i))
-                    .text_size(px(14.))
-                    .text_color(theme::muted())
-                    .cursor_pointer()
-                    .hover(|s| s.text_color(rgb(0xf55522)))
-                    .child("×")
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        let next = all
-                            .iter()
-                            .enumerate()
-                            .filter(|(j, _)| *j != i)
-                            .map(|(_, f)| f.clone())
-                            .collect();
-                        this.rule_inputs.clear();
-                        this.save_filters(next, cx);
-                    })),
-            );
+            rule = rule.child(x_button(("fx", i), "Remove filter").on_click(cx.listener(
+                move |this, _, _, cx| {
+                    let next = all
+                        .iter()
+                        .enumerate()
+                        .filter(|(j, _)| *j != i)
+                        .map(|(_, f)| f.clone())
+                        .collect();
+                    this.rule_inputs.clear();
+                    this.save_filters(next, cx);
+                },
+            )));
             panel = panel.child(self.rule_row(id, entering, rule, window, cx));
         }
         self.rules_settled(Panel::Filter, &ids);
         let all = filters.clone();
-        let panel = panel.child(add_row("add-filter", "+ Add filter", false).on_click(
+        let panel = panel.child(add_row(
+            "add-filter",
+            "+ Add filter",
             cx.listener(move |this, _, _, cx| {
                 let mut next = all.clone();
                 next.push(FilterRule {
@@ -958,30 +950,23 @@ impl QueryControls {
             .to_string();
         let open = self.cond_open == Some(i);
         let mut host = div().relative().child(
-            div()
-                .id(("fcond", i))
-                .flex()
-                .items_center()
-                .gap(px(6.))
+            Button::new(("fcond", i))
+                .outline()
+                .selected(open)
+                .dropdown_caret(true)
+                .h_auto()
+                .px(px(8.))
+                .py(px(4.))
+                .rounded(px(6.))
                 .bg(theme::panel())
-                .border_1()
                 .border_color(if open {
                     theme::accent()
                 } else {
                     theme::border()
                 })
-                .rounded(px(6.))
-                .px(px(8.))
-                .py(px(4.))
-                .text_size(px(13.))
+                .text_color(theme::fg())
                 .cursor_pointer()
-                .child(label)
-                .child(
-                    div()
-                        .text_size(px(10.))
-                        .text_color(theme::muted())
-                        .child("▾"),
-                )
+                .child(div().text_size(px(13.)).child(label))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.cond_open = if this.cond_open == Some(i) {
                         None
@@ -1128,12 +1113,9 @@ impl QueryControls {
         let mut panel = panel_box().gap(px(2.));
         if sorts.is_empty() {
             panel = panel.child(
-                div()
-                    .text_size(px(12.))
-                    .text_color(theme::muted())
+                common::empty_state("No sorts applied", 12.)
                     .px(px(4.))
-                    .py(px(2.))
-                    .child("No sorts applied"),
+                    .py(px(2.)),
             );
         }
         for ((i, s), id) in sorts.iter().enumerate().zip(&ids) {
@@ -1160,19 +1142,24 @@ impl QueryControls {
             let dragging = self.sort_drag == Some(i);
             let over = self.sort_over == Some(i) && self.sort_drag.is_some_and(|d| d != i);
             let more_open = self.sort_more == Some(i);
-            let mut more =
-                div()
-                    .relative()
-                    .child(ibtn(("sort-more", i), "⋯").on_click(cx.listener(
-                        move |this, _, _, cx| {
-                            this.sort_more = if this.sort_more == Some(i) {
-                                None
-                            } else {
-                                Some(i)
-                            };
-                            cx.notify();
-                        },
-                    )));
+            let mut more = div().relative().child(
+                Button::new(("sort-more", i))
+                    .ghost()
+                    .xsmall()
+                    .icon(IconName::Ellipsis)
+                    .accessibility_label("More")
+                    .selected(more_open)
+                    .text_color(theme::muted())
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.sort_more = if this.sort_more == Some(i) {
+                            None
+                        } else {
+                            Some(i)
+                        };
+                        cx.notify();
+                    })),
+            );
             if more_open {
                 let this = cx.weak_entity();
                 let pick = |empty_start: bool| {
@@ -1285,30 +1272,34 @@ impl QueryControls {
                         ),
                 )
                 .child(
-                    div()
-                        .id(("sort-dir", i))
-                        .flex()
-                        .items_center()
-                        .gap(px(4.))
-                        .border_1()
-                        .border_color(theme::border())
-                        .rounded(px(8.))
+                    Button::new(("sort-dir", i))
+                        .outline()
+                        .h_auto()
                         .px(px(8.))
                         .py(px(3.))
-                        .text_size(px(13.))
+                        .rounded(px(8.))
+                        .border_color(theme::border())
+                        .bg(transparent_black())
+                        .text_color(theme::fg())
                         .cursor_pointer()
-                        .hover(|s| s.bg(theme::hl_med()))
                         .child(
-                            svg()
-                                .path(Glyph::SortArrow.path())
-                                .size(px(16.))
-                                .flex_none()
-                                .text_color(theme::fg())
-                                .with_transformation(Transformation::rotate(radians(
-                                    turn * std::f32::consts::PI,
-                                ))),
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(4.))
+                                .text_size(px(13.))
+                                .child(
+                                    svg()
+                                        .path(Glyph::SortArrow.path())
+                                        .size(px(16.))
+                                        .flex_none()
+                                        .text_color(theme::fg())
+                                        .with_transformation(Transformation::rotate(radians(
+                                            turn * std::f32::consts::PI,
+                                        ))),
+                                )
+                                .child(if s.desc { "Desc" } else { "Asc" }),
                         )
-                        .child(if s.desc { "Desc" } else { "Asc" })
                         .on_click(cx.listener(move |this, _, _, cx| {
                             let next = all2
                                 .iter()
@@ -1335,7 +1326,7 @@ impl QueryControls {
                         .ml_auto()
                         .opacity(if more_open { 1. } else { reveal })
                         .child(more)
-                        .child(ibtn(("sort-x", i), "✕").on_click(cx.listener(
+                        .child(x_button(("sort-x", i), "Delete sort").on_click(cx.listener(
                             move |this, _, _, cx| {
                                 let next = all3
                                     .iter()
@@ -1351,26 +1342,25 @@ impl QueryControls {
         }
         self.rules_settled(Panel::Sort, &ids);
         let all = sorts.clone();
-        panel = panel
-            .child(separator())
-            .child(
-                add_row("add-sort", "＋ Add sort", false).on_click(cx.listener(
-                    move |this, _, _, cx| {
-                        let mut next = all.clone();
-                        next.push(SortRule {
-                            key: "name".into(),
-                            desc: false,
-                            empty_start: false,
-                        });
-                        this.save_sorts(next, cx);
-                    },
-                )),
-            );
+        panel = panel.child(separator()).child(add_row(
+            "add-sort",
+            "＋ Add sort",
+            cx.listener(move |this, _, _, cx| {
+                let mut next = all.clone();
+                next.push(SortRule {
+                    key: "name".into(),
+                    desc: false,
+                    empty_start: false,
+                });
+                this.save_sorts(next, cx);
+            }),
+        ));
         if !sorts.is_empty() {
-            panel = panel.child(
-                add_row("clear-sort", "Delete sort", true)
-                    .on_click(cx.listener(|this, _, _, cx| this.save_sorts(vec![], cx))),
-            );
+            panel = panel.child(add_row(
+                "clear-sort",
+                "Delete sort",
+                cx.listener(|this, _, _, cx| this.save_sorts(vec![], cx)),
+            ));
         }
         self.rules_panel(panel)
     }
@@ -1420,28 +1410,33 @@ fn panel_box() -> Div {
         .text_size(px(13.))
 }
 
-fn add_row(id: &'static str, label: &'static str, _clear: bool) -> Stateful<Div> {
-    div()
-        .id(id)
-        .py(px(2.))
-        .text_size(px(13.))
+/// A muted text action of a rules panel ("+ Add filter", "Delete sort"): a
+/// kit ghost button at its own width.
+fn add_row(
+    id: &'static str,
+    label: &'static str,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> Button {
+    Button::new(id)
+        .ghost()
+        .xsmall()
+        .self_start()
+        // The kit sizes a label itself (12px at xsmall): the text sits in a child.
+        .child(div().text_size(px(13.)).child(label))
         .text_color(theme::muted())
         .cursor_pointer()
-        .hover(|s| s.text_color(theme::fg()))
-        .child(label)
+        .on_click(on_click)
 }
 
-fn ibtn(id: impl Into<ElementId>, label: &'static str) -> Stateful<Div> {
-    div()
-        .id(id)
-        .rounded(px(6.))
-        .px(px(7.))
-        .py(px(2.))
-        .text_size(px(13.))
+/// A muted kit ghost "×" removing a value, a rule or a sort.
+fn x_button(id: impl Into<ElementId>, label: &'static str) -> Button {
+    Button::new(id)
+        .ghost()
+        .xsmall()
+        .icon(IconName::Close)
+        .accessibility_label(label)
         .text_color(theme::muted())
         .cursor_pointer()
-        .hover(|s| s.bg(theme::hl_med()).text_color(theme::fg()))
-        .child(label)
 }
 
 /// A bordered filter value input (`select, input` style).
@@ -1513,40 +1508,43 @@ impl Render for QueryControls {
                 .max_w(px(260.))
                 .child(track_bounds(&self.chip_bounds))
                 .child(
-                    div()
-                        .id("prop-chip")
-                        .flex()
-                        .items_center()
+                    Button::new("prop-chip")
+                        .outline()
+                        .selected(self.chip_open)
+                        .dropdown_caret(true)
+                        .flex_shrink(1.)
                         .min_w_0()
                         .h(px(28.))
                         .px(px(8.))
-                        .border_1()
-                        .border_color(theme::border())
                         .rounded(px(8.))
-                        .text_size(px(12.))
-                        .whitespace_nowrap()
-                        .cursor_pointer()
-                        .when(self.chip_open, |d| d.bg(theme::hl_med()))
-                        .hover(|s| s.bg(theme::hl_med()))
-                        .tooltip(roostr_core::ui::tooltip(title))
-                        // `.pchip-title`: hidden at ≤720px.
-                        .when(!roostr_core::layout::is_mobile(window), |d| {
-                            d.child(
-                                div()
-                                    .flex_none()
-                                    .text_color(theme::muted())
-                                    .mr(px(6.))
-                                    .child(format!("{prop_title}:")),
-                            )
+                        .border_color(theme::border())
+                        .bg(if self.chip_open {
+                            theme::hl_med()
+                        } else {
+                            transparent_black()
                         })
-                        .child(self.prop_caption(current.as_ref(), &current_key))
+                        .text_color(theme::fg())
+                        .cursor_pointer()
+                        .tooltip(title)
                         .child(
                             div()
-                                .flex_none()
-                                .text_color(theme::muted())
-                                .text_size(px(10.))
-                                .ml(px(6.))
-                                .child("▾"),
+                                .flex()
+                                .flex_1()
+                                .min_w_0()
+                                .items_center()
+                                .text_size(px(12.))
+                                .whitespace_nowrap()
+                                // `.pchip-title`: hidden at ≤720px.
+                                .when(!roostr_core::layout::is_mobile(window), |d| {
+                                    d.child(
+                                        div()
+                                            .flex_none()
+                                            .text_color(theme::muted())
+                                            .mr(px(6.))
+                                            .child(format!("{prop_title}:")),
+                                    )
+                                })
+                                .child(self.prop_caption(current.as_ref(), &current_key)),
                         )
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.chip_open = !this.chip_open;
@@ -1637,15 +1635,31 @@ impl Render for QueryControls {
                     })),
             );
         if self.settings_open {
-            let mut tiles = div().grid().grid_cols(4).gap(px(4.));
+            // The layout tiles: one kit toggle each, the current one checked.
+            let current_layout = LAYOUTS.iter().position(|(v, _)| view_type == *v);
+            let mut tiles = ToggleGroup::new("layouts")
+                .w_full()
+                .gap(px(4.))
+                .on_click(cx.listener(move |this, next: &Vec<bool>, _, cx| {
+                    // The tile whose state flipped is the one pressed.
+                    let pressed = next
+                        .iter()
+                        .enumerate()
+                        .position(|(ix, on)| *on != (Some(ix) == current_layout));
+                    if let Some(ix) = pressed {
+                        this.pick_layout(LAYOUTS[ix].0, cx);
+                    }
+                }));
             for (v, label) in LAYOUTS {
                 let active = view_type == *v;
+                let ink = if active { theme::fg() } else { theme::muted() };
                 tiles = tiles.child(
-                    div()
-                        .id(SharedString::from(format!("layout-{v}")))
-                        .flex()
+                    Toggle::new(SharedString::from(format!("layout-{v}")))
+                        .checked(active)
+                        .flex_1()
                         .flex_col()
-                        .items_center()
+                        .min_w_0()
+                        .h_auto()
                         .gap(px(2.))
                         .border_1()
                         .border_color(if active {
@@ -1658,16 +1672,11 @@ impl Render for QueryControls {
                         .px(px(2.))
                         .pb(px(6.))
                         .text_size(px(12.))
-                        .text_color(if active { theme::fg() } else { theme::muted() })
+                        .text_color(ink)
                         .cursor_pointer()
-                        .hover(|s| s.bg(theme::hl_med()).text_color(theme::fg()))
-                        .child(layout_icon(
-                            v,
-                            44.,
-                            if active { theme::fg() } else { theme::muted() },
-                        ))
-                        .child(*label)
-                        .on_click(cx.listener(move |this, _, _, cx| this.pick_layout(v, cx))),
+                        .when(active, |t| t.bg(transparent_black()))
+                        .child(layout_icon(v, 44., ink))
+                        .label(*label),
                 );
             }
             let mut vmenu = menu_surface()
@@ -1690,17 +1699,20 @@ impl Render for QueryControls {
                     .child(track_bounds(&self.vsub_bounds))
                     .child(
                         vrow("vsub-row", self.prop_list_open)
-                            .child(prop_title)
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .text_size(px(12.))
-                                    .text_color(theme::muted())
-                                    .whitespace_nowrap()
-                                    .child(self.prop_caption(current.as_ref(), &current_key))
-                                    .child(div().ml(px(4.)).child("›")),
-                            )
+                            .child(vrow_content(
+                                prop_title,
+                                Some(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .text_size(px(12.))
+                                        .text_color(theme::muted())
+                                        .whitespace_nowrap()
+                                        .child(self.prop_caption(current.as_ref(), &current_key))
+                                        .child(div().ml(px(4.)).child("›"))
+                                        .into_any_element(),
+                                ),
+                            ))
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.prop_list_open = !this.prop_list_open;
                                 if this.prop_list_open {
@@ -1755,7 +1767,6 @@ impl Render for QueryControls {
             .child(
                 new_button("new-btn", self.creating)
                     .when(split, |d| d.rounded_r(px(0.)))
-                    .child("New")
                     .on_click(cx.listener(|this, _, _, cx| {
                         if !this.creating {
                             this.new_record(cx)
@@ -1764,21 +1775,19 @@ impl Render for QueryControls {
             );
         if split {
             new_wrap = new_wrap.child(
-                div()
-                    .id("new-chev")
-                    .flex()
-                    .items_center()
+                Button::new("new-chev")
+                    .primary()
+                    .xsmall()
+                    .icon(IconName::ChevronDown)
+                    .accessibility_label("New from template…")
+                    .w(px(22.))
                     .h(px(28.))
-                    .px(px(6.))
-                    .bg(theme::accent())
-                    .text_color(theme::white())
-                    .text_size(px(11.))
+                    .rounded(px(8.))
+                    .rounded_l(px(0.))
                     .border_l_1()
                     .border_color(hsla(0., 0., 1., 0.25))
-                    .rounded_r(px(8.))
                     .cursor_pointer()
-                    .tooltip(roostr_core::ui::tooltip("New from template…"))
-                    .child("▾")
+                    .tooltip("New from template…")
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.tpl_pick_open = !this.tpl_pick_open;
                         cx.notify();

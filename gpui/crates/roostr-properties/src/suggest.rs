@@ -11,19 +11,22 @@
 use std::rc::Rc;
 
 use gpui_kit::base::actions::{Cancel, Confirm};
+use gpui_kit::component::Icon;
 use gpui_kit::component::IndexPath;
 use gpui_kit::component::command::{Command, CommandGroup, CommandItem, CommandState};
 use gpui_kit::component::input::Escape;
+use gpui_kit::component::label::Label;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use roostr_core::objects::type_glyph;
 use roostr_core::relations::{
-    CREATABLE_FORMATS, create_relation, format_glyph, is_reserved_key, space_relations,
+    CREATABLE_FORMATS, create_relation, is_reserved_key, space_relations,
 };
+use roostr_core::ui::prop_icon;
 use roostr_core::{RelationDef, Store, TypeDef, theme};
 
 use crate::type_limit::{TypeLimitPicker, toggled};
-use crate::widgets::{empty_note, pop_shadow};
+use crate::widgets::{act_button, empty_note, pop_shadow};
 
 /// What a suggest menu reports to its host.
 pub enum SuggestEvent<T> {
@@ -58,9 +61,17 @@ fn format_name(format: &str) -> &str {
     }
 }
 
-/// A row's glyph (emoji or format/type glyph) and name, with an optional
-/// muted note at the right end.
-fn glyph_name(glyph: String, name: String, note: Option<String>) -> Div {
+/// A row's lead (the property's emoji, else its format's line icon) and
+/// name, with an optional muted note at the right end.
+fn glyph_name(emoji: Option<String>, format: &str, name: String, note: Option<String>) -> Div {
+    let lead = match emoji {
+        Some(e) => div().child(e),
+        None => div()
+            .flex()
+            .justify_center()
+            .text_color(theme::muted())
+            .child(Icon::new(prop_icon(format)).size(px(14.))),
+    };
     div()
         .flex()
         .justify_between()
@@ -75,7 +86,7 @@ fn glyph_name(glyph: String, name: String, note: Option<String>) -> Div {
                 .items_center()
                 .gap(px(8.))
                 .min_w_0()
-                .child(div().flex_none().w(px(18.)).text_center().child(glyph))
+                .child(lead.flex_none().w(px(18.)).text_center())
                 .child(
                     div()
                         .min_w_0()
@@ -254,19 +265,6 @@ impl PropertySuggest {
         let space = self.space_id.clone();
         let raw = raw.to_string();
         move || {
-            let button = |id: &'static str, label: &'static str| {
-                div()
-                    .id(id)
-                    .border_1()
-                    .border_color(theme::border())
-                    .rounded(theme::radius::sm())
-                    .px(px(10.))
-                    .py(px(4.))
-                    .text_size(px(13.))
-                    .cursor_pointer()
-                    .hover(|s| s.border_color(theme::accent()))
-                    .child(label)
-            };
             let (toggle, back, create) = (entity.clone(), entity.clone(), entity.clone());
             div()
                 .flex()
@@ -274,13 +272,12 @@ impl PropertySuggest {
                 .gap(px(4.))
                 .p(px(4.))
                 .child(
-                    div()
+                    Label::new(format!("Object “{raw}” links to").to_uppercase())
                         .px(px(6.))
                         .pt(px(6.))
                         .pb(px(2.))
                         .text_size(px(10.))
-                        .text_color(theme::muted())
-                        .child(format!("Object “{raw}” links to").to_uppercase()),
+                        .text_color(theme::muted()),
                 )
                 .child(TypeLimitPicker::new(
                     "limit",
@@ -299,17 +296,17 @@ impl PropertySuggest {
                         .gap(px(6.))
                         .justify_end()
                         .mt(px(6.))
-                        .child(button("back", "Back").on_click(move |_, _, cx| {
+                        .child(act_button("back", "Back", false).on_click(move |_, _, cx| {
                             let _ = back.update(cx, |this, cx| {
                                 this.create_format.clear();
                                 cx.notify();
                             });
                         }))
-                        .child(
-                            button("create-it", "Create").on_click(move |_, window, cx| {
+                        .child(act_button("create-it", "Create", false).on_click(
+                            move |_, window, cx| {
                                 let _ = create.update(cx, |this, cx| this.create(window, cx));
-                            }),
-                        ),
+                            },
+                        )),
                 )
                 .into_any_element()
         }
@@ -365,11 +362,7 @@ impl Render for PropertySuggest {
                     .map(|&f| {
                         (
                             row_item(format_name(f).to_string(), move || {
-                                glyph_name(
-                                    format_glyph(f).to_string(),
-                                    format_name(f).to_string(),
-                                    None,
-                                )
+                                glyph_name(None, f, format_name(f).to_string(), None)
                             }),
                             Target::Format(f),
                         )
@@ -398,14 +391,19 @@ impl Render for PropertySuggest {
                 filtered
                     .into_iter()
                     .map(|rel| {
-                        let (glyph, name, format) = (
-                            rel.icon_emoji.clone().unwrap_or_default(),
+                        let (emoji, name, format) = (
+                            rel.icon_emoji.clone().filter(|e| !e.is_empty()),
                             Self::label(&rel),
                             rel.format.clone(),
                         );
                         (
                             row_item(name.clone(), move || {
-                                glyph_name(glyph.clone(), name.clone(), Some(format.clone()))
+                                glyph_name(
+                                    emoji.clone(),
+                                    &format,
+                                    name.clone(),
+                                    Some(format.clone()),
+                                )
                             }),
                             Target::Relation(rel),
                         )

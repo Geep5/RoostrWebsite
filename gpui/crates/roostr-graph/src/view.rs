@@ -7,6 +7,7 @@ use std::cell::Cell;
 use std::rc::Rc;
 use std::time::Duration;
 
+use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
 use gpui_kit::component::input::{Enter, Escape, Input, InputEvent, InputState, MoveDown, MoveUp};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -856,30 +857,46 @@ impl GraphView {
             .rounded_full();
         for (i, (label, _)) in LEVELS.iter().enumerate() {
             let on = i == self.level;
+            let variant = if on {
+                ButtonCustomVariant::new(cx)
+                    .color(hex(0xe7e9ee, 1.))
+                    .foreground(hex(0x0c0e13, 1.))
+                    .hover(hex(0xe7e9ee, 1.))
+                    .active(hex(0xe7e9ee, 1.))
+            } else {
+                ButtonCustomVariant::new(cx)
+                    .color(hsla(0., 0., 0., 0.))
+                    .foreground(hex(0x9aa0ae, 1.))
+                    .hover(hsla(0., 0., 1., 0.06))
+                    .active(hsla(0., 0., 1., 0.1))
+            };
             pill = pill.child(
-                div()
-                    .id(("graph-level", i))
-                    .flex()
-                    .items_center()
-                    .gap(px(8.))
-                    .rounded_full()
+                Button::new(("graph-level", i))
+                    .custom(variant)
+                    .rounded(px(999.))
+                    // The kit paints a custom variant's resting fill at 20%.
+                    .when(on, |b| b.bg(hex(0xe7e9ee, 1.)))
+                    .h_auto()
                     .px(px(16.))
                     .py(px(8.))
-                    .text_size(px(13.))
-                    .font_weight(FontWeight::MEDIUM)
-                    .cursor_pointer()
-                    .when(on, |d| {
-                        d.bg(hex(0xe7e9ee, 1.)).text_color(hex(0x0c0e13, 1.))
-                    })
-                    .when(!on, |d| d.text_color(hex(0x9aa0ae, 1.)))
+                    // The kit's inner content box forces its own text size
+                    // and gap, so the label row carries them itself.
                     .child(
                         div()
-                            .font_family(roostr_core::theme::fonts::MONO)
-                            .text_size(px(10.))
-                            .opacity(0.6)
-                            .child((i + 1).to_string()),
+                            .flex()
+                            .items_center()
+                            .gap(px(8.))
+                            .text_size(px(13.))
+                            .font_weight(FontWeight::MEDIUM)
+                            .child(
+                                div()
+                                    .font_family(roostr_core::theme::fonts::MONO)
+                                    .text_size(px(10.))
+                                    .opacity(0.6)
+                                    .child((i + 1).to_string()),
+                            )
+                            .child(*label),
                     )
-                    .child(*label)
                     .on_click(cx.listener(move |this, _, _, cx| this.go_level(i, cx))),
             );
         }

@@ -4,6 +4,9 @@
 use std::collections::HashMap;
 
 use chrono::TimeZone as _;
+use gpui_kit::component::Sizable as _;
+use gpui_kit::component::link::Link;
+use gpui_kit::component::progress::Progress;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use roostr_core::nav::{self, Route};
@@ -141,9 +144,10 @@ fn ellipsis(text: impl Into<SharedString>) -> Div {
         .child(text.into())
 }
 
-/// One usage bar row: [dot] name, track, percentage.
+/// One usage bar row: [dot] name, kit progress bar, percentage.
 fn bar_row(dot_color: Option<Hsla>, name: String, u: f64, color: Hsla) -> Div {
     let name_w = if dot_color.is_some() { 104. } else { 96. };
+    let id = ElementId::Name(format!("usage-{name}").into());
     div()
         .flex()
         .items_center()
@@ -157,19 +161,11 @@ fn bar_row(dot_color: Option<Hsla>, name: String, u: f64, color: Hsla) -> Div {
                 .text_color(hex(0xd6dae3, 1.)),
         )
         .child(
-            div()
+            Progress::new(id)
+                .xsmall()
                 .flex_1()
-                .h(px(4.))
-                .rounded(px(2.))
-                .bg(hsla(0., 0., 1., 0.06))
-                .overflow_hidden()
-                .child(
-                    div()
-                        .h_full()
-                        .rounded(px(2.))
-                        .bg(color)
-                        .w(relative(u as f32)),
-                ),
+                .color(color)
+                .value(u as f32 * 100.),
         )
         .child(muted_small(pct(u)).w(px(36.)).flex_none().text_right())
 }
@@ -600,13 +596,9 @@ fn object_panel(
         )
     })
     .child(
-        div()
-            .id("graph-open-object")
+        Link::new("graph-open-object")
             .text_size(px(13.))
             .text_color(hex(0xc9cfe0, 1.))
-            .hover(|s| s.text_color(hex(0xffffff, 1.)))
-            .underline()
-            .cursor_pointer()
             .child("Open object")
             .on_click(move |_, _, cx| nav::navigate(Route::Object(id.clone()), cx)),
     )
