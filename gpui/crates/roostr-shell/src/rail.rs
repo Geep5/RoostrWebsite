@@ -45,6 +45,40 @@ pub(crate) fn mix(a: Hsla, p: f32, b: Hsla) -> Hsla {
     .into()
 }
 
+/// A strip's fold button (the rail's, the sidebar's): « like the right
+/// pane's collapse », pointing the way the strip slides.
+pub(crate) fn fold_button(id: &'static str, tip: &'static str) -> Stateful<Div> {
+    div()
+        .id(id)
+        .debug_selector(move || id.to_string())
+        .flex_none()
+        .size(px(26.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .border_1()
+        .border_color(theme::border())
+        .rounded(px(7.))
+        .text_size(px(14.))
+        .text_color(theme::muted())
+        .cursor_pointer()
+        .hover(|s| s.text_color(theme::fg()).border_color(theme::muted()))
+        .tooltip(crate::tip(tip))
+        .child("«")
+}
+
+/// Slides a folded strip's handle in, as the right pane's folded chip does.
+pub(crate) fn slide_in<E: IntoElement + Styled + 'static>(
+    id: &'static str,
+    el: E,
+) -> AnimationElement<E> {
+    el.with_animation(
+        id,
+        Animation::new(Duration::from_millis(220)).with_easing(ease_out_quint()),
+        |d, t| d.opacity(t).ml(px(-12. * (1. - t))),
+    )
+}
+
 /// `color` as gpui-motion's sRGB colour.
 fn motion_color(color: Hsla) -> motion::Color {
     let Rgba { r, g, b, a } = color.to_rgb();
@@ -227,15 +261,45 @@ impl Workspace {
                             }),
                     )
                 })
-                .tooltip(crate::tip(title))
+                // The sidebar, folded, folds into the space it shows: a click on it opens it again.
+                .when(active && self.side_folded, |d| {
+                    d.child(slide_in(
+                        "side-folded-chip",
+                        div()
+                            .absolute()
+                            .right(px(1.))
+                            .bottom(px(1.))
+                            .size(px(15.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded_full()
+                            .border_1()
+                            .border_color(theme::border())
+                            .bg(theme::panel())
+                            .text_size(px(10.))
+                            .text_color(theme::fg())
+                            .child("›"),
+                    ))
+                })
+                .tooltip(crate::tip(if active && self.side_folded {
+                    format!("Show {}", space.name)
+                } else {
+                    title
+                }))
                 .debug_selector({
                     let id = id.clone();
                     move || format!("space:{id}")
                 })
                 .on_click(cx.listener({
                     let id = id.clone();
-                    move |_, _, _, cx| {
-                        roostr_core::nav::open_space(&id, cx);
+                    move |this, _, _, cx| {
+                        if active && this.side_folded {
+                            let rail = this.rail_folded;
+                            this.set_folds(rail, false, cx);
+                        } else {
+                            roostr_core::nav::open_space(&id, cx);
+                        }
                     }
                 }))
                 .on_drag(payload, |payload, _, _, cx| {
@@ -335,6 +399,27 @@ impl Workspace {
                 .on_click(cx.listener(|this, _, window, cx| this.new_space(window, cx))),
         );
         rail = rail.child(div().flex_1());
+        // Fold the rail: it slides shut into the sidebar, whose header offers it back.
+        rail = rail.child(
+            div()
+                .flex()
+                .mb(px(6.))
+                .map(|d| {
+                    if wide {
+                        d.px(px(8.))
+                    } else {
+                        d.justify_center()
+                    }
+                })
+                .child(
+                    fold_button("rail-fold", "Hide spaces").on_click(cx.listener(
+                        |this, _, _, cx| {
+                            let side = this.side_folded;
+                            this.set_folds(true, side, cx);
+                        },
+                    )),
+                ),
+        );
 
         // Sync dot.
         let progress = sync_progress(&status);
