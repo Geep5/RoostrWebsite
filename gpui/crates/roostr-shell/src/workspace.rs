@@ -1046,14 +1046,17 @@ impl Workspace {
         // A narrower window narrows the columns to fit (or shows one and a
         // strip); the chosen widths come back when there is room.
         let room = f32::from(window.viewport_size().width) - rail_target - side_target;
-        let (layout, pane_open) = {
+        let (layout, pane_open, pane_here) = {
             let pane = PaneState::global(cx).read(cx);
             let layout = if views.is_some() {
                 pane.layout(room)
             } else {
                 PaneLayout::HIDDEN
             };
-            (layout, pane.any_open())
+            // The page has a pane (both columns may be collapsed - then only the edge tab shows).
+            let here =
+                views.is_some() && (pane.has(PaneTab::Chat) || pane.has(PaneTab::Properties));
+            (layout, pane.any_open(), here)
         };
         self.pane_layout = layout;
         let chat_col = column(&mut self.chat_col, layout.chat.width(), animate, window, cx);
@@ -1165,7 +1168,7 @@ impl Workspace {
                 self.render_drawer_tab(DwellTab::Nav, !self.nav_hidden, window, cx)
                     .left(px(nav_tab_left)),
             )
-            .when(layout != PaneLayout::HIDDEN, |d| {
+            .when(pane_here, |d| {
                 let right = (chat_col + props_col + 3. - 8. - drawer_tab_spill()).max(0.);
                 d.child(
                     self.render_drawer_tab(DwellTab::Pane, pane_open, window, cx)
