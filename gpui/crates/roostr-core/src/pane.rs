@@ -327,20 +327,22 @@ impl PaneState {
         UiState::set(cx, key, &self.width(tab));
     }
 
-    /// The columns in `room` (the window less the rail and sidebar). The
-    /// page keeps `PAGE_MIN` beside them: two expanded columns that will not
-    /// both fit at `MIN_WIDTH` show the one expanded last, the other as its
-    /// strip (its stored state untouched, it comes back with the room); a
-    /// lone column narrows to fit but never below `MIN_WIDTH`, as before.
+    /// The columns in `room` (the window less the rail and sidebar). A
+    /// collapsed column takes no room: it slides shut, and the open column's
+    /// header offers it back (both collapsed, both slide away; the edge tab
+    /// brings them back). The page keeps `PAGE_MIN` beside them: two expanded
+    /// columns that will not both fit at `MIN_WIDTH` show the one expanded
+    /// last, the other as its strip (its stored state untouched, it comes
+    /// back with the room); a lone column narrows to fit but never below
+    /// `MIN_WIDTH`, as before.
     pub fn layout(&self, room: f32) -> PaneLayout {
         let mut layout = PaneLayout::HIDDEN;
         let mut open = Vec::with_capacity(2);
         for tab in [PaneTab::Chat, PaneTab::Properties] {
-            if self.has(tab) {
+            if self.has(tab) && self.is_open(tab) {
+                // A strip until it is given a width: the one squeezed out stays one.
                 layout.set(tab, Column::Strip);
-                if self.is_open(tab) {
-                    open.push(tab);
-                }
+                open.push(tab);
             }
         }
         let strips = |layout: &PaneLayout| {
@@ -446,11 +448,13 @@ mod tests {
     }
 
     #[test]
-    fn collapsed_columns_are_strips_and_chat_needs_a_discussion() {
+    fn collapsed_columns_take_no_room_and_chat_needs_a_discussion() {
+        // One collapsed: it slides shut, the other keeps its width.
         let layout = state(false, true).layout(1400.);
-        assert_eq!(layout.chat, Column::Strip);
+        assert_eq!(layout.chat, Column::Hidden);
         assert_eq!(layout.properties, Column::Open(320.));
-        assert_eq!(state(false, false).layout(1400.).width(), 2. * STRIP_WIDTH);
+        // Both collapsed: both go.
+        assert_eq!(state(false, false).layout(1400.), PaneLayout::HIDDEN);
         let mut pane = state(true, true);
         pane.chat = false;
         let layout = pane.layout(1400.);

@@ -268,6 +268,42 @@ impl ConversationDrawer {
             .child("»")
     }
 
+    /// A collapsed column folded into the open one's header: its icon and
+    /// name, sliding in from the right as the column slides shut; a click
+    /// expands it again.
+    fn render_folded(tab: PaneTab, cx: &App) -> impl IntoElement {
+        let name = tab.name();
+        div()
+            .id(ElementId::Name(format!("pane-folded-{name}").into()))
+            .debug_selector(move || format!("pane-folded-{name}"))
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap(px(5.))
+            .h(px(26.))
+            .px(px(8.))
+            .border_1()
+            .border_color(theme::border())
+            .rounded(px(7.))
+            .text_size(px(12.))
+            .text_color(theme::muted())
+            .cursor_pointer()
+            .hover(|s| s.text_color(theme::fg()).border_color(theme::muted()))
+            .tooltip(move |window, cx| {
+                Tooltip::new(format!("Show {}", name.to_lowercase())).build(window, cx)
+            })
+            .on_click(move |_, _, cx| {
+                PaneState::global(cx).update(cx, |p, cx| p.set_open(tab, true, cx))
+            })
+            .child(div().text_size(px(12.)).child(tab.icon(cx)))
+            .child(name)
+            .with_animation(
+                ElementId::Name(format!("pane-fold-in-{name}").into()),
+                Animation::new(Duration::from_millis(220)).with_easing(ease_out_quint()),
+                |d, t| d.opacity(t).ml(px(24. * (1. - t))),
+            )
+    }
+
     /// A header row; the divider is inset like the object header's, not edge to edge.
     fn render_head(children: impl IntoIterator<Item = AnyElement>) -> Div {
         div()
@@ -352,12 +388,16 @@ impl ConversationDrawer {
         self.in_sheet = false;
         self.drop_collapsed(cx);
         self.ensure_view(tab, window, cx);
-        let first = {
+        let (first, folded) = {
             let pane = PaneState::global(cx).read(cx);
-            tab == PaneTab::Chat || !(self.chat && pane.chat_open)
+            let other = tab.other();
+            (
+                tab == PaneTab::Chat || !(self.chat && pane.chat_open),
+                pane.has(other) && !pane.is_open(other),
+            )
         };
         let name = tab.name();
-        let head = Self::render_head([
+        let mut head = vec![
             div()
                 .flex_none()
                 .text_size(px(13.))
@@ -370,8 +410,13 @@ impl ConversationDrawer {
                 .font_weight(FontWeight::SEMIBOLD)
                 .child(name)
                 .into_any_element(),
-            self.render_collapse(Some(tab)).into_any_element(),
-        ]);
+        ];
+        // The other column, collapsed, folds into this header: a click opens it again.
+        if folded {
+            head.push(Self::render_folded(tab.other(), cx).into_any_element());
+        }
+        head.push(self.render_collapse(Some(tab)).into_any_element());
+        let head = Self::render_head(head);
         div()
             .debug_selector(move || format!("pane-col-{name}"))
             .size_full()

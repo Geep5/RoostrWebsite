@@ -902,18 +902,22 @@ impl Workspace {
                 .and_then(|v| v.column(tab))
                 .map(IntoElement::into_any_element),
             Column::Strip => Some(self.render_pane_strip(tab, cx).into_any_element()),
-            Column::Hidden => None,
+            // Sliding shut after a collapse: its card goes with it (the view itself is already
+            // dropped - drawing it would rebuild the chat every frame).
+            Column::Hidden => Some(div().into_any_element()),
         };
+        let content_width = col - 6.;
         div()
             .flex_none()
             .w(px(col))
             .h_full()
             .py(px(6.))
+            .overflow_hidden()
             .when_some(inner, |d, inner| {
                 d.child(
                     div()
                         .flex_none()
-                        .w(px(col - 6.))
+                        .w(px(content_width))
                         .h_full()
                         .rounded(theme::radius::page())
                         .bg(theme::bg())
