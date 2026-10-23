@@ -19,6 +19,7 @@ use gpui_kit::*;
 use roostr_core::markdown::{Align, Block, Inline, TaskCheck, parse};
 use roostr_core::nav::{self, Route};
 use roostr_core::objects::{is_image_icon, object_icon};
+use roostr_core::options::{TagPaint, tint_paint};
 use roostr_core::{Store, theme};
 
 /// Colors of the bubble the text sits in.
@@ -31,19 +32,18 @@ pub(crate) struct MdTheme {
     pub mention_names: Vec<(String, String)>,
 }
 
-const OBJ_LINK_BG: u32 = 0x2ea04338;
-const OBJ_LINK_INK: u32 = 0xb8e6c1;
-
 enum Click {
     Object(String),
     Url(String),
 }
 
-/// One rendered line: text, runs and clickable ranges.
+/// One rendered line: text, runs, clickable ranges and the ranges drawn as
+/// tags (a kit-tag box painted behind the text, see [`SelectableLine`]).
 struct Line {
     text: String,
     runs: Vec<TextRun>,
     clicks: Vec<(Range<usize>, Click)>,
+    tags: Vec<(Range<usize>, TagPaint)>,
 }
 
 impl Line {
@@ -97,6 +97,7 @@ fn build_line(inline: &Inline, md: &MdTheme, names: &[(String, String)], cx: &Ap
         text: String::new(),
         runs: Vec::new(),
         clicks: Vec::new(),
+        tags: Vec::new(),
     };
     let store = Store::global(cx);
     let store = store.read(cx);
@@ -140,14 +141,26 @@ fn build_line(inline: &Inline, md: &MdTheme, names: &[(String, String)], cx: &Ap
                         summary.map(|s| s.type_key.as_str()).unwrap_or("page"),
                         &space,
                     );
-                    run.background_color = Some(md.tint.unwrap_or(rgba(OBJ_LINK_BG).into()));
-                    run.color = if md.tint.is_some() {
-                        md.ink
-                    } else {
-                        rgb(OBJ_LINK_INK).into()
+                    // The composer's !object tag: the kit tag look in green
+                    // (a coloured bubble keeps its own tint).
+                    let paint = match md.tint {
+                        Some(tint) => {
+                            run.background_color = Some(tint);
+                            run.color = md.ink;
+                            None
+                        }
+                        None => {
+                            let paint = tint_paint(rgb(crate::discussion::OBJECT_GREEN).into());
+                            run.color = paint.fg;
+                            Some(paint)
+                        }
                     };
-                    line.push(&format!("{}\u{2009}", text_icon(&icon, &type_icon)), &run);
+                    // A narrow no-break space: the icon stays with the name.
+                    line.push(&format!("{}\u{202f}", text_icon(&icon, &type_icon)), &run);
                     line.push(&span.text, &run);
+                    if let Some(paint) = paint {
+                        line.tags.push((start..line.text.len(), paint));
+                    }
                     line.clicks
                         .push((start..line.text.len(), Click::Object(id.clone())));
                 }
@@ -187,22 +200,22 @@ fn build_line(inline: &Inline, md: &MdTheme, names: &[(String, String)], cx: &Ap
                 && let Some((name, icon)) = mention_at(&text[i..], names)
             {
                 line.push(&text[copied..i], &run);
-                // The composer's @agent tag look (kit tag shades of the
-                // person's chat colour); a text run carries no border.
+                // The composer's @agent tag: the kit tag look in the person's
+                // chat colour, its box painted behind the text.
                 let chat = Store::global(cx).read(cx).chat_color.clone();
-                let paint = roostr_core::options::tint_paint(
-                    roostr_core::color::hex(&chat).unwrap_or(theme::accent()),
-                );
+                let paint = tint_paint(roostr_core::color::hex(&chat).unwrap_or(theme::accent()));
                 let pill = TextRun {
                     color: paint.fg,
-                    background_color: Some(paint.bg),
                     font: Font {
                         weight: FontWeight::MEDIUM,
                         ..run.font.clone()
                     },
                     ..run.clone()
                 };
-                line.push(&format!("{}\u{2009}@{name}", text_icon(icon, "🤖")), &pill);
+                let start = line.text.len();
+                // A narrow no-break space: the icon stays with `@name`.
+                line.push(&format!("{}\u{202f}@{name}", text_icon(icon, "🤖")), &pill);
+                line.tags.push((start..line.text.len(), paint));
                 i += 1 + name.len();
                 copied = i;
                 continue;
@@ -241,7 +254,9 @@ fn render_line(
             })
             .into_any_element()
     };
-    SelectableLine::new(id, text, layout, element, order).into_any_element()
+    SelectableLine::new(id, text, layout, element, order)
+        .tags(line.tags)
+        .into_any_element()
 }
 
 /// One laid-out line of message text in the window text selection: gpui-base's
@@ -254,6 +269,8 @@ struct SelectableLine {
     element: AnyElement,
     /// Reading order among the lines of the conversation.
     order: u64,
+    /// Ranges painted as tags behind the text.
+    tags: Vec<(Range<usize>, TagPaint)>,
 }
 
 impl SelectableLine {
@@ -272,9 +289,15 @@ impl SelectableLine {
             layout,
             element,
             order: order.get(),
+            tags: Vec::new(),
         };
         order.set(order.get() + 1);
         this
+    }
+
+    fn tags(mut self, tags: Vec<(Range<usize>, TagPaint)>) -> Self {
+        self.tags = tags;
+        self
     }
 }
 
@@ -354,6 +377,41 @@ impl Element for SelectableLine {
             window.refresh();
         }
         let line_height = self.layout.line_height();
+        // Tags: the kit tag box (fill, 1px border, radius 4) behind each
+        // range, one box per row a wrapped tag covers, 2px past the glyphs.
+        for (range, paint) in &self.tags {
+            let (Some(mut start), Some(end)) = (
+                self.layout.position_for_index(range.start),
+                self.layout.position_for_index(range.end),
+            ) else {
+                continue;
+            };
+            // A tag the line wraps right before reports its start at the end
+            // of the previous row: it really starts at the next row's edge.
+            let first = self.text[range.start..]
+                .chars()
+                .next()
+                .map_or(0, char::len_utf8);
+            if let Some(after) = self.layout.position_for_index(range.start + first)
+                && after.y > start.y
+            {
+                start = point(bounds.left(), after.y);
+            }
+            for row in selection_quads(start, end, bounds, line_height) {
+                let row = Bounds::from_corners(
+                    point(row.left() - px(2.), row.top() + px(1.)),
+                    point(row.right() + px(2.), row.bottom() - px(1.)),
+                );
+                window.paint_quad(quad(
+                    row,
+                    px(4.),
+                    paint.bg,
+                    px(1.),
+                    paint.border,
+                    BorderStyle::Solid,
+                ));
+            }
+        }
         let color = Theme::global(cx).tokens.colors.selection;
         let mut edges = None;
         for range in projection.ranges().iter().flatten() {
