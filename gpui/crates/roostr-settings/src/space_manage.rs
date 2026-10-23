@@ -795,7 +795,7 @@ impl Render for SpaceManage {
         // Default type: what this space makes when Roostr doesn't ask.
         let default_type = Some(object.field_str("default_type"))
             .filter(|k| !k.is_empty())
-            .unwrap_or("note")
+            .unwrap_or(roostr_core::create::FALLBACK_TYPE)
             .to_string();
         let mut defaultable: Vec<_> = s
             .types

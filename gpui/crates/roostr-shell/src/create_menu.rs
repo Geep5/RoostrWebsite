@@ -95,7 +95,7 @@ impl CreateMenu {
             input,
             filter: String::new(),
             active: -1,
-            default_key: "note".into(),
+            default_key: roostr_core::create::FALLBACK_TYPE.into(),
             list,
             paths: Vec::new(),
             _subscriptions: subscriptions,

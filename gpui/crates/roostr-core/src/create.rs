@@ -26,6 +26,9 @@ pub const CREATABLE_TYPES: &[&str] = &["page", "note", "task", "person", "projec
 /// Types a space can't default to: each needs a choice first.
 pub const NOT_DEFAULTABLE: &[&str] = &["file", "machine", "agent", "credential"];
 
+/// What a space makes when its Default type is blank or unusable: a Page.
+pub const FALLBACK_TYPE: &str = "page";
+
 /// The built-in Tools (by name) a new agent gets when its template sets none.
 pub const DEFAULT_TOOLS: &[&str] = &["shell_exec", "web_fetch"];
 /// The Model a new agent starts with when its template sets none.
@@ -105,11 +108,11 @@ pub fn creatable_types(cx: &App) -> Vec<CreatableType> {
         .collect()
 }
 
-/// The space's Default type (`default_type` on the space object), "note"
-/// when unset, not defaultable, or gone from the space.
+/// The space's Default type (`default_type` on the space object),
+/// [`FALLBACK_TYPE`] when unset, not defaultable, or gone from the space.
 pub fn default_type_key(space_id: &str, cx: &App) -> Task<String> {
     if space_id.is_empty() {
-        return Task::ready("note".into());
+        return Task::ready(FALLBACK_TYPE.into());
     }
     let fetch = Store::global(cx).read(cx).fetch_object(space_id, cx);
     let space_id = space_id.to_string();
@@ -128,7 +131,7 @@ pub fn default_type_key(space_id: &str, cx: &App) -> Task<String> {
         if !key.is_empty() && !NOT_DEFAULTABLE.contains(&key.as_str()) && known {
             key
         } else {
-            "note".into()
+            FALLBACK_TYPE.into()
         }
     })
 }

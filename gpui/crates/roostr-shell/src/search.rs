@@ -233,7 +233,7 @@ impl SearchModal {
             results: Vec::new(),
             searching: false,
             chips: Vec::new(),
-            space_default: "note".into(),
+            space_default: roostr_core::create::FALLBACK_TYPE.into(),
             seq: 0,
             pending: None,
             scroll: ScrollHandle::new(),
