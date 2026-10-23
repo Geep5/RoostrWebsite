@@ -424,20 +424,6 @@ pub mod chat {
             cx,
         )
     }
-
-    /// Toggle this author's `emoji` reaction on a message.
-    pub fn react(
-        object_id: &str,
-        message_id: &str,
-        emoji: &str,
-        cx: &mut App,
-    ) -> Task<Result<JsonMap>> {
-        mutate(
-            "chat_react",
-            params(json!({ "object_id": object_id, "message_id": message_id, "emoji": emoji })),
-            cx,
-        )
-    }
 }
 
 /// Agent mailbox exchanges.

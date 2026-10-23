@@ -16,12 +16,6 @@ use roostr_core::{AgentEndpoint, AgentMessage, Block, MailboxEntry, MessageDeliv
 pub(crate) const DISCUSSION: &str = "__discussion__";
 
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct Reaction {
-    pub emoji: String,
-    pub authors: Vec<String>,
-}
-
-#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct ChatMessage {
     pub id: String,
     pub author: String,
@@ -29,30 +23,7 @@ pub(crate) struct ChatMessage {
     pub text: String,
     pub reply_to: String,
     pub origin: String,
-    pub reactions: Vec<Reaction>,
     pub mailbox: Option<MailboxEntry>,
-}
-
-fn parse_reactions(raw: &str) -> Vec<Reaction> {
-    let mut out = Vec::new();
-    for chunk in raw.split(';') {
-        let Some(bar) = chunk.find('|') else { continue };
-        if bar == 0 {
-            continue;
-        }
-        let authors: Vec<String> = chunk[bar + 1..]
-            .split(',')
-            .filter(|a| !a.is_empty())
-            .map(str::to_string)
-            .collect();
-        if !authors.is_empty() {
-            out.push(Reaction {
-                emoji: chunk[..bar].to_string(),
-                authors,
-            });
-        }
-    }
-    out
 }
 
 fn meta<'a>(block: &'a Block, key: &str) -> &'a str {
@@ -302,13 +273,6 @@ pub(crate) fn chat_blocks<'a>(object: &'a Object, root_id: &str) -> Vec<&'a Bloc
         .collect()
 }
 
-fn reactions_of(object: &Object, message_id: &str) -> Vec<Reaction> {
-    object
-        .block(message_id)
-        .map(|b| parse_reactions(meta(b, "reactions")))
-        .unwrap_or_default()
-}
-
 fn envelope_message(object: &Object, entry: &MailboxEntry) -> ChatMessage {
     let m = &entry.message;
     ChatMessage {
@@ -326,7 +290,6 @@ fn envelope_message(object: &Object, entry: &MailboxEntry) -> ChatMessage {
         } else {
             m.sender.object_id.clone()
         },
-        reactions: reactions_of(object, &m.id),
         mailbox: Some(entry.clone()),
     }
 }
@@ -339,7 +302,6 @@ fn block_message(block: &Block) -> ChatMessage {
         text: meta(block, "text").to_string(),
         reply_to: meta(block, "replyTo").to_string(),
         origin: meta_origin(block),
-        reactions: parse_reactions(meta(block, "reactions")),
         mailbox: None,
     }
 }
@@ -433,15 +395,6 @@ pub(crate) fn object_chat_messages(object: &Object) -> Vec<ChatMessage> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn reactions_parse() {
-        let r = parse_reactions("👍|a,b;|x;🔥|;❤️|c");
-        assert_eq!(r.len(), 2);
-        assert_eq!(r[0].emoji, "👍");
-        assert_eq!(r[0].authors, vec!["a", "b"]);
-        assert_eq!(r[1].emoji, "❤️");
-    }
 
     #[test]
     fn unique_prefers_agent() {

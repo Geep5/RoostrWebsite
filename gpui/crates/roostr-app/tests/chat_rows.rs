@@ -1,6 +1,6 @@
 //! The chat's messages never draw on top of each other: each row sits below
 //! the one before it, whatever the row holds (a long wrapped message, a
-//! reply, reactions, your own message on the right) - when the chat opens,
+//! reply, your own message on the right) - when the chat opens,
 //! after scrolling back, and after the pane narrows so the text re-wraps.
 //! Field report: with the message list on gpui-kit's MessageScroller, some
 //! bubbles were drawn over others.
@@ -30,8 +30,7 @@ fn ready<T: Send + 'static>(value: T) -> BoxFuture<T> {
 }
 
 /// Message `n`: every few is long enough to wrap over several lines, every
-/// third is yours, every fourth replies to the one before, every fifth has
-/// reactions.
+/// third is yours, every fourth replies to the one before.
 fn message(n: usize) -> Json {
     let long = n % 3 == 1;
     let text = if n % 7 == 2 {
@@ -57,9 +56,6 @@ fn message(n: usize) -> Json {
     let mut meta = json!({ "author": author, "ts": (1_000 + n).to_string(), "text": text });
     if n % 4 == 0 && n > 1 {
         meta["replyTo"] = json!(format!("m{}", n - 1));
-    }
-    if n % 5 == 0 {
-        meta["reactions"] = json!(format!("👍|peer,{ME};🎉|peer"));
     }
     json!({
         "id": format!("m{n}"),

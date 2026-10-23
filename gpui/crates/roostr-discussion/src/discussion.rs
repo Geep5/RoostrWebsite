@@ -11,7 +11,7 @@ use std::time::Duration;
 use gpui_kit::base::{Avatar as AvatarRoot, AvatarFallback};
 use gpui_kit::component::alert::{Alert, AlertVariant};
 use gpui_kit::component::avatar::Avatar;
-use gpui_kit::component::bubble::{Bubble, BubbleContent, BubbleReactions, BubbleVariant};
+use gpui_kit::component::bubble::{Bubble, BubbleContent, BubbleVariant};
 use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
 use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::command::{Command, CommandItem, CommandState};
@@ -28,12 +28,9 @@ use gpui_kit::component::message::{
     Message, MessageAlignment, MessageAvatar, MessageContent, MessageFooter, MessageHeader,
 };
 use gpui_kit::component::message_scroller::{MessageScroller, MessageScrollerState};
-use gpui_kit::component::popover::Popover;
 use gpui_kit::component::tag::Tag;
 use gpui_kit::component::tooltip::Tooltip;
-use gpui_kit::component::{
-    Disableable as _, ElementExt as _, IconName, IndexPath, Selectable, Sizable as _,
-};
+use gpui_kit::component::{Disableable as _, ElementExt as _, IconName, IndexPath, Sizable as _};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use roostr_core::color::bubble;
@@ -186,7 +183,6 @@ pub struct Discussion {
     placeholder: &'static str,
     draft: String,
     reply_to: String,
-    picker_for: String,
     sending: bool,
     send_error: String,
     me: String,
@@ -292,7 +288,6 @@ impl Discussion {
             placeholder: "",
             draft,
             reply_to: String::new(),
-            picker_for: String::new(),
             sending: false,
             send_error: String::new(),
             me: String::new(),
@@ -476,9 +471,6 @@ impl Discussion {
                     self.is_exchange,
                 )
                     .hash(&mut h);
-                for r in &m.reactions {
-                    (&r.emoji, &r.authors).hash(&mut h);
-                }
                 if let Some(e) = &m.mailbox {
                     (
                         e.incoming,
@@ -1577,42 +1569,6 @@ impl Discussion {
         cx.notify();
     }
 
-    fn toggle_reaction(&mut self, message_id: String, emoji: String, cx: &mut Context<Self>) {
-        if self.read_only || self.is_exchange {
-            return;
-        }
-        self.picker_for.clear();
-        self.send_error.clear();
-        self.sync_list(cx);
-        let task = roostr_core::api::chat::react(&self.object_id, &message_id, &emoji, cx);
-        cx.spawn(async move |this, cx| {
-            if let Err(error) = task.await {
-                let _ = this.update(cx, |this, cx| {
-                    this.send_error = error.to_string();
-                    cx.notify();
-                });
-            }
-        })
-        .detach();
-        cx.notify();
-    }
-
-    fn toggle_picker(&mut self, message_id: &str, cx: &mut Context<Self>) {
-        self.picker_for = if self.picker_for == message_id {
-            String::new()
-        } else {
-            message_id.to_string()
-        };
-        self.sync_list(cx);
-        cx.notify();
-    }
-
-    fn close_picker(&mut self, cx: &mut Context<Self>) {
-        self.picker_for.clear();
-        self.sync_list(cx);
-        cx.notify();
-    }
-
     fn scroll_to_message(&mut self, id: &str, cx: &mut Context<Self>) {
         if let Some(ix) = self.message_index(id)
             && self.own_scroller()
@@ -1879,18 +1835,6 @@ fn overflow_visible<S: Styled>(mut el: S) -> S {
     el
 }
 
-/// Lay a kit part out in the flow instead of pinned over its parent's edge
-/// (the bubble's reaction region: Roostr's chips wrap in a row under it).
-fn in_flow<S: Styled>(mut el: S) -> S {
-    let style = el.style();
-    style.position = Some(Position::Relative);
-    style.inset.top = Some(Length::Auto);
-    style.inset.right = Some(Length::Auto);
-    style.inset.bottom = Some(Length::Auto);
-    style.inset.left = Some(Length::Auto);
-    el
-}
-
 /// An agent in the `@` menu: avatar, `@Name`, and the object's own name.
 fn mention_row(option: &ObjectAgentOption) -> Div {
     let initials = option
@@ -2057,10 +2001,6 @@ impl Discussion {
         let reveal = (!self.read_only).then(|| {
             let id = SharedString::from(format!("msg-actions-{}", m.id));
             motion::hover(id, motion::HOVER_REVEAL, window, cx)
-        });
-        let picker_frame = (self.picker_for == m.id).then(|| {
-            let id = SharedString::from(format!("picker-appear-{}", m.id));
-            motion::appear_frame(id, -4., window, cx)
         });
         // The kit row puts 0.5rem between avatar and column and starts the
         // footer 2.5rem in; Roostr's bubble column is 38px in (28px avatar,
@@ -2241,58 +2181,13 @@ impl Discussion {
         // margins, which size it to its one-line text width - measured and
         // drawn differently (bubbles over the next messages) and wider than
         // the chat. The message content aligns it to its side instead.
-        let mut bubble_el = Bubble::new()
+        let bubble_el = Bubble::new()
             .with_variant(variant)
             .min_w_0()
             // 100% of the message content, which fills the column (78% of the
             // full-width row): measured and drawn the same.
             .max_w_full()
             .content(surface);
-
-        // Reactions: a chip per emoji under the bubble; a click toggles yours,
-        // the tooltip names who reacted, yours is tinted in your colour.
-        if !m.reactions.is_empty() {
-            let mine_color = roostr_core::color::hex(&store.chat_color).unwrap_or(theme::accent());
-            let mut reactions = BubbleReactions::new()
-                .map(in_flow)
-                .border_0()
-                .bg(transparent_black())
-                .p_0()
-                .flex_wrap()
-                .gap(px(4.))
-                .map(|r| {
-                    if own {
-                        r.justify_end()
-                    } else {
-                        r.justify_start()
-                    }
-                });
-            for (i, r) in m.reactions.iter().enumerate() {
-                let mine = r.authors.contains(&self.me);
-                let names = r
-                    .authors
-                    .iter()
-                    .map(|a| self.who(a, store))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                let (id, emoji) = (m.id.clone(), r.emoji.clone());
-                reactions = reactions.action(
-                    Button::new(("chip", i))
-                        .outline()
-                        .xsmall()
-                        .px(px(8.))
-                        .label(format!("{} {}", r.emoji, r.authors.len()))
-                        .when(mine, |b| {
-                            b.border_color(mine_color).bg(mine_color.opacity(0.16))
-                        })
-                        .tooltip(names)
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.toggle_reaction(id.clone(), emoji.clone(), cx)
-                        })),
-                );
-            }
-            bubble_el = bubble_el.reactions(reactions);
-        }
 
         // Delivery / processing status: quiet when all is well.
         let mut status_line = None;
@@ -2430,7 +2325,6 @@ impl Discussion {
 
         // Hover actions, beside the bubble on the side away from the sender.
         let actions = reveal.as_ref().map(|(opacity, _)| {
-            let id = m.id.clone();
             let id2 = m.id.clone();
             let id3 = m.id.clone();
             let exchange = self.is_exchange;
@@ -2447,18 +2341,6 @@ impl Discussion {
                 .flex()
                 .gap(px(2.))
                 .opacity(*opacity)
-                .when(!exchange, |d| {
-                    d.child(
-                        Button::new(("react", ix))
-                            .ghost()
-                            .xsmall()
-                            .label("😀")
-                            .tooltip("Add reaction")
-                            .on_click(
-                                cx.listener(move |this, _, _, cx| this.toggle_picker(&id, cx)),
-                            ),
-                    )
-                })
                 .child(
                     Button::new(("reply", ix))
                         .ghost()
@@ -2487,47 +2369,6 @@ impl Discussion {
                         )
                     },
                 )
-        });
-
-        // Reaction picker: a kit popover held open under the actions' right
-        // edge. The picker draws its own surface; Escape (the popover's) and
-        // an outside press close it.
-        let picker = picker_frame.map(|frame| {
-            let id = m.id.clone();
-            let entity = cx.entity().downgrade();
-            let entity2 = entity.clone();
-            let entity3 = entity.clone();
-            div().absolute().right_0().top(px(24.)).size_0().child(
-                Popover::new(("react-popover", ix))
-                    .trigger(HeldAt(true))
-                    .open(true)
-                    .appearance(false)
-                    .anchor(Anchor::TopRight)
-                    .offset(px(0.))
-                    .on_open_change(move |open, _, cx| {
-                        if !*open {
-                            let _ = entity3.update(cx, |this, cx| this.close_picker(cx));
-                        }
-                    })
-                    .child(
-                        frame
-                            .apply(div())
-                            .on_mouse_down_out(cx.listener(|this, _, _, cx| this.close_picker(cx)))
-                            .child(
-                                roostr_properties::EmojiPicker::new(("emoji-picker", ix))
-                                    .on_pick(move |emoji, _, cx| {
-                                        let (id, emoji) = (id.clone(), emoji.to_string());
-                                        let _ = entity.update(cx, |this, cx| {
-                                            this.toggle_reaction(id, emoji, cx)
-                                        });
-                                    })
-                                    .on_close(move |_, cx| {
-                                        let _ =
-                                            entity2.update(cx, |this, cx| this.close_picker(cx));
-                                    }),
-                            ),
-                    ),
-            )
         });
 
         // The bubble column is at most 78% of the row. It stays full-width
@@ -2590,7 +2431,6 @@ impl Discussion {
             .relative()
             .w_full()
             .child(message)
-            .children(picker)
             .into_any_element()
     }
 
@@ -3187,26 +3027,6 @@ pub(crate) fn pill(line: Pixels, paint: TagPaint, icon: String, name: String) ->
         .font_weight(FontWeight::MEDIUM)
         .child(icon_el)
         .child(name)
-}
-
-/// The zero-size point a held-open kit popover hangs from.
-#[derive(IntoElement)]
-struct HeldAt(bool);
-
-impl Selectable for HeldAt {
-    fn selected(self, selected: bool) -> Self {
-        Self(selected)
-    }
-
-    fn is_selected(&self) -> bool {
-        self.0
-    }
-}
-
-impl RenderOnce for HeldAt {
-    fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
-        div().size_0()
-    }
 }
 
 /// Three pulsing dots (`.dots`): the agent composing.
