@@ -16,7 +16,7 @@ use gpui_kit::*;
 use roostr_core::filters::{engine_filters_of, serving_filters_of, space_filter_of};
 use roostr_core::nav::{self, Route};
 use roostr_core::objects::{kind_name, object_icon};
-use roostr_core::options::{tag_colors, unknown_tag_bg};
+use roostr_core::options::{tag_colors, unknown_tag_paint};
 use roostr_core::relations::{current_space_id, object_space_id, space_relations};
 use roostr_core::{Object, QueryRow, RelationDef, Store, Value, api, field_str, motion, theme};
 use serde_json::{Value as Json, json};
@@ -282,9 +282,9 @@ pub(crate) fn tag_pill(
     small: bool,
     ink: Hsla,
 ) -> gpui_kit::component::tag::Tag {
-    let (bg, fg) = tag_colors(color).unwrap_or((unknown_tag_bg(), ink));
+    let paint = tag_colors(color).unwrap_or_else(|| unknown_tag_paint(ink));
     let (height, size) = if small { (18., 11.) } else { (20., 12.) };
-    roostr_core::ui::tag(bg, fg, px(height), px(size)).child(text.into())
+    roostr_core::ui::tag(paint, px(height), px(size)).child(text.into())
 }
 
 /// A kit [`PopupMenu`] kept under `id` while it is shown, focused when it

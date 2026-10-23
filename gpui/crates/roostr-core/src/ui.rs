@@ -19,7 +19,7 @@ use gpui_kit::*;
 
 use crate::icons::Glyph;
 use crate::objects::is_image_icon;
-use crate::options::{badge_colors, tag_colors, unknown_tag_bg};
+use crate::options::{TagPaint, badge_colors, tag_colors, unknown_tag_paint};
 use crate::theme;
 
 type ClickHandler = Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>;
@@ -207,8 +207,9 @@ pub fn icon_text(icon: &str, size: Pixels) -> AnyElement {
 
 // ------------------------------------------------------------- pills/badges
 
-/// An option pill (Anytype tagItem): h20, padding 0 6, radius 10, 12px; bg/text
-/// from the palette, unknown colour `rgba(255,255,255,0.09)` with primary text.
+/// An option pill (Anytype tagItem): h20, padding 0 6, radius 10, 12px, in
+/// the kit `Tag::color` look of its palette colour; unknown colour neutral
+/// with primary text.
 #[derive(IntoElement)]
 pub struct TagPill {
     text: SharedString,
@@ -226,21 +227,20 @@ impl TagPill {
 
 impl RenderOnce for TagPill {
     fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
-        let (bg, fg) = tag_colors(&self.color).unwrap_or((unknown_tag_bg(), theme::fg()));
-        tag(bg, fg, px(20.), px(12.)).child(self.text)
+        let paint = tag_colors(&self.color).unwrap_or_else(|| unknown_tag_paint(theme::fg()));
+        tag(paint, px(20.), px(12.)).child(self.text)
     }
 }
 
-/// The kit [`Tag`](gpui_kit::component::tag::Tag) as Anytype draws a tagItem:
-/// filled `bg`, `fg` text, no border, radius 10, 0 6px padding, one line of
+/// The kit [`Tag`](gpui_kit::component::tag::Tag) as Roostr draws an option:
+/// `paint`'s fill, 1px border and text, radius 10, 0 6px padding, one line of
 /// `height` and `text` size, ellipsis when squeezed.
-pub fn tag(bg: Hsla, fg: Hsla, height: Pixels, text: Pixels) -> gpui_kit::component::tag::Tag {
-    gpui_kit::component::tag::Tag::custom(bg, fg, bg)
+pub fn tag(paint: TagPaint, height: Pixels, text: Pixels) -> gpui_kit::component::tag::Tag {
+    gpui_kit::component::tag::Tag::custom(paint.bg, paint.fg, paint.border)
         .rounded(px(10.))
-        .border_0()
         .flex_none()
         .h(height)
-        .line_height(height)
+        .line_height(height - px(2.))
         .px(px(6.))
         .py_0()
         .text_size(text)

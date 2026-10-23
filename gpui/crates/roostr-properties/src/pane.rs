@@ -1227,18 +1227,17 @@ impl Render for PropertiesPane {
     }
 }
 
-/// The pane's tag pill (`.pill`) as a kit `Tag` in the option's colours:
-/// 0 8px, radius 10, 12px, 20px line, no outline.
+/// The pane's tag pill (`.pill`) as a kit `Tag` in the option's kit colours:
+/// 0 8px, radius 10, 12px, 20px line, 1px border.
 fn pane_pill(text: String, color: &str) -> Tag {
-    let (bg, fg) = roostr_core::options::tag_colors(color)
-        .unwrap_or((roostr_core::options::unknown_tag_bg(), theme::fg()));
-    Tag::custom(bg, fg, transparent_black())
-        .border_0()
+    let paint = roostr_core::options::tag_colors(color)
+        .unwrap_or_else(|| roostr_core::options::unknown_tag_paint(theme::fg()));
+    Tag::custom(paint.bg, paint.fg, paint.border)
         .rounded(theme::radius::menu())
         .px(px(8.))
         .py_0()
         .text_size(px(12.))
-        .line_height(px(20.))
+        .line_height(px(18.))
         .whitespace_nowrap()
         .child(text)
 }

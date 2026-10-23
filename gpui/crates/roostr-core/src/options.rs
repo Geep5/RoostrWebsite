@@ -6,7 +6,8 @@
 use std::sync::LazyLock;
 
 use anyhow::Result;
-use gpui_kit::{App, AppContext as _, Hsla, Rgba, Task, rgb};
+use gpui_kit::component::ColorName;
+use gpui_kit::{App, AppContext as _, Hsla, Rgba, Task};
 use regex::Regex;
 use serde_json::json;
 
@@ -16,94 +17,63 @@ use crate::store::Store;
 use crate::theme;
 use crate::types::{Fields, RelationDef, RelationOption, Value};
 
-/// One palette entry: `hex` is the vivid tone (swatches, badge icons);
-/// `bg`/`text` the filled tag pill pair. Values are `0xRRGGBB`.
+/// One palette entry: a stored option colour `name` and the gpui-kit colour
+/// it paints with. The tag pill is the kit's own `Tag::color` look (dark
+/// theme): fill 950 at 50%, border 800 at 50%, text 300; `hex` is the vivid
+/// 500 tone (swatches, badge icons).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TagColor {
     pub name: &'static str,
-    pub hex: u32,
-    pub bg: u32,
-    pub text: u32,
+    pub kit: ColorName,
 }
 
 impl TagColor {
     pub fn hex(&self) -> Hsla {
-        rgb(self.hex).into()
+        self.kit.scale(500)
     }
     pub fn bg(&self) -> Hsla {
-        rgb(self.bg).into()
+        self.kit.scale(950).opacity(0.5)
+    }
+    pub fn border(&self) -> Hsla {
+        self.kit.scale(800).opacity(0.5)
     }
     pub fn text(&self) -> Hsla {
-        rgb(self.text).into()
+        self.kit.scale(300)
     }
     /// `#rrggbb` of the vivid tone, as the web stores it.
     pub fn hex_str(&self) -> String {
-        format!("#{:06x}", self.hex)
+        let c = self.hex().to_rgb();
+        let byte = |v: f32| (v.clamp(0., 1.) * 255.).round() as u8;
+        format!("#{:02x}{:02x}{:02x}", byte(c.r), byte(c.g), byte(c.b))
     }
 }
 
-/// Anytype `Constant.textColor` palette, dark-theme values.
+const fn tc(name: &'static str, kit: ColorName) -> TagColor {
+    TagColor { name, kit }
+}
+
+/// The option palette, in the kit's hue order. The first ten names are
+/// Anytype's (`grey`, `ice` = the kit's Gray and Sky), kept so stored options
+/// keep their colour; the rest are the kit colours Anytype lacks.
 pub const TAG_COLORS: &[TagColor] = &[
-    TagColor {
-        name: "grey",
-        hex: 0x8c9ea5,
-        bg: 0x414141,
-        text: 0xc8c8c8,
-    },
-    TagColor {
-        name: "yellow",
-        hex: 0xb2a616,
-        bg: 0x6c630f,
-        text: 0xfbf29a,
-    },
-    TagColor {
-        name: "orange",
-        hex: 0xd3720d,
-        bg: 0x5c2a06,
-        text: 0xfbcf7a,
-    },
-    TagColor {
-        name: "red",
-        hex: 0xe2400c,
-        bg: 0x4a0a08,
-        text: 0xf5a090,
-    },
-    TagColor {
-        name: "pink",
-        hex: 0xca1b8e,
-        bg: 0x4a0828,
-        text: 0xf9a0c8,
-    },
-    TagColor {
-        name: "purple",
-        hex: 0x9e30c4,
-        bg: 0x3d0e68,
-        text: 0xd090f0,
-    },
-    TagColor {
-        name: "blue",
-        hex: 0x6878ee,
-        bg: 0x162060,
-        text: 0xa0b0f8,
-    },
-    TagColor {
-        name: "ice",
-        hex: 0x1c8bca,
-        bg: 0x023a58,
-        text: 0x90deff,
-    },
-    TagColor {
-        name: "teal",
-        hex: 0x0caaa3,
-        bg: 0x0b4f4a,
-        text: 0x7eeedd,
-    },
-    TagColor {
-        name: "lime",
-        hex: 0x64b90f,
-        bg: 0x1a3a0a,
-        text: 0x80ee80,
-    },
+    tc("grey", ColorName::Gray),
+    tc("red", ColorName::Red),
+    tc("orange", ColorName::Orange),
+    tc("amber", ColorName::Amber),
+    tc("yellow", ColorName::Yellow),
+    tc("lime", ColorName::Lime),
+    tc("green", ColorName::Green),
+    tc("emerald", ColorName::Emerald),
+    tc("teal", ColorName::Teal),
+    tc("cyan", ColorName::Cyan),
+    tc("ice", ColorName::Sky),
+    tc("blue", ColorName::Blue),
+    tc("indigo", ColorName::Indigo),
+    tc("violet", ColorName::Violet),
+    tc("purple", ColorName::Purple),
+    tc("fuchsia", ColorName::Fuchsia),
+    tc("pink", ColorName::Pink),
+    tc("rose", ColorName::Rose),
 ];
 
 pub fn tag_color(name: &str) -> Option<&'static TagColor> {
@@ -119,10 +89,30 @@ pub fn color_hex(name: &str) -> String {
     }
 }
 
-/// Tag pill `(bg, text)` for a palette name; `None` = unknown/default
+/// Tag pill colours for a palette name; `None` = unknown/default
 /// (render [`unknown_tag_bg`] with primary text).
-pub fn tag_colors(name: &str) -> Option<(Hsla, Hsla)> {
-    tag_color(name).map(|c| (c.bg(), c.text()))
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TagPaint {
+    pub bg: Hsla,
+    pub fg: Hsla,
+    pub border: Hsla,
+}
+
+pub fn tag_colors(name: &str) -> Option<TagPaint> {
+    tag_color(name).map(|c| TagPaint {
+        bg: c.bg(),
+        fg: c.text(),
+        border: c.border(),
+    })
+}
+
+/// The pill of an option with no (known) colour: neutral fill and border, `fg` text.
+pub fn unknown_tag_paint(fg: Hsla) -> TagPaint {
+    TagPaint {
+        bg: unknown_tag_bg(),
+        fg,
+        border: unknown_tag_bg(),
+    }
 }
 
 /// The pill background of an option with no (known) color: `rgba(255,255,255,0.09)`.
@@ -385,19 +375,31 @@ mod tests {
 
     #[test]
     fn badge_mix_is_srgb_interpolation() {
+        let red = tag_color("red").unwrap().hex().to_rgb();
+        let panel = theme::panel().to_rgb();
         let c = badge_colors("red").bg.to_rgb();
-        // 0.18 * e2400c + 0.82 * 2b2b2e
-        let want = |v: f32, p: f32| (v * 0.18 + p * 0.82) / 255.;
-        assert!((c.r - want(226., 43.)).abs() < 0.003);
-        assert!((c.g - want(64., 43.)).abs() < 0.003);
-        assert!((c.b - want(12., 46.)).abs() < 0.003);
+        // 0.18 * vivid red + 0.82 * panel
+        let want = |v: f32, p: f32| v * 0.18 + p * 0.82;
+        assert!((c.r - want(red.r, panel.r)).abs() < 0.003);
+        assert!((c.g - want(red.g, panel.g)).abs() < 0.003);
+        assert!((c.b - want(red.b, panel.b)).abs() < 0.003);
         assert_eq!(badge_colors("nope").fg, theme::fg());
     }
 
     #[test]
     fn color_hex_falls_back() {
-        assert_eq!(color_hex("teal"), "#0caaa3");
+        let teal = color_hex("teal");
+        assert!(teal.len() == 7 && teal.starts_with('#'), "{teal}");
         assert_eq!(color_hex("#123456"), "#123456");
-        assert_eq!(color_hex(""), "#8c9ea5");
+        assert_eq!(color_hex(""), color_hex("grey"));
+    }
+
+    #[test]
+    fn stored_anytype_names_keep_a_colour() {
+        for name in [
+            "grey", "yellow", "orange", "red", "pink", "purple", "blue", "ice", "teal", "lime",
+        ] {
+            assert!(tag_color(name).is_some(), "{name}");
+        }
     }
 }
