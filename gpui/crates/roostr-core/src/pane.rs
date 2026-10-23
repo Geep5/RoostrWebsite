@@ -9,7 +9,16 @@ use crate::ui_state::UiState;
 const WIDTH_KEY: &str = "disc-drawer-w";
 pub const DEFAULT_WIDTH: f32 = 380.;
 pub const MIN_WIDTH: f32 = 300.;
-pub const MAX_WIDTH: f32 = 640.;
+/// A ceiling for very wide screens; below it the window decides (`max_width`).
+pub const MAX_WIDTH: f32 = 1600.;
+/// What the page beside the pane always keeps: the pane grows into the rest.
+pub const PAGE_MIN: f32 = 420.;
+
+/// The widest the pane may be when `room` is the width it shares with the
+/// page (the window less the rail and sidebar): the page keeps `PAGE_MIN`.
+pub fn max_width(room: f32) -> f32 {
+    (room - PAGE_MIN).clamp(MIN_WIDTH, MAX_WIDTH)
+}
 
 pub struct PaneState {
     pub open: bool,
@@ -19,7 +28,7 @@ pub struct PaneState {
     pub count: usize,
     /// Conversations (threads + the discussion).
     pub conv_count: usize,
-    /// Persisted width (300–640).
+    /// Persisted width (300–1600); `max_width` fits it to the window when shown.
     pub width: f32,
 }
 
@@ -77,5 +86,20 @@ impl PaneState {
             UiState::set(cx, WIDTH_KEY, &width);
             cx.notify();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pane_grows_into_the_window_leaving_the_page_its_minimum() {
+        // A normal window: everything past the page's minimum.
+        assert_eq!(max_width(1500.), 1500. - PAGE_MIN);
+        // A narrow window still allows the pane's own minimum.
+        assert_eq!(max_width(500.), MIN_WIDTH);
+        // A very wide screen stops at the ceiling.
+        assert_eq!(max_width(4000.), MAX_WIDTH);
     }
 }

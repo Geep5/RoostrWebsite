@@ -647,9 +647,11 @@ impl Workspace {
             self.side_width = (start_w + f32::from(position.x - start_x)).clamp(SIDE_MIN, SIDE_MAX);
             cx.notify();
         } else if let Some((start_x, start_w)) = self.pane_drag {
+            // As wide as the window allows: the page beside it keeps its minimum.
+            let nav = if self.nav_hidden { 0. } else { self.rail_width + self.side_width };
+            let room = f32::from(window.viewport_size().width) - nav;
             let width = (start_w + f32::from(start_x - position.x))
-                .clamp(roostr_core::pane::MIN_WIDTH, roostr_core::pane::MAX_WIDTH);
-            let _ = window;
+                .clamp(roostr_core::pane::MIN_WIDTH, roostr_core::pane::max_width(room));
             PaneState::global(cx).update(cx, |pane, cx| {
                 pane.width = width;
                 cx.notify();
@@ -935,7 +937,9 @@ impl Workspace {
         let rail_col = column(&mut self.rail_col, rail_target, animate, window, cx);
         let side_target = if self.nav_hidden { 0. } else { self.side_width };
         let side_col = column(&mut self.side_col, side_target, animate, window, cx);
-        let pane_target = if affixed { pane_width } else { 0. };
+        // A narrower window narrows the pane to fit; the chosen width comes back when there is room.
+        let room = f32::from(window.viewport_size().width) - rail_target - side_target;
+        let pane_target = if affixed { pane_width.min(roostr_core::pane::max_width(room)) } else { 0. };
         let pane_col = column(&mut self.pane_col, pane_target, animate, window, cx);
         let wide = Self::open_object_id(cx)
             .and_then(|id| {
