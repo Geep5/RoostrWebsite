@@ -6,6 +6,13 @@
 
 use std::sync::Arc;
 
+use gpui_kit::component::attachment::{
+    Attachment, AttachmentContent, AttachmentMedia, AttachmentStatus, AttachmentTitle,
+};
+use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
+use gpui_kit::component::description_list::DescriptionList;
+use gpui_kit::component::link::Link;
+use gpui_kit::component::{Icon, IconName};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use roostr_core::serving::{self, MachineRow};
@@ -207,20 +214,29 @@ impl FileView {
         .detach();
     }
 
-    fn button(id: &'static str, label: &'static str) -> Stateful<Div> {
-        div()
-            .id(id)
+    /// The page's quiet action button. The custom variant's color is the
+    /// hover/press border and its foreground the hover/press text, so the
+    /// rest state (bg border, muted text) comes from the instance style.
+    fn button(id: &'static str, label: &'static str, cx: &App) -> Button {
+        Button::new(id)
+            .custom(
+                ButtonCustomVariant::new(cx)
+                    .color(theme::accent())
+                    .foreground(theme::fg())
+                    .hover(theme::bg())
+                    .active(theme::bg()),
+            )
+            .accessibility_label(label)
+            .child(div().text_size(px(12.)).child(label))
+            .rounded(px(7.))
+            .h_auto()
+            .px(px(12.))
+            .py(px(5.))
             .bg(theme::bg())
             .border_1()
             .border_color(theme::border())
-            .rounded(px(7.))
-            .px(px(12.))
-            .py(px(5.))
-            .text_size(px(12.))
             .text_color(theme::muted())
             .cursor_pointer()
-            .hover(|s| s.border_color(theme::accent()).text_color(theme::fg()))
-            .child(label)
     }
 }
 
@@ -295,29 +311,40 @@ impl Render for FileView {
                 .child(t)
         };
 
-        let mut facts = div()
-            .flex()
-            .flex_wrap()
-            .items_baseline()
-            .gap(px(6.))
-            .text_size(px(13.))
-            .text_color(theme::muted());
+        // A small-caps key, aligned with the value's first line.
+        let key = |t: &'static str, line: f32| {
+            div()
+                .text_size(px(11.))
+                .line_height(px(line))
+                .text_color(theme::muted())
+                .child(t)
+                .into_any_element()
+        };
+        let list = || {
+            DescriptionList::horizontal()
+                .bordered(false)
+                .columns(1)
+                .label_width(px(80.))
+        };
+
+        let mut facts = list();
         if size > 0. || !hash.is_empty() {
-            facts = facts.child(crate::files::human_size(size));
+            facts = facts.item(key("SIZE", 19.5), crate::files::human_size(size), 1);
         }
         if !shown_type.is_empty() {
-            facts = facts
-                .child(div().opacity(0.6).child("·"))
-                .child(shown_type.clone());
+            facts = facts.item(key("TYPE", 19.5), shown_type.clone(), 1);
         }
         if !hash.is_empty() {
-            facts = facts.child(div().opacity(0.6).child("·")).child(
+            facts = facts.item(
+                key("HASH", 19.5),
                 div()
                     .id("file-hash")
                     .text_size(px(12.))
                     .font_family(theme::fonts::MONO)
                     .tooltip(roostr_core::ui::tooltip(hash.clone()))
-                    .child(hash.chars().take(12).collect::<String>()),
+                    .child(hash.chars().take(12).collect::<String>())
+                    .into_any_element(),
+                1,
             );
         }
 
@@ -331,7 +358,13 @@ impl Render for FileView {
             .when(narrow, |d| d.mx(px(16.)))
             .when(!narrow, |d| d.ml(px(48.)))
             .max_w(px(720.))
-            .child(facts);
+            .child(
+                div()
+                    .text_size(px(13.))
+                    .line_height(px(19.5))
+                    .text_color(theme::muted())
+                    .child(facts),
+            );
         if !object_error.is_empty() {
             page = page.child(error(object_error.clone()));
         }
@@ -344,11 +377,27 @@ impl Render for FileView {
         } else {
             let mut sec = div().flex().flex_col().gap(px(8.));
             if self.loading {
-                sec = sec.child(muted(if fetching_from.is_empty() {
-                    "Loading…".into()
-                } else {
-                    format!("Fetching from {fetching_from}…")
-                }));
+                sec = sec.child(
+                    Attachment::new()
+                        .status(AttachmentStatus::Processing)
+                        .media(AttachmentMedia::new())
+                        .content(
+                            AttachmentContent::new().title(
+                                AttachmentTitle::new(if fetching_from.is_empty() {
+                                    "Loading…".to_string()
+                                } else {
+                                    format!("Fetching from {fetching_from}…")
+                                })
+                                .font_weight(FontWeight::NORMAL)
+                                .text_color(theme::muted()),
+                            ),
+                        )
+                        .w_full()
+                        .text_size(px(13.))
+                        .rounded(px(10.))
+                        .bg(theme::bg())
+                        .border_color(theme::border()),
+                );
             } else if !self.fetch_error.is_empty() && self.fetch_error != object_error {
                 sec = sec.child(error(self.fetch_error.clone()));
             } else if let Some(bytes) = self.bytes.clone() {
@@ -411,15 +460,8 @@ impl Render for FileView {
                             _ => "Open in the system viewer",
                         };
                         sec = sec.child(
-                            preview_frame()
+                            Attachment::new()
                                 .id("file-open")
-                                .flex()
-                                .items_center()
-                                .gap(px(10.))
-                                .px(px(14.))
-                                .py(px(12.))
-                                .cursor_pointer()
-                                .hover(|s| s.border_color(theme::muted()))
                                 .on_click(move |_, _, cx| {
                                     crate::files::open_externally(
                                         open_bytes.clone(),
@@ -428,17 +470,24 @@ impl Render for FileView {
                                     )
                                     .detach_and_log_err(cx)
                                 })
-                                .child(div().text_size(px(22.)).child(match kind {
-                                    Kind::Video => "🎬",
-                                    Kind::Audio => "🎵",
-                                    _ => "📄",
-                                }))
-                                .child(
-                                    div()
-                                        .text_size(px(13.))
-                                        .text_color(theme::fg())
-                                        .child(label),
-                                ),
+                                .media(AttachmentMedia::new().child(Icon::new(match kind {
+                                    Kind::Pdf => IconName::FileText,
+                                    _ => IconName::Play,
+                                })))
+                                .content(
+                                    AttachmentContent::new().title(
+                                        AttachmentTitle::new(label)
+                                            .font_weight(FontWeight::NORMAL)
+                                            .text_color(theme::fg()),
+                                    ),
+                                )
+                                .w_full()
+                                .h_auto()
+                                .gap(px(10.))
+                                .px(px(14.))
+                                .py(px(12.))
+                                .rounded(px(10.))
+                                .text_size(px(13.)),
                         );
                     }
                     Kind::None => {}
@@ -451,7 +500,7 @@ impl Render for FileView {
                 } else {
                     name.clone()
                 };
-                actions = actions.child(Self::button("file-download", "Download").on_click(
+                actions = actions.child(Self::button("file-download", "Download", cx).on_click(
                     move |_, _, cx| {
                         crate::files::save_bytes(bytes.as_ref().clone(), file_name.clone(), cx)
                             .detach_and_log_err(cx);
@@ -461,10 +510,10 @@ impl Render for FileView {
             if !self.fetch_error.is_empty() || !object_error.is_empty() {
                 let loading = self.loading;
                 actions = actions.child(
-                    Self::button("file-retry", "Retry")
-                        .when(loading, |d| d.opacity(0.5))
-                        .when(!loading, |d| {
-                            d.on_click(cx.listener(|this, _, _, cx| this.retry(cx)))
+                    Self::button("file-retry", "Retry", cx)
+                        .when(loading, |b| b.opacity(0.5))
+                        .when(!loading, |b| {
+                            b.on_click(cx.listener(|this, _, _, cx| this.retry(cx)))
                         }),
                 );
             }
@@ -472,25 +521,22 @@ impl Render for FileView {
             page = page.child(sec);
         }
 
-        let mut stored = div().flex().flex_col().gap(px(8.)).child(
-            div()
-                .text_size(px(11.))
-                .text_color(theme::muted())
-                .child("STORED ON"),
-        );
-        if holders.is_empty() {
-            stored = stored.child(muted(if on_blossom {
-                "No computer keeps a copy yet - the file is on Blossom".into()
+        let holders_empty = holders.is_empty();
+        let stored =
+            if holders_empty {
+                muted(if on_blossom {
+                    "No computer keeps a copy yet - the file is on Blossom".into()
+                } else {
+                    "No computer holds this file yet".into()
+                })
+                .into_any_element()
             } else {
-                "No computer holds this file yet".into()
-            }));
-        } else {
-            stored = stored.child(
                 div()
                     .flex()
                     .flex_col()
                     .gap(px(4.))
                     .text_size(px(14.))
+                    .line_height(px(21.))
                     .text_color(theme::fg())
                     .children(holders.into_iter().enumerate().map(
                         |(i, (machine_id, row, label))| {
@@ -501,12 +547,8 @@ impl Render for FileView {
                                 .gap(px(6.))
                                 .child(machine_icon.clone())
                                 .child(match row {
-                                    Some(row) => div()
-                                        .id(("holder", i))
-                                        .cursor_pointer()
+                                    Some(row) => Link::new(("holder", i))
                                         .text_color(theme::fg())
-                                        .underline()
-                                        .hover(|s| s.text_color(theme::accent()))
                                         .on_click(move |_, _, cx| {
                                             roostr_core::nav::navigate(
                                                 Route::Object(row.id.clone()),
@@ -526,9 +568,10 @@ impl Render for FileView {
                                     )
                                 })
                         },
-                    )),
-            );
-        }
-        page.child(stored)
+                    ))
+                    .into_any_element()
+            };
+        let stored_line = if holders_empty { 19.5 } else { 21. };
+        page.child(list().item(key("STORED ON", stored_line), stored, 1))
     }
 }

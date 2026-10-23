@@ -14,13 +14,15 @@ mod views;
 
 use std::time::Duration;
 
+use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputState};
+use gpui_kit::component::{IconName, Sizable as _};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use roostr_core::create::default_type_key;
 use roostr_core::filters::space_filter_of;
 use roostr_core::relations::object_space_id;
-use roostr_core::{Object, Store, StoreEvent, Value, api, field_str, lite_ui, theme};
+use roostr_core::{Object, Store, StoreEvent, Value, api, field_str, lite_ui, theme, ui};
 use serde_json::json;
 
 use crate::calendar::CalendarView;
@@ -482,22 +484,6 @@ impl DataView {
         cx.notify();
     }
 
-    fn bar_button(id: &'static str, label: &'static str) -> Stateful<Div> {
-        div()
-            .id(id)
-            .bg(theme::panel())
-            .border_1()
-            .border_color(theme::border())
-            .text_color(theme::fg())
-            .rounded(px(8.))
-            .px(px(12.))
-            .py(px(6.))
-            .text_size(px(13.))
-            .cursor_pointer()
-            .hover(|s| s.border_color(theme::accent()))
-            .child(label)
-    }
-
     fn render_collection_bar(&mut self, members: usize, cx: &mut Context<Self>) -> Div {
         let mut out = div().flex().flex_col();
         out = out.child(
@@ -508,11 +494,13 @@ impl DataView {
                 .mb(px(12.))
                 .child(
                     common::new_button("col-new", false)
-                        .child("New")
                         .on_click(cx.listener(|this, _, _, cx| this.new_in_collection(cx))),
                 )
                 .child(
-                    Self::bar_button("col-add", "+ Add object")
+                    ui::outline_button("col-add", "+ Add object")
+                        .bg(theme::panel())
+                        .px(px(12.))
+                        .py(px(6.))
                         .on_click(cx.listener(|this, _, window, cx| this.open_picker(window, cx))),
                 )
                 .when(members > 0, |d| {
@@ -541,26 +529,17 @@ impl DataView {
             for (id, name, type_key) in &shown {
                 let pick = id.clone();
                 list = list.child(
-                    div()
-                        .id(SharedString::from(format!("pick-{id}")))
-                        .flex()
-                        .gap(px(4.))
+                    common::vrow(SharedString::from(format!("pick-{id}")), false)
                         .bg(theme::panel())
-                        .border_1()
-                        .border_color(transparent_black())
                         .rounded(px(8.))
                         .px(px(12.))
-                        .py(px(6.))
-                        .text_size(px(13.))
-                        .text_color(theme::fg())
-                        .cursor_pointer()
-                        .hover(|s| s.border_color(theme::accent()))
-                        .child(name.clone())
                         .child(
-                            div()
-                                .text_size(px(12.))
-                                .text_color(theme::muted())
-                                .child(type_key.clone()),
+                            div().flex().gap(px(4.)).child(name.clone()).child(
+                                div()
+                                    .text_size(px(12.))
+                                    .text_color(theme::muted())
+                                    .child(type_key.clone()),
+                            ),
                         )
                         .on_click(
                             cx.listener(move |this, _, _, cx| this.add_member(pick.clone(), cx)),
@@ -573,12 +552,7 @@ impl DataView {
                 } else {
                     "No matches."
                 };
-                list = list.child(
-                    div()
-                        .text_size(px(12.))
-                        .text_color(theme::muted())
-                        .child(text),
-                );
+                list = list.child(common::empty_state(text, 12.));
             }
             out = out.child(
                 div()
@@ -601,9 +575,13 @@ impl DataView {
                                     .child(Input::new(&self.pick_query).text_size(px(13.))),
                             )
                             .child(
-                                Self::bar_button("picker-close", "✕")
+                                Button::new("picker-close")
+                                    .ghost()
+                                    .small()
+                                    .icon(IconName::Close)
                                     .text_color(theme::muted())
-                                    .tooltip(roostr_core::ui::tooltip("Close (Esc)"))
+                                    .cursor_pointer()
+                                    .tooltip("Close (Esc)")
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.picking = false;
                                         cx.notify();

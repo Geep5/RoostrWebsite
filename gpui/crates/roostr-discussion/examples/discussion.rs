@@ -6,6 +6,8 @@
 //! - `page`: the full-screen `/app/chat/:id` page.
 //! - `opener`: the collapsed "N comments" opener in a page, beside the columns.
 
+use gpui_kit::component::Sizable as _;
+use gpui_kit::component::button::Button;
 use gpui_kit::*;
 use roostr_core::{PaneState, PaneTab, theme};
 use roostr_discussion::{ChatPage, ConversationDrawer, Discussion, DiscussionOptions, pane_counts};
@@ -46,19 +48,15 @@ impl Render for Frame {
                     .bg(theme::bg())
                     .child(view),
                 _ => div().flex_none().p(px(8.)).child(
-                    div()
-                        .id(tab.name())
-                        .px(px(8.))
-                        .py(px(4.))
+                    Button::new(tab.name())
+                        .outline()
+                        .small()
                         .rounded(px(7.))
-                        .border_1()
-                        .border_color(theme::border())
                         .text_color(theme::muted())
-                        .cursor_pointer()
+                        .label(format!("‹ {}", tab.name()))
                         .on_click(move |_, _, cx| {
                             PaneState::global(cx).update(cx, |p, cx| p.set_open(tab, true, cx))
-                        })
-                        .child(format!("‹ {}", tab.name())),
+                        }),
                 ),
             }
         });

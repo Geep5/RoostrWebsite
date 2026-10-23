@@ -12,6 +12,8 @@ use gpui_kit::base::{
     TextSelection, TextSelectionHandle, TextSelectionRegistration, TextSelectionRun, Theme,
     TouchHandleLayout,
 };
+use gpui_kit::component::Sizable as _;
+use gpui_kit::component::separator::Separator;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use roostr_core::markdown::{Align, Block, Inline, TaskCheck, parse};
@@ -471,7 +473,9 @@ fn render_block(
                 cx,
             ))
             .into_any_element(),
-        Block::Rule => div().h(px(1.)).bg(theme::border()).into_any_element(),
+        Block::Rule => Separator::horizontal()
+            .color(theme::border())
+            .into_any_element(),
         Block::Quote(ls) => {
             let quote = MdTheme {
                 ink: theme::muted(),
@@ -536,20 +540,13 @@ fn render_block(
                 );
                 if tasky {
                     let done = item.check == Some(TaskCheck::Done);
-                    let check = div()
-                        .flex_none()
-                        .size(px(13.))
-                        .mt(px(4.))
-                        .border(px(1.5))
-                        .border_color(md.ink)
-                        .opacity(0.7)
-                        .rounded(px(4.))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .text_size(px(10.))
-                        .line_height(px(10.))
-                        .when(done, |d| d.child("✓"));
+                    let check = roostr_core::ui::checkbox_display(
+                        ElementId::Name(format!("{id}-{ix}-check{i}").into()),
+                        done,
+                    )
+                    .small()
+                    .flex_none()
+                    .mt(px(3.));
                     div()
                         .flex()
                         .items_start()

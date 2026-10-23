@@ -2,7 +2,14 @@
 //! default type, members, join link + requests, key rotation, the bin, and
 //! leaving / deleting the space.
 
+use std::cell::Cell;
+use std::rc::Rc;
+
+use gpui_kit::component::WindowExt as _;
+use gpui_kit::component::avatar::Avatar;
+use gpui_kit::component::dialog::{Dialog, DialogEntrance};
 use gpui_kit::component::input::{InputEvent, InputState};
+use gpui_kit::component::{Sizable as _, Size};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use roostr_core::create::NOT_DEFAULTABLE;
@@ -10,12 +17,12 @@ use roostr_core::dates::show_date;
 use roostr_core::invite::{SpaceJoinLink, join_url};
 use roostr_core::objects::{object_icon, type_glyph};
 use roostr_core::types::{Space, field_str};
-use roostr_core::ui::{CheckboxIcon, modal_shadow, tooltip};
+use roostr_core::ui::{checkbox_display, tooltip};
 use roostr_core::{Navigator, Route, Store, StoreEvent, Value, api, motion, nav, theme};
 use serde_json::json;
 
 use crate::local::{JoinRequest, clear_join_request, list_join_requests};
-use crate::widgets::{Btn, FieldStyle, Select, Span, field, over_window, rich, window_overlay};
+use crate::widgets::{Btn, FieldStyle, Select, Span, field, rich};
 
 /// `binBusy` while the whole bin is being emptied.
 const ALL: &str = "__all__";
@@ -49,8 +56,6 @@ pub struct SpaceManage {
     added_member: Option<String>,
     join_requests: Vec<JoinRequest>,
     identity_error: SharedString,
-    type_menu_open: bool,
-    modal_focus: FocusHandle,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -62,7 +67,6 @@ impl SpaceManage {
         let delete_draft = cx.new(|cx| InputState::new(window, cx));
         let npub_draft =
             cx.new(|cx| InputState::new(window, cx).placeholder("npub1… of the person to invite"));
-        let weak = cx.weak_entity();
         let subscriptions = vec![
             cx.observe(&store, |_, _, cx| cx.notify()),
             cx.subscribe(&store, |this, _, event: &StoreEvent, cx| {
@@ -76,27 +80,19 @@ impl SpaceManage {
                     this.add_member(cx);
                 }
             }),
-            cx.subscribe(
+            cx.subscribe_in(
                 &empty_draft,
-                |this, _, event: &InputEvent, cx| match event {
+                window,
+                |this, _, event: &InputEvent, window, cx| match event {
                     InputEvent::PressEnter { .. } => {
                         if this.empty_armed(cx) && this.bin_busy.is_empty() {
-                            this.empty_bin(cx);
+                            this.empty_bin(window, cx);
                         }
                     }
                     InputEvent::Change => cx.notify(),
                     _ => {}
                 },
             ),
-            // `<svelte:window onkeydown>`: Escape cancels the open confirmation wherever focus is.
-            cx.intercept_keystrokes({
-                let this = weak.clone();
-                move |event, _, cx| {
-                    if event.keystroke.key == "escape" {
-                        let _ = this.update(cx, |this, cx| this.escape(cx));
-                    }
-                }
-            }),
             cx.subscribe_in(
                 &delete_draft,
                 window,
@@ -126,8 +122,6 @@ impl SpaceManage {
             added_member: None,
             join_requests: Vec::new(),
             identity_error: SharedString::default(),
-            type_menu_open: false,
-            modal_focus: cx.focus_handle(),
             _subscriptions: subscriptions,
         };
         this.load_bin(cx);
@@ -259,7 +253,7 @@ impl SpaceManage {
     }
 
     /// Empty bin: vanish every deleted object in this space at once.
-    fn empty_bin(&mut self, cx: &mut Context<Self>) {
+    fn empty_bin(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(ids) = self
             .bin
             .as_ref()
@@ -273,6 +267,7 @@ impl SpaceManage {
         self.bin_busy = ALL.into();
         cx.notify();
         let task = api::note::vanish(&ids, cx);
+        let dialog_window = window.window_handle();
         cx.spawn(async move |this, cx| {
             let result = task.await;
             let _ = this.update(cx, |this, cx| {
@@ -280,7 +275,11 @@ impl SpaceManage {
                     log::warn!("empty bin failed: {error:#}");
                 }
                 this.bin = Some(Vec::new());
-                this.confirm_empty = false;
+                // Escape may already have closed it while the vanish ran.
+                if this.confirm_empty {
+                    this.confirm_empty = false;
+                    let _ = dialog_window.update(cx, |_, window, cx| window.close_dialog(cx));
+                }
                 this.bin_busy.clear();
                 cx.notify();
             });
@@ -495,6 +494,7 @@ impl SpaceManage {
             s.set_value("", window, cx);
             s.set_placeholder(phrase, window, cx);
         });
+        self.open_confirm(window, cx);
         self.delete_draft.focus_handle(cx).focus(window, cx);
         cx.notify();
     }
@@ -503,14 +503,15 @@ impl SpaceManage {
         self.confirm_empty = true;
         self.empty_draft
             .update(cx, |s, cx| s.set_value("", window, cx));
-        self.modal_focus.focus(window, cx);
+        self.open_confirm(window, cx);
         cx.notify();
     }
 
     /// Owner: vanish the space and every object in it (the ledger entry rides
     /// sync, so it is gone everywhere and can't resurrect). Member: leave —
     /// only this identity's copies go.
-    fn remove_space(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+    fn remove_space(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let dialog_window = window.window_handle();
         self.deleting = true;
         cx.notify();
         let id = self.object_id.clone();
@@ -535,7 +536,10 @@ impl SpaceManage {
                 this.deleting = false;
                 match result {
                     Ok(()) => {
-                        this.confirm_delete = false;
+                        if this.confirm_delete {
+                            this.confirm_delete = false;
+                            let _ = dialog_window.update(cx, |_, window, cx| window.close_dialog(cx));
+                        }
                         let store = Store::global(cx);
                         store.update(cx, |store, cx| store.refresh_all(cx));
                         let navigator = Navigator::global(cx);
@@ -555,78 +559,182 @@ impl SpaceManage {
         .detach();
     }
 
-    /// Escape mirrors each modal's Cancel; the delete flow stays put once the vanish is in flight.
-    fn escape(&mut self, cx: &mut Context<Self>) {
-        if !self.confirm_empty && !self.confirm_delete {
-            return;
-        }
-        if self.confirm_empty {
+    /// Escape, a backdrop press and Cancel all land here: the empty-bin
+    /// confirmation always closes, the delete flow stays put once the vanish
+    /// is in flight. Returns whether the dialog may close.
+    fn dismiss_confirm(&mut self, cx: &mut Context<Self>) -> bool {
+        let close = if self.confirm_empty {
             self.confirm_empty = false;
-        } else if self.confirm_delete && !self.deleting {
-            self.confirm_delete = false;
-        }
+            true
+        } else if self.confirm_delete {
+            let close = !self.deleting;
+            self.confirm_delete = !close;
+            close
+        } else {
+            true
+        };
         cx.notify();
+        close
     }
 
-    // ------------------------------------------------------------- render
+    /// A Cancel button: dismiss, and take the dialog down with it.
+    fn cancel_confirm(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.dismiss_confirm(cx) {
+            window.close_dialog(cx);
+        }
+    }
 
-    fn render_modal(
+    /// Open the kit dialog for the confirmation just armed. It is rebuilt
+    /// from this view every frame, so the confirm button arms as the phrase
+    /// is typed.
+    fn open_confirm(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let this = cx.weak_entity();
+        let gone = Rc::new(Cell::new(false));
+        window.open_dialog(cx, move |dialog, window, cx| {
+            match this.upgrade() {
+                Some(view) => view.read(cx).confirm_dialog(&this, dialog, window, cx),
+                None => {
+                    // The view went away under its dialog: take the dialog down once.
+                    if !gone.replace(true) {
+                        window.defer(cx, |window, cx| window.close_dialog(cx));
+                    }
+                    dialog
+                }
+            }
+        });
+    }
+
+    /// The empty-bin or delete/leave confirmation (`.del-modal`): title,
+    /// warning, "Type <phrase> to confirm.", the field, Cancel and the red
+    /// confirm that stays disabled until the phrase matches.
+    fn confirm_dialog(
         &self,
-        title: String,
-        body: Vec<AnyElement>,
-        input: AnyElement,
-        actions: AnyElement,
+        this: &WeakEntity<Self>,
+        dialog: Dialog,
         window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Deferred {
-        let closable_on_backdrop = !self.deleting;
-        // Backdrop and panel fade in, the panel rising 8px, over 120ms; it
-        // takes keys from the first frame and closes at once.
-        let appear = motion::appear_frame("del-modal-appear", 8., window, cx);
-        let alpha = appear.target().alpha();
-        over_window(
-            window_overlay("del-overlay", window)
-                .bg(hsla(0., 0., 0., 0.55 * alpha))
-                .track_focus(&self.modal_focus)
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(move |this, _, _, cx| {
-                        if this.confirm_empty {
-                            this.confirm_empty = false;
-                        } else if closable_on_backdrop {
-                            this.confirm_delete = false;
-                        }
-                        cx.notify();
-                    }),
-                )
-                .child(
-                    div()
-                        .id("del-modal")
-                        .occlude()
-                        .w(px(380.))
-                        .max_w(window.viewport_size().width - px(48.))
-                        .p(px(18.))
-                        .rounded(px(12.))
-                        .bg(theme::panel())
-                        .border_1()
-                        .border_color(theme::border())
-                        .shadow(modal_shadow())
-                        .text_color(theme::fg())
-                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                        .child(
-                            div()
-                                .mb(px(6.))
-                                .text_size(px(15.))
-                                .line_height(px(19.))
-                                .font_weight(FontWeight::BOLD)
-                                .child(title),
-                        )
-                        .child(div().flex().flex_col().gap(px(10.)).children(body))
-                        .child(div().mt(px(8.)).mb(px(14.)).child(input))
-                        .child(actions)
-                        .map(|panel| appear.apply(panel)),
+        cx: &App,
+    ) -> Dialog {
+        let cancel = |id: &'static str| {
+            let this = this.clone();
+            Btn::manage(id, "Cancel").on_click(move |_, window, cx| {
+                let _ = this.update(cx, |this, cx| this.cancel_confirm(window, cx));
+            })
+        };
+        let (title, text, phrase, draft, confirm) = if self.confirm_empty {
+            let n = self.bin.as_ref().map_or(0, Vec::len);
+            let armed = self.empty_armed(cx) && self.bin_busy.is_empty();
+            let this = this.clone();
+            let confirm = Btn::destructive(
+                "empty-confirm",
+                if self.bin_busy == ALL {
+                    "Deleting…"
+                } else {
+                    "Delete forever"
+                },
+            )
+            .disabled(!armed)
+            .on_click(move |_, window, cx| {
+                let _ = this.update(cx, |this, cx| this.empty_bin(window, cx));
+            });
+            (
+                "Empty the bin?".to_string(),
+                format!(
+                    "Permanently deletes {n} object{} — on every device, forever. This cannot be undone.",
+                    if n == 1 { "" } else { "s" }
                 ),
-        )
+                "delete".to_string(),
+                &self.empty_draft,
+                div()
+                    .flex()
+                    .justify_end()
+                    .gap(px(8.))
+                    .child(cancel("empty-cancel"))
+                    .child(confirm),
+            )
+        } else {
+            let is_owner = self.is_owner(cx);
+            let space_name = self.space_name(cx);
+            let armed = self.delete_armed(cx) && !self.deleting;
+            let shown = if space_name.is_empty() {
+                "this space".to_string()
+            } else {
+                space_name
+            };
+            let (title, text) = if is_owner {
+                (
+                    format!("Delete {shown} for everyone?"),
+                    "This permanently deletes the space and everything in it — for every member, on every device, forever. This cannot be undone.",
+                )
+            } else {
+                (
+                    format!("Leave {shown}?"),
+                    "Only your own copies go: the space and everything in it disappear from your devices. The other members keep the space and everything in it, including what you added. This cannot be undone.",
+                )
+            };
+            let confirm_label = match (is_owner, self.deleting) {
+                (true, true) => "Deleting…",
+                (true, false) => "Delete for everyone",
+                (false, true) => "Leaving…",
+                (false, false) => "Leave space",
+            };
+            let this = this.clone();
+            let confirm = Btn::destructive("delete-confirm", confirm_label)
+                .disabled(!armed)
+                .on_click(move |_, window, cx| {
+                    let _ = this.update(cx, |this, cx| this.remove_space(window, cx));
+                });
+            (
+                title,
+                text.to_string(),
+                self.delete_phrase(cx),
+                &self.delete_draft,
+                div()
+                    .flex()
+                    .justify_end()
+                    .gap(px(8.))
+                    .child(cancel("delete-cancel").disabled(self.deleting))
+                    .child(confirm),
+            )
+        };
+        let dismiss = this.clone();
+        dialog
+            .w(px(380.))
+            .close_button(false)
+            .entrance(DialogEntrance::FadeSlide)
+            // Enter belongs to the field, which submits once armed.
+            .on_ok(|_, _, _| false)
+            .on_cancel(move |_, _, cx| {
+                dismiss
+                    .update(cx, |this, cx| this.dismiss_confirm(cx))
+                    .unwrap_or(true)
+            })
+            .p(px(18.))
+            .gap(px(14.))
+            .rounded(px(12.))
+            .bg(theme::panel())
+            .border_color(theme::border())
+            .text_color(theme::fg())
+            .title(
+                div()
+                    .text_size(px(15.))
+                    .line_height(px(19.))
+                    .font_weight(FontWeight::BOLD)
+                    .child(title),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(10.))
+                    .child(manage_hint(text))
+                    .child(type_to_confirm(&phrase, window))
+                    .child(
+                        div()
+                            .mt(px(8.))
+                            .child(field(draft, Self::delete_input_style(), window, cx).w_full()),
+                    ),
+            )
+            .footer(confirm)
     }
 
     fn delete_input_style() -> FieldStyle {
@@ -678,7 +786,6 @@ impl Render for SpaceManage {
         };
         let space = self.space_info(s).cloned();
         let is_owner = space.as_ref().is_none_or(|sp| sp.owner.is_empty());
-        let space_name = object.field_str("name").trim().to_string();
         let members = space
             .as_ref()
             .map(|sp| sp.members.clone())
@@ -759,18 +866,9 @@ impl Render for SpaceManage {
             ))
             .child(
                 div().flex().child(
-                    Select::new("default-type", type_options, default_type, self.type_menu_open)
+                    Select::new("default-type", type_options, default_type)
                         .bg(theme::panel())
                         .min_w(px(220.))
-                        .on_open({
-                            let this = this.clone();
-                            move |open, _, cx| {
-                                this.update(cx, |this, cx| {
-                                    this.type_menu_open = open;
-                                    cx.notify();
-                                })
-                            }
-                        })
                         .on_pick({
                             let this = this.clone();
                             move |key, _, cx| this.update(cx, |this, cx| this.set_default_type(key, cx))
@@ -890,24 +988,14 @@ impl Render for SpaceManage {
         if !self.join_requests.is_empty() {
             root = root.child(h3("Join requests"));
             for r in &self.join_requests {
-                let avatar = match r.picture.as_deref().filter(|p| !p.is_empty()) {
-                    Some(picture) => img(SharedString::from(picture.to_string()))
-                        .size(px(28.))
-                        .rounded_full()
-                        .flex_none()
-                        .into_any_element(),
-                    None => div()
-                        .size(px(28.))
-                        .rounded_full()
-                        .flex_none()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .bg(theme::hover())
-                        .text_size(px(14.))
-                        .child("👤")
-                        .into_any_element(),
-                };
+                let avatar = Avatar::new()
+                    .with_size(px(28.))
+                    .flex_none()
+                    .when_some(
+                        r.picture.as_deref().filter(|p| !p.is_empty()),
+                        |a, picture| a.src(SharedString::from(picture.to_string())),
+                    )
+                    .into_any_element();
                 let name = r.name.clone().filter(|n| !n.is_empty());
                 let approve = r.clone();
                 let deny = r.clone();
@@ -1014,13 +1102,10 @@ impl Render for SpaceManage {
                 for (id, name, is_task, done, icon) in rows {
                     let busy = self.bin_busy == id;
                     let leading = if is_task {
-                        div()
-                            .flex_none()
-                            .child(CheckboxIcon::new(done).size(px(16.)).color(if done {
-                                theme::accent()
-                            } else {
-                                theme::muted()
-                            }))
+                        div().flex_none().child(
+                            checkbox_display(SharedString::from(format!("bin-check-{id}")), done)
+                                .with_size(Size::Medium),
+                        )
                     } else {
                         div().flex_none().child(icon)
                     };
@@ -1091,108 +1176,6 @@ impl Render for SpaceManage {
                 .full_width()
                 .on_click(cx.listener(|this, _, window, cx| this.open_delete(window, cx))),
             );
-        }
-
-        // ── Empty-bin confirmation
-        if self.confirm_empty {
-            let n = bin_len;
-            let armed = self.empty_armed(cx) && self.bin_busy.is_empty();
-            let actions = div()
-                .flex()
-                .justify_end()
-                .gap(px(8.))
-                .child(Btn::manage("empty-cancel", "Cancel").on_click(cx.listener(
-                    |this, _, _, cx| {
-                        this.confirm_empty = false;
-                        cx.notify();
-                    },
-                )))
-                .child(
-                    Btn::destructive(
-                        "empty-confirm",
-                        if self.bin_busy == ALL {
-                            "Deleting…"
-                        } else {
-                            "Delete forever"
-                        },
-                    )
-                    .disabled(!armed)
-                    .on_click(cx.listener(|this, _, _, cx| this.empty_bin(cx))),
-                )
-                .into_any_element();
-            let body = vec![
-                manage_hint(format!(
-                    "Permanently deletes {n} object{} — on every device, forever. This cannot be undone.",
-                    if n == 1 { "" } else { "s" }
-                ))
-                .into_any_element(),
-                type_to_confirm("delete", window).into_any_element(),
-            ];
-            let input = field(&self.empty_draft, Self::delete_input_style(), window, cx)
-                .w_full()
-                .into_any_element();
-            root = root.child(self.render_modal(
-                "Empty the bin?".into(),
-                body,
-                input,
-                actions,
-                window,
-                cx,
-            ));
-        }
-
-        // ── Delete / leave confirmation
-        if self.confirm_delete {
-            let phrase = self.delete_phrase(cx);
-            let armed = self.delete_armed(cx) && !self.deleting;
-            let shown = if space_name.is_empty() {
-                "this space".to_string()
-            } else {
-                space_name.clone()
-            };
-            let (title, text) = if is_owner {
-                (
-                    format!("Delete {shown} for everyone?"),
-                    "This permanently deletes the space and everything in it — for every member, on every device, forever. This cannot be undone.",
-                )
-            } else {
-                (
-                    format!("Leave {shown}?"),
-                    "Only your own copies go: the space and everything in it disappear from your devices. The other members keep the space and everything in it, including what you added. This cannot be undone.",
-                )
-            };
-            let confirm_label = match (is_owner, self.deleting) {
-                (true, true) => "Deleting…",
-                (true, false) => "Delete for everyone",
-                (false, true) => "Leaving…",
-                (false, false) => "Leave space",
-            };
-            let actions = div()
-                .flex()
-                .justify_end()
-                .gap(px(8.))
-                .child(
-                    Btn::manage("delete-cancel", "Cancel")
-                        .disabled(self.deleting)
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.confirm_delete = false;
-                            cx.notify();
-                        })),
-                )
-                .child(
-                    Btn::destructive("delete-confirm", confirm_label)
-                        .disabled(!armed)
-                        .on_click(cx.listener(|this, _, window, cx| this.remove_space(window, cx))),
-                )
-                .into_any_element();
-            let body = vec![
-                manage_hint(text).into_any_element(),
-                type_to_confirm(&phrase, window).into_any_element(),
-            ];
-            let input = field(&self.delete_draft, Self::delete_input_style(), window, cx)
-                .w_full()
-                .into_any_element();
-            root = root.child(self.render_modal(title, body, input, actions, window, cx));
         }
 
         root

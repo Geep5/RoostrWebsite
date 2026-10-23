@@ -1,18 +1,32 @@
 //! Anytype's relationSuggest (`PropertySuggest.svelte`) and typeSuggest
 //! (`TypeSuggest.svelte`) menus: one filter box over the space's properties
 //! (with "Create property" and its format/type-limit steps) or types.
+//!
+//! Both are the kit `Command` palette: it owns the query field, the list,
+//! hover/arrow highlight and Enter. Roostr supplies the rows (glyph + name),
+//! its own filtering and ranking (`filterable(false)`), the create steps, and
+//! dismisses on the first Escape (the palette alone would clear the query
+//! first).
 
-use gpui_kit::component::input::{Escape, InputEvent, InputState, MoveDown, MoveUp};
+use std::rc::Rc;
+
+use gpui_kit::base::actions::{Cancel, Confirm};
+use gpui_kit::component::Icon;
+use gpui_kit::component::IndexPath;
+use gpui_kit::component::command::{Command, CommandGroup, CommandItem, CommandState};
+use gpui_kit::component::input::Escape;
+use gpui_kit::component::label::Label;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use roostr_core::objects::type_glyph;
 use roostr_core::relations::{
-    CREATABLE_FORMATS, create_relation, format_glyph, is_reserved_key, space_relations,
+    CREATABLE_FORMATS, create_relation, is_reserved_key, space_relations,
 };
+use roostr_core::ui::prop_icon;
 use roostr_core::{RelationDef, Store, TypeDef, theme};
 
 use crate::type_limit::{TypeLimitPicker, toggled};
-use crate::widgets::{FieldSkin, field, pop_shadow};
+use crate::widgets::{act_button, empty_note, pop_shadow};
 
 /// What a suggest menu reports to its host.
 pub enum SuggestEvent<T> {
@@ -47,46 +61,64 @@ fn format_name(format: &str) -> &str {
     }
 }
 
-fn section(label: String) -> Div {
+/// A row's lead (the property's emoji, else its format's line icon) and
+/// name, with an optional muted note at the right end.
+fn glyph_name(emoji: Option<String>, format: &str, name: String, note: Option<String>) -> Div {
+    let lead = match emoji {
+        Some(e) => div().child(e),
+        None => div()
+            .flex()
+            .justify_center()
+            .text_color(theme::muted())
+            .child(Icon::new(prop_icon(format)).size(px(14.))),
+    };
     div()
-        .px(px(6.))
-        .pt(px(6.))
-        .pb(px(2.))
-        .text_size(px(10.))
-        .text_color(theme::muted())
-        .child(SharedString::from(label.to_uppercase()))
-}
-
-fn item(id: impl Into<ElementId>) -> Stateful<Div> {
-    div()
-        .id(id.into())
         .flex()
         .justify_between()
         .items_center()
         .gap(px(10.))
-        .px(px(8.))
-        .py(px(6.))
-        .rounded(theme::radius::sm())
-        .text_size(px(13.))
-        .cursor_pointer()
-        .hover(|s| s.bg(theme::hover()))
-}
-
-fn glyph_name(glyph: String, name: String) -> Div {
-    div()
-        .flex()
-        .items_center()
-        .gap(px(8.))
+        .w_full()
         .min_w_0()
-        .child(div().flex_none().w(px(18.)).text_center().child(glyph))
+        .text_size(px(13.))
         .child(
             div()
+                .flex()
+                .items_center()
+                .gap(px(8.))
                 .min_w_0()
-                .overflow_hidden()
-                .whitespace_nowrap()
-                .text_ellipsis()
-                .child(name),
+                .child(lead.flex_none().w(px(18.)).text_center())
+                .child(
+                    div()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .child(name),
+                ),
         )
+        .when_some(note, |d, note| {
+            d.child(
+                div()
+                    .flex_none()
+                    .text_size(px(11.))
+                    .text_color(theme::muted())
+                    .child(note),
+            )
+        })
+}
+
+/// A palette row drawn by Roostr; `label` is what assistive tech reads.
+fn row_item(label: impl Into<SharedString>, row: impl Fn() -> Div + 'static) -> CommandItem {
+    CommandItem::new().label(label).child(move |_, _| row())
+}
+
+/// What a PropertySuggest row does.
+#[derive(Clone)]
+enum Target {
+    Create,
+    Format(&'static str),
+    Extra(String),
+    Relation(RelationDef),
 }
 
 /// Relation picker with search (+ "create property"); place inside a popover/anchored.
@@ -94,11 +126,12 @@ pub struct PropertySuggest {
     space_id: String,
     exclude: Vec<String>,
     extras: Vec<(String, String)>,
-    query: Entity<InputState>,
+    command: Entity<CommandState>,
     creating: bool,
     create_format: String,
     create_types: Vec<String>,
-    fmt_idx: usize,
+    /// The query and step the default highlight was last placed for.
+    highlighted_for: Option<(String, bool, String)>,
     focus: FocusHandle,
     _subs: Vec<Subscription>,
 }
@@ -107,7 +140,7 @@ impl EventEmitter<SuggestEvent<PropertyPick>> for PropertySuggest {}
 
 impl Focusable for PropertySuggest {
     fn focus_handle(&self, cx: &App) -> FocusHandle {
-        self.query.focus_handle(cx)
+        self.command.focus_handle(cx)
     }
 }
 
@@ -121,40 +154,28 @@ impl PropertySuggest {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let query =
-            cx.new(|cx| InputState::new(window, cx).placeholder("Filter or create a property…"));
-        let subs = vec![
-            cx.subscribe_in(
-                &query,
-                window,
-                |this, _, ev: &InputEvent, window, cx| match ev {
-                    InputEvent::Change => cx.notify(),
-                    InputEvent::PressEnter { .. } => this.enter(window, cx),
-                    _ => {}
-                },
-            ),
-            cx.observe(&Store::global(cx), |_, _, cx| cx.notify()),
-        ];
-        let q = query.clone();
+        let command = cx.new(|cx| CommandState::new(window, cx));
+        let subs = vec![cx.observe(&Store::global(cx), |_, _, cx| cx.notify())];
+        let c = command.clone();
         window.defer(cx, move |window, cx| {
-            q.update(cx, |s, cx| s.focus(window, cx))
+            c.update(cx, |c, cx| c.focus(window, cx))
         });
         Self {
             space_id,
             exclude,
             extras,
-            query,
+            command,
             creating: false,
             create_format: String::new(),
             create_types: Vec::new(),
-            fmt_idx: 0,
+            highlighted_for: None,
             focus: cx.focus_handle(),
             _subs: subs,
         }
     }
 
-    fn q(&self, cx: &App) -> String {
-        self.query.read(cx).value().trim().to_lowercase()
+    fn raw(&self, cx: &App) -> String {
+        self.command.read(cx).query(cx).trim().to_string()
     }
 
     fn all(&self, cx: &App) -> Vec<RelationDef> {
@@ -174,45 +195,36 @@ impl PropertySuggest {
         }
     }
 
-    fn filtered(&self, all: &[RelationDef], cx: &App) -> Vec<RelationDef> {
-        let q = self.q(cx);
+    fn filtered(all: &[RelationDef], q: &str) -> Vec<RelationDef> {
         all.iter()
-            .filter(|r| q.is_empty() || Self::label(r).to_lowercase().contains(&q))
+            .filter(|r| q.is_empty() || Self::label(r).to_lowercase().contains(q))
             .cloned()
             .collect()
     }
 
-    fn filtered_extras(&self, cx: &App) -> Vec<(String, String)> {
-        let q = self.q(cx);
+    fn filtered_extras(&self, q: &str) -> Vec<(String, String)> {
         self.extras
             .iter()
             .filter(|(k, n)| {
-                !self.exclude.contains(k) && (q.is_empty() || n.to_lowercase().contains(&q))
+                !self.exclude.contains(k) && (q.is_empty() || n.to_lowercase().contains(q))
             })
             .cloned()
             .collect()
     }
 
-    fn can_create(&self, all: &[RelationDef], cx: &App) -> bool {
-        let q = self.q(cx);
+    fn can_create(all: &[RelationDef], q: &str) -> bool {
         !q.is_empty() && !all.iter().any(|r| Self::label(r).to_lowercase() == q)
     }
 
-    fn enter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let all = self.all(cx);
-        let filtered = self.filtered(&all, cx);
-        let can_create = self.can_create(&all, cx);
-        if !filtered.is_empty() && !self.creating {
-            cx.emit(SuggestEvent::Picked(PropertyPick::Relation(
-                filtered[0].clone(),
-            )));
-        } else if can_create && !self.creating {
-            self.creating = true;
-            cx.notify();
-        } else if can_create && self.create_format.is_empty() {
-            self.choose(CREATABLE_FORMATS[self.fmt_idx], window, cx);
-        } else if can_create {
-            self.create(window, cx);
+    fn confirm(&mut self, target: Target, window: &mut Window, cx: &mut Context<Self>) {
+        match target {
+            Target::Create => {
+                self.creating = true;
+                cx.notify();
+            }
+            Target::Format(f) => self.choose(f, window, cx),
+            Target::Extra(key) => cx.emit(SuggestEvent::Picked(PropertyPick::Extra(key))),
+            Target::Relation(rel) => cx.emit(SuggestEvent::Picked(PropertyPick::Relation(rel))),
         }
     }
 
@@ -226,7 +238,7 @@ impl PropertySuggest {
     }
 
     fn create(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let name = self.query.read(cx).value().trim().to_string();
+        let name = self.raw(cx);
         let task = create_relation(
             &name,
             &self.create_format,
@@ -245,21 +257,231 @@ impl PropertySuggest {
         .detach();
     }
 
-    fn move_fmt(&mut self, down: bool, cx: &mut Context<Self>) {
-        let n = CREATABLE_FORMATS.len();
-        self.fmt_idx = (self.fmt_idx + if down { 1 } else { n - 1 }) % n;
-        cx.notify();
+    /// The step-3 panel (an Object's type limits + Back / Create), shown under
+    /// the list once a format that needs it is chosen.
+    fn limit_panel(&self, raw: &str, cx: &mut Context<Self>) -> impl Fn() -> AnyElement + 'static {
+        let entity = cx.entity().downgrade();
+        let types = self.create_types.clone();
+        let space = self.space_id.clone();
+        let raw = raw.to_string();
+        move || {
+            let (toggle, back, create) = (entity.clone(), entity.clone(), entity.clone());
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(4.))
+                .p(px(4.))
+                .child(
+                    Label::new(format!("Object “{raw}” links to").to_uppercase())
+                        .px(px(6.))
+                        .pt(px(6.))
+                        .pb(px(2.))
+                        .text_size(px(10.))
+                        .text_color(theme::muted()),
+                )
+                .child(TypeLimitPicker::new(
+                    "limit",
+                    types.clone(),
+                    space.clone(),
+                    move |id, _, cx| {
+                        let _ = toggle.update(cx, |this, cx| {
+                            this.create_types = toggled(&this.create_types, id);
+                            cx.notify();
+                        });
+                    },
+                ))
+                .child(
+                    div()
+                        .flex()
+                        .gap(px(6.))
+                        .justify_end()
+                        .mt(px(6.))
+                        .child(act_button("back", "Back", false).on_click(move |_, _, cx| {
+                            let _ = back.update(cx, |this, cx| {
+                                this.create_format.clear();
+                                cx.notify();
+                            });
+                        }))
+                        .child(act_button("create-it", "Create", false).on_click(
+                            move |_, window, cx| {
+                                let _ = create.update(cx, |this, cx| this.create(window, cx));
+                            },
+                        )),
+                )
+                .into_any_element()
+        }
     }
 }
 
 impl Render for PropertySuggest {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let raw = self.raw(cx);
+        let q = raw.to_lowercase();
         let all = self.all(cx);
-        let filtered = self.filtered(&all, cx);
-        let extras = self.filtered_extras(cx);
-        let can_create = self.can_create(&all, cx);
-        let raw = self.query.read(cx).value().trim().to_string();
-        let mut menu = div()
+        let filtered = Self::filtered(&all, &q);
+        let extras = self.filtered_extras(&q);
+        let can_create = Self::can_create(&all, &q);
+        let pick_format = can_create && self.creating && self.create_format.is_empty();
+        let limits = can_create && self.creating && !self.create_format.is_empty();
+
+        // Rows, one group per section; `targets` maps each row's path to its action.
+        let mut groups: Vec<CommandGroup> = Vec::new();
+        let mut targets: Vec<(IndexPath, Target)> = Vec::new();
+        let mut add_group = |heading: Option<String>, rows: Vec<(CommandItem, Target)>| {
+            let section = groups.len();
+            let mut group = CommandGroup::new();
+            if let Some(h) = heading {
+                group = group.label(h.to_uppercase());
+            }
+            for (row, (item, target)) in rows.into_iter().enumerate() {
+                targets.push((IndexPath::new(row).section(section), target));
+                group = group.item(item);
+            }
+            groups.push(group);
+        };
+        if can_create && !self.creating {
+            let text = format!("＋ Create property “{raw}”");
+            add_group(
+                None,
+                vec![(
+                    row_item(text.clone(), move || {
+                        div()
+                            .text_size(px(13.))
+                            .text_color(theme::accent())
+                            .child(text.clone())
+                    }),
+                    Target::Create,
+                )],
+            );
+        }
+        if pick_format {
+            add_group(
+                Some(format!("Type of “{raw}”")),
+                CREATABLE_FORMATS
+                    .iter()
+                    .map(|&f| {
+                        (
+                            row_item(format_name(f).to_string(), move || {
+                                glyph_name(None, f, format_name(f).to_string(), None)
+                            }),
+                            Target::Format(f),
+                        )
+                    })
+                    .collect(),
+            );
+        }
+        if !extras.is_empty() {
+            add_group(
+                Some("System".into()),
+                extras
+                    .into_iter()
+                    .map(|(key, name)| {
+                        let n = name.clone();
+                        (
+                            row_item(name, move || div().text_size(px(13.)).child(n.clone())),
+                            Target::Extra(key),
+                        )
+                    })
+                    .collect(),
+            );
+        }
+        if !filtered.is_empty() {
+            add_group(
+                Some("My properties".into()),
+                filtered
+                    .into_iter()
+                    .map(|rel| {
+                        let (emoji, name, format) = (
+                            rel.icon_emoji.clone().filter(|e| !e.is_empty()),
+                            Self::label(&rel),
+                            rel.format.clone(),
+                        );
+                        (
+                            row_item(name.clone(), move || {
+                                glyph_name(
+                                    emoji.clone(),
+                                    &format,
+                                    name.clone(),
+                                    Some(format.clone()),
+                                )
+                            }),
+                            Target::Relation(rel),
+                        )
+                    })
+                    .collect(),
+            );
+        }
+
+        // Enter does what the web menu's did: the first matching property,
+        // else "Create property", else the first format. The palette
+        // highlights its first row, so the highlight is placed once per query
+        // and step; arrows and hover move it from there.
+        let step = (raw.clone(), self.creating, self.create_format.clone());
+        if self.highlighted_for.as_ref() != Some(&step) {
+            self.highlighted_for = Some(step);
+            let want = if pick_format {
+                targets
+                    .iter()
+                    .find(|(_, t)| matches!(t, Target::Format(_)))
+                    .map(|(ix, _)| *ix)
+            } else if !self.creating {
+                let first_relation = targets
+                    .iter()
+                    .find(|(_, t)| matches!(t, Target::Relation(_)))
+                    .map(|(ix, _)| *ix);
+                first_relation.or_else(|| {
+                    targets
+                        .iter()
+                        .find(|(_, t)| matches!(t, Target::Create))
+                        .map(|(ix, _)| *ix)
+                })
+            } else {
+                None
+            };
+            if let Some(ix) = want {
+                // After this render installs the rows the path points into.
+                let command = self.command.downgrade();
+                window.defer(cx, move |window, cx| {
+                    let _ = command.update(cx, |c, cx| c.set_selected_index(Some(ix), window, cx));
+                });
+            }
+        }
+
+        let targets = Rc::new(targets);
+        let entity = cx.entity().downgrade();
+        let on_query = entity.clone();
+        let mut command = Command::new(&self.command)
+            .filterable(false)
+            .bordered(false)
+            .placeholder("Filter or create a property…")
+            .max_h(px(280.))
+            .on_query(move |_, _, cx| {
+                let _ = on_query.update(cx, |_, cx| cx.notify());
+            })
+            .on_confirm(move |ix, window, cx| {
+                let Some(target) = targets
+                    .iter()
+                    .find(|(p, _)| *p == ix)
+                    .map(|(_, t)| t.clone())
+                else {
+                    return;
+                };
+                let _ = entity.update(cx, |this, cx| this.confirm(target, window, cx));
+            })
+            .empty(|_, _, _| {
+                empty_note("No properties yet — type a name to create one.")
+                    .p(px(6.))
+                    .text_size(px(12.))
+            });
+        for group in groups {
+            command = command.group(group);
+        }
+        if limits {
+            let panel = self.limit_panel(&raw, cx);
+            command = command.footer(move |_, _, _| panel());
+        }
+
+        div()
             .id("property-suggest")
             .track_focus(&self.focus)
             .w(px(280.))
@@ -267,29 +489,27 @@ impl Render for PropertySuggest {
             .overflow_hidden()
             .flex()
             .flex_col()
-            .gap(px(4.))
             .bg(theme::panel())
             .border_1()
             .border_color(theme::border())
             .rounded(theme::radius::menu())
-            .p(px(8.))
+            .p(px(4.))
             .shadow(pop_shadow())
             .text_color(theme::fg())
             .occlude()
             .on_mouse_down_out(cx.listener(|_, _, _, cx| cx.emit(SuggestEvent::Dismissed)))
-            .capture_action(cx.listener(|this, _: &MoveDown, _, cx| {
-                if this.creating && this.create_format.is_empty() {
+            // Step 3 has no row to confirm: Enter creates the property.
+            .capture_action(cx.listener(move |this, _: &Confirm, window, cx| {
+                if limits {
                     cx.stop_propagation();
-                    this.move_fmt(true, cx);
-                }
-            }))
-            .capture_action(cx.listener(|this, _: &MoveUp, _, cx| {
-                if this.creating && this.create_format.is_empty() {
-                    cx.stop_propagation();
-                    this.move_fmt(false, cx);
+                    this.create(window, cx);
                 }
             }))
             .capture_action(cx.listener(|_, _: &Escape, _, cx| {
+                cx.stop_propagation();
+                cx.emit(SuggestEvent::Dismissed);
+            }))
+            .capture_action(cx.listener(|_, _: &Cancel, _, cx| {
                 cx.stop_propagation();
                 cx.emit(SuggestEvent::Dismissed);
             }))
@@ -298,157 +518,7 @@ impl Render for PropertySuggest {
                     cx.emit(SuggestEvent::Dismissed);
                 }
             }))
-            .child(
-                field(&self.query, FieldSkin::Search, window, cx)
-                    .bg(theme::hl_light())
-                    .border_0(),
-            );
-        if can_create {
-            if !self.creating {
-                menu = menu.child(
-                    item("create")
-                        .text_color(theme::accent())
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.creating = true;
-                            cx.notify();
-                        }))
-                        .child(format!("＋ Create property “{raw}”")),
-                );
-            } else if self.create_format.is_empty() {
-                menu = menu.child(section(format!("Type of “{raw}”")));
-                let mut list = div()
-                    .id("formats")
-                    .flex()
-                    .flex_col()
-                    .flex_shrink(1.)
-                    .min_h_0()
-                    .overflow_y_scroll();
-                for (i, f) in CREATABLE_FORMATS.iter().enumerate() {
-                    let active = i == self.fmt_idx;
-                    list = list.child(
-                        item(SharedString::from(format!("fmt-{f}")))
-                            .when(active, |d| d.bg(theme::hover()))
-                            .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
-                                if *hovered && this.fmt_idx != i {
-                                    this.fmt_idx = i;
-                                    cx.notify();
-                                }
-                            }))
-                            .on_click(
-                                cx.listener(move |this, _, window, cx| this.choose(f, window, cx)),
-                            )
-                            .child(glyph_name(
-                                format_glyph(f).to_string(),
-                                format_name(f).to_string(),
-                            )),
-                    );
-                }
-                menu = menu.child(list);
-            } else {
-                menu = menu.child(section(format!("Object “{raw}” links to")));
-                let entity = cx.entity().downgrade();
-                menu = menu.child(TypeLimitPicker::new(
-                    "limit",
-                    self.create_types.clone(),
-                    self.space_id.clone(),
-                    move |id, _, cx| {
-                        let _ = entity.update(cx, |this, cx| {
-                            this.create_types = toggled(&this.create_types, id);
-                            cx.notify();
-                        });
-                    },
-                ));
-                let button = |id: &'static str, label: &'static str| {
-                    div()
-                        .id(id)
-                        .border_1()
-                        .border_color(theme::border())
-                        .rounded(theme::radius::sm())
-                        .px(px(10.))
-                        .py(px(4.))
-                        .text_size(px(13.))
-                        .cursor_pointer()
-                        .hover(|s| s.border_color(theme::accent()))
-                        .child(label)
-                };
-                menu =
-                    menu.child(
-                        div()
-                            .flex()
-                            .gap(px(6.))
-                            .justify_end()
-                            .mt(px(6.))
-                            .child(button("back", "Back").on_click(cx.listener(
-                                |this, _, _, cx| {
-                                    this.create_format.clear();
-                                    cx.notify();
-                                },
-                            )))
-                            .child(button("create-it", "Create").on_click(
-                                cx.listener(|this, _, window, cx| this.create(window, cx)),
-                            )),
-                    );
-            }
-        }
-        if !extras.is_empty() {
-            menu = menu.child(section("System".into()));
-            let mut list = div()
-                .id("extras")
-                .flex()
-                .flex_col()
-                .flex_shrink_0()
-                .overflow_y_scroll();
-            for (key, name) in extras.iter().cloned() {
-                list = list.child(
-                    item(SharedString::from(format!("extra-{key}")))
-                        .on_click(cx.listener(move |_, _, _, cx| {
-                            cx.emit(SuggestEvent::Picked(PropertyPick::Extra(key.clone())))
-                        }))
-                        .child(div().child(name)),
-                );
-            }
-            menu = menu.child(list);
-        }
-        if !filtered.is_empty() {
-            menu = menu.child(section("My properties".into()));
-            let mut list = div()
-                .id("relations")
-                .flex()
-                .flex_col()
-                .flex_shrink(1.)
-                .min_h_0()
-                .overflow_y_scroll();
-            for rel in filtered {
-                let r = rel.clone();
-                list = list.child(
-                    item(SharedString::from(format!("rel-{}", rel.key)))
-                        .on_click(cx.listener(move |_, _, _, cx| {
-                            cx.emit(SuggestEvent::Picked(PropertyPick::Relation(r.clone())))
-                        }))
-                        .child(glyph_name(
-                            rel.icon_emoji.clone().unwrap_or_default(),
-                            Self::label(&rel),
-                        ))
-                        .child(
-                            div()
-                                .flex_none()
-                                .text_size(px(11.))
-                                .text_color(theme::muted())
-                                .child(rel.format.clone()),
-                        ),
-                );
-            }
-            menu = menu.child(list);
-        } else if !can_create && extras.is_empty() {
-            menu = menu.child(
-                div()
-                    .p(px(6.))
-                    .text_size(px(12.))
-                    .text_color(theme::muted())
-                    .child("No properties yet — type a name to create one."),
-            );
-        }
-        menu
+            .child(command.bg(theme::panel()).flex_1().min_h_0())
     }
 }
 
@@ -456,8 +526,8 @@ impl Render for PropertySuggest {
 pub struct TypeSuggest {
     space_id: String,
     exclude: Vec<String>,
-    query: Entity<InputState>,
-    selected: usize,
+    command: Entity<CommandState>,
+    placeholder: SharedString,
     _subs: Vec<Subscription>,
 }
 
@@ -465,7 +535,7 @@ impl EventEmitter<SuggestEvent<String>> for TypeSuggest {}
 
 impl Focusable for TypeSuggest {
     fn focus_handle(&self, cx: &App) -> FocusHandle {
-        self.query.focus_handle(cx)
+        self.command.focus_handle(cx)
     }
 }
 
@@ -478,32 +548,17 @@ impl TypeSuggest {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let query = cx.new(|cx| InputState::new(window, cx).placeholder(placeholder));
-        let subs = vec![
-            cx.subscribe_in(&query, window, |this, _, ev: &InputEvent, _, cx| match ev {
-                InputEvent::Change => {
-                    this.selected = 0;
-                    cx.notify();
-                }
-                InputEvent::PressEnter { .. } => {
-                    if let Some(t) = this.matches(cx).get(this.selected) {
-                        let key = t.key.clone();
-                        this.pick(key, cx);
-                    }
-                }
-                _ => {}
-            }),
-            cx.observe(&Store::global(cx), |_, _, cx| cx.notify()),
-        ];
-        let q = query.clone();
+        let command = cx.new(|cx| CommandState::new(window, cx));
+        let subs = vec![cx.observe(&Store::global(cx), |_, _, cx| cx.notify())];
+        let c = command.clone();
         window.defer(cx, move |window, cx| {
-            q.update(cx, |s, cx| s.focus(window, cx))
+            c.update(cx, |c, cx| c.focus(window, cx))
         });
         Self {
             space_id,
             exclude,
-            query,
-            selected: 0,
+            command,
+            placeholder,
             _subs: subs,
         }
     }
@@ -516,9 +571,10 @@ impl TypeSuggest {
         }
     }
 
+    /// The space's types, name/key prefix matches first, then the rest that contain the query.
     fn matches(&self, cx: &App) -> Vec<TypeDef> {
         let store = Store::global(cx).read(cx);
-        let q = self.query.read(cx).value().trim().to_lowercase();
+        let q = self.command.read(cx).query(cx).trim().to_lowercase();
         let space = if self.space_id.is_empty() {
             store
                 .channels
@@ -564,94 +620,88 @@ impl TypeSuggest {
         });
         starts.iter().cloned().chain(contains).collect()
     }
-
-    fn pick(&mut self, key: String, cx: &mut Context<Self>) {
-        cx.emit(SuggestEvent::Picked(key));
-    }
 }
 
 impl Render for TypeSuggest {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let matches = self.matches(cx);
         let store = Store::global(cx).read(cx);
-        let mut options = div()
-            .id("type-options")
-            .flex()
-            .flex_col()
-            .max_h(px(240.))
-            .overflow_y_scroll();
-        for (i, t) in matches.iter().enumerate() {
-            let key = t.key.clone();
-            let icon = if t.icon.is_empty() {
-                type_glyph(store, &t.key, &self.space_id)
-            } else {
-                t.icon.clone()
-            };
-            options = options.child(
-                div()
-                    .id(SharedString::from(format!("type-{}-{}", t.id, t.key)))
-                    .flex()
-                    .items_center()
-                    .gap(px(8.))
-                    .px(px(8.))
-                    .py(px(6.))
-                    .rounded(theme::radius::sm())
-                    .text_size(px(13.))
-                    .cursor_pointer()
-                    .when(i == self.selected, |d| d.bg(theme::hl_med()))
-                    .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
-                        if *hovered && this.selected != i {
-                            this.selected = i;
-                            cx.notify();
-                        }
-                    }))
-                    .on_click(cx.listener(move |this, _, _, cx| this.pick(key.clone(), cx)))
-                    .child(div().flex_none().w(px(20.)).text_center().child(icon))
-                    .child(div().flex_1().child(if t.name.is_empty() {
-                        t.key.clone()
-                    } else {
-                        t.name.clone()
-                    }))
-                    .child(
-                        div()
-                            .text_size(px(11.))
-                            .text_color(theme::muted())
-                            .child(t.key.clone()),
-                    ),
-            );
-        }
-        if matches.is_empty() {
-            options = options.child(
-                div()
-                    .px(px(8.))
-                    .py(px(6.))
-                    .text_size(px(12.))
-                    .text_color(theme::muted())
-                    .child("No matching types."),
-            );
-        }
-        let n = matches.len();
+        let keys: Rc<Vec<String>> = Rc::new(matches.iter().map(|t| t.key.clone()).collect());
+        let items: Vec<CommandItem> = matches
+            .iter()
+            .map(|t| {
+                let icon = if t.icon.is_empty() {
+                    type_glyph(store, &t.key, &self.space_id)
+                } else {
+                    t.icon.clone()
+                };
+                let name = if t.name.is_empty() {
+                    t.key.clone()
+                } else {
+                    t.name.clone()
+                };
+                let key = t.key.clone();
+                row_item(name.clone(), move || {
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(8.))
+                        .w_full()
+                        .text_size(px(13.))
+                        .child(
+                            div()
+                                .flex_none()
+                                .w(px(20.))
+                                .text_center()
+                                .child(icon.clone()),
+                        )
+                        .child(div().flex_1().child(name.clone()))
+                        .child(
+                            div()
+                                .text_size(px(11.))
+                                .text_color(theme::muted())
+                                .child(key.clone()),
+                        )
+                })
+            })
+            .collect();
+        let entity = cx.entity().downgrade();
+        let on_query = entity.clone();
         div()
             .flex()
             .flex_col()
-            .gap(px(4.))
             .min_w(px(240.))
             .text_color(theme::fg())
-            .capture_action(cx.listener(move |this, _: &MoveDown, _, cx| {
-                cx.stop_propagation();
-                this.selected = (this.selected + 1).min(n.saturating_sub(1));
-                cx.notify();
-            }))
-            .capture_action(cx.listener(|this, _: &MoveUp, _, cx| {
-                cx.stop_propagation();
-                this.selected = this.selected.saturating_sub(1);
-                cx.notify();
-            }))
             .capture_action(cx.listener(|_, _: &Escape, _, cx| {
                 cx.stop_propagation();
                 cx.emit(SuggestEvent::Dismissed);
             }))
-            .child(field(&self.query, FieldSkin::Suggest, window, cx))
-            .child(options)
+            .capture_action(cx.listener(|_, _: &Cancel, _, cx| {
+                cx.stop_propagation();
+                cx.emit(SuggestEvent::Dismissed);
+            }))
+            .child(
+                Command::new(&self.command)
+                    .filterable(false)
+                    .bordered(false)
+                    .placeholder(self.placeholder.clone())
+                    .max_h(px(240.))
+                    .bg(theme::panel())
+                    .items(items)
+                    .on_query(move |_, _, cx| {
+                        let _ = on_query.update(cx, |_, cx| cx.notify());
+                    })
+                    .on_confirm(move |ix, _, cx| {
+                        if let Some(key) = keys.get(ix.row).cloned() {
+                            let _ = entity.update(cx, |_, cx| cx.emit(SuggestEvent::Picked(key)));
+                        }
+                    })
+                    .empty(|_, _, _| {
+                        empty_note("No matching types.")
+                            .px(px(8.))
+                            .py(px(6.))
+                            .text_size(px(12.))
+                    }),
+            )
     }
 }

@@ -7,6 +7,9 @@
 
 use std::time::Duration;
 
+use gpui_kit::component::IconName;
+use gpui_kit::component::alert::Alert;
+use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use roostr_core::harness::harness;
@@ -124,26 +127,18 @@ impl Render for InstallComputer {
                             ),
                     )
                     .child(
-                        div()
-                            .id("ic-dismiss")
+                        Button::new("ic-dismiss")
+                            .ghost()
+                            .icon(IconName::Close)
                             .flex_none()
                             .size(px(26.))
-                            .flex()
-                            .items_center()
-                            .justify_center()
                             .rounded(px(7.))
-                            .border_1()
-                            .border_color(transparent_black())
                             .text_color(muted)
-                            .text_size(px(13.))
-                            .cursor_pointer()
-                            .hover(|s| s.text_color(theme::fg()).border_color(theme::border()))
-                            .tooltip(roostr_core::ui::tooltip("Hide for now"))
+                            .tooltip("Hide for now")
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.dismissed = true;
                                 cx.notify();
-                            }))
-                            .child("✕"),
+                            })),
                     ),
             )
             .child(
@@ -221,7 +216,7 @@ impl Render for InstallComputer {
                     }),
             )
             .when(!self.error.is_empty(), |d| {
-                d.child(div().text_size(px(12.)).text_color(theme::red()).child(self.error.clone()))
+                d.child(Alert::error("ic-error", self.error.clone()).text_size(px(12.)))
             })
     }
 }

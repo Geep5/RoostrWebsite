@@ -4,6 +4,8 @@
 use std::collections::HashMap;
 
 use chrono::{Datelike, Duration, Local, NaiveDate, TimeZone};
+use gpui_kit::component::button::Button;
+use gpui_kit::component::tag::Tag;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use roostr_core::{QueryRow, api, theme};
@@ -104,19 +106,20 @@ fn ts_of(r: &QueryRow, date_key: &str) -> i64 {
     }
 }
 
-fn nav_button(id: &'static str, label: &'static str) -> Stateful<Div> {
-    div()
-        .id(id)
-        .border_1()
-        .border_color(theme::border())
-        .rounded(px(8.))
+/// A month-nav button (`.cal-nav button`), the kit outline button; the 12px
+/// label sits in a child (the kit sizes its own label text).
+fn nav_button(id: &'static str, label: &'static str) -> Button {
+    Button::new(id)
+        .child(div().text_size(px(12.)).child(label))
+        .outline()
+        .h_auto()
         .px(px(10.))
         .py(px(3.))
-        .text_size(px(12.))
+        .rounded(px(8.))
+        .border_color(theme::border())
+        .bg(transparent_black())
         .text_color(theme::fg())
         .cursor_pointer()
-        .hover(|s| s.border_color(theme::accent()))
-        .child(label)
 }
 
 impl Render for CalendarView {
@@ -183,26 +186,25 @@ impl Render for CalendarView {
                     div()
                         .id(SharedString::from(format!("cal-{}-{}", i, r.id)))
                         .flex()
-                        .items_center()
-                        .gap(px(4.))
                         .min_w_0()
-                        .bg(theme::panel())
-                        .border_1()
-                        .border_color(theme::border())
-                        .rounded(px(6.))
-                        .px(px(6.))
-                        .py(px(2.))
-                        .text_size(px(11.))
-                        .text_color(theme::fg())
-                        .whitespace_nowrap()
                         .overflow_hidden()
                         .cursor_pointer()
-                        .hover(|s| s.border_color(theme::accent()))
                         .tooltip(roostr_core::ui::tooltip(name.clone()))
                         .on_click(move |_, _, cx| common::open_object(&id, cx))
-                        .child(div().flex_none().child(common::row_icon(r, cx)))
-                        // A flex button clips its text node: no ellipsis in the web either.
-                        .child(div().flex_none().child(name)),
+                        .child(
+                            Tag::custom(theme::panel(), theme::fg(), theme::border())
+                                .rounded(px(6.))
+                                .gap(px(4.))
+                                .min_w_0()
+                                .px(px(6.))
+                                .py(px(2.))
+                                .text_size(px(11.))
+                                .whitespace_nowrap()
+                                .overflow_hidden()
+                                .child(div().flex_none().child(common::row_icon(r, cx)))
+                                // A flex button clips its text node: no ellipsis in the web either.
+                                .child(div().flex_none().child(name)),
+                        ),
                 );
             }
             if items.len() > 4 {
@@ -250,6 +252,7 @@ impl Render for CalendarView {
                             .gap(px(4.))
                             .child(
                                 nav_button("cal-prev", "‹")
+                                    .accessibility_label("Previous month")
                                     .on_click(cx.listener(|this, _, _, cx| this.step(-1, cx))),
                             )
                             .child(nav_button("cal-today", "Today").on_click(cx.listener(
@@ -262,6 +265,7 @@ impl Render for CalendarView {
                             )))
                             .child(
                                 nav_button("cal-next", "›")
+                                    .accessibility_label("Next month")
                                     .on_click(cx.listener(|this, _, _, cx| this.step(1, cx))),
                             ),
                     ),

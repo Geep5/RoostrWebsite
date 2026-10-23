@@ -7,6 +7,8 @@
 use std::time::Duration;
 
 use anyhow::{Result, anyhow};
+use gpui_kit::component::label::Label;
+use gpui_kit::component::tag::Tag;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use roostr_core::create::this_machine_id;
@@ -18,7 +20,7 @@ use roostr_core::{Glyph, Store, api, theme};
 use serde::Deserialize;
 use serde_json::{Value as Json, json};
 
-use crate::widgets::act_button;
+use crate::widgets::{act_button, error_alert, note, rule};
 
 /// Request statuses still waiting on a human or running.
 const OPEN_REQUEST: [&str; 3] = ["pending", "awaiting_approval", "processing"];
@@ -271,20 +273,6 @@ impl CapabilityStatus {
     }
 }
 
-fn muted(text: impl Into<SharedString>) -> Div {
-    div()
-        .text_size(px(12.5))
-        .text_color(theme::muted())
-        .child(text.into())
-}
-
-fn error_line(text: String) -> Div {
-    div()
-        .text_size(px(12.5))
-        .text_color(rgb(0xff6961))
-        .child(text)
-}
-
 impl Render for CapabilityStatus {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let Some(object) = Store::global(cx).read(cx).object(&self.object_id) else {
@@ -322,15 +310,18 @@ impl Render for CapabilityStatus {
             .gap(px(8.))
             .min_w(px(220.))
             .child(
-                div()
+                Label::new(capability_status_text(&status))
                     .text_size(px(14.))
                     .font_weight(FontWeight::SEMIBOLD)
-                    .child(capability_status_text(&status)),
+                    .text_color(theme::fg()),
             )
-            .when(!error.is_empty(), |d| d.child(error_line(error.clone())));
+            .when(!error.is_empty(), |d| {
+                d.child(error_alert("cap-error", error.clone()).text_size(px(12.5)))
+            });
         if is_template {
-            col = col.child(muted(
+            col = col.child(note(
                 "A template does not install; each capability made from it does.",
+                12.5,
             ));
         } else if self.ready {
             if can_act {
@@ -365,14 +356,12 @@ impl Render for CapabilityStatus {
                     .collect();
                 for request in waiting {
                     let mut line = div().flex().flex_wrap().items_center().gap(px(6.)).child(
-                        div()
-                            .text_size(px(11.))
-                            .font_weight(FontWeight::SEMIBOLD)
+                        Tag::custom(theme::hl_light(), theme::muted(), theme::hl_light())
                             .rounded(theme::radius::sm())
                             .px(px(8.))
                             .py(px(2.))
-                            .text_color(theme::muted())
-                            .bg(theme::hl_light())
+                            .text_size(px(11.))
+                            .font_weight(FontWeight::SEMIBOLD)
                             .child(format!(
                                 "{} · {}",
                                 request.operation,
@@ -416,35 +405,38 @@ impl Render for CapabilityStatus {
                                     )),
                                 );
                         } else {
-                            line = line.child(muted(format!("approve on {computer}")));
+                            line = line.child(note(format!("approve on {computer}"), 12.5));
                         }
                     }
                     let mut block = div()
                         .flex()
                         .flex_col()
                         .gap(px(4.))
-                        .border_t_1()
-                        .border_color(theme::border())
-                        .pt(px(6.))
+                        .child(rule().mb(px(2.)))
                         .child(line);
                     if !request.error.is_empty() {
-                        block = block.child(muted(request.error.clone()));
+                        block = block.child(note(request.error.clone(), 12.5));
                     }
                     col = col.child(block);
                 }
             } else {
-                col = col.child(muted(if served_by.is_empty() {
-                    "This capability has no computer yet.".to_string()
-                } else {
-                    format!("Open Roostr on {computer} to install or check this capability.")
-                }));
+                col = col.child(note(
+                    if served_by.is_empty() {
+                        "This capability has no computer yet.".to_string()
+                    } else {
+                        format!("Open Roostr on {computer} to install or check this capability.")
+                    },
+                    12.5,
+                ));
             }
         }
         if !self.notice.is_empty() {
-            col = col.child(muted(self.notice.clone()));
+            col = col.child(note(self.notice.clone(), 12.5));
         }
         if !self.action_error.is_empty() {
-            col = col.child(error_line(self.action_error.clone()));
+            col = col.child(
+                error_alert("cap-action-error", self.action_error.clone()).text_size(px(12.5)),
+            );
         }
         col
     }

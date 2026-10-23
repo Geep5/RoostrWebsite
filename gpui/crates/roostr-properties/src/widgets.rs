@@ -4,10 +4,15 @@
 
 use std::rc::Rc;
 
+use gpui_kit::component::Sizable as _;
+use gpui_kit::component::alert::Alert;
+use gpui_kit::component::button::Button;
+use gpui_kit::component::empty::Empty;
 use gpui_kit::component::input::{Input, InputState, Textarea, TextareaState};
-use gpui_kit::prelude::FluentBuilder as _;
+use gpui_kit::component::label::Label;
+use gpui_kit::component::separator::Separator;
 use gpui_kit::*;
-pub(crate) use roostr_core::ui::{menu_shadow, modal_shadow, tooltip as tip};
+pub(crate) use roostr_core::ui::{menu_shadow, tooltip as tip};
 use roostr_core::{motion, theme};
 
 /// `0 12px 32px rgba(0,0,0,.45)`: the popovers' shadow.
@@ -115,10 +120,6 @@ pub(crate) enum FieldSkin {
     Value,
     /// Anytype's filter field: filled `hl-light` (focus `hl-med`), borderless, radius 10, 8px 12px.
     Filter,
-    /// Menu search boxes: `--bg`, 1px border (accent on focus), radius 6, 6px 8px.
-    Search,
-    /// TypeSuggest: `--bg`, 1px border (accent on focus), radius 8, 6px 10px.
-    Suggest,
     /// The emoji picker's search: `--bg`, border, radius 7, 5px 9px.
     Emoji,
     /// Repeat editor fields: white 5% fill, 1px border, radius 6, 3px 6px, 12.5px.
@@ -162,28 +163,6 @@ pub(crate) fn field(state: &Entity<InputState>, skin: FieldSkin, window: &Window
             .rounded(theme::radius::menu())
             .px(px(12.))
             .py(px(8.)),
-        FieldSkin::Search => base
-            .bg(theme::bg())
-            .border_1()
-            .border_color(if focused {
-                theme::accent()
-            } else {
-                theme::border()
-            })
-            .rounded(theme::radius::sm())
-            .px(px(8.))
-            .py(px(6.)),
-        FieldSkin::Suggest => base
-            .bg(theme::bg())
-            .border_1()
-            .border_color(if focused {
-                theme::accent()
-            } else {
-                theme::border()
-            })
-            .rounded(theme::radius::md())
-            .px(px(10.))
-            .py(px(6.)),
         FieldSkin::Emoji => base
             .bg(theme::bg())
             .border_1()
@@ -265,30 +244,64 @@ pub(crate) fn placeholder(group: SharedString, hint: impl Into<SharedString>) ->
         )
 }
 
-/// A plain outline action button (`.act`): bg, 1px border, radius 7, 5px 12px, 12px.
+/// A list's one-line empty note as the kit `Empty`, restyled to Roostr's
+/// quiet left-aligned muted line; callers set its padding and text size.
+pub(crate) fn empty_note(text: impl Into<SharedString>) -> Empty {
+    Empty::new()
+        .flex_none()
+        .items_start()
+        .justify_start()
+        .gap_0()
+        .p_0()
+        .rounded_none()
+        .text_left()
+        .text_color(theme::muted())
+        .child(text.into())
+}
+
+/// A plain outline action button (`.act`): kit outline [`Button`], bg, 1px
+/// border, radius 7, 5px 12px, 12px label (on the child: the kit's inner
+/// content box sets its own text size); kit hover fill; `disabled` greys it
+/// and blocks clicks.
 pub(crate) fn act_button(
     id: impl Into<ElementId>,
     label: impl Into<SharedString>,
     disabled: bool,
-) -> Stateful<Div> {
+) -> Button {
     let label: SharedString = label.into();
-    div()
-        .id(id.into())
-        .flex_none()
-        .bg(theme::bg())
-        .border_1()
-        .border_color(theme::border())
-        .rounded(px(7.))
-        .px(px(12.))
-        .py(px(5.))
-        .text_size(px(12.))
-        .text_color(theme::fg())
-        .when(disabled, |d| d.opacity(0.5))
-        .when(!disabled, |d| {
-            d.cursor_pointer()
-                .hover(|s| s.border_color(theme::accent()))
-        })
-        .child(label)
+    roostr_core::ui::disabled(
+        Button::new(id)
+            .outline()
+            .small()
+            .accessibility_label(label.clone())
+            .rounded(px(7.))
+            .h_auto()
+            .px(px(12.))
+            .py(px(5.))
+            .bg(theme::bg())
+            .border_color(theme::border())
+            .text_color(theme::fg())
+            .child(div().text_size(px(12.)).child(label)),
+        disabled,
+    )
+}
+
+/// A muted one-line note (kit [`Label`]): `size`px in the muted colour.
+pub(crate) fn note(text: impl Into<SharedString>, size: f32) -> Label {
+    Label::new(text)
+        .text_size(px(size))
+        .text_color(theme::muted())
+}
+
+/// An error line under a control: the kit destructive [`Alert`], compact.
+pub(crate) fn error_alert(id: impl Into<ElementId>, text: impl Into<SharedString>) -> Alert {
+    let text: SharedString = text.into();
+    Alert::error(id, text).xsmall().text_size(px(12.))
+}
+
+/// A 1px horizontal rule in the border colour (kit [`Separator`]).
+pub(crate) fn rule() -> Separator {
+    Separator::horizontal().color(theme::border())
 }
 
 /// The first `n` characters of `s` (char-safe `slice(0, n)`).

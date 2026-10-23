@@ -322,7 +322,7 @@ impl Render for GalleryView {
                                 .find(|o| o.text == tg)
                                 .map(|o| o.color.clone())
                                 .unwrap_or_default();
-                            c = c.child(tag_pill(tg.to_string(), &color, true));
+                            c = c.child(tag_pill(tg.to_string(), &color, true, theme::muted()));
                         }
                         card = card.child(c);
                     } else {
@@ -339,12 +339,7 @@ impl Render for GalleryView {
             .child(measure)
             .child(grid)
             .when(empty, |d| {
-                d.child(
-                    div()
-                        .text_size(px(13.))
-                        .text_color(theme::muted())
-                        .child("No objects match."),
-                )
+                d.child(common::empty_state("No objects match.", 13.))
             })
             .into_any_element()
     }

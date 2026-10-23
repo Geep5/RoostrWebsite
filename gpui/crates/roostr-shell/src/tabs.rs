@@ -2,14 +2,17 @@
 //! open route of the active space, live titles from the store, drag reorder,
 //! middle-click close, separators hidden beside the active tab.
 
-use gpui_kit::component::IconNamed as _;
+use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::tab::{Tab, TabBar};
+use gpui_kit::component::{Icon, Sizable as _};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use roostr_core::nav::{Navigator, Route};
 use roostr_core::objects::{object_icon, type_glyph};
 use roostr_core::store::Store;
-use roostr_core::{Glyph, theme};
+use roostr_core::{Glyph, theme, ui};
 
+use crate::Tip as _;
 use crate::rail::DragGhost;
 use crate::workspace::Workspace;
 
@@ -99,23 +102,6 @@ fn tab_info(route: &Route, cx: &App) -> TabInfo {
     }
 }
 
-/// Display-only Anytype checkbox (CheckboxIcon), accent when checked.
-pub(crate) fn checkbox_icon(checked: bool, size: f32) -> Svg {
-    svg()
-        .path(if checked {
-            Glyph::CheckboxChecked.path()
-        } else {
-            Glyph::CheckboxUnchecked.path()
-        })
-        .size(px(size))
-        .flex_none()
-        .text_color(if checked {
-            theme::accent()
-        } else {
-            theme::muted()
-        })
-}
-
 impl Workspace {
     pub(crate) fn render_tab_strip(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let nav = Navigator::global(cx).read(cx);
@@ -131,17 +117,22 @@ impl Workspace {
         let count = tabs.len();
         let uids: Vec<u64> = tabs.iter().map(|t| t.0).collect();
         self.tab_focus.retain(|u, _| uids.contains(u));
-        let mut strip = div()
-            .id("tab-strip")
-            .line_height(relative(1.2))
+        // gpui-kit's TabBar (default Tab variant: the active tab on
+        // `tab.active.background`, labels ellipsised at 220px, a clicked tab
+        // scrolled into view). Roostr's drag reorder, middle-click and ×
+        // close, keyboard focus and separators ride on each Tab.
+        let mut bar = TabBar::new("tab-strip")
+            .selected_index(active)
+            .max_width(px(220.))
             .flex_none()
             .h(px(40.))
             .px(px(8.))
-            .py(px(5.))
-            .flex()
-            .items_center()
-            .overflow_x_scroll()
-            .bg(theme::panel());
+            .line_height(relative(1.2))
+            .bg(theme::panel())
+            .on_click(|ix, _, cx| {
+                let ix = *ix;
+                Navigator::global(cx).update(cx, |nav, cx| nav.activate(ix, cx));
+            });
         for (i, (uid, route)) in tabs.into_iter().enumerate() {
             let info = tab_info(&route, cx);
             let is_active = i == active;
@@ -157,42 +148,14 @@ impl Workspace {
                 .entry(uid)
                 .or_insert_with(|| cx.focus_handle().tab_index(0).tab_stop(true))
                 .clone();
-            let tab = div()
-                .id(("tab", uid))
-                .track_focus(&focus)
-                .focus_visible(|s| s.border_color(theme::accent()))
-                .border_1()
-                .border_color(gpui_kit::transparent_black())
-                .on_key_down(cx.listener(move |_, e: &KeyDownEvent, _, cx| {
-                    if e.keystroke.key == "enter" {
-                        Navigator::global(cx).update(cx, |nav, cx| nav.activate(i, cx));
-                    }
-                }))
-                .group(group.clone())
-                .relative()
+            // Icon (or the Anytype checkbox on a task) and the ellipsised name.
+            let content = div()
                 .flex()
                 .items_center()
                 .gap(px(7.))
                 .min_w_0()
-                .max_w(px(220.))
-                .flex_shrink(1.)
-                .h(px(30.))
-                .px(px(9.))
-                .rounded(theme::radius::tab())
-                .text_size(px(13.))
-                .whitespace_nowrap()
-                .cursor_pointer()
-                .map(|d| {
-                    if is_active {
-                        d.bg(theme::hl_med()).text_color(theme::fg())
-                    } else {
-                        d.text_color(theme::muted())
-                            .hover(|s| s.bg(theme::hl_light()))
-                    }
-                })
-                .when(drag_uid == Some(uid), |d| d.opacity(0.4))
                 .map(|d| match info.task {
-                    Some(done) => d.child(checkbox_icon(done, 14.)),
+                    Some(done) => d.child(ui::checkbox_display(("tab-check", uid), done).small()),
                     None => d.child(
                         div()
                             .flex_none()
@@ -200,47 +163,69 @@ impl Workspace {
                             .child(info.icon.clone()),
                     ),
                 })
-                .child(div().min_w_0().truncate().child(info.name.clone()))
+                .child(div().min_w_0().truncate().child(info.name.clone()));
+            // The separator after this tab, hidden beside the active one.
+            let separator = (i + 1 < count).then(|| {
+                let hidden = i == active || i + 1 == active;
+                div()
+                    .absolute()
+                    .right_0()
+                    .top(px(8.))
+                    .w(px(1.))
+                    .h(px(16.))
+                    .bg(theme::border())
+                    .when(hidden, |d| d.opacity(0.))
+            });
+            let drop_line = over_here.map(|after| {
+                div()
+                    .absolute()
+                    .top(px(3.))
+                    .bottom(px(3.))
+                    .w(px(2.))
+                    .rounded(px(2.))
+                    .bg(theme::accent())
+                    .map(|l| if after { l.right_0() } else { l.left_0() })
+            });
+            let close = div()
+                .flex()
+                .items_center()
+                .pr(px(6.))
                 .child(
-                    div()
-                        .id(("tab-x", uid))
+                    Button::new(("tab-x", uid))
+                        .ghost()
                         .flex_none()
-                        .text_size(px(15.))
-                        .line_height(px(15.))
+                        .h(px(17.))
+                        .w_auto()
                         .px(px(3.))
                         .py(px(1.))
                         .rounded(theme::radius::xs())
                         .text_color(theme::muted())
                         .opacity(if is_active { 1. } else { 0. })
-                        .group_hover(group, |s| s.opacity(1.))
-                        .hover(|s| s.bg(theme::hover()).text_color(theme::fg()))
-                        .child("×")
+                        .group_hover(group.clone(), |s| s.opacity(1.))
+                        .tab_stop(false)
+                        .cursor_pointer()
+                        .accessibility_label("Close tab")
+                        .child(div().text_size(px(15.)).line_height(px(15.)).child("×"))
                         .on_click(cx.listener(move |_, _, _, cx| {
                             cx.stop_propagation();
                             Navigator::global(cx).update(cx, |nav, cx| nav.close(i, cx));
                         })),
                 )
-                .when_some(over_here, |d, after| {
-                    d.child(
-                        div()
-                            .absolute()
-                            .top(px(3.))
-                            .bottom(px(3.))
-                            .w(px(2.))
-                            .rounded(px(2.))
-                            .bg(theme::accent())
-                            .map(|l| {
-                                if after {
-                                    l.right(px(-3.))
-                                } else {
-                                    l.left(px(-3.))
-                                }
-                            }),
-                    )
-                })
-                .on_click(cx.listener(move |_, _, _, cx| {
-                    Navigator::global(cx).update(cx, |nav, cx| nav.activate(i, cx));
+                .children(separator)
+                .children(drop_line);
+            let tab = Tab::new()
+                .aria_label(info.name.clone())
+                .child(content)
+                .suffix(close)
+                .track_focus(&focus)
+                .focus_visible(|s| s.border_1().border_color(theme::accent()))
+                .on_key_down(cx.listener(move |_, e: &KeyDownEvent, _, cx| {
+                    if e.keystroke.key == "enter" {
+                        Navigator::global(cx).update(cx, |nav, cx| nav.activate(i, cx));
+                    }
                 }))
+                .group(group)
+                .when(drag_uid == Some(uid), |d| d.opacity(0.4))
                 .on_mouse_up(
                     MouseButton::Middle,
                     cx.listener(move |_, _, _, cx| {
@@ -309,41 +294,16 @@ impl Workspace {
                     let at = ix + usize::from(after);
                     nav.update(cx, |nav, cx| nav.move_tab(from, at, cx));
                 }));
-            strip = strip.child(tab);
-            if i + 1 < count {
-                let hidden = i == active || i + 1 == active;
-                strip = strip.child(
-                    div()
-                        .flex_none()
-                        .w(px(1.))
-                        .h(px(16.))
-                        .mx(px(2.))
-                        .bg(theme::border())
-                        .when(hidden, |d| d.opacity(0.)),
-                );
-            }
+            bar = bar.child(tab);
         }
-        strip.child(
-            div()
-                .id("tab-new")
-                .group("tab-new")
-                .flex_none()
+        bar.suffix(
+            crate::fill_button("tab-new", theme::hl_med(), cx)
                 .size(px(26.))
                 .ml(px(4.))
-                .flex()
-                .items_center()
-                .justify_center()
                 .rounded(theme::radius::sm())
-                .cursor_pointer()
-                .hover(|s| s.bg(theme::hl_med()))
-                .child(
-                    svg()
-                        .path(Glyph::Plus.path())
-                        .size(px(14.))
-                        .text_color(theme::muted())
-                        .group_hover("tab-new", |s| s.text_color(theme::fg())),
-                )
-                .map(|d| self.data_tip(d, "tip-new-tab", "New tab", cx))
+                .child(Icon::new(Glyph::Plus).size(px(14.)))
+                .accessibility_label("New tab")
+                .tip("New tab")
                 .on_click(|_, _, cx| roostr_core::nav::open_tab(Route::Home, false, cx)),
         )
     }

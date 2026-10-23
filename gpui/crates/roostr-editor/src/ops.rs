@@ -535,6 +535,7 @@ impl Editor {
                 url,
                 pos: anchor,
                 at: from,
+                popup: None,
             });
             cx.notify();
             return;
@@ -1537,6 +1538,7 @@ impl Editor {
                     to: miss.to,
                     pos: position,
                     options,
+                    popup: None,
                 });
                 cx.notify();
                 return true;

@@ -6,6 +6,11 @@ use std::cell::Cell;
 use std::rc::Rc;
 use std::sync::Arc;
 
+use gpui_kit::component::button::Button;
+use gpui_kit::component::empty::{Empty, EmptyDescription, EmptyHeader};
+use gpui_kit::component::list::ListItem;
+use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
+use gpui_kit::component::separator::Separator;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use roostr_core::filters::{engine_filters_of, serving_filters_of, space_filter_of};
@@ -269,22 +274,90 @@ pub(crate) fn find_rel<'a>(relations: &'a [RelationDef], key: &str) -> Option<&'
 
 // ── Styled primitives ────────────────────────────────────────────
 
-/// Anytype tagItem.isSmall: filled pill, the option's own colours.
-pub(crate) fn tag_pill(text: impl Into<SharedString>, color: &str, small: bool) -> Div {
-    let (bg, fg) = tag_colors(color).map_or((unknown_tag_bg(), None), |(bg, fg)| (bg, Some(fg)));
-    div()
-        .flex_none()
-        .rounded(px(10.))
-        .px(px(6.))
-        .h(px(if small { 18. } else { 20. }))
-        .line_height(px(if small { 18. } else { 20. }))
-        .text_size(px(if small { 11. } else { 12. }))
-        .bg(bg)
-        .when_some(fg, |d, fg| d.text_color(fg))
-        .whitespace_nowrap()
-        .overflow_hidden()
-        .text_ellipsis()
-        .child(text.into())
+/// Anytype tagItem.isSmall: filled pill, the option's own colours. An
+/// unknown colour gets the neutral fill and `ink`, the text colour around it.
+pub(crate) fn tag_pill(
+    text: impl Into<SharedString>,
+    color: &str,
+    small: bool,
+    ink: Hsla,
+) -> gpui_kit::component::tag::Tag {
+    let (bg, fg) = tag_colors(color).unwrap_or((unknown_tag_bg(), ink));
+    let (height, size) = if small { (18., 11.) } else { (20., 12.) };
+    roostr_core::ui::tag(bg, fg, px(height), px(size)).child(text.into())
+}
+
+/// A kit [`PopupMenu`] kept under `id` while it is shown, focused when it
+/// opens (arrows, Enter, Escape). `build` fills it and runs again only when
+/// `key` changes, so hover and keyboard selection survive re-renders: `key`
+/// must cover everything the items' handlers capture. `on_dismiss` runs when
+/// the menu closes itself (a pick, Escape, a press outside it).
+pub(crate) fn kit_menu<K: PartialEq + 'static>(
+    id: impl Into<ElementId>,
+    key: K,
+    window: &mut Window,
+    cx: &mut App,
+    build: impl FnOnce(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu,
+    on_dismiss: impl Fn(&mut Window, &mut App) + 'static,
+) -> Entity<PopupMenu> {
+    struct Host<K> {
+        menu: Entity<PopupMenu>,
+        key: Option<K>,
+        on_dismiss: Rc<dyn Fn(&mut Window, &mut App)>,
+        _dismiss: Subscription,
+    }
+    let host = window.use_keyed_state(id, cx, |window, cx| {
+        let menu = PopupMenu::build(window, cx, |menu, _, _| menu);
+        let dismiss = cx.subscribe_in(
+            &menu,
+            window,
+            |host: &mut Host<K>, _, _: &DismissEvent, window, cx| {
+                (host.on_dismiss.clone())(window, cx)
+            },
+        );
+        window.focus(&menu.focus_handle(cx), cx);
+        Host {
+            menu,
+            key: None,
+            on_dismiss: Rc::new(|_, _| {}),
+            _dismiss: dismiss,
+        }
+    });
+    host.update(cx, |host, cx| {
+        host.on_dismiss = Rc::new(on_dismiss);
+        if host.key.as_ref() != Some(&key) {
+            host.key = Some(key);
+            host.menu
+                .update(cx, |menu, cx| menu.rebuild(window, cx, build));
+        }
+        host.menu.clone()
+    })
+}
+
+/// A kit menu row with `.vrow` content: the label, and an accent ✓ when
+/// `checked`.
+pub(crate) fn kit_row(label: impl Into<SharedString>, checked: bool) -> PopupMenuItem {
+    let label = label.into();
+    PopupMenuItem::element(move |_, _| {
+        div()
+            .flex()
+            .flex_1()
+            .items_center()
+            .justify_between()
+            .gap(px(12.))
+            .py(px(6.))
+            .text_size(px(13.))
+            .child(label.clone())
+            .when(checked, |d| {
+                d.child(div().text_color(theme::accent()).child("✓"))
+            })
+    })
+}
+
+/// A kit menu's title row (`.ptitle`): [`menu_title`] as an inert item.
+pub(crate) fn kit_title(text: impl Into<SharedString>) -> PopupMenuItem {
+    let text = text.into();
+    PopupMenuItem::element(move |_, _| menu_title(text.clone()).px_0()).disabled(true)
 }
 
 /// The popover/menu surface (`.vmenu`, `.plist`, `.ctx-menu`).
@@ -315,13 +388,11 @@ pub(crate) fn appear<E: Styled>(
     motion::appear_frame(id, -4., window, cx).apply(menu)
 }
 
-/// A `.vrow` menu row: label left, trailer right; hover/active hl-med.
-pub(crate) fn vrow(id: impl Into<ElementId>, active: bool) -> Stateful<Div> {
-    div()
-        .id(id)
-        .flex()
-        .items_center()
-        .justify_between()
+/// A `.vrow` menu row, the kit list row; hover/active hl-med. Give it one
+/// child: [`vrow_content`] (label left, trailer right).
+pub(crate) fn vrow(id: impl Into<ElementId>, active: bool) -> ListItem {
+    ListItem::new(id)
+        .selected(active)
         .gap(px(12.))
         .rounded(px(6.))
         .px(px(8.))
@@ -329,8 +400,18 @@ pub(crate) fn vrow(id: impl Into<ElementId>, active: bool) -> Stateful<Div> {
         .text_size(px(13.))
         .text_color(theme::fg())
         .cursor_pointer()
-        .when(active, |d| d.bg(theme::hl_med()))
-        .hover(|s| s.bg(theme::hl_med()))
+}
+
+/// A [`vrow`]'s content: `label` left, `trailer` right.
+pub(crate) fn vrow_content(label: impl IntoElement, trailer: Option<AnyElement>) -> Div {
+    div()
+        .w_full()
+        .flex()
+        .items_center()
+        .justify_between()
+        .gap(px(12.))
+        .child(label)
+        .children(trailer)
 }
 
 /// The uppercase title of a menu (`.ptitle`, `.more-title`).
@@ -344,9 +425,26 @@ pub(crate) fn menu_title(text: impl Into<SharedString>) -> Div {
         .child(text.into().to_uppercase())
 }
 
-/// A 1px separator (`.sort-div`).
-pub(crate) fn separator() -> Div {
-    div().flex_none().h(px(1.)).bg(theme::border()).my(px(4.))
+/// A 1px separator (`.sort-div`), the kit separator.
+pub(crate) fn separator() -> Separator {
+    Separator::horizontal().color(theme::border()).my(px(4.))
+}
+
+/// The kit empty state with one muted line of `size` px (`.empty`, e.g. "No
+/// objects match."); callers set the padding.
+pub(crate) fn empty_state(text: impl Into<SharedString>, size: f32) -> Empty {
+    Empty::new()
+        .p(px(0.))
+        .flex_none()
+        .items_start()
+        .text_left()
+        .header(
+            EmptyHeader::new().items_start().description(
+                EmptyDescription::new()
+                    .text_size(px(size))
+                    .child(text.into()),
+            ),
+        )
 }
 
 /// Arc-friendly read of the cached object.
@@ -354,22 +452,10 @@ pub(crate) fn cached_object(id: &str, cx: &App) -> Option<Arc<Object>> {
     Store::global(cx).read(cx).object(id)
 }
 
-/// The accent "New" button (`.new-btn`).
-pub(crate) fn new_button(id: impl Into<ElementId>, disabled: bool) -> Stateful<Div> {
-    div()
-        .id(id)
-        .flex()
-        .items_center()
-        .h(px(28.))
-        .px(px(12.))
-        .rounded(px(8.))
-        .bg(theme::accent())
-        .text_color(theme::white())
-        .text_size(px(13.))
-        .font_weight(FontWeight::MEDIUM)
-        .cursor_pointer()
-        .when(disabled, |d| d.opacity(0.5))
-        .when(!disabled, |d| d.hover(|s| s.bg(rgb(0x2b95ff))))
+/// The accent "New" button (`.new-btn`), the kit primary button; `disabled`
+/// while a create runs.
+pub(crate) fn new_button(id: impl Into<ElementId>, disabled: bool) -> Button {
+    roostr_core::ui::disabled(roostr_core::ui::primary_button(id, "New"), disabled)
 }
 
 /// One outer box shadow.

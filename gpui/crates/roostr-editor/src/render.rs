@@ -5,7 +5,13 @@
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use gpui_kit::component::Icon;
+use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
+use gpui_kit::component::collapsible::Collapsible;
+use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
+use gpui_kit::component::separator::Separator;
+use gpui_kit::component::tag::Tag;
+use gpui_kit::component::toolbar::Toolbar;
+use gpui_kit::component::{Disableable as _, Icon, Sizable as _, Size, ThemeStyled as _};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use roostr_core::motion::{self, HoverMotion};
@@ -543,7 +549,7 @@ impl Editor {
                         )
                     })
                     .when(!dots, |d| {
-                        d.child(div().w_full().h(px(1.)).bg(theme::border()))
+                        d.child(Separator::horizontal().color(theme::border()).w_full())
                     })
                     .into_any_element()
             }
@@ -572,15 +578,17 @@ impl Editor {
                     .py(px(1.))
                     .child(self.geom(id, false, false))
                     .child(
-                        div()
-                            .text_size(px(11.))
-                            .text_color(theme::muted())
-                            .border_1()
-                            .border_color(theme::border())
-                            .rounded(px(6.))
-                            .px(px(8.))
-                            .py(px(2.))
-                            .child(other.to_string()),
+                        Tag::custom(
+                            gpui_kit::transparent_black(),
+                            theme::muted(),
+                            theme::border(),
+                        )
+                        .rounded(px(6.))
+                        .text_size(px(11.))
+                        .line_height(px(15.))
+                        .px(px(8.))
+                        .py(px(2.))
+                        .child(other.to_string()),
                     )
                     .children(self.row_decor(id));
                 return Some(
@@ -687,41 +695,27 @@ impl Editor {
         match s {
             style::CHECKBOX => {
                 let toggle_id = id.to_string();
+                let read_only = self.read_only;
                 row = row.child(
                     div()
-                        .id(Self::row_id("check", id))
                         .size(px(24.))
                         .flex_none()
                         .mt(px(3.))
                         .flex()
                         .items_center()
                         .justify_center()
-                        .when(!self.read_only, |d| d.cursor_pointer())
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.toggle_checked(&toggle_id, !checked, cx)
-                        }))
-                        .child(if checked {
-                            div()
-                                .size(px(16.))
-                                .rounded_full()
-                                .bg(theme::accent())
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .child(
-                                    Icon::new(Glyph::Check)
-                                        .size(px(11.))
-                                        .text_color(theme::white()),
-                                )
-                        } else {
-                            div()
-                                .size(px(15.))
-                                .rounded_full()
-                                .border_1()
-                                .border_color(theme::muted())
-                                .hover(|s| s.bg(rgba(0x4f4f4f14)))
-                        }),
+                        .child(
+                            roostr_core::ui::checkbox(Self::row_id("check", id), checked)
+                                .with_size(Size::Medium)
+                                .when(read_only, |c| c.tab_stop(false))
+                                .when(!read_only, |c| {
+                                    c.on_change(cx.listener(move |this, done: &bool, _, cx| {
+                                        cx.stop_propagation();
+                                        this.toggle_checked(&toggle_id, *done, cx)
+                                    }))
+                                }),
+                        ),
                 );
             }
             style::BULLET => {
@@ -750,21 +744,21 @@ impl Editor {
             style::TOGGLE => {
                 let flip = id.to_string();
                 row = row.child(
-                    div()
-                        .id(Self::row_id("toggle", id))
+                    Button::new(Self::row_id("toggle", id))
+                        .ghost()
+                        .xsmall()
                         .size(px(24.))
+                        .p_0()
                         .flex_none()
                         .mr(px(6.))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .cursor_pointer()
                         .text_color(theme::fg())
+                        .accessibility_label(if open { "Collapse" } else { "Expand" })
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .on_click(cx.listener(move |this, _, _, cx| this.flip_toggle(&flip, cx)))
                         .child(
                             Icon::new(Glyph::ChevronRight)
                                 .size(px(16.))
+                                .text_color(theme::fg())
                                 .when(turn > 0., |i| {
                                     i.rotate(radians(std::f32::consts::FRAC_PI_2 * turn))
                                 }),
@@ -778,32 +772,32 @@ impl Editor {
             let copied = self.copied.contains(id);
             let copy_id = id.to_string();
             row = row.child(
-                div()
-                    .id(Self::row_id("copy", id))
+                Button::new(Self::row_id("copy", id))
+                    .outline()
+                    .xsmall()
+                    .accessibility_label("Copy code")
+                    .child(
+                        div()
+                            .text_size(px(11.))
+                            .child(if copied { "Copied" } else { "Copy" }),
+                    )
                     .absolute()
                     .top(px(7.))
                     .right(px(6.))
                     .w(px(58.))
-                    .px(px(8.))
-                    .py(px(2.))
-                    .text_size(px(11.))
-                    .text_center()
-                    .rounded(px(4.))
-                    .border_1()
-                    .border_color(theme::border())
-                    .bg(theme::panel())
-                    .text_color(theme::muted())
-                    .cursor_pointer()
                     .opacity(if copied { 1. } else { copy_reveal })
-                    .hover(|s| s.text_color(theme::fg()).bg(theme::hover()))
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .on_click(cx.listener(move |this, _, _, cx| this.copy_code(&copy_id, cx)))
-                    .child(if copied { "Copied" } else { "Copy" }),
+                    .on_click(cx.listener(move |this, _, _, cx| this.copy_code(&copy_id, cx))),
             );
         }
         row = row.children(self.row_decor(id));
 
-        let mut tree = div()
+        // A toggle's children are its collapsible content (shown only while
+        // open, so a closed toggle neither holds the caret nor reports row
+        // geometry); the arrow turn and the children fade share `turn`.
+        let shown = !is_toggle || open;
+        let mut tree = Collapsible::new()
+            .open(shown)
             .relative()
             .rounded(px(4.))
             .when(dragging, |d| d.opacity(0.4));
@@ -846,16 +840,16 @@ impl Editor {
                     })),
             );
         }
-        if !block.children_ids.is_empty() && (!is_toggle || open) {
+        if !block.children_ids.is_empty() && shown {
             let kids: Vec<AnyElement> = block
                 .children_ids
                 .iter()
                 .filter_map(|cid| self.render_block(cid, f, window, cx))
                 .collect();
-            tree = tree.child(div().pl(px(26.)).opacity(turn).children(kids));
+            tree = tree.content(div().pl(px(26.)).opacity(turn).children(kids));
             // Anytype targetBot: a thin strip below the children; a drop there lands after the subtree.
             let over = matches!(&self.drop_hint, Some(h) if h.id == block.id && h.bot);
-            tree = tree.child(
+            tree = tree.content(
                 div()
                     .absolute()
                     .left_0()
@@ -875,9 +869,9 @@ impl Editor {
                         )
                     }),
             );
-        } else if is_toggle && open && block.children_ids.is_empty() && !self.read_only {
+        } else if is_toggle && shown && !self.read_only {
             let empty_id = id.to_string();
-            tree = tree.child(
+            tree = tree.content(
                 div()
                     .id(Self::row_id("empty-toggle", id))
                     .ml(px(30.))
@@ -952,18 +946,56 @@ impl Editor {
             );
             (t, Some(state))
         };
-        let mini = |id: ElementId, enabled: bool| {
-            div()
-                .id(id)
+        // `×` row/column deletes: muted marks whose `×` turns red under the
+        // pointer (a group hover: the kit button owns its own hover style).
+        let del_look = ButtonCustomVariant::new(cx).foreground(theme::muted());
+        let mini = |id: ElementId, enabled: bool, tip: &'static str| {
+            Button::new(id)
+                .custom(del_look)
+                .xsmall()
+                .group("table-del")
+                .h(px(14.))
                 .px(px(4.))
-                .text_size(px(12.))
-                .line_height(px(14.))
-                .text_color(theme::muted())
-                .when(enabled, |d| {
-                    d.cursor_pointer().hover(|s| s.text_color(theme::red()))
-                })
-                .when(!enabled, |d| d.opacity(0.3))
-                .child("×")
+                .tooltip(tip)
+                .accessibility_label(tip)
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .disabled(!enabled)
+                .when(!enabled, |b| b.opacity(0.3))
+                .child(
+                    div()
+                        .text_size(px(12.))
+                        .line_height(px(14.))
+                        .when(enabled, |d| {
+                            d.group_hover("table-del", |s| s.text_color(theme::red()))
+                        })
+                        .child("×"),
+                )
+        };
+        // Dashed `+` edges that add a row or a column; under the pointer the
+        // border (the custom colour) and the `+` (a group hover) turn accent.
+        let add_look = ButtonCustomVariant::new(cx)
+            .foreground(theme::muted())
+            .color(theme::accent());
+        let add = |id: ElementId, tip: &'static str| {
+            Button::new(id)
+                .custom(add_look)
+                .xsmall()
+                .group("table-add")
+                .bg(gpui_kit::transparent_black())
+                .border_1()
+                .border_dashed()
+                .border_color(theme::border())
+                .rounded(px(6.))
+                .opacity(reveal)
+                .tooltip(tip)
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .accessibility_label(tip)
+                .child(
+                    div()
+                        .text_size(px(13.))
+                        .group_hover("table-add", |s| s.text_color(theme::accent()))
+                        .child("+"),
+                )
         };
         let mut wrap = div()
             .id(Self::row_id("table", &block.id))
@@ -977,29 +1009,27 @@ impl Editor {
             .flex_col();
         if !ro {
             let can = cols.len() > 1;
-            wrap = wrap.child(
-                div()
-                    .flex()
-                    .h(px(14.))
-                    .mr(px(20.))
-                    .opacity(reveal)
-                    .children(cols.iter().enumerate().map(|(i, col)| {
-                        let (t, c) = (table_id.clone(), col.clone());
-                        div().flex_1().flex().justify_center().child(
-                            mini(
-                                ElementId::Name(format!("delcol-{}-{i}", table_id).into()),
-                                can,
+            wrap =
+                wrap.child(
+                    div()
+                        .flex()
+                        .h(px(14.))
+                        .mr(px(20.))
+                        .opacity(reveal)
+                        .children(cols.iter().enumerate().map(|(i, col)| {
+                            let (t, c) = (table_id.clone(), col.clone());
+                            div().flex_1().flex().justify_center().child(
+                                mini(
+                                    ElementId::Name(format!("delcol-{}-{i}", table_id).into()),
+                                    can,
+                                    "Delete column",
+                                )
+                                .on_click(cx.listener(
+                                    move |this, _, _, cx| this.table_col_remove(&t, &c, cx),
+                                )),
                             )
-                            .tooltip(roostr_core::ui::tooltip("Delete column"))
-                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                            .when(can, |d| {
-                                d.on_click(cx.listener(move |this, _, _, cx| {
-                                    this.table_col_remove(&t, &c, cx)
-                                }))
-                            }),
-                        )
-                    })),
-            );
+                        })),
+                );
         }
         let mut grid = div()
             .flex_1()
@@ -1078,70 +1108,34 @@ impl Editor {
                                     mini(
                                         ElementId::Name(format!("delrow-{}-{i}", block.id).into()),
                                         can,
+                                        "Delete row",
                                     )
-                                    .tooltip(roostr_core::ui::tooltip("Delete row"))
-                                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                                        cx.stop_propagation()
-                                    })
-                                    .when(can, |d| {
-                                        d.on_click(cx.listener(move |this, _, _, cx| {
-                                            this.table_row_remove(&r, cx)
-                                        }))
-                                    }),
+                                    .on_click(cx.listener(
+                                        move |this, _, _, cx| this.table_row_remove(&r, cx),
+                                    )),
                                 )
                             })),
                     ),
             );
             let t = table_id.clone();
             grid_row = grid_row.child(
-                div()
-                    .id(Self::row_id("addcol", &block.id))
+                add(Self::row_id("addcol", &block.id), "Add column")
                     .w(px(16.))
+                    .h_auto()
                     .mr(px(2.))
                     .flex_none()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .border_1()
-                    .border_dashed()
-                    .border_color(theme::border())
-                    .rounded(px(6.))
-                    .text_size(px(13.))
-                    .text_color(theme::muted())
-                    .cursor_pointer()
-                    .opacity(reveal)
-                    .hover(|s| s.text_color(theme::accent()).border_color(theme::accent()))
-                    .tooltip(roostr_core::ui::tooltip("Add column"))
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .on_click(cx.listener(move |this, _, _, cx| this.table_col_add(&t, cx)))
-                    .child("+"),
+                    .on_click(cx.listener(move |this, _, _, cx| this.table_col_add(&t, cx))),
             );
         }
         wrap = wrap.child(grid_row);
         if !ro {
             let t = table_id.clone();
             wrap = wrap.child(
-                div()
-                    .id(Self::row_id("addrow", &block.id))
+                add(Self::row_id("addrow", &block.id), "Add row")
                     .mt(px(2.))
                     .h(px(16.))
                     .mr(px(20.))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .border_1()
-                    .border_dashed()
-                    .border_color(theme::border())
-                    .rounded(px(6.))
-                    .text_size(px(13.))
-                    .text_color(theme::muted())
-                    .cursor_pointer()
-                    .opacity(reveal)
-                    .hover(|s| s.text_color(theme::accent()).border_color(theme::accent()))
-                    .tooltip(roostr_core::ui::tooltip("Add row"))
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .on_click(cx.listener(move |this, _, _, cx| this.table_row_add(&t, cx)))
-                    .child("+"),
+                    .on_click(cx.listener(move |this, _, _, cx| this.table_row_add(&t, cx))),
             );
         }
         wrap.into_any_element()
@@ -1455,22 +1449,19 @@ impl Editor {
                                 .line_height(px(19.))
                                 .child(div().flex_1().child(self.file_notice.clone()))
                                 .child(
-                                    div()
-                                        .id("file-notice-dismiss")
+                                    Button::new("file-notice-dismiss")
+                                        .outline()
+                                        .small()
                                         .flex_none()
-                                        .border_1()
-                                        .border_color(theme::border())
                                         .rounded(px(7.))
                                         .px(px(10.))
-                                        .py(px(3.))
                                         .text_color(theme::muted())
-                                        .cursor_pointer()
-                                        .hover(|s| s.text_color(theme::fg()))
+                                        .accessibility_label("Dismiss")
+                                        .child(div().text_size(px(13.)).child("Dismiss"))
                                         .on_click(cx.listener(|this, _, _, cx| {
                                             this.file_notice.clear();
                                             cx.notify();
-                                        }))
-                                        .child("Dismiss"),
+                                        })),
                                 ),
                         ),
                 )
@@ -1479,105 +1470,22 @@ impl Editor {
             );
         }
         if let Some(menu) = self.spell_menu.clone() {
-            let entity = cx.entity();
-            let mut card = div()
-                .id("spell-menu")
-                .occlude()
-                .relative()
-                .flex()
-                .flex_col()
-                .gap(px(4.))
-                .min_w(px(180.))
-                .bg(theme::panel())
-                .border_1()
-                .border_color(theme::border())
-                .rounded(px(8.))
-                .px(px(8.))
-                .py(px(5.))
-                .text_size(px(13.))
-                .shadow(vec![BoxShadow {
-                    color: hsla(0., 0., 0., 0.5),
-                    offset: point(px(0.), px(8.)),
-                    blur_radius: px(24.),
-                    spread_radius: px(0.),
-                    inset: false,
-                }]);
-            let btn = |id: ElementId| {
-                div()
-                    .id(id)
-                    .px(px(6.))
-                    .py(px(2.))
-                    .rounded(px(5.))
-                    .cursor_pointer()
-                    .text_color(theme::fg())
-                    .hover(|s| s.bg(theme::hl_med()))
+            let popup = match menu.popup.clone() {
+                Some(popup) => popup,
+                None => {
+                    let popup = self.build_spell_popup(&menu, window, cx);
+                    if let Some(m) = self.spell_menu.as_mut() {
+                        m.popup = Some(popup.clone());
+                    }
+                    popup
+                }
             };
-            if menu.options.is_empty() {
-                card = card.child(
-                    div()
-                        .text_color(theme::muted())
-                        .max_w(px(240.))
-                        .overflow_hidden()
-                        .text_ellipsis()
-                        .whitespace_nowrap()
-                        .px(px(6.))
-                        .py(px(2.))
-                        .child(format!("No suggestions for \"{}\"", menu.word)),
-                );
-            } else {
-                card = card.child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .border_b_1()
-                        .border_color(theme::border())
-                        .pb(px(4.))
-                        .children(menu.options.iter().enumerate().map(|(i, o)| {
-                            let o2 = o.clone();
-                            btn(ElementId::Name(format!("spell-opt-{i}").into()))
-                                .font_weight(FontWeight::MEDIUM)
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.replace_misspelling(&o2, cx)
-                                }))
-                                .child(o.clone())
-                        })),
-                );
-            }
-            card = card.child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .gap(px(8.))
-                    .child(
-                        btn("spell-add".into())
-                            .text_color(theme::muted())
-                            .on_click(cx.listener(|this, _, _, cx| this.spell_add_word(cx)))
-                            .child(format!("Add \"{}\" to dictionary", menu.word)),
-                    )
-                    .child(
-                        btn("spell-close".into())
-                            .text_color(theme::muted())
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.spell_menu = None;
-                                cx.notify();
-                            }))
-                            .child("✕"),
-                    ),
-            );
-            card = card.child(crate::link_picker::outside_click(
-                entity,
-                |this: &mut Editor, cx| {
-                    this.spell_menu = None;
-                    cx.notify();
-                },
-            ));
             out.push(
                 deferred(
                     anchored()
                         .position(point(menu.pos.x, menu.pos.y + px(6.)))
                         .snap_to_window_with_margin(px(8.))
-                        .child(card),
+                        .child(popup_holder("spell-menu").child(popup)),
                 )
                 .with_priority(5)
                 .into_any_element(),
@@ -1630,100 +1538,28 @@ impl Editor {
             );
         }
         if let Some(menu) = self.paste_menu.clone() {
-            let item = |id: &'static str, label: &'static str| {
-                div()
-                    .id(id)
-                    .px(px(8.))
-                    .py(px(6.))
-                    .rounded(px(6.))
-                    .text_size(px(13.))
-                    .cursor_pointer()
-                    .hover(|s| s.bg(theme::hover()))
-                    .child(label)
+            let popup = match menu.popup.clone() {
+                Some(popup) => popup,
+                None => {
+                    let popup = self.build_paste_popup(&menu, window, cx);
+                    if let Some(m) = self.paste_menu.as_mut() {
+                        m.popup = Some(popup.clone());
+                    }
+                    popup
+                }
             };
-            let entity = cx.entity();
-            let card = div()
-                .id("paste-menu")
-                .occlude()
-                .relative()
-                .min_w(px(160.))
-                .flex()
-                .flex_col()
-                .bg(theme::panel())
-                .border_1()
-                .border_color(theme::border())
-                .rounded(px(10.))
-                .p(px(6.))
-                .shadow(vec![BoxShadow {
-                    color: hsla(0., 0., 0., 0.45),
-                    offset: point(px(0.), px(12.)),
-                    blur_radius: px(32.),
-                    spread_radius: px(0.),
-                    inset: false,
-                }])
-                .text_color(theme::fg())
-                .child(
-                    div()
-                        .text_size(px(10.))
-                        .text_color(theme::muted())
-                        .px(px(8.))
-                        .pt(px(6.))
-                        .pb(px(4.))
-                        .child("PASTE AS"),
-                )
-                .when(menu.processor.is_some(), |d| {
-                    d.child(
-                        item("paste-embed", "Embed")
-                            .on_click(cx.listener(|this, _, _, cx| this.paste_as_block(true, cx))),
-                    )
-                })
-                .child(
-                    item("paste-bookmark", "Bookmark")
-                        .on_click(cx.listener(|this, _, _, cx| this.paste_as_block(false, cx))),
-                )
-                .child(
-                    item("paste-link", "Link")
-                        .on_click(cx.listener(|this, _, _, cx| this.paste_as_text(true, cx))),
-                )
-                .child(
-                    item("paste-text", "Text")
-                        .on_click(cx.listener(|this, _, _, cx| this.paste_as_text(false, cx))),
-                )
-                .child(crate::link_picker::outside_click(
-                    entity,
-                    |this: &mut Editor, cx| {
-                        this.paste_menu = None;
-                        cx.notify();
-                    },
-                ));
             out.push(
                 deferred(
                     anchored()
                         .position(menu.pos)
                         .snap_to_window_with_margin(px(8.))
-                        .child(card),
+                        .child(popup_holder("paste-menu").child(popup)),
                 )
                 .with_priority(5)
                 .into_any_element(),
             );
         }
         if let Some(tb) = self.toolbar.clone() {
-            let b = |id: &'static str, tip: &'static str, label: AnyElement| {
-                div()
-                    .id(id)
-                    .size(px(30.))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(6.))
-                    .text_size(px(14.))
-                    .text_color(theme::fg())
-                    .cursor_pointer()
-                    .hover(|s| s.bg(theme::hover()))
-                    .tooltip(roostr_core::ui::tooltip(tip))
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .child(label)
-            };
             let block = tb.block.clone();
             let mk = |kind: u32| {
                 let block = block.clone();
@@ -1731,10 +1567,8 @@ impl Editor {
                     this.apply_mark(&block, kind, None, cx)
                 })
             };
-            let bar = div()
-                .id("marks-toolbar")
-                .occlude()
-                .flex()
+            let bar = Toolbar::new("marks-toolbar")
+                .h_auto()
                 .gap(px(2.))
                 .bg(theme::panel())
                 .border_1()
@@ -1748,63 +1582,56 @@ impl Editor {
                     spread_radius: px(0.),
                     inset: false,
                 }])
-                .child(
-                    b(
-                        "tb-bold",
-                        "Bold (⌘B)",
-                        div()
-                            .font_weight(FontWeight::BOLD)
-                            .child("B")
-                            .into_any_element(),
-                    )
-                    .on_click(mk(mark::BOLD)),
-                )
-                .child(
-                    b(
-                        "tb-italic",
-                        "Italic (⌘I)",
-                        div().italic().child("I").into_any_element(),
-                    )
-                    .on_click(mk(mark::ITALIC)),
-                )
-                .child(
-                    b(
-                        "tb-underline",
-                        "Underline (⌘U)",
-                        div().underline().child("U").into_any_element(),
-                    )
-                    .on_click(mk(mark::UNDERLINE)),
-                )
-                .child(
-                    b(
-                        "tb-strike",
-                        "Strikethrough",
-                        div().line_through().child("S").into_any_element(),
-                    )
-                    .on_click(mk(mark::STRIKETHROUGH)),
-                )
-                .child(
-                    b("tb-code", "Code (⌘E)", div().child("<>").into_any_element())
-                        .on_click(mk(mark::INLINE_CODE)),
-                )
-                .child(
-                    b("tb-link", "Link", div().child("🔗").into_any_element())
-                        .on_click(cx.listener(|this, _, window, cx| this.add_link(window, cx))),
-                )
-                .child(
-                    b(
-                        "tb-object",
-                        "Turn into object",
-                        div()
-                            .text_size(px(12.))
-                            .whitespace_nowrap()
-                            .child("↗ Object")
-                            .into_any_element(),
-                    )
-                    .w_auto()
-                    .px(px(8.))
-                    .on_click(cx.listener(|this, _, window, cx| this.open_turn_into(window, cx))),
-                );
+                .content(tool_button(
+                    "tb-bold",
+                    "Bold (⌘B)",
+                    div()
+                        .font_weight(FontWeight::BOLD)
+                        .child("B")
+                        .into_any_element(),
+                    mk(mark::BOLD),
+                ))
+                .content(tool_button(
+                    "tb-italic",
+                    "Italic (⌘I)",
+                    div().italic().child("I").into_any_element(),
+                    mk(mark::ITALIC),
+                ))
+                .content(tool_button(
+                    "tb-underline",
+                    "Underline (⌘U)",
+                    div().underline().child("U").into_any_element(),
+                    mk(mark::UNDERLINE),
+                ))
+                .content(tool_button(
+                    "tb-strike",
+                    "Strikethrough",
+                    div().line_through().child("S").into_any_element(),
+                    mk(mark::STRIKETHROUGH),
+                ))
+                .content(tool_button(
+                    "tb-code",
+                    "Code (⌘E)",
+                    div().child("<>").into_any_element(),
+                    mk(mark::INLINE_CODE),
+                ))
+                .content(tool_button(
+                    "tb-link",
+                    "Link",
+                    div().child("🔗").into_any_element(),
+                    cx.listener(|this, _, window, cx| this.add_link(window, cx)),
+                ))
+                .content(tool_button_wide(
+                    "tb-object",
+                    "Turn into object",
+                    div()
+                        .text_size(px(12.))
+                        .whitespace_nowrap()
+                        .child("↗ Object")
+                        .into_any_element(),
+                    cx.listener(|this, _, window, cx| this.open_turn_into(window, cx)),
+                ));
+            let bar = div().occlude().child(bar);
             // translateX(-50%) at the selection's center, 44px above it.
             let w = px(7. * 32. + 50.);
             out.push(
@@ -1828,18 +1655,8 @@ impl Editor {
                             .id("turn-pop")
                             .occlude()
                             .w(px(260.))
-                            .bg(theme::panel())
-                            .border_1()
-                            .border_color(theme::border())
-                            .rounded(px(10.))
+                            .popover_style(cx)
                             .p(px(6.))
-                            .shadow(vec![BoxShadow {
-                                color: hsla(0., 0., 0., 0.35),
-                                offset: point(px(0.), px(8.)),
-                                blur_radius: px(24.),
-                                spread_radius: px(0.),
-                                inset: false,
-                            }])
                             .child(view.clone()),
                     )
                     .into_any_element(),
@@ -2470,4 +2287,222 @@ impl Render for Editor {
             .children(ghost)
             .children(overlays)
     }
+}
+
+impl Editor {
+    /// The spelling menu: suggestions, then "Add … to dictionary" with a
+    /// close button. Outside clicks and picks dismiss it.
+    fn build_spell_popup(
+        &self,
+        menu: &crate::editor::SpellMenu,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<PopupMenu> {
+        let editor = cx.entity().downgrade();
+        let word = menu.word.clone();
+        let options = menu.options.clone();
+        let popup = PopupMenu::build(window, cx, move |mut m, _, _| {
+            m = m.min_w(px(180.));
+            if options.is_empty() {
+                let word = word.clone();
+                m = m.item(
+                    PopupMenuItem::element(move |_, _| {
+                        div()
+                            .text_size(px(13.))
+                            .text_color(theme::muted())
+                            .max_w(px(240.))
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .whitespace_nowrap()
+                            .child(format!("No suggestions for \"{word}\""))
+                    })
+                    .disabled(true),
+                );
+            } else {
+                for (i, option) in options.iter().enumerate() {
+                    let label = option.clone();
+                    let pick = option.clone();
+                    let editor = editor.clone();
+                    m = m.item(
+                        PopupMenuItem::element(move |_, _| {
+                            div()
+                                .id(ElementId::Name(format!("spell-opt-{i}").into()))
+                                .text_size(px(13.))
+                                .font_weight(FontWeight::MEDIUM)
+                                .child(label.clone())
+                        })
+                        .on_click(move |_, _, cx| {
+                            let _ =
+                                editor.update(cx, |this, cx| this.replace_misspelling(&pick, cx));
+                        }),
+                    );
+                }
+                m = m.separator();
+            }
+            let add = editor.clone();
+            let close = editor.clone();
+            let word = word.clone();
+            m.item(
+                PopupMenuItem::element(move |_, _| {
+                    let close = close.clone();
+                    div()
+                        .flex()
+                        .flex_1()
+                        .items_center()
+                        .justify_between()
+                        .gap(px(8.))
+                        .text_size(px(13.))
+                        .text_color(theme::muted())
+                        .child(
+                            div()
+                                .id("spell-add")
+                                .child(format!("Add \"{word}\" to dictionary")),
+                        )
+                        .child(
+                            div()
+                                .id("spell-close")
+                                .px(px(6.))
+                                .py(px(2.))
+                                .rounded(px(5.))
+                                .cursor_pointer()
+                                .hover(|s| s.bg(theme::hl_med()).text_color(theme::fg()))
+                                .on_click(move |_, _, cx| {
+                                    // Not the row's "Add".
+                                    cx.stop_propagation();
+                                    let _ = close.update(cx, |this, cx| {
+                                        this.spell_menu = None;
+                                        cx.notify();
+                                    });
+                                })
+                                .child("✕"),
+                        )
+                })
+                .on_click(move |_, _, cx| {
+                    let _ = add.update(cx, |this, cx| this.spell_add_word(cx));
+                }),
+            )
+        });
+        cx.subscribe(&popup, |this, popup, _: &DismissEvent, cx| {
+            if this.spell_menu.as_ref().and_then(|m| m.popup.as_ref()) == Some(&popup) {
+                this.spell_menu = None;
+                cx.notify();
+            }
+        })
+        .detach();
+        popup
+    }
+
+    /// "Paste as": Embed (when a processor knows the URL), Bookmark, Link, Text.
+    fn build_paste_popup(
+        &self,
+        menu: &crate::editor::PasteMenu,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<PopupMenu> {
+        let editor = cx.entity().downgrade();
+        let embed = menu.processor.is_some();
+        let popup = PopupMenu::build(window, cx, move |mut m, _, _| {
+            m = m.min_w(px(160.)).item(
+                PopupMenuItem::element(|_, _| {
+                    div()
+                        .text_size(px(10.))
+                        .text_color(theme::muted())
+                        .pt(px(2.))
+                        .child("PASTE AS")
+                })
+                .disabled(true),
+            );
+            // (id, label, as a block, embed / link)
+            let choices: [(&'static str, &'static str, bool, bool); 4] = [
+                ("paste-embed", "Embed", true, true),
+                ("paste-bookmark", "Bookmark", true, false),
+                ("paste-link", "Link", false, true),
+                ("paste-text", "Text", false, false),
+            ];
+            for (id, label, block, flag) in choices {
+                if id == "paste-embed" && !embed {
+                    continue;
+                }
+                let editor = editor.clone();
+                m = m.item(
+                    PopupMenuItem::element(move |_, _| {
+                        div().id(id).text_size(px(13.)).child(label)
+                    })
+                    .on_click(move |_, _, cx| {
+                        let _ = editor.update(cx, |this, cx| {
+                            if block {
+                                this.paste_as_block(flag, cx)
+                            } else {
+                                this.paste_as_text(flag, cx)
+                            }
+                        });
+                    }),
+                );
+            }
+            m
+        });
+        cx.subscribe(&popup, |this, popup, _: &DismissEvent, cx| {
+            if this.paste_menu.as_ref().and_then(|m| m.popup.as_ref()) == Some(&popup) {
+                this.paste_menu = None;
+                cx.notify();
+            }
+        })
+        .detach();
+        popup
+    }
+}
+
+/// Holds a kit popup menu (its own popover chrome draws the frame) where the
+/// editor keeps focus: a click in the menu must not move it there.
+fn popup_holder(id: &'static str) -> Stateful<Div> {
+    div()
+        .id(id)
+        .occlude()
+        .capture_any_mouse_down(|_, window, _| window.prevent_default())
+}
+
+/// A marks-toolbar control: a kit ghost button (30px square) under Roostr's
+/// tooltip — the kit Button takes only its own tooltip — whose mouse-down
+/// stays off the text so the selection survives the click.
+fn tool_button(
+    id: &'static str,
+    tip: &'static str,
+    label: AnyElement,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> AnyElement {
+    tool_button_with(id, tip, Button::new(id).w(px(30.)).p_0(), label, on_click)
+}
+
+/// [`tool_button`] sized to its label.
+fn tool_button_wide(
+    id: &'static str,
+    tip: &'static str,
+    label: AnyElement,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> AnyElement {
+    tool_button_with(id, tip, Button::new(id).px(px(8.)), label, on_click)
+}
+
+fn tool_button_with(
+    id: &'static str,
+    tip: &'static str,
+    button: Button,
+    label: AnyElement,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> AnyElement {
+    div()
+        .id(SharedString::from(format!("{id}-tip")))
+        .flex_none()
+        .tooltip(roostr_core::ui::tooltip(tip))
+        .child(
+            button
+                .ghost()
+                .h(px(30.))
+                .text_size(px(14.))
+                .text_color(theme::fg())
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_click(on_click)
+                .child(label),
+        )
+        .into_any_element()
 }

@@ -1,15 +1,19 @@
 //! A property chooser for filter and sort rules (`KeyPicker.svelte`): a
 //! button showing the current property; opening it gives a search box over
-//! the list.
+//! the list. Built on the kit `Combobox` (single select, searchable): the kit
+//! owns the popup, search, keyboard (Up/Down/Enter), Escape and click-away;
+//! Roostr draws the button and the rows.
 
+use std::cell::RefCell;
 use std::rc::Rc;
 
-use gpui_kit::component::input::{Escape, InputEvent, InputState, MoveDown, MoveUp};
-use gpui_kit::prelude::FluentBuilder as _;
+use gpui_kit::component::combobox::{Combobox, ComboboxEvent, ComboboxState};
+use gpui_kit::component::searchable_list::{SearchableListDelegate, SearchableListItem};
+use gpui_kit::component::{FocusableExt as _, Icon, IndexPath};
 use gpui_kit::*;
-use roostr_core::theme;
+use roostr_core::{Glyph, theme};
 
-use crate::widgets::{FieldSkin, below, field, menu_shadow};
+use crate::widgets::empty_note;
 
 type LabelFn = Rc<dyn Fn(&str, &App) -> SharedString>;
 type PickFn = Rc<dyn Fn(&str, &mut Window, &mut App)>;
@@ -43,211 +47,213 @@ impl KeyPicker {
     }
 }
 
+/// One property row: its key and how it reads.
+#[derive(Clone, PartialEq)]
+struct KeyItem {
+    key: String,
+    label: SharedString,
+}
+
+impl SearchableListItem for KeyItem {
+    type Value = String;
+
+    fn title(&self) -> SharedString {
+        self.label.clone()
+    }
+
+    fn value(&self) -> &String {
+        &self.key
+    }
+
+    /// The label or the raw key, ignoring case.
+    fn matches(&self, query: &str) -> bool {
+        let q = query.trim().to_lowercase();
+        q.is_empty()
+            || self.label.to_lowercase().contains(&q)
+            || self.key.to_lowercase().contains(&q)
+    }
+}
+
+/// The property list: filtered by the query, which the empty note quotes.
+struct KeyList {
+    items: Vec<KeyItem>,
+    matched: Vec<usize>,
+    query: Rc<RefCell<String>>,
+}
+
+impl KeyList {
+    fn new(items: Vec<KeyItem>, query: Rc<RefCell<String>>) -> Self {
+        Self {
+            matched: (0..items.len()).collect(),
+            items,
+            query,
+        }
+    }
+}
+
+impl SearchableListDelegate for KeyList {
+    type Item = KeyItem;
+
+    fn items_count(&self, _: usize) -> usize {
+        self.matched.len()
+    }
+
+    fn item(&self, ix: IndexPath) -> Option<&KeyItem> {
+        self.items.get(*self.matched.get(ix.row)?)
+    }
+
+    fn position<V>(&self, value: &V) -> Option<IndexPath>
+    where
+        KeyItem: SearchableListItem<Value = V>,
+        V: PartialEq,
+    {
+        self.matched
+            .iter()
+            .position(|&i| self.items[i].value() == value)
+            .map(|row| IndexPath::default().row(row))
+    }
+
+    fn perform_search(&mut self, query: &str, _: &mut Window, _: &mut App) -> Task<()> {
+        *self.query.borrow_mut() = query.trim().to_string();
+        self.matched = (0..self.items.len())
+            .filter(|&i| self.items[i].matches(query))
+            .collect();
+        Task::ready(())
+    }
+
+    /// Roostr's row: 13px, the current property in the accent colour.
+    fn render_item(
+        &self,
+        _: IndexPath,
+        item: &KeyItem,
+        checked: bool,
+        _: &mut Window,
+        _: &mut App,
+    ) -> Option<AnyElement> {
+        Some(
+            div()
+                .py(px(2.))
+                .text_size(px(13.))
+                .text_color(if checked {
+                    theme::accent()
+                } else {
+                    theme::fg()
+                })
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_ellipsis()
+                .child(item.label.clone())
+                .into_any_element(),
+        )
+    }
+}
+
 struct KeyPickerState {
-    open: bool,
-    query: Entity<InputState>,
-    active: usize,
+    combobox: Entity<ComboboxState<KeyList>>,
+    query: Rc<RefCell<String>>,
     value: String,
-    keys: Vec<String>,
-    label: Option<LabelFn>,
+    /// How the current value reads on the button.
+    current: SharedString,
+    items: Vec<KeyItem>,
     on_pick: Option<PickFn>,
     _sub: Subscription,
 }
 
 impl KeyPickerState {
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let query = cx.new(|cx| InputState::new(window, cx).placeholder("Search properties"));
+        let query = Rc::new(RefCell::new(String::new()));
+        let list = KeyList::new(vec![], query.clone());
+        let combobox = cx.new(|cx| ComboboxState::new(list, vec![], window, cx).searchable(true));
         let sub = cx.subscribe_in(
-            &query,
+            &combobox,
             window,
-            |this, _, ev: &InputEvent, window, cx| match ev {
-                InputEvent::Change => {
-                    this.active = 0;
-                    cx.notify();
+            |this, _, ev: &ComboboxEvent<KeyList>, window, cx| {
+                if let ComboboxEvent::Change(values) = ev
+                    && let Some(key) = values.first()
+                    && *key != this.value
+                    && let Some(f) = this.on_pick.clone()
+                {
+                    f(key, window, cx);
                 }
-                InputEvent::PressEnter { .. } => {
-                    if let Some(k) = this.matches(cx).get(this.active).cloned() {
-                        this.pick(&k, window, cx);
-                    }
-                }
-                _ => {}
             },
         );
         Self {
-            open: false,
+            combobox,
             query,
-            active: 0,
             value: String::new(),
-            keys: vec![],
-            label: None,
+            current: SharedString::default(),
+            items: vec![],
             on_pick: None,
             _sub: sub,
         }
     }
 
-    fn label(&self, key: &str, cx: &App) -> SharedString {
-        self.label
-            .as_ref()
-            .map_or_else(|| key.to_string().into(), |f| f(key, cx))
-    }
-
-    fn matches(&self, cx: &App) -> Vec<String> {
-        let q = self.query.read(cx).value().trim().to_lowercase();
-        if q.is_empty() {
-            return self.keys.clone();
+    /// Takes the host's props; the list and selection only change when they do,
+    /// so a re-render never clears what the person is typing.
+    fn sync(
+        &mut self,
+        value: String,
+        current: SharedString,
+        items: Vec<KeyItem>,
+        on_pick: Option<PickFn>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.on_pick = on_pick;
+        self.current = current;
+        let items_changed = items != self.items;
+        if items_changed {
+            self.items = items.clone();
+            let list = KeyList::new(items, self.query.clone());
+            self.combobox
+                .update(cx, |c, cx| c.set_items(list, window, cx));
         }
-        self.keys
-            .iter()
-            .filter(|k| {
-                self.label(k, cx).to_lowercase().contains(&q) || k.to_lowercase().contains(&q)
-            })
-            .cloned()
-            .collect()
-    }
-
-    fn toggle(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.open = !self.open;
-        self.query.update(cx, |s, cx| s.set_value("", window, cx));
-        self.active = self.keys.iter().position(|k| *k == self.value).unwrap_or(0);
-        if self.open {
-            self.query.update(cx, |s, cx| s.focus(window, cx));
-        }
-        cx.notify();
-    }
-
-    fn pick(&mut self, key: &str, window: &mut Window, cx: &mut Context<Self>) {
-        self.open = false;
-        cx.notify();
-        if key != self.value
-            && let Some(f) = self.on_pick.clone()
-        {
-            f(key, window, cx);
+        if items_changed || value != self.value {
+            self.value = value.clone();
+            self.combobox
+                .update(cx, |c, cx| c.set_selected_values(&[value], window, cx));
         }
     }
 }
 
 impl Render for KeyPickerState {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let current = self.label(&self.value, cx);
-        let mut root = div().relative().flex().child(
-            div()
-                .id("current")
-                .flex()
-                .items_center()
-                .gap(px(4.))
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let current = self.current.clone();
+        let query = self.query.clone();
+        div().flex().flex_none().child(
+            Combobox::new(&self.combobox)
+                .focus_ring(false)
+                .search_placeholder("Search properties")
+                .menu_width(px(240.))
+                .menu_max_h(px(300.))
                 .bg(theme::panel())
-                .border_1()
-                .border_color(if self.open {
-                    theme::accent()
-                } else {
-                    theme::border()
-                })
+                .border_color(theme::border())
                 .rounded(theme::radius::sm())
+                .h_auto()
                 .px(px(8.))
                 .py(px(4.))
                 .text_size(px(13.))
                 .text_color(theme::fg())
-                .whitespace_nowrap()
-                .cursor_pointer()
-                .on_click(cx.listener(|this, _, window, cx| this.toggle(window, cx)))
-                .child(current)
-                .child(
+                .render_trigger(move |_, _, _| {
                     div()
-                        .text_size(px(10.))
-                        .text_color(theme::muted())
-                        .child("▾"),
-                ),
-        );
-        if self.open {
-            let matches = self.matches(cx);
-            let q = self.query.read(cx).value().to_string();
-            let mut list = div()
-                .id("keys")
-                .flex()
-                .flex_col()
-                .min_h_0()
-                .max_h(px(300.))
-                .overflow_y_scroll();
-            for (i, k) in matches.iter().enumerate() {
-                let key = k.clone();
-                list = list.child(
-                    div()
-                        .id(SharedString::from(format!("key-{k}")))
-                        .flex_none()
-                        .px(px(8.))
-                        .py(px(6.))
-                        .rounded(theme::radius::sm())
-                        .text_size(px(13.))
-                        .text_color(if *k == self.value {
-                            theme::accent()
-                        } else {
-                            theme::fg()
-                        })
-                        .cursor_pointer()
-                        .when(i == self.active, |d| d.bg(theme::hover()))
-                        .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
-                            if *hovered && this.active != i {
-                                this.active = i;
-                                cx.notify();
-                            }
-                        }))
-                        .on_click(
-                            cx.listener(move |this, _, window, cx| this.pick(&key, window, cx)),
+                        .flex()
+                        .items_center()
+                        .gap(px(4.))
+                        .whitespace_nowrap()
+                        .child(current.clone())
+                        .child(
+                            Icon::new(Glyph::ChevronDown)
+                                .size(px(10.))
+                                .text_color(theme::muted()),
                         )
-                        .child(self.label(k, cx)),
-                );
-            }
-            if matches.is_empty() {
-                list = list.child(
-                    div()
+                })
+                .empty(move |_, _| {
+                    empty_note(format!("No property matches “{}”.", query.borrow()))
                         .px(px(8.))
                         .py(px(6.))
                         .text_size(px(12.))
-                        .text_color(theme::muted())
-                        .child(format!("No property matches “{q}”.")),
-                );
-            }
-            let n = matches.len();
-            let menu = div()
-                .w(px(240.))
-                .flex()
-                .flex_col()
-                .bg(theme::panel())
-                .border_1()
-                .border_color(theme::border())
-                .rounded(theme::radius::menu())
-                .p(px(6.))
-                .shadow(menu_shadow())
-                .text_color(theme::fg())
-                .occlude()
-                .on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                    this.open = false;
-                    cx.notify();
-                }))
-                .capture_action(cx.listener(move |this, _: &MoveDown, _, cx| {
-                    cx.stop_propagation();
-                    this.active = (this.active + 1).min(n.saturating_sub(1));
-                    cx.notify();
-                }))
-                .capture_action(cx.listener(|this, _: &MoveUp, _, cx| {
-                    cx.stop_propagation();
-                    this.active = this.active.saturating_sub(1);
-                    cx.notify();
-                }))
-                .capture_action(cx.listener(|this, _: &Escape, _, cx| {
-                    cx.stop_propagation();
-                    this.open = false;
-                    cx.notify();
-                }))
-                .child(
-                    div()
-                        .mb(px(4.))
-                        .child(field(&self.query, FieldSkin::Search, window, cx)),
-                )
-                .child(list);
-            root = root.child(below("key-menu", 4., menu));
-        }
-        root
+                }),
+        )
     }
 }
 
@@ -256,11 +262,17 @@ impl RenderOnce for KeyPicker {
         let state = window.use_keyed_state(self.id.clone(), cx, |window, cx| {
             KeyPickerState::new(window, cx)
         });
-        state.update(cx, |s, _| {
-            s.value = self.value;
-            s.keys = self.keys;
-            s.label = Some(self.label);
-            s.on_pick = self.on_pick;
+        let items = self
+            .keys
+            .iter()
+            .map(|k| KeyItem {
+                key: k.clone(),
+                label: (self.label)(k, cx),
+            })
+            .collect();
+        let current = (self.label)(&self.value, cx);
+        state.update(cx, |s, cx| {
+            s.sync(self.value, current, items, self.on_pick, window, cx)
         });
         state
     }

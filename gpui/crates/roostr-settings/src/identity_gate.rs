@@ -8,6 +8,8 @@
 
 use std::sync::{Arc, LazyLock};
 
+use gpui_kit::component::alert::Alert;
+use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::*;
@@ -132,20 +134,16 @@ impl IdentityGate {
         })
     }
 
-    /// A quiet text link under the card.
-    fn link(
-        id: &'static str,
-        label: &'static str,
-        action: impl Fn(&mut App) + 'static,
-    ) -> Stateful<Div> {
-        div()
-            .id(id)
+    /// A quiet text link under the card (kit text button, muted until hover).
+    /// The label carries its own size: the kit's inner box sets one of its own.
+    fn link(id: &'static str, label: &'static str) -> Button {
+        Button::new(id)
+            .text()
+            .h_auto()
             .p(px(4.))
-            .text_size(px(14.))
             .text_color(theme::muted())
-            .cursor_pointer()
-            .on_click(move |_, _, cx| action(cx))
-            .child(label)
+            .accessibility_label(label)
+            .child(div().text_size(px(14.)).child(label))
     }
 }
 
@@ -235,19 +233,10 @@ impl Render for IdentityGate {
                         }
                     },
                 )))
-                .child(
-                    div()
-                        .id("back")
-                        .p(px(4.))
-                        .text_size(px(14.))
-                        .text_color(theme::muted())
-                        .cursor_pointer()
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.created = None;
-                            cx.notify();
-                        }))
-                        .child("Back"),
-                );
+                .child(Self::link("back", "Back").on_click(cx.listener(|this, _, _, cx| {
+                    this.created = None;
+                    cx.notify();
+                })));
         } else {
             let empty = self.draft.read(cx).value().trim().is_empty();
             card = card
@@ -292,30 +281,26 @@ impl Render for IdentityGate {
                 if cfg!(target_os = "ios") {
                     card
                 } else {
-                    card.child(Self::link(
-                        "use-daemon",
-                        if io::WEB {
-                            "Pair with Roostr on this computer instead"
-                        } else {
-                            "Use the Roostr daemon on this computer instead"
-                        },
-                        |cx| mode::switch(Mode::Daemon, cx),
-                    ))
+                    card.child(
+                        Self::link(
+                            "use-daemon",
+                            if io::WEB {
+                                "Pair with Roostr on this computer instead"
+                            } else {
+                                "Use the Roostr daemon on this computer instead"
+                            },
+                        )
+                        .on_click(|_, _, cx| mode::switch(Mode::Daemon, cx)),
+                    )
                 }
             } else {
-                card.child(Self::link("retry", "Retry", |cx| {
+                card.child(Self::link("retry", "Retry").on_click(|_, _, cx| {
                     Store::global(cx).update(cx, |store, cx| store.reconnect(cx))
                 }))
             };
         }
         if !self.error.is_empty() {
-            card = card.child(
-                div()
-                    .text_size(px(13.))
-                    .text_color(theme::red())
-                    .text_center()
-                    .child(self.error.clone()),
-            );
+            card = card.child(Alert::error("gate-error", self.error.clone()).text_size(px(13.)));
         }
 
         div()

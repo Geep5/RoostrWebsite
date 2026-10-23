@@ -4,7 +4,10 @@
 //! editor keeps keyboard focus (typing goes on into the block) and owns
 //! navigation keys.
 
-use gpui_kit::prelude::FluentBuilder as _;
+use std::rc::Rc;
+
+use gpui_kit::component::IndexPath;
+use gpui_kit::component::command::{Command, CommandGroup, CommandItem, CommandState};
 use gpui_kit::*;
 use roostr_core::theme;
 use roostr_core::types::style;
@@ -274,7 +277,10 @@ impl Editor {
             .collect()
     }
 
-    /// The open slash menu (300px, at the caret; flips above when there's no room).
+    /// The open slash menu (300px, at the caret; flips above when there's no
+    /// room): a kit command list without its own query field — the filter is
+    /// the text typed after the slash, and the editor keeps focus and routes
+    /// ↑/↓/Enter to the list's highlight.
     pub(crate) fn render_slash(
         &mut self,
         window: &mut Window,
@@ -295,93 +301,70 @@ impl Editor {
                 p
             }
         };
+        let cmd = match slash.cmd {
+            Some(cmd) => cmd,
+            None => {
+                let cmd = cx.new(|cx| CommandState::new(window, cx));
+                if let Some(s) = self.slash.as_mut() {
+                    s.cmd = Some(cmd.clone());
+                }
+                cmd
+            }
+        };
         let filtered = self.slash_entries(&slash.filter);
+        let groups = slash_groups(&filtered);
         let viewport = window.viewport_size();
         let w = px(300.);
-        let h = px((12. + filtered.len() as f32 * 46.).min(360.));
+        // Rows are 48px (36px tile + padding), section headings ~28px.
+        let h = px((12. + filtered.len() as f32 * 48. + groups.len() as f32 * 28.).min(360.));
         let left = anchor.x.min(viewport.width - w - px(12.));
         let top = if anchor.y + h > viewport.height - px(12.) {
             (anchor.y - h - px(28.)).max(px(12.))
         } else {
             anchor.y
         };
-        let mut list = div()
-            .id("slash-menu")
-            .w(w)
-            .max_h(px(360.))
-            .overflow_y_scroll()
-            .bg(theme::panel())
-            .border_1()
-            .border_color(theme::border())
-            .rounded(px(10.))
-            .p(px(6.))
-            .shadow(roostr_core::ui::menu_shadow())
-            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation());
-        if filtered.is_empty() {
-            list = list.child(
+
+        let picks: Rc<Vec<Vec<SlashPick>>> = Rc::new(
+            groups
+                .iter()
+                .map(|(_, items)| items.iter().map(|e| e.pick.clone()).collect())
+                .collect(),
+        );
+        let editor = cx.entity().downgrade();
+        let mut list = Command::new(&cmd)
+            .searchable(false)
+            .max_h(px(348.))
+            .on_confirm(move |ix, window, cx| {
+                let Some(pick) = picks.get(ix.section).and_then(|s| s.get(ix.row)).cloned() else {
+                    return;
+                };
+                let _ = editor.update(cx, |this, cx| this.apply_slash(pick, window, cx));
+            })
+            .empty(|_, _, _| {
                 div()
                     .p(px(12.))
                     .text_size(px(12.))
                     .text_color(theme::muted())
-                    .child("No matches"),
-            );
-        }
-        let mut last_section = "";
-        for (i, e) in filtered.into_iter().enumerate() {
-            if e.section != last_section {
-                last_section = e.section;
-                list = list.child(section_label(e.section));
+                    .child("No matches")
+            })
+            .w(w)
+            .p(px(2.))
+            .shadow(roostr_core::ui::menu_shadow());
+        let mut i = 0;
+        for (section, items) in groups {
+            let mut group = CommandGroup::new().label(section.to_uppercase());
+            for e in items {
+                let ix = i;
+                i += 1;
+                let keywords = e.aliases.clone();
+                group = group.item(
+                    CommandItem::new()
+                        .label(e.label.clone())
+                        .keywords(keywords)
+                        .child(move |_, _| slash_row(ix, &e)),
+                );
             }
-            let selected = i == slash.sel;
-            let pick = e.pick.clone();
-            list = list.child(
-                div()
-                    .id(("slash-item", i))
-                    .flex()
-                    .items_center()
-                    .gap(px(10.))
-                    .w_full()
-                    .px(px(8.))
-                    .py(px(5.))
-                    .rounded(px(8.))
-                    .cursor_pointer()
-                    .when(selected, |d| d.bg(theme::hover()))
-                    .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
-                        if *hovered && let Some(s) = this.slash.as_mut() {
-                            s.sel = i;
-                            cx.notify();
-                        }
-                    }))
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.apply_slash(pick.clone(), window, cx)
-                    }))
-                    .child(preview_tile(
-                        e.preview,
-                        e.cls,
-                        px(36.),
-                        px(36.),
-                        theme::bg(),
-                    ))
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .min_w_0()
-                            .child(
-                                div()
-                                    .text_size(px(13.))
-                                    .font_weight(FontWeight(550.))
-                                    .text_color(theme::fg())
-                                    .child(e.label),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(11.))
-                                    .text_color(theme::muted())
-                                    .child(e.desc),
-                            ),
-                    ),
-            );
+            list = list.group(group);
         }
         // Appears once per opening (keyed by where the `/` was typed), so
         // filtering re-renders it in place.
@@ -393,9 +376,17 @@ impl Editor {
         );
         Some(
             deferred(
-                anchored()
-                    .position(point(left, top))
-                    .child(appear.apply(list)),
+                anchored().position(point(left, top)).child(
+                    appear.apply(
+                        div()
+                            .id("slash-menu")
+                            // The editor keeps focus: the list must not take
+                            // it on click (its keys belong to the block).
+                            .capture_any_mouse_down(|_, window, _| window.prevent_default())
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                            .child(list),
+                    ),
+                ),
             )
             .with_priority(2)
             .into_any_element(),
@@ -403,15 +394,64 @@ impl Editor {
     }
 }
 
-/// `.section` header: 10px uppercase, letter-spaced, muted.
-pub(crate) fn section_label(text: &'static str) -> Div {
+/// The entries split into their (contiguous) sections, in order.
+fn slash_groups(entries: &[SlashEntry]) -> Vec<(&'static str, Vec<SlashEntry>)> {
+    let mut out: Vec<(&'static str, Vec<SlashEntry>)> = Vec::new();
+    for e in entries {
+        match out.last_mut() {
+            Some((section, items)) if *section == e.section => items.push(e.clone()),
+            _ => out.push((e.section, vec![e.clone()])),
+        }
+    }
+    out
+}
+
+/// The command-list path of each entry, in flat order.
+pub(crate) fn slash_paths(entries: &[SlashEntry]) -> Vec<IndexPath> {
+    slash_groups(entries)
+        .iter()
+        .enumerate()
+        .flat_map(|(section, (_, items))| {
+            (0..items.len()).map(move |row| IndexPath::new(row).section(section))
+        })
+        .collect()
+}
+
+/// One slash row: the preview tile, the name and its description.
+fn slash_row(i: usize, e: &SlashEntry) -> Stateful<Div> {
     div()
-        .text_size(px(10.))
-        .text_color(theme::muted())
-        .px(px(8.))
-        .pt(px(8.))
-        .pb(px(4.))
-        .child(text.to_uppercase())
+        .id(("slash-item", i))
+        .flex()
+        .items_center()
+        .gap(px(10.))
+        .w_full()
+        .cursor_pointer()
+        .child(preview_tile(
+            e.preview,
+            e.cls,
+            px(36.),
+            px(36.),
+            theme::bg(),
+        ))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .min_w_0()
+                .child(
+                    div()
+                        .text_size(px(13.))
+                        .font_weight(FontWeight(550.))
+                        .text_color(theme::fg())
+                        .child(e.label.clone()),
+                )
+                .child(
+                    div()
+                        .text_size(px(11.))
+                        .text_color(theme::muted())
+                        .child(e.desc.clone()),
+                ),
+        )
 }
 
 /// The rendered style preview tile (`.preview` + `pv-*`).

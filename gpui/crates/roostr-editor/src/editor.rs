@@ -73,14 +73,15 @@ pub(crate) struct Toolbar {
     pub y: Pixels,
 }
 
-/// Slash menu: block, byte offset of the "/", live filter, anchor.
+/// Slash menu: block, byte offset of the "/", live filter, anchor, and the
+/// kit command list (created on first render; it owns the highlight).
 #[derive(Clone)]
 pub(crate) struct Slash {
     pub block: String,
     pub start: usize,
     pub filter: String,
     pub pos: Option<Point<Pixels>>,
-    pub sel: usize,
+    pub cmd: Option<Entity<gpui_kit::component::command::CommandState>>,
 }
 
 /// "Paste as" menu (Anytype editor/page.tsx onPasteUrl).
@@ -91,6 +92,8 @@ pub(crate) struct PasteMenu {
     pub processor: Option<crate::embed::Processor>,
     pub pos: Point<Pixels>,
     pub at: usize,
+    /// The kit menu showing the choices (built on first render).
+    pub popup: Option<Entity<gpui_kit::component::menu::PopupMenu>>,
 }
 
 /// Spelling suggestions for the word under a right-click.
@@ -102,6 +105,8 @@ pub(crate) struct SpellMenu {
     pub to: usize,
     pub pos: Point<Pixels>,
     pub options: Vec<String>,
+    /// The kit menu showing the suggestions (built on first render).
+    pub popup: Option<Entity<gpui_kit::component::menu::PopupMenu>>,
 }
 
 pub(crate) struct OpenBlockMenu {

@@ -8,8 +8,9 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use gpui_kit::component::Icon;
+use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Escape as InputEscape, Input, InputEvent, InputState};
+use gpui_kit::component::{Icon, IconName, Sizable as _};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use roostr_core::dates::show_date;
@@ -19,7 +20,7 @@ use roostr_core::protected::blockers_for;
 use roostr_core::relations::current_space_id;
 use roostr_core::repeat::describe_repeat;
 use roostr_core::serving::{MachineRow, fetch_machines, machine_name, resolve_many, serving_copy};
-use roostr_core::ui::{CheckboxIcon, tooltip};
+use roostr_core::ui::{self, tooltip};
 use roostr_core::{
     QueryRow, RelationDef, Store, Value, api, field_str, is_locked_tool, repeat_of, theme,
 };
@@ -1186,6 +1187,41 @@ fn layout_widths(avail: f32, name_w: Option<f32>, cols: &[Col]) -> (f32, Vec<f32
     }
 }
 
+/// A column title (`.th-label`), the kit ghost button that sorts by it:
+/// muted 13/500, the optional property emoji, the text ellipsized.
+fn sort_head(id: SharedString, icon: Option<String>, text: String) -> Button {
+    Button::new(id)
+        .ghost()
+        .tab_stop(false)
+        .max_w_full()
+        .h_auto()
+        .px(px(10.))
+        .py(px(6.))
+        .rounded(px(0.))
+        .text_color(theme::muted())
+        .cursor_pointer()
+        .child(
+            // Text styles on the child: the kit's inner box sets its own size.
+            div()
+                .flex()
+                .flex_1()
+                .min_w_0()
+                .items_center()
+                .text_size(px(13.))
+                .font_weight(FontWeight::MEDIUM)
+                .when_some(icon, |d, icon| {
+                    d.child(div().flex_none().mr(px(5.)).text_size(px(12.)).child(icon))
+                })
+                .child(
+                    div()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .child(text),
+                ),
+        )
+}
+
 impl SetTable {
     #[allow(clippy::too_many_arguments)]
     fn header_cell(
@@ -1245,36 +1281,17 @@ impl SetTable {
             )
             .on_drop(cx.listener(|this, _: &ColumnDrag, _, cx| this.drop_column(cx)))
             .child(
-                div()
-                    .id(SharedString::from(format!("head-{}", c.key)))
-                    .flex()
-                    .items_center()
-                    .max_w_full()
-                    .px(px(10.))
-                    .py(px(6.))
-                    .text_size(px(13.))
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(theme::muted())
-                    .whitespace_nowrap()
-                    .overflow_hidden()
-                    .cursor_pointer()
-                    .when(dragging, |d| d.opacity(0.55))
-                    .hover(|s| s.text_color(theme::fg()))
-                    .when_some(icon, |d, icon| {
-                        d.child(div().flex_none().mr(px(5.)).text_size(px(12.)).child(icon))
-                    })
-                    .child(
-                        div()
-                            .min_w_0()
-                            .overflow_hidden()
-                            .text_ellipsis()
-                            .child(format!("{label} {arrow}")),
-                    )
-                    .on_click(cx.listener(move |this, _, _, cx| this.toggle_sort(&key, cx))),
+                // The title is the sort toggle; the whole cell stays the drag source.
+                sort_head(
+                    SharedString::from(format!("head-{}", c.key)),
+                    icon,
+                    format!("{label} {arrow}"),
+                )
+                .when(dragging, |d| d.opacity(0.55))
+                .on_click(cx.listener(move |this, _, _, cx| this.toggle_sort(&key, cx))),
             )
             .child(
                 div()
-                    .id(SharedString::from(format!("hide-{}", c.key)))
                     .absolute()
                     .right(px(8.))
                     .top_0()
@@ -1282,28 +1299,27 @@ impl SetTable {
                     .flex()
                     .items_center()
                     .child(
-                        div()
-                            .px(px(5.))
-                            .py(px(2.))
-                            .rounded(px(4.))
+                        Button::new(SharedString::from(format!("hide-{}", c.key)))
+                            .ghost()
+                            .xsmall()
+                            .icon(IconName::Close)
+                            .tab_stop(false)
                             .bg(theme::bg())
-                            .text_size(px(13.))
                             .text_color(theme::muted())
+                            .cursor_pointer()
                             .opacity(0.)
                             .group_hover(group.clone(), |s| s.opacity(1.))
-                            .hover(|s| s.text_color(theme::red()))
-                            .child("×"),
-                    )
-                    .tooltip(tooltip("Hide column"))
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        let next = this
-                            .cols(cx)
-                            .into_iter()
-                            .filter(|x| x.key != key2)
-                            .collect();
-                        this.save_columns(next, cx);
-                    })),
+                            .tooltip("Hide column")
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                let next = this
+                                    .cols(cx)
+                                    .into_iter()
+                                    .filter(|x| x.key != key2)
+                                    .collect();
+                                this.save_columns(next, cx);
+                            })),
+                    ),
             )
             .child(self.resize_grip(
                 SharedString::from(format!("grip-{}", c.key)),
@@ -1495,18 +1511,16 @@ impl SetTable {
                             .and_then(|rel| rel.options.iter().find(|o| o.text == t))
                             .map(|o| o.color.clone())
                             .unwrap_or_default();
-                        cell = cell.child(tag_pill(t, &color, false));
+                        cell = cell.child(tag_pill(t, &color, false, theme::fg()));
                     }
                 }
                 "checkbox" => {
+                    // Display only: the press reaches the cell, which toggles it.
                     let on = r.fields.get(c).and_then(|v| v.bool_value) == Some(true);
-                    cell = cell.min_h(px(37.)).child(
-                        CheckboxIcon::new(on).size(px(20.)).color(if on {
-                            theme::fg()
-                        } else {
-                            theme::muted()
-                        }),
-                    );
+                    cell = cell.min_h(px(37.)).child(ui::checkbox_display(
+                        SharedString::from(format!("cbx-{}-{c}", r.id)),
+                        on,
+                    ));
                 }
                 _ => {
                     let text = self.cell_text(r, c, relations, cx);
@@ -1705,19 +1719,7 @@ impl Render for SetTable {
                     .overflow_hidden()
                     .child(track_bounds(&name_bounds))
                     .child(
-                        div()
-                            .id("head-name")
-                            .px(px(10.))
-                            .py(px(6.))
-                            .text_size(px(13.))
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(theme::muted())
-                            .whitespace_nowrap()
-                            .overflow_hidden()
-                            .text_ellipsis()
-                            .cursor_pointer()
-                            .hover(|s| s.text_color(theme::fg()))
-                            .child(format!("Name {name_arrow}"))
+                        sort_head("head-name".into(), None, format!("Name {name_arrow}"))
                             .on_click(cx.listener(|this, _, _, cx| this.toggle_sort("name", cx))),
                     )
                     .child(self.resize_grip("grip-name".into(), name_group, None, 0., cx)),
@@ -1772,29 +1774,21 @@ impl Render for SetTable {
             let lead: AnyElement = if task {
                 let rid = r.id.clone();
                 div()
-                    .id(SharedString::from(format!("done-{}", r.id)))
                     .flex_none()
                     .flex()
                     .items_center()
                     .mr(px(6.))
-                    .cursor_pointer()
-                    .text_color(if done {
-                        theme::accent()
-                    } else {
-                        theme::muted()
-                    })
-                    .hover(|s| if done { s } else { s.text_color(theme::fg()) })
-                    .child(CheckboxIcon::new(done).size(px(18.)).color(if done {
-                        theme::accent()
-                    } else {
-                        theme::muted()
-                    }))
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        cx.stop_propagation();
-                        let task = api::note::set_field(&rid, "done", Value::bool(!done), cx);
-                        this.after(task, cx);
-                    }))
+                    .child(
+                        ui::checkbox(SharedString::from(format!("done-{}", r.id)), done)
+                            .tab_stop(false)
+                            .on_change(cx.listener(move |this, done: &bool, _, cx| {
+                                cx.stop_propagation();
+                                let task =
+                                    api::note::set_field(&rid, "done", Value::bool(*done), cx);
+                                this.after(task, cx);
+                            })),
+                    )
                     .into_any_element()
             } else {
                 let icon = object_icon(
@@ -1927,19 +1921,15 @@ impl Render for SetTable {
             div()
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .child(
-                    div()
-                        .id("new-object")
-                        .flex()
-                        .items_center()
-                        .gap(px(6.))
+                    Button::new("new-object")
+                        .ghost()
                         .w_full()
+                        .h_auto()
                         .px(px(8.))
                         .py(px(10.))
-                        .text_size(px(14.))
                         .text_color(theme::muted())
                         .cursor_pointer()
-                        .hover(|s| s.text_color(theme::fg()))
-                        .child("＋ New Object")
+                        .child(div().flex_1().text_size(px(14.)).child("＋ New Object"))
                         .on_click(cx.listener(|this, _, window, cx| this.begin_new(window, cx))),
                 ),
         );
@@ -1997,25 +1987,15 @@ impl Render for SetTable {
                     .relative()
                     .child(track_bounds(&self.plus_bounds))
                     .child(
-                        div()
-                            .id("add-column")
-                            .flex()
-                            .items_center()
-                            .justify_center()
+                        Button::new("add-column")
+                            .outline()
+                            .icon(IconName::Plus)
                             .size(px(26.))
-                            .border_1()
-                            .border_color(theme::border())
                             .rounded(px(7.))
-                            .text_size(px(17.))
+                            .border_color(theme::border())
                             .text_color(theme::fg())
                             .cursor_pointer()
-                            .hover(|s| {
-                                s.border_color(theme::accent())
-                                    .text_color(theme::accent())
-                                    .bg(rgba(0x377aff1f))
-                            })
-                            .tooltip(tooltip("Add column"))
-                            .child("+")
+                            .tooltip("Add column")
                             .on_click(
                                 cx.listener(|this, _, window, cx| this.open_adding(window, cx)),
                             ),
@@ -2137,11 +2117,9 @@ impl Render for SetTable {
                     )
                 };
                 bar = bar.child(
-                    div()
-                        .id("sel-del")
-                        .text_color(rgb(0xe05555))
-                        .cursor_pointer()
-                        .child(label)
+                    ui::danger_button("sel-del", label)
+                        .py(px(2.))
+                        .px(px(8.))
                         .on_click(cx.listener(|this, _, _, cx| this.delete_selected(cx))),
                 );
             } else {
@@ -2163,23 +2141,22 @@ impl Render for SetTable {
                 );
             }
             bar = bar.child(
-                div()
-                    .id("sel-clear")
+                Button::new("sel-clear")
+                    .ghost()
+                    .xsmall()
+                    .icon(IconName::Close)
+                    .accessibility_label("Clear selection")
                     .text_color(theme::muted())
                     .cursor_pointer()
-                    .child("✕")
                     .on_click(cx.listener(|this, _, _, cx| this.set_selection(Vec::new(), cx))),
             );
             root = root.child(div().flex().child(bar));
         }
         if self.rows.is_empty() {
             root = root.child(
-                div()
+                common::empty_state("No objects match.", 13.)
                     .px(px(10.))
-                    .py(px(16.))
-                    .text_size(px(13.))
-                    .text_color(theme::muted())
-                    .child("No objects match."),
+                    .py(px(16.)),
             );
         }
         if let Some(m) = &self.marquee

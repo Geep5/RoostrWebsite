@@ -4,16 +4,19 @@
 //! affordance opening name + the 10-swatch palette + Delete option. Select
 //! (status) picks one; multi-select (tag) toggles.
 
+use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{InputEvent, InputState};
+use gpui_kit::component::list::ListItem;
+use gpui_kit::component::{Icon, IconName, Sizable as _, h_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use roostr_core::options::{
     TAG_COLORS, add_option, delete_option, rename_option, set_option_color,
 };
 use roostr_core::ui::TagPill;
-use roostr_core::{RelationDef, RelationOption, Store, theme};
+use roostr_core::{Glyph, RelationDef, RelationOption, Store, theme};
 
-use crate::widgets::{FieldSkin, field, tip};
+use crate::widgets::{FieldSkin, empty_note, field, tip};
 
 pub(crate) enum OptionEvent {
     /// Toggle/select this option text.
@@ -191,15 +194,13 @@ impl Render for OptionPicker {
         )));
         if can_create {
             list = list.child(
-                div()
-                    .id("create")
+                ListItem::new("create")
                     .px(px(6.))
                     .py(px(4.))
                     .rounded(theme::radius::sm())
                     .text_size(px(13.))
                     .text_color(theme::accent())
                     .cursor_pointer()
-                    .hover(|s| s.bg(theme::hl_med()))
                     .on_click(cx.listener(|this, _, window, cx| this.create(window, cx)))
                     .child(format!("＋ Create option “{raw}”")),
             );
@@ -217,42 +218,42 @@ impl Render for OptionPicker {
                     .items_center()
                     .gap(px(2.))
                     .child(
-                        div()
-                            .id(SharedString::from(format!("row-{}", opt.id)))
+                        ListItem::new(SharedString::from(format!("row-{}", opt.id)))
                             .flex_1()
-                            .flex()
-                            .items_center()
-                            .gap(px(8.))
                             .px(px(6.))
                             .py(px(4.))
                             .rounded(theme::radius::sm())
                             .text_size(px(13.))
                             .cursor_pointer()
-                            .hover(|s| s.bg(theme::hl_med()))
                             .on_click(cx.listener(move |_, _, _, cx| {
                                 cx.emit(OptionEvent::Pick(text.clone()))
                             }))
-                            .child(TagPill::new(opt.text.clone(), opt.color.clone()))
-                            .when(on, |d| {
-                                d.child(div().ml_auto().text_color(theme::muted()).child("✓"))
-                            }),
+                            .child(
+                                h_flex()
+                                    .gap(px(8.))
+                                    .child(TagPill::new(opt.text.clone(), opt.color.clone()))
+                                    .when(on, |d| {
+                                        d.child(
+                                            Icon::new(Glyph::Check)
+                                                .ml_auto()
+                                                .size(px(13.))
+                                                .text_color(theme::muted()),
+                                        )
+                                    }),
+                            ),
                     )
                     .child(
-                        div()
-                            .id(SharedString::from(format!("more-{}", opt.id)))
-                            .px(px(6.))
-                            .py(px(2.))
-                            .rounded(theme::radius::xs())
+                        Button::new(SharedString::from(format!("more-{}", opt.id)))
+                            .ghost()
+                            .xsmall()
+                            .icon(IconName::Ellipsis)
                             .text_color(theme::muted())
                             .opacity(0.5)
                             .group_hover(group, |s| s.opacity(1.))
-                            .cursor_pointer()
-                            .hover(|s| s.bg(theme::hl_med()).text_color(theme::fg()))
-                            .tooltip(tip("Edit option"))
+                            .tooltip("Edit option")
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.open_edit(&o, window, cx)
-                            }))
-                            .child("⋯"),
+                            })),
                     ),
             );
             if self.editing == opt.id {
@@ -300,44 +301,40 @@ impl Render for OptionPicker {
                         .child(field(&self.name_draft, FieldSkin::Filter, window, cx))
                         .child(palette)
                         .child(
-                            div()
-                                .id("delete")
-                                .pt(px(2.))
-                                .text_size(px(12.))
+                            Button::new("delete")
+                                .ghost()
+                                .xsmall()
+                                .self_start()
+                                .px(px(2.))
                                 .text_color(rgb(0xe05555))
-                                .cursor_pointer()
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     this.editing.clear();
                                     delete_option(&rel3, &oid, cx).detach_and_log_err(cx);
                                     cx.notify();
                                 }))
-                                .child("Delete option"),
+                                .child(div().text_size(px(12.)).child("Delete option")),
                         ),
                 );
             }
         }
         if matches.is_empty() && !can_create {
             list = list.child(
-                div()
+                empty_note("No options yet — type a name.")
                     .px(px(6.))
                     .py(px(2.))
-                    .text_size(px(12.))
-                    .text_color(theme::muted())
-                    .child("No options yet — type a name."),
+                    .text_size(px(12.)),
             );
         }
         if !self.multi && !self.selected.is_empty() {
             let first = self.selected[0].clone();
             list = list.child(
-                div()
-                    .id("clear")
+                ListItem::new("clear")
                     .px(px(6.))
                     .py(px(4.))
                     .rounded(theme::radius::sm())
                     .text_size(px(13.))
                     .text_color(theme::muted())
                     .cursor_pointer()
-                    .hover(|s| s.bg(theme::hl_med()))
                     .on_click(
                         cx.listener(move |_, _, _, cx| cx.emit(OptionEvent::Pick(first.clone()))),
                     )

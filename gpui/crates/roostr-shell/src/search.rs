@@ -2,12 +2,18 @@
 //! full-text search grouped by type (fewest matches first), type chips,
 //! matching types, recents for an empty query, and `Create object "<q>"`.
 //! At a phone width it is a bottom sheet (its @media 720 rules) that a
-//! downward pull drags away.
+//! downward pull drags away. The result list is a gpui-kit [`Command`]
+//! (the query is answered by the store, not filtered locally) inside the
+//! modal's own frame, field, chips and sheet.
 
 use std::ops::Range;
 use std::time::Duration;
 
+use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
+use gpui_kit::component::command::{Command, CommandGroup, CommandItem, CommandState};
 use gpui_kit::component::input::{Enter, Escape, Input, InputEvent, InputState, MoveDown, MoveUp};
+use gpui_kit::component::tag::Tag;
+use gpui_kit::component::{Disableable as _, IndexPath};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use roostr_core::create::{create_typed, default_type_key};
@@ -58,6 +64,11 @@ pub(crate) struct SearchModal {
     seq: u64,
     pending: Option<Task<()>>,
     scroll: ScrollHandle,
+    /// The result list (rows, hover, click).
+    command: Entity<CommandState>,
+    /// Each selectable row's path in the list, in keyboard order
+    /// ([`Self::ordered`], then the create row).
+    paths: Vec<IndexPath>,
     /// The sheet drag in flight (`armed`/`dragging`), mobile only.
     sheet_drag: Option<SheetDrag>,
     /// How far the sheet is pulled down (`sheetY`).
@@ -143,6 +154,17 @@ fn highlighted(text: String, q: &str, selected: bool, mobile: bool) -> StyledTex
     }
 }
 
+/// A kit button skin that keeps its fill under the pointer (the modal's
+/// pills: no hover change, as in the web).
+fn still(bg: Hsla, fg: Hsla, cx: &App) -> ButtonCustomVariant {
+    ButtonCustomVariant::new(cx)
+        .color(bg)
+        .foreground(fg)
+        .hover(bg)
+        .active(bg)
+        .shadow(false)
+}
+
 /// `text-transform: capitalize`.
 fn capitalize(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
@@ -215,6 +237,8 @@ impl SearchModal {
             seq: 0,
             pending: None,
             scroll: ScrollHandle::new(),
+            command: cx.new(|cx| CommandState::new(window, cx)),
+            paths: Vec::new(),
             sheet_drag: None,
             sheet_y: 0.,
             sheet: motion::ValueState::new(f64::from(sheet_from)),
@@ -430,14 +454,27 @@ impl SearchModal {
         }
     }
 
-    fn step(&mut self, down: bool, cx: &mut Context<Self>) {
+    fn step(&mut self, down: bool, window: &mut Window, cx: &mut Context<Self>) {
         let count = self.row_count(cx);
         self.selected = if down {
             (self.selected + 1).min(count.saturating_sub(1))
         } else {
             self.selected.saturating_sub(1)
         };
+        // Keep the list's own highlight (its Enter, its scroll) on the same row.
+        let path = self.paths.get(self.selected).copied();
+        self.command.update(cx, |command, cx| {
+            command.set_selected_index(path, window, cx)
+        });
         cx.notify();
+    }
+
+    /// A row clicked in the list: open it (or create, for the create row).
+    fn confirm(&mut self, path: IndexPath, cx: &mut Context<Self>) {
+        if let Some(ix) = self.paths.iter().position(|p| *p == path) {
+            self.selected = ix;
+            self.open_selected(cx);
+        }
     }
 
     fn toggle_chip(&mut self, key: String, cx: &mut Context<Self>) {
@@ -531,12 +568,41 @@ impl SearchModal {
             .value() as f32
     }
 
+    /// A result row as a list item: the Roostr row (`selected` = accent fill)
+    /// laid over the whole kit row, its 8×6 padding and its own highlight
+    /// included, with hover selecting it (keyboard order `i`).
+    fn item(
+        id: ElementId,
+        i: usize,
+        selected: bool,
+        mobile: bool,
+        this: WeakEntity<Self>,
+        fill: impl Fn(Stateful<Div>) -> Stateful<Div> + 'static,
+    ) -> CommandItem {
+        CommandItem::new().child(move |_, _| {
+            let this = this.clone();
+            fill(Self::row(id.clone(), selected, mobile)).on_hover(move |hovered, _, cx| {
+                if *hovered {
+                    let _ = this.update(cx, |this, cx| {
+                        if this.selected != i {
+                            this.selected = i;
+                            cx.notify();
+                        }
+                    });
+                }
+            })
+        })
+    }
+
     fn row(id: ElementId, selected: bool, mobile: bool) -> Stateful<Div> {
         div()
             .id(id)
             .flex()
             .gap(px(12.))
-            .w_full()
+            .flex_1()
+            .min_w_0()
+            .mx(px(-8.))
+            .my(px(-6.))
             .map(|d| {
                 if mobile {
                     // Stacked: the kind wraps under the name.
@@ -552,7 +618,11 @@ impl SearchModal {
             } else {
                 theme::fg()
             })
-            .when(selected, |d| d.bg(theme::accent()))
+            .bg(if selected {
+                theme::accent()
+            } else {
+                theme::panel()
+            })
     }
 
     /// `.kind`: the row's type, at the end; on a phone on its own line
@@ -597,18 +667,28 @@ impl SearchModal {
             .child(roostr_core::ui::icon_text(&icon, px(16.)))
     }
 
+    /// A group's heading: a disabled list item (never highlighted, skipped
+    /// by the list's keys) drawn as the Roostr section header with its count.
+    fn heading(first: bool, label: String, count: Option<usize>) -> CommandItem {
+        CommandItem::new()
+            .disabled(true)
+            .child(move |_, _| Self::section_header(first, label.clone(), count))
+    }
+
+    /// Spans the list edge to edge (out past the kit row's 8×6 padding).
     fn section_header(first: bool, label: String, count: Option<usize>) -> Div {
         div()
             .flex()
+            .flex_1()
             .items_center()
             .gap(px(8.))
-            .mx(px(-6.))
-            .mb(px(4.))
+            .mx(px(-14.))
+            .mb(px(-2.))
             .map(|d| {
                 if first {
-                    d.mt(px(-6.))
+                    d.mt(px(-12.))
                 } else {
-                    d.mt(px(10.)).border_t_1().border_color(theme::border())
+                    d.mt(px(4.)).border_t_1().border_color(theme::border())
                 }
             })
             .pt(px(8.))
@@ -621,12 +701,11 @@ impl SearchModal {
             .child(label.to_uppercase())
             .when_some(count, |d, n| {
                 d.child(
-                    div()
+                    Tag::custom(hsla(0., 0., 1., 0.08), theme::muted(), transparent_black())
+                        .rounded_full()
+                        .border_0()
                         .px(px(7.))
                         .py(px(1.))
-                        .rounded_full()
-                        .bg(hsla(0., 0., 1., 0.08))
-                        .text_color(theme::muted())
                         .text_size(px(10.5))
                         .font_weight(FontWeight::SEMIBOLD)
                         .child(n.to_string()),
@@ -707,69 +786,75 @@ impl Render for SearchModal {
             }
         };
 
-        let mut results = div()
-            .id("search-results")
-            .map(|d| {
-                if mobile {
-                    // The sheet is fixed-height: results fill the rest.
-                    d.flex_1().min_h_0()
-                } else {
-                    d.max_h(viewport.height * 0.46)
+        // The list: one group per section, each led by its heading item;
+        // `paths` maps the keyboard order onto the list's rows.
+        let this = cx.entity().downgrade();
+        let mut paths = Vec::new();
+        let mut command = Command::new(&self.command)
+            .searchable(false)
+            .bordered(false)
+            // The results box below scrolls (the sheet's pull watches it).
+            .max_h(px(1_000_000.))
+            .flex_none()
+            // Rows round at 12 − the list's 4px inset = `radius::md`.
+            .rounded(theme::radius::pane())
+            .bg(transparent_black())
+            .text_color(theme::fg())
+            .on_confirm({
+                let this = this.clone();
+                move |path, _, cx| {
+                    let _ = this.update(cx, |this, cx| this.confirm(path, cx));
                 }
-            })
-            .overflow_y_scroll()
-            .track_scroll(&self.scroll)
-            .p(px(6.))
-            .flex()
-            .flex_col();
+            });
         let mut first = true;
+        let mut section = 0;
         if !type_matches.is_empty() {
-            results = results.child(Self::section_header(first, "Types".into(), None));
+            let mut group = CommandGroup::new().item(Self::heading(first, "Types".into(), None));
             first = false;
             let store = Store::global(cx).read(cx);
             for (i, t) in type_matches.iter().enumerate() {
+                paths.push(IndexPath::new(i + 1).section(section));
                 let selected = i == self.selected;
                 let icon = if t.icon.is_empty() {
                     type_icon(store, &t.key, &active)
                 } else {
                     t.icon.clone()
                 };
-                let id = t.id.clone();
-                results = results.child(
-                    Self::row(crate::eid("search-type", &t.id), selected, mobile)
-                        .child(Self::icon(icon, selected))
-                        .child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .gap(px(1.))
-                                .flex_1()
-                                .min_w_0()
-                                .child(div().text_size(px(14.)).truncate().child(
-                                    if t.name.is_empty() {
-                                        t.key.clone()
-                                    } else {
-                                        t.name.clone()
-                                    },
-                                ))
-                                .child(
-                                    div()
-                                        .text_size(px(12.))
-                                        .truncate()
-                                        .text_color(Self::secondary(selected))
-                                        .child("Type · opens with its objects"),
-                                ),
-                        )
-                        .child(Self::kind("Type", selected, mobile))
-                        .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
-                            if *hovered && this.selected != i {
-                                this.selected = i;
-                                cx.notify();
-                            }
-                        }))
-                        .on_click(cx.listener(move |this, _, _, cx| this.open(id.clone(), cx))),
-                );
+                let name = if t.name.is_empty() {
+                    t.key.clone()
+                } else {
+                    t.name.clone()
+                };
+                group = group.item(Self::item(
+                    crate::eid("search-type", &t.id),
+                    i,
+                    selected,
+                    mobile,
+                    this.clone(),
+                    move |row| {
+                        row.child(Self::icon(icon.clone(), selected))
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap(px(1.))
+                                    .flex_1()
+                                    .min_w_0()
+                                    .child(div().text_size(px(14.)).truncate().child(name.clone()))
+                                    .child(
+                                        div()
+                                            .text_size(px(12.))
+                                            .truncate()
+                                            .text_color(Self::secondary(selected))
+                                            .child("Type · opens with its objects"),
+                                    ),
+                            )
+                            .child(Self::kind("Type", selected, mobile))
+                    },
+                ));
             }
+            command = command.group(group);
+            section += 1;
         }
         let mut offset = type_matches.len();
         for g in &groups {
@@ -782,7 +867,7 @@ impl Render for SearchModal {
                     g.name
                 )
             };
-            results = results.child(Self::section_header(
+            let mut group = CommandGroup::new().item(Self::heading(
                 first,
                 label,
                 (!q.is_empty()).then_some(g.rows.len()),
@@ -790,6 +875,7 @@ impl Render for SearchModal {
             first = false;
             for (j, row) in g.rows.iter().enumerate() {
                 let i = offset + j;
+                paths.push(IndexPath::new(j + 1).section(section));
                 let selected = i == self.selected;
                 let store = Store::global(cx).read(cx);
                 let icon = object_icon(
@@ -803,31 +889,35 @@ impl Render for SearchModal {
                     .clone()
                     .filter(|n| !n.is_empty())
                     .unwrap_or_else(|| "Untitled".into());
+                let snippet = row.snippet.clone().filter(|s| !s.is_empty());
                 let kind = format!(
                     "{} {}",
                     type_icon(store, &row.type_key, &active),
                     Self::type_name(&row.type_key, cx)
                 );
-                let id = row.id.clone();
-                results = results.child(
-                    Self::row(crate::eid("search-row", &row.id), selected, mobile)
-                        .child(Self::icon(icon, selected))
-                        .child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .gap(px(1.))
-                                .flex_1()
-                                .min_w_0()
-                                .child(
-                                    div()
-                                        .text_size(px(14.))
-                                        .truncate()
-                                        .child(highlighted(name, &q, selected, mobile)),
-                                )
-                                .when_some(
-                                    row.snippet.clone().filter(|s| !s.is_empty()),
-                                    |d, snippet| {
+                let q = q.clone();
+                group = group.item(Self::item(
+                    crate::eid("search-row", &row.id),
+                    i,
+                    selected,
+                    mobile,
+                    this.clone(),
+                    move |el| {
+                        el.child(Self::icon(icon.clone(), selected))
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap(px(1.))
+                                    .flex_1()
+                                    .min_w_0()
+                                    .child(div().text_size(px(14.)).truncate().child(highlighted(
+                                        name.clone(),
+                                        &q,
+                                        selected,
+                                        mobile,
+                                    )))
+                                    .when_some(snippet.clone(), |d, snippet| {
                                         d.child(
                                             div()
                                                 .text_size(px(12.))
@@ -835,22 +925,18 @@ impl Render for SearchModal {
                                                 .text_color(Self::secondary(selected))
                                                 .child(highlighted(snippet, &q, selected, mobile)),
                                         )
-                                    },
-                                ),
-                        )
-                        .child(Self::kind(kind, selected, mobile))
-                        .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
-                            if *hovered && this.selected != i {
-                                this.selected = i;
-                                cx.notify();
-                            }
-                        }))
-                        .on_click(cx.listener(move |this, _, _, cx| this.open(id.clone(), cx))),
-                );
+                                    }),
+                            )
+                            .child(Self::kind(kind.clone(), selected, mobile))
+                    },
+                ));
             }
+            command = command.group(group);
+            section += 1;
             offset += g.rows.len();
         }
         if can_create && !self.searching {
+            paths.push(IndexPath::new(0).section(section));
             let selected = self.selected == ordered_len;
             let create_type = self.create_type();
             let kind = format!(
@@ -858,9 +944,15 @@ impl Render for SearchModal {
                 type_icon(Store::global(cx).read(cx), &create_type, &active),
                 Self::type_name(&create_type, cx)
             );
-            results = results.child(
-                Self::row("search-create".into(), selected, mobile)
-                    .child(Self::icon("＋".into(), selected).text_color(if selected {
+            let label = format!("Create object \"{q}\"");
+            command = command.group(CommandGroup::new().item(Self::item(
+                "search-create".into(),
+                ordered_len,
+                selected,
+                mobile,
+                this.clone(),
+                move |row| {
+                    row.child(Self::icon("＋".into(), selected).text_color(if selected {
                         theme::white()
                     } else {
                         theme::accent()
@@ -871,28 +963,40 @@ impl Render for SearchModal {
                             .min_w_0()
                             .text_size(px(14.))
                             .truncate()
-                            .child(format!("Create object \"{q}\"")),
+                            .child(label.clone()),
                     )
-                    .child(Self::kind(kind, selected, mobile))
-                    .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
-                        if *hovered && this.selected != ordered_len {
-                            this.selected = ordered_len;
-                            cx.notify();
-                        }
-                    }))
-                    .on_click(cx.listener(|this, _, _, cx| this.create_from_query(cx))),
-            );
+                    .child(Self::kind(kind.clone(), selected, mobile))
+                },
+            )));
         }
-        if ordered_len == 0 && !self.searching && !can_create {
-            results = results.child(
-                div()
-                    .px(px(12.))
+        let nothing = ordered_len == 0 && !self.searching && !can_create;
+        command = command.empty(move |_, _, _| {
+            div().when(nothing, |d| {
+                d.px(px(12.))
                     .py(px(16.))
                     .text_size(px(13.))
                     .text_color(theme::muted())
-                    .child("Nothing here yet."),
-            );
-        }
+                    .child("Nothing here yet.")
+            })
+        });
+        self.paths = paths;
+        let results = div()
+            .id("search-results")
+            .map(|d| {
+                if mobile {
+                    // The sheet is fixed-height: results fill the rest.
+                    d.flex_1().min_h_0()
+                } else {
+                    d.max_h(viewport.height * 0.46)
+                }
+            })
+            .overflow_y_scroll()
+            .track_scroll(&self.scroll)
+            // With the list's own 4px inset: the 6px around the rows.
+            .p(px(2.))
+            .flex()
+            .flex_col()
+            .child(command);
 
         let width = (viewport.width - px(48.)).min(px(620.)) + px(2.);
         let sheet_listener = mobile.then(|| {
@@ -966,13 +1070,13 @@ impl Render for SearchModal {
                             .rounded_t(px(18.))
                     })
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .capture_action(cx.listener(|this, _: &MoveDown, _, cx| {
+                    .capture_action(cx.listener(|this, _: &MoveDown, window, cx| {
                         cx.stop_propagation();
-                        this.step(true, cx);
+                        this.step(true, window, cx);
                     }))
-                    .capture_action(cx.listener(|this, _: &MoveUp, _, cx| {
+                    .capture_action(cx.listener(|this, _: &MoveUp, window, cx| {
                         cx.stop_propagation();
-                        this.step(false, cx);
+                        this.step(false, window, cx);
                     }))
                     .capture_action(cx.listener(|this, _: &Enter, _, cx| {
                         cx.stop_propagation();
@@ -982,8 +1086,14 @@ impl Render for SearchModal {
                         cx.stop_propagation();
                         this.close(cx);
                     }))
-                    .on_action(cx.listener(|this, _: &SelectNext, _, cx| this.step(true, cx)))
-                    .on_action(cx.listener(|this, _: &SelectPrev, _, cx| this.step(false, cx)))
+                    .on_action(
+                        cx.listener(|this, _: &SelectNext, window, cx| this.step(true, window, cx)),
+                    )
+                    .on_action(
+                        cx.listener(|this, _: &SelectPrev, window, cx| {
+                            this.step(false, window, cx)
+                        }),
+                    )
                     .on_action(cx.listener(|this, _: &OpenSelected, _, cx| this.open_selected(cx)))
                     .on_action(cx.listener(|this, _: &CloseSearch, _, cx| this.close(cx)))
                     .children(sheet_listener)
@@ -1022,16 +1132,17 @@ impl Render for SearchModal {
                             })
                             .when(!mobile, |d| {
                                 d.child(
-                                    div()
-                                        .flex_none()
-                                        .text_size(px(12.))
-                                        .text_color(theme::accent())
-                                        .border_1()
-                                        .border_color(theme::border())
-                                        .rounded(theme::radius::sm())
-                                        .px(px(8.))
-                                        .py(px(2.))
-                                        .child(space_name),
+                                    Tag::custom(
+                                        transparent_black(),
+                                        theme::accent(),
+                                        theme::border(),
+                                    )
+                                    .flex_none()
+                                    .text_size(px(12.))
+                                    .rounded(theme::radius::sm())
+                                    .px(px(8.))
+                                    .py(px(2.))
+                                    .child(space_name),
                                 )
                             })
                             .when(mobile, |d| {
@@ -1078,20 +1189,18 @@ impl Render for SearchModal {
                             })
                             .when(mobile && has_query, |d| {
                                 d.child(
-                                    div()
-                                        .id("search-clear")
-                                        .flex()
+                                    Button::new("search-clear")
+                                        .custom(still(theme::hover(), theme::muted(), cx))
                                         .flex_none()
-                                        .items_center()
-                                        .justify_center()
                                         .size(px(28.))
+                                        .p_0()
                                         .ml(px(-36.))
-                                        .rounded_full()
+                                        .rounded(px(14.))
                                         .bg(theme::hover())
                                         .text_color(theme::muted())
-                                        .text_size(px(15.))
                                         .cursor_pointer()
-                                        .child("×")
+                                        .accessibility_label("Clear")
+                                        .child(div().text_size(px(15.)).child("×"))
                                         .on_click(cx.listener(|this, _, window, cx| {
                                             this.input.update(cx, |input, cx| {
                                                 input.set_value("", window, cx);
@@ -1121,38 +1230,44 @@ impl Render for SearchModal {
                             });
                         for (key, label, count) in chips {
                             let on = self.chips.contains(&key);
+                            let (bg, fg) = if on {
+                                (theme::accent(), theme::white())
+                            } else {
+                                (theme::hover(), theme::fg())
+                            };
                             row = row.child(
-                                div()
-                                    .id(crate::eid("chip", &key))
-                                    .flex()
+                                Button::new(crate::eid("chip", &key))
+                                    .custom(still(bg, fg, cx))
                                     .flex_none()
-                                    .gap(px(2.))
+                                    .h_auto()
                                     .map(|d| {
                                         if mobile {
-                                            d.px(px(14.)).py(px(7.)).text_size(px(14.))
+                                            d.px(px(14.)).py(px(7.))
                                         } else {
-                                            d.px(px(11.)).py(px(4.)).text_size(px(12.5))
+                                            d.px(px(11.)).py(px(4.))
                                         }
                                     })
-                                    .rounded_full()
-                                    .whitespace_nowrap()
+                                    .rounded(px(999.))
+                                    .bg(bg)
+                                    .text_color(fg)
                                     .cursor_pointer()
-                                    .map(|d| {
-                                        if on {
-                                            d.bg(theme::accent()).text_color(theme::white())
-                                        } else {
-                                            d.bg(theme::hover()).text_color(theme::fg())
-                                        }
-                                    })
-                                    .child(label)
-                                    .when_some(count, |d, n| {
-                                        d.child(
-                                            div()
-                                                .ml(px(2.))
-                                                .text_color(theme::muted())
-                                                .child(n.to_string()),
-                                        )
-                                    })
+                                    .toggled(on)
+                                    .accessibility_label(label.clone())
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .gap(px(4.))
+                                            .whitespace_nowrap()
+                                            .text_size(px(if mobile { 14. } else { 12.5 }))
+                                            .child(label)
+                                            .when_some(count, |d, n| {
+                                                d.child(
+                                                    div()
+                                                        .text_color(theme::muted())
+                                                        .child(n.to_string()),
+                                                )
+                                            }),
+                                    )
                                     .on_click(cx.listener(move |this, _, _, cx| {
                                         this.toggle_chip(key.clone(), cx)
                                     })),

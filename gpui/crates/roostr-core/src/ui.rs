@@ -1,13 +1,20 @@
 //! Shared UI primitives, styled per `.specs/roostr/style.md` §5 so every
-//! feature crate looks the same: checkbox and property icons, tag pills,
-//! property badges, popover menus, header/primary/outline buttons, section
-//! labels, modal frames, tooltips and emoji-or-image icons.
+//! feature crate looks the same: checkboxes (kit `Checkbox`), property icons,
+//! tag pills (kit `Tag`), property badges (kit `Tag` in a kit `Button`),
+//! popover menus, primary/outline/danger/icon buttons (kit `Button`), section
+//! labels, modal frames, tooltips (kit `Tooltip`) and emoji-or-image icons.
 
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, Mutex};
 
 use base64::Engine as _;
-use gpui_kit::component::Icon;
+use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
+use gpui_kit::component::checkbox::Checkbox;
+use gpui_kit::component::kbd::Kbd;
+use gpui_kit::component::tag::Tag;
+use gpui_kit::component::tooltip::Tooltip as KitTooltip;
+use gpui_kit::component::{Disableable as _, Icon, Sizable as _, Size};
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use crate::icons::Glyph;
@@ -63,55 +70,20 @@ pub fn brighten(color: Hsla, f: f32) -> Hsla {
 
 // -------------------------------------------------------------------- icons
 
-/// Anytype's checkbox (`CheckboxIcon.svelte`): 20px default, muted
-/// unchecked, accent checked.
-#[derive(IntoElement)]
-pub struct CheckboxIcon {
-    checked: bool,
-    size: Pixels,
-    color: Option<Hsla>,
+/// The kit [`Checkbox`] at Roostr's size: Anytype's 20px box drawn at the
+/// kit's largest size (18px), accent (`primary`) fill when checked. Chain
+/// `.on_change(|checked: &bool, window, cx| ..)` (controlled: write the value
+/// and notify; call `cx.stop_propagation()` there when it sits in a clickable
+/// row), `.tooltip("Mark done")`, `.disabled(..)`, or `.with_size(Size::Medium)`
+/// (16px) / `.small()` (14px) / `.xsmall()` (12px) for denser rows.
+pub fn checkbox(id: impl Into<ElementId>, checked: bool) -> Checkbox {
+    Checkbox::new(id).checked(checked).with_size(Size::Large)
 }
 
-impl CheckboxIcon {
-    pub fn new(checked: bool) -> Self {
-        Self {
-            checked,
-            size: px(20.),
-            color: None,
-        }
-    }
-
-    pub fn size(mut self, size: Pixels) -> Self {
-        self.size = size;
-        self
-    }
-
-    /// Override the state color (e.g. `fg` on hover).
-    pub fn color(mut self, color: Hsla) -> Self {
-        self.color = Some(color);
-        self
-    }
-}
-
-impl RenderOnce for CheckboxIcon {
-    fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
-        let glyph = if self.checked {
-            Glyph::CheckboxChecked
-        } else {
-            Glyph::CheckboxUnchecked
-        };
-        let color = self.color.unwrap_or_else(|| {
-            if self.checked {
-                theme::accent()
-            } else {
-                theme::muted()
-            }
-        });
-        Icon::new(glyph)
-            .size(self.size)
-            .flex_none()
-            .text_color(color)
-    }
+/// A display-only [`checkbox`]: full colour, no click handler, out of the tab
+/// order; presses fall through to the surrounding row.
+pub fn checkbox_display(id: impl Into<ElementId>, checked: bool) -> Checkbox {
+    checkbox(id, checked).tab_stop(false)
 }
 
 /// The line icon for a relation format (`PropIcon` `line`).
@@ -255,32 +227,40 @@ impl TagPill {
 impl RenderOnce for TagPill {
     fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
         let (bg, fg) = tag_colors(&self.color).unwrap_or((unknown_tag_bg(), theme::fg()));
-        div()
-            .flex()
-            .flex_none()
-            .items_center()
-            .h(px(20.))
-            .px(px(6.))
-            .rounded(px(10.))
-            .bg(bg)
-            .text_color(fg)
-            .text_size(px(12.))
-            .whitespace_nowrap()
-            .overflow_hidden()
-            .text_ellipsis()
-            .child(self.text)
+        tag(bg, fg, px(20.), px(12.)).child(self.text)
     }
 }
 
-/// A property badge (`ObjectMeta .badge`): h26, padding 0 10 0 6, gap 6,
-/// radius 8, 13/500, a leading 16px glyph in the badge's icon color; hover
-/// brightness 1.18.
+/// The kit [`Tag`](gpui_kit::component::tag::Tag) as Anytype draws a tagItem:
+/// filled `bg`, `fg` text, no border, radius 10, 0 6px padding, one line of
+/// `height` and `text` size, ellipsis when squeezed.
+pub fn tag(bg: Hsla, fg: Hsla, height: Pixels, text: Pixels) -> gpui_kit::component::tag::Tag {
+    gpui_kit::component::tag::Tag::custom(bg, fg, bg)
+        .rounded(px(10.))
+        .border_0()
+        .flex_none()
+        .h(height)
+        .line_height(height)
+        .px(px(6.))
+        .py_0()
+        .text_size(text)
+        .whitespace_nowrap()
+        .overflow_hidden()
+        .text_ellipsis()
+}
+
+/// A property badge (`ObjectMeta .badge`): a kit [`Button`] painting the
+/// badge fill (radius 8, hover brightness 1.18; pointer, keyboard focus and
+/// tooltip when clickable) around a kit [`Tag`] holding the content: h26,
+/// padding 0 10 0 6, gap 6, 13/500, a leading 16px glyph in the badge's icon
+/// color.
 #[derive(IntoElement)]
 pub struct Badge {
     id: ElementId,
     text: SharedString,
     color: SharedString,
     icon: Glyph,
+    tooltip: Option<SharedString>,
     on_click: Option<ClickHandler>,
 }
 
@@ -298,8 +278,15 @@ impl Badge {
             text: text.into(),
             color: color.into(),
             icon,
+            tooltip: None,
             on_click: None,
         }
+    }
+
+    /// The kit tooltip shown on hover.
+    pub fn tooltip(mut self, text: impl Into<SharedString>) -> Self {
+        self.tooltip = Some(text.into());
+        self
     }
 
     pub fn on_click(
@@ -312,35 +299,49 @@ impl Badge {
 }
 
 impl RenderOnce for Badge {
-    fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
+    fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
         let colors = badge_colors(&self.color);
-        let el = div()
-            .id(self.id)
-            .flex()
-            .flex_none()
-            .items_center()
-            .gap(px(6.))
-            .h(px(26.))
-            .pl(px(6.))
-            .pr(px(10.))
+        let hover = brighten(colors.bg, 1.18);
+        let clickable = self.on_click.is_some();
+        let fill = ButtonCustomVariant::new(cx)
+            .color(colors.bg)
+            .foreground(colors.fg)
+            .hover(hover)
+            .active(hover)
+            .shadow(false);
+        Button::new(self.id)
+            .custom(fill)
             .rounded(px(8.))
+            .accessibility_label(self.text.clone())
+            .tab_stop(clickable)
+            .flex_none()
+            .h(px(26.))
+            .p_0()
             .bg(colors.bg)
             .text_color(colors.fg)
-            .text_size(px(13.))
-            .font_weight(FontWeight::MEDIUM)
-            .whitespace_nowrap()
-            .hover(move |s| s.bg(brighten(colors.bg, 1.18)))
+            .when(clickable, |b| b.cursor_pointer())
+            .when_some(self.tooltip, |b, text| b.tooltip(text))
+            .when_some(self.on_click, |b, handler| b.on_click(handler))
             .child(
-                Icon::new(self.icon)
-                    .size(px(16.))
-                    .flex_none()
-                    .text_color(colors.icon),
+                Tag::custom(transparent_black(), colors.fg, transparent_black())
+                    .rounded(px(8.))
+                    .border_0()
+                    .h_full()
+                    .gap(px(6.))
+                    .pl(px(6.))
+                    .pr(px(10.))
+                    .py_0()
+                    .text_size(px(13.))
+                    .font_weight(FontWeight::MEDIUM)
+                    .whitespace_nowrap()
+                    .child(
+                        Icon::new(self.icon)
+                            .size(px(16.))
+                            .flex_none()
+                            .text_color(colors.icon),
+                    )
+                    .child(self.text),
             )
-            .child(self.text);
-        match self.on_click {
-            Some(handler) => el.cursor_pointer().on_click(handler),
-            None => el,
-        }
     }
 }
 
@@ -523,89 +524,91 @@ impl RenderOnce for MenuItem {
 
 // ------------------------------------------------------------------ buttons
 
-/// Header icon button (`.hbtn`): 28×28, radius 7, muted 16px glyph → fg on a
-/// `--hover` fill. Chain `.on_click(...)` / `.tooltip(tooltip("..."))`.
-pub fn icon_button(id: impl Into<ElementId>, glyph: Glyph) -> Stateful<Div> {
-    div()
-        .id(id)
-        .flex()
-        .flex_none()
-        .items_center()
-        .justify_center()
-        .size(px(28.))
+// The helpers return the kit [`Button`]: chain `.on_click(..)`,
+// `.tooltip("..")` (kit tooltip), `.disabled(..)` or [`disabled`]. Labels sit
+// in a child (the kit sizes its own label text) and stay the accessible name.
+
+/// Header icon button (`.hbtn`), the kit ghost button: 28×28, radius 7, muted
+/// 16px glyph → fg on the kit hover fill. Icon-only: add
+/// `.accessibility_label(..)` and `.tooltip(..)`.
+pub fn icon_button(id: impl Into<ElementId>, glyph: Glyph) -> Button {
+    Button::new(id)
+        .ghost()
         .rounded(theme::radius::tab())
+        .flex_none()
+        .size(px(28.))
+        .p_0()
         .text_color(theme::muted())
         .cursor_pointer()
-        .hover(|s| s.bg(theme::hover()).text_color(theme::fg()))
         .child(Icon::new(glyph).size(px(16.)))
 }
 
-/// Primary button (`.new-btn`): accent fill, white 13/500 text, h28, padding 0 12,
-/// radius 8; hover brightness 1.1.
-pub fn primary_button(id: impl Into<ElementId>, label: impl Into<SharedString>) -> Stateful<Div> {
-    div()
-        .id(id)
-        .flex()
+/// Primary button (`.new-btn`), the kit primary button (accent fill, white
+/// text): 13/500, h28, padding 0 12, radius 8.
+pub fn primary_button(id: impl Into<ElementId>, label: impl Into<SharedString>) -> Button {
+    let label = label.into();
+    Button::new(id)
+        .primary()
+        .rounded(px(8.))
+        .accessibility_label(label.clone())
         .flex_none()
-        .items_center()
-        .justify_center()
-        .gap(px(6.))
         .h(px(28.))
         .px(px(12.))
-        .rounded(px(8.))
-        .bg(theme::accent())
-        .text_color(theme::white())
-        .text_size(px(13.))
-        .font_weight(FontWeight::MEDIUM)
-        .whitespace_nowrap()
         .cursor_pointer()
-        .hover(|s| s.bg(brighten(theme::accent(), 1.1)))
-        .child(label.into())
+        .child(
+            div()
+                .text_size(px(13.))
+                .font_weight(FontWeight::MEDIUM)
+                .child(label),
+        )
 }
 
-/// Outline button (`.prop-del-row button`): 1px border, transparent, fg,
-/// radius 8, padding 7×14, 13px. Pass `disabled` for opacity 0.5 (no hover).
-pub fn outline_button(id: impl Into<ElementId>, label: impl Into<SharedString>) -> Stateful<Div> {
-    outline_base(id)
-        .hover(|s| s.bg(theme::hl_med()))
-        .child(label.into())
-}
-
-fn outline_base(id: impl Into<ElementId>) -> Stateful<Div> {
-    div()
-        .id(id)
-        .flex()
+/// Outline button (`.prop-del-row button`), the kit outline button: 1px
+/// border, transparent, fg, radius 8, padding 7×14, 13px; kit hover fill.
+pub fn outline_button(id: impl Into<ElementId>, label: impl Into<SharedString>) -> Button {
+    let label = label.into();
+    Button::new(id)
+        .outline()
+        .rounded(px(8.))
+        .accessibility_label(label.clone())
         .flex_none()
-        .items_center()
-        .justify_center()
-        .gap(px(6.))
+        .h_auto()
         .px(px(14.))
         .py(px(7.))
-        .rounded(px(8.))
-        .border_1()
         .border_color(theme::border())
+        .bg(transparent_black())
         .text_color(theme::fg())
-        .text_size(px(13.))
-        .whitespace_nowrap()
         .cursor_pointer()
+        .child(div().text_size(px(13.)).child(label))
 }
 
-/// Danger outline: red border and text; hover red fill + white text.
-pub fn danger_button(id: impl Into<ElementId>, label: impl Into<SharedString>) -> Stateful<Div> {
-    outline_base(id)
+/// Danger button, the kit danger button drawn as an outline at rest: red
+/// border and text, radius 8, padding 7×14, 13px; kit red fill + white text
+/// on hover.
+pub fn danger_button(id: impl Into<ElementId>, label: impl Into<SharedString>) -> Button {
+    let label = label.into();
+    Button::new(id)
+        .danger()
+        .rounded(px(8.))
+        .accessibility_label(label.clone())
+        .flex_none()
+        .h_auto()
+        .px(px(14.))
+        .py(px(7.))
+        .border_1()
         .border_color(theme::red())
+        .bg(transparent_black())
         .text_color(theme::red())
-        .hover(|s| s.bg(theme::red()).text_color(theme::white()))
-        .child(label.into())
+        .cursor_pointer()
+        .child(div().text_size(px(13.)).child(label))
 }
 
-/// Dim a button and drop its pointer when disabled (opacity 0.5).
-pub fn disabled(el: Stateful<Div>, disabled: bool) -> Stateful<Div> {
-    if disabled {
-        el.opacity(0.5).cursor_default()
-    } else {
-        el
-    }
+/// Disable a kit button the Roostr way: no clicks, no hover, opacity 0.5 and
+/// the default cursor (the kit keeps the rest colours).
+pub fn disabled(button: Button, disabled: bool) -> Button {
+    button
+        .disabled(disabled)
+        .when(disabled, |b| b.opacity(0.5).cursor_default())
 }
 
 // ------------------------------------------------------------ text & frames
@@ -758,7 +761,9 @@ impl RenderOnce for SpacedText {
 }
 
 /// A modal panel: panel bg, 1px border, radius 14, modal shadow, `width` wide.
-/// Callers add padding (settings: 18 22 22) and the overlay.
+/// Callers add padding and the overlay. Kept for the search modal, whose
+/// mobile bottom sheet (drag-to-dismiss pan) the kit `Dialog` cannot host;
+/// prompts and confirms use the kit `Dialog`.
 pub fn modal_frame(width: Pixels) -> Div {
     div()
         .flex()
@@ -773,51 +778,50 @@ pub fn modal_frame(width: Pixels) -> Div {
         .overflow_hidden()
 }
 
-/// A small modal (`.prop-del-modal`): radius 12, padding 20.
-pub fn small_modal_frame(width: Pixels) -> Div {
-    modal_frame(width).rounded(px(12.)).p(px(20.))
-}
-
-/// The modal backdrop: full-size `rgb(0 0 0/0.5)`, content centered.
-pub fn modal_overlay() -> Div {
-    div()
-        .absolute()
-        .inset_0()
-        .flex()
-        .items_center()
-        .justify_center()
-        .bg(theme::overlay())
-}
-
 // ------------------------------------------------------------------ tooltip
 
-struct TextTooltip(SharedString);
-
-impl Render for TextTooltip {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        // The pad keeps the shadow inside the tooltip's bounds and sets it 6px off the control.
-        div().pt(px(6.)).child(
-            div()
-                .bg(theme::panel())
-                .border_1()
-                .border_color(theme::border())
-                .rounded(theme::radius::sm())
-                .px(px(8.))
-                .py(px(3.))
-                .text_size(px(11.))
-                .text_color(theme::fg())
-                .whitespace_nowrap()
-                .shadow(tooltip_shadow())
-                .child(self.0.clone()),
-        )
-    }
-}
-
-/// The `[data-tip]` tooltip: panel bg, 1px border, radius 6, padding 3×8,
-/// 11px, tooltip shadow. Use on a stateful element: `.tooltip(tooltip("Back"))`.
+/// The `[data-tip]` tooltip as the kit [`Tooltip`](KitTooltip), so plain
+/// elements match the kit controls' own `.tooltip(..)`. A trailing shortcut
+/// hint ("Search (⌘K)") shows as a kit [`Kbd`] after the label
+/// ([`split_shortcut`]). Use on a stateful element: `.tooltip(tooltip("Back"))`;
+/// kit controls take the text directly: `Button::tooltip("Back")`.
 pub fn tooltip(
     text: impl Into<SharedString>,
 ) -> impl Fn(&mut Window, &mut App) -> AnyView + 'static {
-    let text = text.into();
-    move |_, cx| cx.new(|_| TextTooltip(text.clone())).into()
+    let text: SharedString = text.into();
+    let (label, stroke) = match split_shortcut(&text) {
+        Some((label, stroke)) => (SharedString::from(label.to_string()), Some(stroke)),
+        None => (text.clone(), None),
+    };
+    move |window, cx| {
+        KitTooltip::new(label.clone())
+            .key_binding(stroke.clone().map(Kbd::new))
+            .build(window, cx)
+    }
+}
+
+/// A tooltip text's trailing shortcut hint: "Search (⌘K)" → `("Search", ⌘K)`
+/// (⌘ is Ctrl off macOS). `None` without a modifier glyph in the parentheses.
+pub fn split_shortcut(text: &str) -> Option<(&str, Keystroke)> {
+    let (label, hint) = text.strip_suffix(')')?.rsplit_once(" (")?;
+    let mut modifiers = Vec::new();
+    let mut key = String::new();
+    for c in hint.chars() {
+        match c {
+            '⌘' => modifiers.push(if cfg!(target_os = "macos") {
+                "cmd"
+            } else {
+                "ctrl"
+            }),
+            '⌃' => modifiers.push("ctrl"),
+            '⌥' => modifiers.push("alt"),
+            '⇧' => modifiers.push("shift"),
+            c => key.extend(c.to_lowercase()),
+        }
+    }
+    if modifiers.is_empty() || key.is_empty() {
+        return None;
+    }
+    let stroke = Keystroke::parse(&format!("{}-{key}", modifiers.join("-"))).ok()?;
+    Some((label, stroke))
 }

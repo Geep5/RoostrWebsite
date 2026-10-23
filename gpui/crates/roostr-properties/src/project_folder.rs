@@ -5,12 +5,16 @@
 
 use std::rc::Rc;
 
+use gpui_kit::component::Sizable as _;
+use gpui_kit::component::alert::Alert;
+use gpui_kit::component::label::Label;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use roostr_core::create::this_machine_id;
 use roostr_core::harness::harness;
 use roostr_core::io;
 use roostr_core::types::field_str;
+use roostr_core::ui::{disabled, outline_button};
 use roostr_core::{Store, theme};
 use serde_json::{Value as Json, json};
 
@@ -117,12 +121,9 @@ impl ProjectFolder {
     }
 }
 
-fn note(text: &'static str) -> Div {
-    div()
-        .text_size(px(12.))
-        .line_height(relative(1.4))
-        .opacity(0.6)
-        .child(text)
+/// A muted 12px explanatory note.
+fn folder_note(text: &'static str) -> Label {
+    crate::widgets::note(text, 12.).line_height(relative(1.4))
 }
 
 impl Render for ProjectFolder {
@@ -150,38 +151,41 @@ impl Render for ProjectFolder {
             .map(|d| {
                 if local {
                     d.child(
-                        div()
-                            .id("choose")
+                        // Greyed and inert while the macOS folder window is open.
+                        disabled(
+                            outline_button(
+                                "choose",
+                                if picking { "Choose in the window that opened…" } else { "Choose…" },
+                            )
                             .self_start()
-                            .px(px(10.))
-                            .py(px(4.))
                             .rounded(theme::radius::sm())
-                            .border_1()
-                            .border_color(theme::border())
-                            .text_size(px(13.))
-                            .when(picking, |d| d.opacity(0.6))
-                            .when(!picking, |d| d.cursor_pointer())
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                if !picking {
-                                    this.choose(cx)
-                                }
-                            }))
-                            .child(if picking { "Choose in the window that opened…" } else { "Choose…" }),
+                            .px(px(10.))
+                            .py(px(4.)),
+                            picking,
+                        )
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if !picking {
+                                this.choose(cx)
+                            }
+                        })),
                     )
                 } else if !served_by.is_empty() {
-                    d.child(note("The folder must be on this agent's computer; it checks it there, and a problem shows on its Error."))
+                    d.child(folder_note("The folder must be on this agent's computer; it checks it there, and a problem shows on its Error."))
                 } else {
-                    d.child(note("Set Served by first - the folder must be on that computer."))
+                    d.child(folder_note("Set Served by first - the folder must be on that computer."))
                 }
             })
             .when_some(self.status.clone(), |d, (ok, text)| {
                 d.child(
-                    div()
-                        .text_size(px(12.))
-                        .text_color(if ok { rgb(0x4caf50) } else { rgb(0xf55522) })
-                        .child(format!("{} {text}", if ok { "✓" } else { "✗" })),
+                    if ok {
+                        Alert::success("folder-status", text)
+                    } else {
+                        Alert::error("folder-status", text)
+                    }
+                    .xsmall()
+                    .text_size(px(12.)),
                 )
             })
-            .child(note("Optional. When set, the agent works there: it's told the folder is its project (and its git repo), reads its AGENTS.md, and its shell starts there."))
+            .child(folder_note("Optional. When set, the agent works there: it's told the folder is its project (and its git repo), reads its AGENTS.md, and its shell starts there."))
     }
 }

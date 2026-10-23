@@ -8,18 +8,24 @@ use std::cell::Cell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
+use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Escape, InputEvent, InputState, MoveDown, MoveUp, TextareaState};
+use gpui_kit::component::list::ListItem;
+use gpui_kit::component::tag::Tag;
+use gpui_kit::component::{Disableable as _, Icon, IconName, Sizable as _, h_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use roostr_core::color::normalize_hex;
 use roostr_core::objects::object_icon;
 use roostr_core::types::is_system_type;
-use roostr_core::ui::{CheckboxIcon, TagPill};
-use roostr_core::{Fields, RelationDef, Store, Value, api, theme};
+use roostr_core::ui::{TagPill, checkbox, checkbox_display};
+use roostr_core::{Fields, Glyph, RelationDef, Store, Value, api, theme};
 
 use crate::calendar::{CalendarEvent, CalendarPicker};
 use crate::option_picker::{OptionEvent, OptionPicker};
-use crate::widgets::{FieldSkin, below, field, pop_shadow, prefix, text_area, tip};
+use crate::widgets::{
+    FieldSkin, below, empty_note, field, note, pop_shadow, prefix, text_area, tip,
+};
 
 pub(crate) type SaveFn = Rc<dyn Fn(&Value, &mut Window, &mut App)>;
 
@@ -859,7 +865,12 @@ impl ValueEditor {
                         .child(icon.unwrap_or_else(|| "🤖".into()))
                         .into_any_element()
                 } else if let Some(s) = summary.filter(|s| store.layout_of(&s.type_key) == "task") {
-                    checkbox_icon(s.done == Some(true), 14.).into_any_element()
+                    checkbox_display(
+                        SharedString::from(format!("chip-done-{id}")),
+                        s.done == Some(true),
+                    )
+                    .xsmall()
+                    .into_any_element()
                 } else {
                     let (icon, tk) = summary
                         .map(|s| (s.icon.as_str(), s.type_key.as_str()))
@@ -871,47 +882,47 @@ impl ValueEditor {
             let target = shown.clone();
             let remove = id.clone();
             row = row.child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(2.))
-                    .border_1()
-                    .border_color(theme::border())
+                Tag::custom(theme::bg(), theme::fg(), theme::border())
+                    .outline()
                     .rounded_full()
+                    .gap(px(2.))
                     .pl(px(8.))
                     .pr(px(4.))
                     .py(px(1.))
                     .text_size(px(12.))
+                    .text_color(theme::fg())
                     .child(
-                        div()
-                            .id(SharedString::from(format!("chip-{id}")))
-                            .flex()
-                            .items_center()
-                            .gap(px(4.))
-                            .cursor_pointer()
-                            .hover(|s| s.text_color(theme::accent()))
+                        Button::new(SharedString::from(format!("chip-{id}")))
+                            .ghost()
+                            .xsmall()
+                            .h_auto()
+                            .px(px(2.))
                             .on_click(move |_, _, cx| {
                                 roostr_core::nav::navigate(
                                     roostr_core::Route::Object(target.clone()),
                                     cx,
                                 )
                             })
-                            .child(lead)
-                            .child(name),
+                            .child(
+                                h_flex()
+                                    .gap(px(4.))
+                                    .text_size(px(12.))
+                                    .child(lead)
+                                    .child(name),
+                            ),
                     )
                     .when(!read_only, |d| {
                         d.child(
-                            div()
-                                .id(SharedString::from(format!("rm-{id}")))
-                                .px(px(4.))
-                                .text_size(px(11.))
+                            Button::new(SharedString::from(format!("rm-{id}")))
+                                .ghost()
+                                .xsmall()
+                                .child(Icon::new(IconName::Close).size(px(11.)))
                                 .text_color(theme::muted())
-                                .cursor_pointer()
-                                .tooltip(tip("Remove"))
+                                .tooltip("Remove")
+                                .accessibility_label("Remove")
                                 .on_click(cx.listener(move |this, _, window, cx| {
                                     this.toggle_object(&remove, window, cx)
-                                }))
-                                .child("×"),
+                                })),
                         )
                     }),
             );
@@ -931,18 +942,15 @@ impl ValueEditor {
             return row.into_any_element();
         }
         row = row.child(
-            div()
-                .id("link-object")
+            Button::new("link-object")
                 .debug_selector(|| "link-object".into())
-                .border_1()
+                .outline()
+                .xsmall()
+                .rounded(px(999.))
                 .border_color(theme::border())
-                .rounded_full()
                 .px(px(8.))
-                .py(px(1.))
-                .text_size(px(11.))
-                .cursor_pointer()
                 .on_click(cx.listener(|this, _, window, cx| this.toggle_object_menu(window, cx)))
-                .child("+ link object"),
+                .child(div().text_size(px(11.)).child("+ link object")),
         );
         if self.object_open {
             let menu = self.render_object_menu(window, cx);
@@ -1010,7 +1018,12 @@ impl ValueEditor {
                 };
                 div().child(icon).into_any_element()
             } else if store.layout_of(&c.type_key) == "task" {
-                checkbox_icon(c.done == Some(true), 15.).into_any_element()
+                checkbox_display(
+                    SharedString::from(format!("cand-done-{}", c.id)),
+                    c.done == Some(true),
+                )
+                .xsmall()
+                .into_any_element()
             } else {
                 div()
                     .child(object_icon(store, &c.icon, &c.type_key, &self.space))
@@ -1018,23 +1031,19 @@ impl ValueEditor {
             };
             let id = c.id.clone();
             menu = menu.child(
-                div()
-                    .id(SharedString::from(format!("cand-{}", c.id)))
+                ListItem::new(SharedString::from(format!("cand-{}", c.id)))
                     .debug_selector({
                         let selector = format!("cand-{}", c.id);
                         move || selector
                     })
-                    .flex()
-                    .items_center()
-                    .gap(px(6.))
                     .px(px(6.))
                     .py(px(5.))
                     .rounded(theme::radius::sm())
                     .text_size(px(13.))
                     .cursor_pointer()
-                    .when(active, |d| d.bg(theme::hover()))
-                    .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
-                        if *hovered && this.object_active != i as i32 {
+                    .selected(active)
+                    .on_mouse_enter(cx.listener(move |this, _: &MouseMoveEvent, _, cx| {
+                        if this.object_active != i as i32 {
                             this.object_active = i as i32;
                             cx.notify();
                         }
@@ -1043,48 +1052,51 @@ impl ValueEditor {
                         this.pick_candidate(id.clone(), window, cx)
                     }))
                     .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .flex()
-                            .items_center()
-                            .gap(px(4.))
-                            .overflow_hidden()
-                            .whitespace_nowrap()
-                            .child(lead)
-                            .child(div().min_w_0().overflow_hidden().text_ellipsis().child(
-                                if c.name.is_empty() {
-                                    "Untitled".to_string()
-                                } else {
-                                    c.name.clone()
-                                },
-                            )),
-                    )
-                    .child(
-                        div()
-                            .ml_auto()
-                            .flex_none()
-                            .text_size(px(11.))
-                            .text_color(theme::muted())
-                            .child(c.type_key.clone()),
+                        h_flex()
+                            .gap(px(6.))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(4.))
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .child(lead)
+                                    .child(
+                                        div().min_w_0().overflow_hidden().text_ellipsis().child(
+                                            if c.name.is_empty() {
+                                                "Untitled".to_string()
+                                            } else {
+                                                c.name.clone()
+                                            },
+                                        ),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .ml_auto()
+                                    .flex_none()
+                                    .text_size(px(11.))
+                                    .text_color(theme::muted())
+                                    .child(c.type_key.clone()),
+                            ),
                     ),
             );
         }
         if candidates.is_empty() {
             menu = menu.child(
-                div()
+                empty_note("No matches")
                     .px(px(6.))
                     .py(px(4.))
-                    .text_size(px(11.))
-                    .text_color(theme::muted())
-                    .child("No matches"),
+                    .text_size(px(11.)),
             );
         }
         if let Some((name, label)) = self.offer_create(cx) {
             let creating = self.creating_agent;
             menu = menu.child(
-                div()
-                    .id("create-from-query")
+                ListItem::new("create-from-query")
                     .debug_selector(|| "create-from-query".into())
                     .mt(px(2.))
                     .border_t_1()
@@ -1097,12 +1109,10 @@ impl ValueEditor {
                     .overflow_hidden()
                     .whitespace_nowrap()
                     .text_ellipsis()
+                    .disabled(creating)
                     .when(creating, |d| d.opacity(0.5))
-                    .when(!creating, |d| {
-                        d.cursor_pointer().hover(|s| s.bg(theme::hover())).on_click(
-                            cx.listener(|this, _, window, cx| this.create_from_query(window, cx)),
-                        )
-                    })
+                    .when(!creating, |d| d.cursor_pointer())
+                    .on_click(cx.listener(|this, _, window, cx| this.create_from_query(window, cx)))
                     .child(if creating {
                         "Creating…".to_string()
                     } else {
@@ -1114,8 +1124,7 @@ impl ValueEditor {
             match &self.agent_name {
                 None => {
                     menu = menu.child(
-                        div()
-                            .id("new-kind")
+                        ListItem::new("new-kind")
                             .mt(px(2.))
                             .border_t_1()
                             .border_color(theme::border())
@@ -1124,7 +1133,6 @@ impl ValueEditor {
                             .rounded(theme::radius::sm())
                             .text_size(px(13.))
                             .cursor_pointer()
-                            .hover(|s| s.bg(theme::hover()))
                             .on_click(
                                 cx.listener(|this, _, window, cx| this.start_naming(window, cx)),
                             )
@@ -1145,21 +1153,21 @@ impl ValueEditor {
                             .gap(px(6.))
                             .child(field(input, FieldSkin::Filter, window, cx).flex_1())
                             .child(
-                                div()
-                                    .id("create-new")
+                                Button::new("create-new")
+                                    .outline()
+                                    .xsmall()
                                     .flex_none()
-                                    .border_1()
-                                    .border_color(theme::border())
-                                    .rounded_full()
+                                    .rounded(px(999.))
                                     .px(px(8.))
-                                    .py(px(1.))
-                                    .text_size(px(11.))
-                                    .when(creating || empty, |d| d.opacity(0.5))
-                                    .when(!(creating || empty), |d| d.cursor_pointer())
+                                    .disabled(creating || empty)
                                     .on_click(
                                         cx.listener(|this, _, window, cx| this.add_new(window, cx)),
                                     )
-                                    .child(if creating { "Creating…" } else { "Create" }),
+                                    .child(div().text_size(px(11.)).child(if creating {
+                                        "Creating…"
+                                    } else {
+                                        "Create"
+                                    })),
                             ),
                     );
                 }
@@ -1178,15 +1186,6 @@ fn parse_js_number(raw: &str) -> Option<f64> {
     t.parse::<f64>().ok().filter(|n| n.is_finite())
 }
 
-/// Anytype's checkbox glyph (`CheckboxIcon`): muted unchecked, fg checked.
-pub(crate) fn checkbox_icon(checked: bool, size: f32) -> CheckboxIcon {
-    CheckboxIcon::new(checked).size(px(size)).color(if checked {
-        theme::fg()
-    } else {
-        theme::muted()
-    })
-}
-
 impl Render for ValueEditor {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let format = self.rel.format.clone();
@@ -1197,18 +1196,14 @@ impl Render for ValueEditor {
         }
         if format == "checkbox" {
             let checked = self.value.as_ref().and_then(|v| v.bool_value) == Some(true);
-            return div()
-                .id("chk")
-                .flex()
-                .text_color(if checked { theme::fg() } else { theme::muted() })
-                .when(!read_only, |d| {
-                    d.cursor_pointer()
-                        .hover(|s| s.text_color(theme::fg()))
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            this.save(Value::bool(!checked), window, cx)
-                        }))
-                })
-                .child(checkbox_icon(checked, 20.))
+            if read_only {
+                return checkbox_display("chk", checked).into_any_element();
+            }
+            return checkbox("chk", checked)
+                .on_change(cx.listener(move |this, next: &bool, window, cx| {
+                    cx.stop_propagation();
+                    this.save(Value::bool(*next), window, cx)
+                }))
                 .into_any_element();
         }
         if read_only {
@@ -1226,26 +1221,23 @@ impl Render for ValueEditor {
                     .relative()
                     .flex()
                     .child(
-                        div()
-                            .id("date-btn")
-                            .border_1()
-                            .border_color(theme::border())
+                        Button::new("date-btn")
+                            .outline()
                             .bg(theme::bg())
+                            .border_color(theme::border())
                             .rounded(theme::radius::sm())
+                            .h_auto()
                             .px(px(10.))
                             .py(px(5.))
-                            .text_size(px(13.))
                             .text_color(if num == 0 {
                                 theme::muted()
                             } else {
                                 theme::fg()
                             })
-                            .cursor_pointer()
-                            .hover(|s| s.border_color(theme::accent()))
                             .on_click(
                                 cx.listener(|this, _, window, cx| this.open_calendar(window, cx)),
                             )
-                            .child(label),
+                            .child(div().text_size(px(13.)).child(label)),
                     )
                     .when_some(
                         self.calendar.clone().filter(|_| self.date_open),
@@ -1288,15 +1280,15 @@ impl Render for ValueEditor {
                     .child(field(&self.text, FieldSkin::Value, window, cx).flex_1())
                     .when(!text.is_empty(), |d| {
                         d.child(
-                            div()
-                                .id("open")
+                            Button::new("open")
+                                .ghost()
+                                .xsmall()
                                 .flex_none()
-                                .text_size(px(14.))
+                                .child(Icon::new(Glyph::ArrowUpRight).size(px(14.)))
                                 .text_color(theme::accent())
-                                .cursor_pointer()
-                                .tooltip(tip("Open"))
-                                .on_click(move |_, _, cx| cx.open_url(&href))
-                                .child("↗"),
+                                .tooltip("Open")
+                                .accessibility_label("Open")
+                                .on_click(move |_, _, cx| cx.open_url(&href)),
                         )
                     })
                     .into_any_element()
@@ -1358,13 +1350,7 @@ impl ValueEditor {
     /// Read-only display of the value.
     fn render_read_only(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let format = self.rel.format.as_str();
-        let muted_empty = || {
-            div()
-                .text_size(px(13.))
-                .text_color(theme::muted())
-                .child("Empty")
-                .into_any_element()
-        };
+        let muted_empty = || note("Empty", 13.).into_any_element();
         match format {
             "status" | "tag" => {
                 let (selected, _) = self.option_selection();
@@ -1427,12 +1413,12 @@ impl ValueEditor {
                     .filter(|n| !n.is_empty())
                     .or_else(|| store.agent(&shown).map(|a| a.name.clone()))
                     .unwrap_or_else(|| prefix(id, 8));
-                div()
-                    .border_1()
-                    .border_color(theme::border())
+                Tag::custom(theme::bg(), theme::fg(), theme::border())
+                    .outline()
                     .rounded_full()
                     .px(px(8.))
                     .py(px(1.))
+                    .text_color(theme::fg())
                     .child(name)
             }))
     }

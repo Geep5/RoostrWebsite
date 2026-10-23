@@ -29,10 +29,15 @@ mod sidebar;
 mod tabs;
 mod workspace;
 
+use std::time::Duration;
+
+use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
 use gpui_kit::{
-    AnyView, App, AppContext as _, Entity, Global, KeyBinding, SharedString, Window, actions,
+    App, AppContext as _, ElementId, Entity, Global, Hsla, KeyBinding, SharedString, Styled as _,
+    actions, transparent_black,
 };
 use roostr_core::PaneViews;
+use roostr_core::theme;
 
 pub use workspace::{PageFactory, Workspace};
 
@@ -50,11 +55,39 @@ actions!(
 
 actions!(roostr_shell_focus, [FocusNext, FocusPrev]);
 
-/// The `[data-tip]` tooltip.
-pub(crate) fn tip(
-    text: impl Into<SharedString>,
-) -> impl Fn(&mut Window, &mut App) -> AnyView + 'static {
-    roostr_core::ui::tooltip(text)
+/// `[data-tip]` appears after this much hover (`animation: tip-in 0.12s ease 0.4s`).
+pub(crate) const TIP_DELAY: Duration = Duration::from_millis(400);
+
+/// The shell's `[data-tip]` on a kit [`Button`]: the kit tooltip, shown
+/// after [`TIP_DELAY`].
+pub(crate) trait Tip {
+    fn tip(self, text: impl Into<SharedString>) -> Self;
+}
+
+impl Tip for Button {
+    fn tip(self, text: impl Into<SharedString>) -> Self {
+        self.tooltip(text).tooltip_show_delay(TIP_DELAY)
+    }
+}
+
+/// A kit [`Button`] for the shell's bare controls: transparent and muted at
+/// rest, filling `hover` (also while pressed) with `fg` text under the
+/// pointer. Callers size and round it; content goes in children.
+pub(crate) fn fill_button(id: impl Into<ElementId>, hover: Hsla, cx: &App) -> Button {
+    Button::new(id)
+        .custom(
+            ButtonCustomVariant::new(cx)
+                .color(transparent_black())
+                .foreground(theme::fg())
+                .hover(hover)
+                .active(hover)
+                .shadow(false),
+        )
+        .flex_none()
+        .p_0()
+        .bg(transparent_black())
+        .text_color(theme::muted())
+        .cursor_pointer()
 }
 
 /// A per-object element id (`"<prefix>:<id>"`).

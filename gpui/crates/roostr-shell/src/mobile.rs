@@ -8,7 +8,14 @@
 use std::time::Duration;
 
 use chrono::{Local, TimeZone as _};
+use gpui_kit::component::Icon;
 use gpui_kit::component::IconNamed as _;
+use gpui_kit::component::alert::Alert;
+use gpui_kit::component::badge::Badge;
+use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
+use gpui_kit::component::group_box::GroupBox;
+use gpui_kit::component::list::ListItem;
+use gpui_kit::component::progress::ProgressCircle;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use roostr_core::layout::{self, sync_now};
@@ -18,15 +25,16 @@ use roostr_core::objects::{is_image_icon, object_icon, type_glyph};
 use roostr_core::relations::{format_glyph, is_reserved_key, space_relations};
 use roostr_core::store::Store;
 use roostr_core::sync_status::{count, sync_progress, sync_tip};
-use roostr_core::types::{ObjectSummary, RelationDef, Space, SyncPhase, Value};
+use roostr_core::types::{ObjectSummary, RelationDef, Space, SyncPhase};
 use roostr_core::{Glyph, PaneState, theme, ui};
 
 use crate::PaneHost;
+use crate::Tip as _;
 use crate::back_swipe::{self, Phase, Screen, Track};
 use crate::list_motion;
 use crate::pinned::PinnedWidget;
 use crate::rail::commit_space_move;
-use crate::tabs::checkbox_icon;
+use crate::sidebar::builtin_mark;
 use crate::workspace::Workspace;
 
 /// The web app's `__BUILD_STAMP__` (see `build.rs`).
@@ -36,32 +44,39 @@ const BUILD_STAMP: &str = env!("ROOSTR_BUILD_STAMP");
 /// (the iOS web view's pull-to-refresh, which called `Backend.resume`).
 const PULL_TO_SYNC: f32 = 64.;
 
-/// `.m-btn`: a 40px round panel button.
-fn m_btn(id: impl Into<ElementId>) -> Stateful<Div> {
-    div()
-        .id(id)
+/// A phone control on the panel: panel fill, 1px border, fg text, a
+/// `--hover` fill while pressed. Callers size and round it.
+fn panel_button(id: impl Into<ElementId>, cx: &App) -> Button {
+    Button::new(id)
+        .custom(
+            ButtonCustomVariant::new(cx)
+                .color(theme::border())
+                .foreground(theme::fg())
+                .hover(theme::panel())
+                .active(theme::hover())
+                .shadow(false),
+        )
         .relative()
         .flex_none()
-        .size(px(40.))
-        .rounded_full()
+        .p_0()
         .bg(theme::panel())
         .border_1()
         .border_color(theme::border())
         .text_color(theme::fg())
-        .text_size(px(19.))
         .cursor_pointer()
-        .flex()
-        .items_center()
-        .justify_center()
+}
+
+/// `.m-btn`: a 40px round panel button.
+fn m_btn(id: &'static str, cx: &App) -> Button {
+    panel_button(id, cx)
+        .debug_selector(move || id.into())
+        .size(px(40.))
+        .rounded(px(20.))
 }
 
 /// The mobile headers' back chevron (20px).
-fn back_glyph() -> Svg {
-    svg()
-        .path(Glyph::MobileBack.path())
-        .size(px(20.))
-        .flex_none()
-        .text_color(theme::fg())
+fn back_glyph() -> Icon {
+    Icon::new(Glyph::MobileBack).size(px(20.))
 }
 
 /// `.m-top`: the 56px header row (back on the left, actions on the right).
@@ -118,15 +133,12 @@ fn m_obj(icon: Option<String>, name: String) -> Div {
 
 /// `.m-chev`: the ⌄ of a collapsible card or section, turned over while open
 /// (`transition: transform 0.12s`): `turn` 0 folded, 1 open.
-fn m_chev(id: impl Into<ElementId>, turn: f32) -> Stateful<Div> {
-    div()
-        .id(id)
-        .flex_none()
-        .flex()
-        .items_center()
+fn m_chev(id: impl Into<ElementId>, turn: f32, cx: &App) -> Button {
+    crate::fill_button(id, transparent_black(), cx)
+        .h_auto()
         .px(px(14.))
         .py(px(12.))
-        .cursor_pointer()
+        .accessibility_label("Fold")
         .child(
             svg()
                 .path(Glyph::ChevronDown.path())
@@ -140,13 +152,15 @@ fn m_chev(id: impl Into<ElementId>, turn: f32) -> Stateful<Div> {
         )
 }
 
-/// `.m-row`: a row of a space-home section.
-fn m_row(id: impl Into<ElementId>) -> Stateful<Div> {
-    div()
-        .id(id)
-        .flex()
-        .items_center()
-        .gap(px(8.))
+/// `.m-row`: a row of a space-home section as a kit list row (its lead
+/// icon or checkbox, the name, a trailing `mark`), `--hover` while pressed.
+fn m_row(
+    id: impl Into<ElementId>,
+    lead: AnyElement,
+    name: String,
+    mark: Option<Stateful<Div>>,
+) -> ListItem {
+    ListItem::new(id)
         .py(px(9.))
         .px(px(6.))
         .rounded(theme::radius::md())
@@ -154,29 +168,23 @@ fn m_row(id: impl Into<ElementId>) -> Stateful<Div> {
         .text_color(theme::fg())
         .cursor_pointer()
         .active(|s| s.bg(theme::hover()))
+        .accessibility_label(name.clone())
+        .child(
+            div()
+                .w_full()
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .min_w_0()
+                .child(lead)
+                .child(div().min_w_0().truncate().child(name))
+                .children(mark),
+        )
 }
 
 /// `.obj-icon` at its 20px width.
 fn row_icon(icon: &str) -> Div {
     crate::sidebar::obj_icon(icon)
-}
-
-/// `.builtin-mark`: an 11px lock pushed to the row's end.
-fn builtin_mark(id: impl Into<ElementId>) -> Stateful<Div> {
-    div()
-        .id(id)
-        .ml_auto()
-        .pl(px(6.))
-        .flex()
-        .flex_none()
-        .opacity(0.55)
-        .child(
-            svg()
-                .path(Glyph::Lock.path())
-                .size(px(11.))
-                .text_color(theme::muted()),
-        )
-        .tooltip(crate::tip("Roostr default - can't be deleted"))
 }
 
 /// A space's tile glyph: its icon, else its initial, else "?".
@@ -205,38 +213,6 @@ fn short_date(ms: i64) -> String {
     } else {
         d.format("%b %-d").to_string()
     }
-}
-
-/// The conic ring around the sync dot: `arc` of a 20px ring (2px thick)
-/// from `start` (fractions of a turn, 0 = 12 o'clock) in orange, the rest
-/// in the border colour.
-fn paint_sync_ring(bounds: Bounds<Pixels>, start: f32, arc: f32, window: &mut Window) {
-    let center = bounds.center();
-    let ring = |from: f32, to: f32, color: Hsla, window: &mut Window| {
-        if to <= from {
-            return;
-        }
-        let mut path = PathBuilder::stroke(px(2.));
-        let steps = 48;
-        for i in 0..=steps {
-            let turn = from + (to - from) * i as f32 / steps as f32;
-            let angle = std::f32::consts::TAU * turn - std::f32::consts::FRAC_PI_2;
-            let p = point(
-                center.x + px(9.) * angle.cos(),
-                center.y + px(9.) * angle.sin(),
-            );
-            if i == 0 {
-                path.move_to(p);
-            } else {
-                path.line_to(p);
-            }
-        }
-        if let Ok(path) = path.build() {
-            window.paint_path(path, color);
-        }
-    };
-    ring(start + arc, start + 1., theme::border(), window);
-    ring(start, start + arc, theme::orange(), window);
 }
 
 impl Workspace {
@@ -651,10 +627,10 @@ impl Workspace {
                 m_top()
                     .child(m_obj(None, "Graph".into()))
                     .child(
-                        m_btn("m-back")
-                            .debug_selector(|| "m-back".into())
+                        m_btn("m-back", cx)
                             .child(back_glyph())
-                            .map(|d| self.data_tip(d, "tip-m-back", "Back", cx))
+                            .accessibility_label("Back")
+                            .tip("Back")
                             .on_click(|_, _, cx| {
                                 Navigator::global(cx).update(cx, |n, cx| n.back(cx))
                             }),
@@ -687,42 +663,19 @@ impl Workspace {
             (pane.available, pane.count)
         };
         let pane_btn = (pane_available && (summary || space)).then(|| {
-            m_btn("m-pane")
-                .debug_selector(|| "m-pane".into())
+            Badge::new()
+                .count(count)
+                .max(99)
+                .color(theme::accent())
                 .child(
-                    svg()
-                        .path(Glyph::Pane.path())
-                        .size(px(18.))
-                        .text_color(theme::fg()),
+                    m_btn("m-pane", cx)
+                        .child(Icon::new(Glyph::Pane).size(px(18.)))
+                        .accessibility_label("Chat & properties")
+                        .tip("Chat & properties")
+                        .on_click(|_, _, cx| {
+                            PaneState::global(cx).update(cx, |p, cx| p.set_sheet(true, cx))
+                        }),
                 )
-                .when(count > 0, |d| {
-                    d.child(
-                        div()
-                            .absolute()
-                            .top(px(-4.))
-                            .right(px(-4.))
-                            .min_w(px(16.))
-                            .h(px(16.))
-                            .px(px(4.))
-                            .rounded(px(8.))
-                            .bg(theme::accent())
-                            .text_color(theme::white())
-                            .text_size(px(10.))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .line_height(px(16.))
-                            .flex()
-                            .justify_center()
-                            .child(if count > 99 {
-                                "99+".to_string()
-                            } else {
-                                count.to_string()
-                            }),
-                    )
-                })
-                .map(|d| self.data_tip(d, "tip-m-pane", "Chat & properties", cx))
-                .on_click(|_, _, cx| {
-                    PaneState::global(cx).update(cx, |p, cx| p.set_sheet(true, cx))
-                })
         });
         let sync = (relation || summary).then(|| self.render_m_sync(window, cx));
         let actions = (relation || summary || space).then(|| {
@@ -733,14 +686,19 @@ impl Workspace {
                 .gap(px(8.))
                 .children(sync)
                 .child(
-                    div().relative().child(
-                        m_btn("m-more")
-                            .debug_selector(|| "m-more".into())
-                            .child("⋯")
-                            .child(self.anchor_probe("more"))
-                            .map(|d| self.data_tip(d, "tip-more", "More", cx))
-                            .on_click(cx.listener(|this, _, _, cx| this.toggle_more(cx))),
-                    ),
+                    div()
+                        .relative()
+                        .flex_none()
+                        .child(
+                            m_btn("m-more", cx)
+                                .child(div().text_size(px(19.)).child("⋯"))
+                                .accessibility_label("More")
+                                .tip("More")
+                                .on_click(
+                                    cx.listener(|this, _, window, cx| this.toggle_more(window, cx)),
+                                ),
+                        )
+                        .child(self.anchor_probe("more")),
                 )
                 .children(pane_btn)
         });
@@ -753,10 +711,10 @@ impl Workspace {
                 m_top()
                     .child(m_obj((!graph).then_some(path_icon), path_name))
                     .child(
-                        m_btn("m-back")
-                            .debug_selector(|| "m-back".into())
+                        m_btn("m-back", cx)
                             .child(back_glyph())
-                            .map(|d| self.data_tip(d, "tip-m-back", "Space home", cx))
+                            .accessibility_label("Space home")
+                            .tip("Space home")
                             .on_click(cx.listener(|this, _, _, cx| this.mobile_back(cx))),
                     )
                     .children(actions),
@@ -811,39 +769,23 @@ impl Workspace {
         } else {
             dot.into_any_element()
         };
-        let ring = match (progress, shown_pct) {
-            (Some(_), Some(pct)) => Some(
-                canvas(
-                    |_, _, _| {},
-                    move |bounds, _, window, _| paint_sync_ring(bounds, 0., pct / 100., window),
-                )
+        // The 20px ring around the dot: filled to the pass's percentage (the
+        // kit eases it to each new value), or an indeterminate arc.
+        let ring = progress.map(|_| {
+            div()
                 .absolute()
                 .inset_0()
-                .into_any_element(),
-            ),
-            (Some(_), None) => Some(
-                div()
-                    .absolute()
-                    .inset_0()
-                    .with_animation(
-                        "m-sync-spin",
-                        Animation::new(Duration::from_millis(1600)).repeat(),
-                        |d, t| {
-                            d.child(
-                                canvas(
-                                    |_, _, _| {},
-                                    move |bounds, _, window, _| {
-                                        paint_sync_ring(bounds, t, 0.25, window)
-                                    },
-                                )
-                                .size_full(),
-                            )
-                        },
-                    )
-                    .into_any_element(),
-            ),
-            (None, _) => None,
-        };
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(
+                    ProgressCircle::new("m-sync-ring")
+                        .color(theme::orange())
+                        .loading(pct.is_none())
+                        .value(pct.map_or(0., |pct| pct as f32))
+                        .size(px(20.)),
+                )
+        });
         let label = progress.map(|p| {
             div()
                 .absolute()
@@ -861,20 +803,16 @@ impl Workspace {
                 })
         });
         let sync = sync_now(cx);
-        div()
-            .id("m-sync")
+        panel_button("m-sync", cx)
             .debug_selector(|| "m-sync".into())
-            .relative()
-            .flex_none()
             .size(px(40.))
-            .rounded_full()
-            .bg(theme::panel())
-            .flex()
-            .items_center()
-            .justify_center()
-            .tooltip(crate::tip(sync_tip(&status)))
-            .when_some(sync, |d, sync| {
-                d.cursor_pointer().on_click(move |_, _, cx| (sync.0)(cx))
+            .rounded(px(20.))
+            .border_0()
+            .accessibility_label("Sync")
+            .tip(sync_tip(&status))
+            .map(|b| match sync {
+                Some(sync) => b.on_click(move |_, _, cx| (sync.0)(cx)),
+                None => b.cursor_default(),
             })
             .children(ring)
             .child(dot)
@@ -953,10 +891,6 @@ impl Workspace {
                 })
                 .collect();
             (spaces, latest, store.status.clone())
-        };
-        let (pic, avatar) = {
-            let profile = roostr_core::profile::ProfileCache::global(cx).read(cx);
-            (profile.picture().to_string(), profile.avatar())
         };
         let lift = self.space_lift.clone();
         let over = self.space_over.clone().filter(|_| lift.is_some());
@@ -1112,20 +1046,13 @@ impl Workspace {
             );
         }
         cards = cards.child(
-            div()
-                .id("m-new-space")
-                .flex()
-                .flex_none()
-                .items_center()
-                .justify_center()
-                .bg(theme::panel())
-                .border_1()
-                .border_color(theme::border())
-                .rounded(px(10.))
+            panel_button("m-new-space", cx)
+                .w_full()
+                .h_auto()
                 .p(px(12.))
+                .rounded(px(10.))
                 .text_color(theme::muted())
-                .cursor_pointer()
-                .child("＋ New space")
+                .child(div().text_size(px(16.)).child("＋ New space"))
                 .on_click(cx.listener(|this, _, window, cx| this.new_space(window, cx))),
         );
 
@@ -1134,15 +1061,20 @@ impl Workspace {
                 .detail
                 .clone()
                 .unwrap_or_else(|| format!("{} changes imported", count(status.imported)));
-            div()
-                .mx(px(16.))
-                .mb(px(8.))
-                .text_size(px(12.))
-                .line_height(relative(1.35))
-                .text_color(theme::muted())
-                .child(format!(
-                    "Loading your vault… {detail}. Spaces appear as they arrive."
-                ))
+            Alert::info(
+                "m-importing",
+                format!("Loading your vault… {detail}. Spaces appear as they arrive."),
+            )
+            .w_auto()
+            .mx(px(16.))
+            .mb(px(8.))
+            .p_0()
+            .gap(px(6.))
+            .border_0()
+            .bg(transparent_black())
+            .text_size(px(12.))
+            .line_height(relative(1.35))
+            .text_color(theme::muted())
         });
         div()
             .debug_selector(|| "m-spaces".into())
@@ -1159,36 +1091,17 @@ impl Workspace {
                     .mb(px(14.))
                     .child(
                         div().flex().justify_end().pb(px(10.)).child(
-                            div()
-                                .id("m-avatar")
+                            crate::fill_button("m-avatar", transparent_black(), cx)
                                 .size(px(36.))
-                                .rounded_full()
-                                .overflow_hidden()
-                                .bg(theme::hover())
-                                .border_1()
-                                .border_color(theme::border())
-                                .text_color(theme::fg())
-                                .text_size(px(16.))
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .cursor_pointer()
-                                .map(|d| match (avatar, pic.is_empty()) {
-                                    (Some(image), _) => d.child(
-                                        img(ImageSource::Image(image))
-                                            .size_full()
-                                            .rounded_full()
-                                            .object_fit(ObjectFit::Cover),
-                                    ),
-                                    (None, false) => d.child(
-                                        img(SharedString::from(pic))
-                                            .size_full()
-                                            .rounded_full()
-                                            .object_fit(ObjectFit::Cover),
-                                    ),
-                                    (None, true) => d.child("⚙"),
-                                })
-                                .map(|d| self.data_tip(d, "tip-m-avatar", "Settings", cx))
+                                .rounded(px(18.))
+                                .child(
+                                    crate::rail::account_avatar(px(36.), Glyph::Settings, cx)
+                                        .bg(theme::hover())
+                                        .border_color(theme::border())
+                                        .text_color(theme::fg()),
+                                )
+                                .accessibility_label("Settings")
+                                .tip("Settings")
                                 .on_click(
                                     cx.listener(|this, _, window, cx| this.settings(window, cx)),
                                 ),
@@ -1320,24 +1233,25 @@ impl Workspace {
             window,
             cx,
         );
-        let mut body = div()
-            .flex()
-            .flex_col()
-            .bg(theme::panel())
-            .border_1()
-            .border_color(theme::border())
-            .rounded(px(10.))
-            .pt(px(4.))
-            .px(px(10.))
-            .pb(px(8.))
-            .mb(px(6.));
-        for (i, row) in rows.into_iter().enumerate() {
-            body = body.child(
+        let body = GroupBox::new()
+            .id(crate::eid("m-section-box", key))
+            .mb(px(6.))
+            .content_style(
+                StyleRefinement::default()
+                    .bg(theme::panel())
+                    .border_1()
+                    .border_color(theme::border())
+                    .rounded(px(10.))
+                    .pt(px(4.))
+                    .px(px(10.))
+                    .pb(px(8.))
+                    .gap_0(),
+            )
+            .children(rows.into_iter().enumerate().map(|(i, row)| {
                 div()
                     .when(i > 0, |d| d.border_t_1().border_color(theme::border()))
-                    .child(row),
-            );
-        }
+                    .child(row)
+            }));
         div()
             .flex()
             .flex_none()
@@ -1364,7 +1278,7 @@ impl Workspace {
                     )
                     .when(open, |d| d.children(add))
                     .child(
-                        m_chev(crate::eid("m-section-chev", key), fold.turn())
+                        m_chev(crate::eid("m-section-chev", key), fold.turn(), cx)
                             .on_click(cx.listener(move |this, _, _, cx| this.flip_mobile(key, cx))),
                     ),
             )
@@ -1372,23 +1286,12 @@ impl Workspace {
     }
 
     /// `.m-section-add`: a 44px ＋ target.
-    fn m_section_add(id: &'static str) -> Stateful<Div> {
-        div()
-            .id(id)
+    fn m_section_add(id: &'static str, label: &'static str, cx: &App) -> Button {
+        crate::fill_button(id, transparent_black(), cx)
             .relative()
-            .flex_none()
-            .min_w(px(44.))
-            .min_h(px(44.))
-            .flex()
-            .items_center()
-            .justify_center()
-            .cursor_pointer()
-            .child(
-                svg()
-                    .path(Glyph::Plus.path())
-                    .size(px(17.))
-                    .text_color(theme::muted()),
-            )
+            .size(px(44.))
+            .child(Icon::new(Glyph::Plus).size(px(17.)))
+            .accessibility_label(label)
     }
 
     /// Screen 2: a space's home - its pinned objects as cards, Recently
@@ -1467,62 +1370,72 @@ impl Workspace {
                 .filter(|view| !view.read(cx).is_empty());
             let open_id = id.clone();
             let flip_id = id.clone();
-            let card = div()
+            let card = GroupBox::new()
+                .id(crate::eid("m-wcard-box", &id))
                 .flex_none()
-                .bg(theme::panel())
-                .border_1()
-                .border_color(theme::border())
-                .rounded(px(10.))
-                .overflow_hidden()
+                .content_style(
+                    StyleRefinement::default()
+                        .bg(theme::panel())
+                        .border_1()
+                        .border_color(theme::border())
+                        .rounded(px(10.))
+                        .overflow_hidden()
+                        .gap_0(),
+                )
                 .child(
                     div()
                         .flex()
                         .items_center()
                         .w_full()
-                        .text_color(theme::fg())
-                        .text_size(px(15.))
-                        .font_weight(FontWeight::SEMIBOLD)
                         .child(
-                            div()
-                                .id(crate::eid("m-wcard", &id))
+                            crate::fill_button(crate::eid("m-wcard", &id), transparent_black(), cx)
                                 .flex_1()
                                 .min_w_0()
-                                .flex()
-                                .items_center()
-                                .gap(px(10.))
+                                .h_auto()
                                 .pt(px(12.))
                                 .pr(px(6.))
                                 .pb(px(12.))
                                 .pl(px(16.))
-                                .cursor_pointer()
+                                .text_color(theme::fg())
+                                .accessibility_label(name.clone())
                                 .child(
                                     div()
-                                        .flex_none()
-                                        .w(px(22.))
+                                        .w_full()
+                                        .min_w_0()
                                         .flex()
                                         .items_center()
-                                        .justify_center()
-                                        .text_size(px(16.))
-                                        .line_height(px(16.))
-                                        .text_color(theme::accent())
-                                        .child(ui::icon_text(&icon, px(16.))),
+                                        .justify_start()
+                                        .gap(px(10.))
+                                        .text_size(px(15.))
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .line_height(relative(1.2))
+                                        .child(
+                                            div()
+                                                .flex_none()
+                                                .w(px(22.))
+                                                .flex()
+                                                .items_center()
+                                                .justify_center()
+                                                .text_size(px(16.))
+                                                .line_height(px(16.))
+                                                .text_color(theme::accent())
+                                                .child(ui::icon_text(&icon, px(16.))),
+                                        )
+                                        .child(div().flex_1().min_w_0().truncate().child(name)),
                                 )
-                                .child(div().flex_1().min_w_0().truncate().child(name))
                                 .on_click(move |_, _, cx| {
                                     navigate(Route::Object(open_id.clone()), cx)
                                 }),
                         )
                         .child(
-                            m_chev(crate::eid("m-wcard-chev", &id), fold.turn()).on_click(
+                            m_chev(crate::eid("m-wcard-chev", &id), fold.turn(), cx).on_click(
                                 cx.listener(move |this, _, _, cx| {
                                     this.toggle_pin_collapsed(&flip_id, cx)
                                 }),
                             ),
                         ),
                 )
-                .when_some(body, |d, view| {
-                    d.child(fold.wrap(div().px(px(10.)).pb(px(10.)).child(view)))
-                });
+                .children(body.map(|view| fold.wrap(div().px(px(10.)).pb(px(10.)).child(view))));
             column = column.child(pins.card(&id, card, window, cx));
         }
 
@@ -1545,35 +1458,13 @@ impl Workspace {
                         o.name.clone()
                     };
                     let lead = if store.layout_of(&o.type_key) == "task" {
-                        let done = o.done == Some(true);
                         let id = o.id.clone();
-                        div()
-                            .id(crate::eid("m-row-check", &o.id))
-                            .flex()
+                        ui::checkbox(crate::eid("m-row-check", &o.id), o.done == Some(true))
                             .flex_none()
                             .mr(px(6.))
-                            .text_color(if done {
-                                theme::accent()
-                            } else {
-                                theme::muted()
-                            })
-                            .child(checkbox_icon(done, 17.))
-                            .on_click(move |_, _, cx| {
+                            .on_change(move |done: &bool, _, cx| {
                                 cx.stop_propagation();
-                                let task = roostr_core::api::note::set_field(
-                                    &id,
-                                    "done",
-                                    Value::bool(!done),
-                                    cx,
-                                );
-                                cx.spawn(async move |cx| {
-                                    if task.await.is_ok() {
-                                        cx.update(|cx| {
-                                            Store::global(cx).update(cx, |s, cx| s.refresh_all(cx))
-                                        });
-                                    }
-                                })
-                                .detach();
+                                crate::sidebar::set_done(&id, *done, cx);
                             })
                             .into_any_element()
                     } else {
@@ -1585,9 +1476,7 @@ impl Workspace {
                         row_icon(&icon).into_any_element()
                     };
                     let id = o.id.clone();
-                    m_row(crate::eid("m-recent", &o.id))
-                        .child(lead)
-                        .child(div().min_w_0().truncate().child(name))
+                    m_row(crate::eid("m-recent", &o.id), lead, name, None)
                         .on_click(move |_, _, cx| navigate(Route::Object(id.clone()), cx))
                         .into_any_element()
                 })
@@ -1615,18 +1504,21 @@ impl Workspace {
                         t.name.clone()
                     };
                     let id = t.id.clone();
-                    m_row(crate::eid("m-type", &t.id))
-                        .child(row_icon(&icon))
-                        .child(div().min_w_0().truncate().child(name))
-                        .when(t.builtin, |d| {
-                            d.child(builtin_mark(crate::eid("m-type-lock", &t.id)))
-                        })
-                        .on_click(move |_, _, cx| navigate(Route::Object(id.clone()), cx))
-                        .into_any_element()
+                    let mark = t
+                        .builtin
+                        .then(|| builtin_mark(crate::eid("m-type-lock", &t.id)));
+                    m_row(
+                        crate::eid("m-type", &t.id),
+                        row_icon(&icon).into_any_element(),
+                        name,
+                        mark,
+                    )
+                    .on_click(move |_, _, cx| navigate(Route::Object(id.clone()), cx))
+                    .into_any_element()
                 })
                 .collect()
         };
-        let add_type = Self::m_section_add("m-new-type")
+        let add_type = Self::m_section_add("m-new-type", "New type", cx)
             .on_click(cx.listener(|this, _, window, cx| this.new_type(window, cx)))
             .into_any_element();
         let types = self.m_section("__types", "Types", Some(add_type), type_rows, window, cx);
@@ -1660,18 +1552,22 @@ impl Workspace {
                         r.name.clone()
                     };
                     let id = r.id.clone();
-                    m_row(crate::eid("m-prop", &r.id))
-                        .child(row_icon(&icon))
-                        .child(div().min_w_0().truncate().child(name))
-                        .when(store.builtin_ids.contains(&r.id), |d| {
-                            d.child(builtin_mark(crate::eid("m-prop-lock", &r.id)))
-                        })
-                        .on_click(move |_, _, cx| navigate(Route::Object(id.clone()), cx))
-                        .into_any_element()
+                    let mark = store
+                        .builtin_ids
+                        .contains(&r.id)
+                        .then(|| builtin_mark(crate::eid("m-prop-lock", &r.id)));
+                    m_row(
+                        crate::eid("m-prop", &r.id),
+                        row_icon(&icon).into_any_element(),
+                        name,
+                        mark,
+                    )
+                    .on_click(move |_, _, cx| navigate(Route::Object(id.clone()), cx))
+                    .into_any_element()
                 })
                 .collect()
         };
-        let add_prop = Self::m_section_add("m-new-prop")
+        let add_prop = Self::m_section_add("m-new-prop", "New property", cx)
             .child(self.anchor_probe("new-prop"))
             .on_click(cx.listener(|this, _, window, cx| this.open_new_property(window, cx)))
             .into_any_element();
@@ -1700,21 +1596,18 @@ impl Workspace {
                     .mt(px(-12.))
                     .mx(px(-14.))
                     .child(
-                        m_btn("m-spaces")
+                        m_btn("m-spaces", cx)
                             .child(back_glyph())
-                            .map(|d| self.data_tip(d, "tip-m-spaces", "Spaces", cx))
+                            .accessibility_label("Spaces")
+                            .tip("Spaces")
                             .on_click(cx.listener(|this, _, _, cx| this.mobile_back(cx))),
                     )
                     .child(div().flex_1())
                     .child(
-                        m_btn("m-space-settings")
-                            .child(
-                                svg()
-                                    .path(Glyph::Settings.path())
-                                    .size(px(18.))
-                                    .text_color(theme::fg()),
-                            )
-                            .map(|d| self.data_tip(d, "tip-m-space-settings", "Space settings", cx))
+                        m_btn("m-space-settings", cx)
+                            .child(Icon::new(Glyph::Settings).size(px(18.)))
+                            .accessibility_label("Space settings")
+                            .tip("Space settings")
                             .on_click(move |_, _, cx| {
                                 navigate(Route::Object(settings_id.clone()), cx)
                             }),
@@ -1770,46 +1663,28 @@ impl Workspace {
                     .pt(px(10.))
                     .pb(px(12.))
                     .child(
-                        div()
-                            .id("m-search")
+                        panel_button("m-search", cx)
                             .debug_selector(|| "m-search".into())
                             .flex_1()
-                            .bg(theme::panel())
-                            .border_1()
-                            .border_color(theme::border())
-                            .rounded_full()
+                            .h_auto()
+                            .rounded(px(999.))
                             .text_color(theme::muted())
-                            .text_size(px(15.))
                             .px(px(16.))
                             .py(px(12.))
-                            .cursor_pointer()
-                            .child("⌕ Search")
+                            .accessibility_label("Search")
+                            .child(div().w_full().text_size(px(15.)).child("⌕ Search"))
                             .on_click(
                                 cx.listener(|this, _, window, cx| this.open_search(window, cx)),
                             ),
                     )
                     .child(
-                        div()
-                            .id("m-compose")
+                        panel_button("m-compose", cx)
                             .debug_selector(|| "m-compose".into())
-                            .relative()
-                            .flex_none()
                             .size(px(46.))
-                            .rounded_full()
-                            .bg(theme::panel())
-                            .border_1()
-                            .border_color(theme::border())
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .cursor_pointer()
-                            .child(
-                                svg()
-                                    .path(Glyph::Plus.path())
-                                    .size(px(22.))
-                                    .text_color(theme::fg()),
-                            )
-                            .map(|d| self.data_tip(d, "tip-m-compose", "New object", cx))
+                            .rounded(px(23.))
+                            .child(Icon::new(Glyph::Plus).size(px(22.)))
+                            .accessibility_label("New object")
+                            .tip("New object")
                             .on_click(cx.listener(|this, _, window, cx| {
                                 if this.create_menu.is_some() {
                                     this.create_menu = None;

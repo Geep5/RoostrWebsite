@@ -8,14 +8,15 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::time::Duration;
 
-use gpui_kit::component::Icon;
-use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::command::{Command, CommandGroup, CommandItem, CommandState};
+use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
+use gpui_kit::component::{Disableable as _, Icon, Side};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use roostr_core::types::{Block, style};
 use roostr_core::{Glyph, Store, theme};
 
-use crate::slash_menu::{Preview, preview_tile, section_label};
+use crate::slash_menu::{Preview, preview_tile};
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum MenuAction {
@@ -169,15 +170,33 @@ pub struct BlockMenu {
     block: Block,
     at: Point<Pixels>,
     group_count: usize,
-    filter: Entity<InputState>,
+    /// The kit command list: its query field is the filter box.
+    cmd: Entity<CommandState>,
     sub: Option<(SubKind, Pixels)>,
+    /// The open flyout's kit menu, rebuilt when another flyout opens.
+    flyout: Option<(SubKind, Entity<PopupMenu>)>,
     hover_opened: bool,
     pending: Option<Task<()>>,
     /// Row tops (window y) of the submenu rows, for the flyout.
     row_tops: Rc<RefCell<HashMap<SubKind, Pixels>>>,
     /// Menu + flyout bounds, for click-outside.
     bounds: Rc<RefCell<Vec<Bounds<Pixels>>>>,
-    _subs: Vec<Subscription>,
+}
+
+/// What a list row does when clicked or confirmed with Enter.
+#[derive(Clone)]
+enum RowAct {
+    Sub(SubKind),
+    Fire(Fired),
+    None,
+}
+
+/// The value shown at the end of a submenu row.
+#[derive(Clone)]
+enum Trail {
+    Text(&'static str),
+    Dot(Hsla),
+    None,
 }
 
 fn swatch_color(hex: &str, fallback: Hsla) -> Hsla {
@@ -192,27 +211,23 @@ impl BlockMenu {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let filter = cx.new(|cx| InputState::new(window, cx).placeholder("Filter actions…"));
-        let subs = vec![
-            cx.subscribe(&filter, |this: &mut Self, _, ev: &InputEvent, cx| {
-                if matches!(ev, InputEvent::Change) {
-                    this.close_sub();
-                    cx.notify();
-                }
-            }),
-        ];
-        filter.update(cx, |f, cx| f.focus(window, cx));
+        let cmd = cx.new(|cx| CommandState::new(window, cx));
+        cmd.update(cx, |cmd, cx| {
+            // No row lit until the pointer or a key picks one.
+            cmd.set_selected_index(None, window, cx);
+            cmd.focus(window, cx);
+        });
         Self {
             block,
             at,
             group_count,
-            filter,
+            cmd,
             sub: None,
+            flyout: None,
             hover_opened: false,
             pending: None,
             row_tops: Rc::default(),
             bounds: Rc::default(),
-            _subs: subs,
         }
     }
 
@@ -515,7 +530,7 @@ impl BlockMenu {
             desc: None,
             preview: None,
         });
-        let f = self.filter.read(cx).value().trim().to_lowercase();
+        let f = self.cmd.read(cx).query(cx).trim().to_lowercase();
         if f.is_empty() {
             return out;
         }
@@ -526,93 +541,44 @@ impl BlockMenu {
             .collect()
     }
 
-    fn row_base(id: impl Into<ElementId>) -> Stateful<Div> {
+    /// A list row's content. It spans the whole kit row (over the row's own
+    /// 8/6 padding) so hover and Roostr's 10/7 spacing cover all of it, and a
+    /// click on it leaves focus in the filter field.
+    fn row(id: impl Into<ElementId>) -> Stateful<Div> {
         div()
             .id(id)
             .flex()
+            .flex_1()
             .items_center()
             .gap(px(8.))
-            .w_full()
+            .mx(px(-8.))
+            .my(px(-6.))
             .px(px(10.))
             .py(px(7.))
             .rounded(px(6.))
             .text_size(px(13.))
             .text_color(theme::fg())
             .cursor_pointer()
-            .hover(|s| s.bg(theme::hover()))
+            .capture_any_mouse_down(|_, window, _| window.prevent_default())
     }
 
-    fn check() -> Div {
-        div().ml_auto().child("✓")
+    /// A flyout row's content inside its kit menu item.
+    fn fly_row(id: impl Into<ElementId>, active: bool) -> Stateful<Div> {
+        div()
+            .id(id)
+            .flex()
+            .flex_1()
+            .items_center()
+            .gap(px(8.))
+            .ml(px(2.))
+            .py(px(7.))
+            .text_size(px(13.))
+            .cursor_pointer()
+            .text_color(if active { theme::accent() } else { theme::fg() })
     }
 
-    fn sub_row(
-        &self,
-        kind: SubKind,
-        glyph: Glyph,
-        label: &'static str,
-        trail: AnyElement,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let open = self.sub.map(|s| s.0) == Some(kind);
-        let tops = self.row_tops.clone();
-        Self::row_base(SharedString::from(format!("sub-{label}")))
-            .relative()
-            .when(open, |d| d.bg(theme::hover()))
-            .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
-                if *hovered {
-                    this.hover_sub(kind, cx);
-                }
-            }))
-            .on_click(cx.listener(move |this, _, _, cx| this.toggle_sub(kind, cx)))
-            .child(
-                canvas(
-                    move |b, _, _| {
-                        tops.borrow_mut().insert(kind, b.top());
-                    },
-                    |_, _, _, _| {},
-                )
-                .absolute()
-                .top_0()
-                .left_0()
-                .size(px(1.)),
-            )
-            .child(Icon::new(glyph).size(px(16.)))
-            .child(label)
-            .child(
-                div()
-                    .ml_auto()
-                    .flex()
-                    .items_center()
-                    .gap(px(6.))
-                    .text_size(px(12.))
-                    .text_color(theme::muted())
-                    .child(trail)
-                    .child(Icon::new(Glyph::ChevronRight).size(px(14.))),
-            )
-            .into_any_element()
-    }
-
-    fn plain_row(
-        &self,
-        id: &'static str,
-        glyph: Glyph,
-        label: &'static str,
-        fired: Fired,
-        danger: bool,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        Self::row_base(id)
-            .when(danger, |d| d.text_color(rgb(0xf55522)))
-            .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
-                if *hovered {
-                    this.hover_plain(cx);
-                }
-            }))
-            .on_click(cx.listener(move |this, _, _, cx| this.fire(fired.clone(), cx)))
-            .child(Icon::new(glyph).size(px(16.)))
-            .child(label)
-            .into_any_element()
+    fn check() -> Icon {
+        Icon::new(Glyph::Check).size(px(14.)).ml_auto()
     }
 
     fn dot(color: Hsla, ring: bool) -> Div {
@@ -624,124 +590,441 @@ impl BlockMenu {
             .when(ring, |d| d.border_1().border_color(theme::border()))
     }
 
-    fn flyout(&self, kind: SubKind, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        let mut rows = Vec::new();
+    /// A row that opens a flyout: on hover (with the 220ms intent delay)
+    /// or on click.
+    fn sub_item(
+        &self,
+        kind: SubKind,
+        glyph: Glyph,
+        label: &'static str,
+        trail: Trail,
+        cx: &Context<Self>,
+    ) -> CommandItem {
+        let open = self.sub.map(|s| s.0) == Some(kind);
+        let tops = self.row_tops.clone();
+        let this = cx.entity().downgrade();
+        CommandItem::new().label(label).child(move |_, _| {
+            let tops = tops.clone();
+            let this = this.clone();
+            Self::row(SharedString::from(format!("sub-{label}")))
+                .relative()
+                .when(open, |d| d.bg(theme::hover()))
+                .on_hover(move |hovered, _, cx| {
+                    if *hovered {
+                        let _ = this.update(cx, |this, cx| this.hover_sub(kind, cx));
+                    }
+                })
+                .child(
+                    canvas(
+                        move |b, _, _| {
+                            tops.borrow_mut().insert(kind, b.top());
+                        },
+                        |_, _, _, _| {},
+                    )
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .size(px(1.)),
+                )
+                .child(Icon::new(glyph).size(px(16.)))
+                .child(label)
+                .child(
+                    div()
+                        .ml_auto()
+                        .flex()
+                        .items_center()
+                        .gap(px(6.))
+                        .text_size(px(12.))
+                        .text_color(theme::muted())
+                        .map(|d| match trail {
+                            Trail::Text(text) => d.child(text),
+                            Trail::Dot(color) => d.child(Self::dot(color, true)),
+                            Trail::None => d,
+                        })
+                        .child(Icon::new(Glyph::ChevronRight).size(px(14.))),
+                )
+        })
+    }
+
+    /// A row that acts at once; hovering it closes an open flyout after 220ms.
+    fn plain_item(
+        &self,
+        id: &'static str,
+        glyph: Glyph,
+        label: &'static str,
+        danger: bool,
+        cx: &Context<Self>,
+    ) -> CommandItem {
+        let this = cx.entity().downgrade();
+        CommandItem::new().label(label).child(move |_, _| {
+            let this = this.clone();
+            Self::row(id)
+                .when(danger, |d| d.text_color(rgb(0xf55522)))
+                .on_hover(move |hovered, _, cx| {
+                    if *hovered {
+                        let _ = this.update(cx, |this, cx| this.hover_plain(cx));
+                    }
+                })
+                .child(Icon::new(glyph).size(px(16.)))
+                .child(label)
+        })
+    }
+
+    /// The flyout for `kind`: a kit menu of the choices, the current one checked.
+    fn build_flyout(
+        &self,
+        kind: SubKind,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<PopupMenu> {
+        let this = cx.entity().downgrade();
         let t = self.text().cloned();
-        match kind {
-            SubKind::Style => {
-                let Some(t) = t else { return rows };
-                for (i, (label, value, desc, preview, cls)) in STYLES.iter().enumerate() {
-                    let active = t.style == *value;
-                    let fired = Fired::Action(MenuAction::Style(*value));
-                    rows.push(
-                        Self::row_base(("fly-style", i))
-                            .when(active, |d| d.text_color(theme::accent()))
-                            .on_click(
-                                cx.listener(move |this, _, _, cx| this.fire(fired.clone(), cx)),
+        let align = self.block.align.unwrap_or(0);
+        let bg_cur = self.block.background_color.clone().unwrap_or_default();
+        let types = if kind == SubKind::Turn {
+            roostr_core::create::creatable_types(cx)
+        } else {
+            Vec::new()
+        };
+        PopupMenu::build(window, cx, move |mut m, _, _| {
+            m = m
+                .min_w(px(SUB_W))
+                .max_w(px(SUB_W))
+                .max_h(px(418.))
+                .scrollable(true)
+                .check_side(Side::Right);
+            let on = |fired: Fired| fire_on(this.clone(), fired);
+            match kind {
+                SubKind::Style => {
+                    let Some(t) = &t else { return m };
+                    for (i, (label, value, desc, preview, cls)) in STYLES.iter().enumerate() {
+                        let active = t.style == *value;
+                        m = m.item(
+                            PopupMenuItem::element(move |_, _| {
+                                Self::fly_row(("fly-style", i), active)
+                                    .child(
+                                        preview_tile(preview, *cls, px(34.), px(30.), theme::bg())
+                                            .text_color(if *cls == Preview::P {
+                                                theme::muted()
+                                            } else {
+                                                theme::fg()
+                                            }),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .flex_col()
+                                            .gap(px(1.))
+                                            .min_w_0()
+                                            .child(div().text_size(px(13.)).child(*label))
+                                            .child(
+                                                div()
+                                                    .text_size(px(11.))
+                                                    .text_color(theme::muted())
+                                                    .child(*desc),
+                                            ),
+                                    )
+                            })
+                            .checked(active)
+                            .on_click(on(Fired::Action(MenuAction::Style(*value)))),
+                        );
+                    }
+                }
+                SubKind::Align => {
+                    for (i, (label, value)) in ALIGNS.iter().enumerate() {
+                        let active = align == *value;
+                        m = m.item(
+                            PopupMenuItem::element(move |_, _| {
+                                Self::fly_row(("fly-align", i), active).child(*label)
+                            })
+                            .checked(active)
+                            .on_click(on(Fired::Action(MenuAction::Align(*value)))),
+                        );
+                    }
+                }
+                SubKind::Color => {
+                    let Some(t) = &t else { return m };
+                    let cur = t.color.clone().unwrap_or_default();
+                    for (i, (name, text, _)) in COLORS.iter().enumerate() {
+                        let active = cur == *text;
+                        m = m.item(
+                            PopupMenuItem::element(move |_, _| {
+                                Self::fly_row(("fly-color", i), active)
+                                    .child(Self::dot(swatch_color(text, theme::fg()), false))
+                                    .child(capitalize(name))
+                            })
+                            .checked(active)
+                            .on_click(on(Fired::Action(MenuAction::Color(text.to_string())))),
+                        );
+                    }
+                }
+                SubKind::Background => {
+                    for (i, (name, _, bg)) in COLORS.iter().enumerate() {
+                        let active = bg_cur == *bg;
+                        m = m.item(
+                            PopupMenuItem::element(move |_, _| {
+                                Self::fly_row(("fly-bg", i), active)
+                                    .child(Self::dot(
+                                        swatch_color(bg, gpui_kit::transparent_black()),
+                                        true,
+                                    ))
+                                    .child(capitalize(name))
+                            })
+                            .checked(active)
+                            .on_click(on(Fired::Action(MenuAction::Background(bg.to_string())))),
+                        );
+                    }
+                }
+                SubKind::Turn => {
+                    for (i, ty) in types.iter().enumerate() {
+                        let (icon, name) = (ty.icon.clone(), ty.name.clone());
+                        m = m.item(
+                            PopupMenuItem::element(move |_, _| {
+                                Self::fly_row(("fly-turn", i), false)
+                                    .child(
+                                        div()
+                                            .w(px(18.))
+                                            .flex_none()
+                                            .text_center()
+                                            .child(icon.clone()),
+                                    )
+                                    .child(name.clone())
+                            })
+                            .on_click(on(Fired::Action(
+                                MenuAction::TurnIntoObject(ty.key.clone()),
+                            ))),
+                        );
+                    }
+                }
+            }
+            m
+        })
+    }
+
+    /// The list's groups (`None` is a separator) and what each row does.
+    fn groups(&self, cx: &Context<Self>) -> Vec<Option<(CommandGroup, Vec<RowAct>)>> {
+        let mut groups = Vec::new();
+        if self.group_count > 1 {
+            let n = self.group_count;
+            groups.push(Some((
+                CommandGroup::new().item(CommandItem::new().disabled(true).child(move |_, _| {
+                    div()
+                        .ml(px(4.))
+                        .text_size(px(11.))
+                        .text_color(theme::accent())
+                        .child(format!("Applies to {n} selected blocks"))
+                })),
+                vec![RowAct::None],
+            )));
+        }
+        let filtering = !self.cmd.read(cx).query(cx).trim().is_empty();
+        if filtering {
+            let items = self.items(cx);
+            if items.is_empty() {
+                groups.push(Some((
+                    CommandGroup::new().item(CommandItem::new().disabled(true).child(|_, _| {
+                        div()
+                            .p(px(4.))
+                            .text_size(px(13.))
+                            .text_color(theme::muted())
+                            .child("No matching actions")
+                    })),
+                    vec![RowAct::None],
+                )));
+            }
+            let mut current: Option<(&'static str, Vec<CommandItem>, Vec<RowAct>)> = None;
+            let close = |(section, rows, acts): (&'static str, Vec<CommandItem>, Vec<RowAct>)| {
+                Some((
+                    CommandGroup::new()
+                        .label(section.to_uppercase())
+                        .items(rows),
+                    acts,
+                ))
+            };
+            for (i, item) in items.into_iter().enumerate() {
+                if current.as_ref().map(|c| c.0) != Some(item.section) {
+                    if let Some(done) = current.take() {
+                        groups.push(close(done));
+                    }
+                    current = Some((item.section, Vec::new(), Vec::new()));
+                }
+                let Item {
+                    label,
+                    action,
+                    active,
+                    swatch,
+                    desc,
+                    preview,
+                    ..
+                } = item;
+                let danger = label.as_ref() == "Delete";
+                let row = CommandItem::new().label(label.clone()).child(move |_, _| {
+                    let row = Self::row(("flat", i))
+                        .when(active, |d| d.text_color(theme::accent()))
+                        .when(danger, |d| d.text_color(rgb(0xf55522)))
+                        .when_some(swatch, |d, sw| {
+                            d.child(
+                                div()
+                                    .size(px(14.))
+                                    .rounded(px(4.))
+                                    .border_1()
+                                    .border_color(theme::border())
+                                    .flex_none()
+                                    .bg(sw),
                             )
-                            .child(
-                                preview_tile(preview, *cls, px(34.), px(30.), theme::bg())
-                                    .text_color(if *cls == Preview::P {
-                                        theme::muted()
-                                    } else {
-                                        theme::fg()
-                                    }),
-                            )
+                        });
+                    let row = match preview {
+                        Some((preview, cls)) => row
+                            .child(preview_tile(preview, cls, px(34.), px(30.), theme::bg()))
                             .child(
                                 div()
                                     .flex()
                                     .flex_col()
                                     .gap(px(1.))
                                     .min_w_0()
-                                    .child(div().text_size(px(13.)).child(*label))
+                                    .child(div().text_size(px(13.)).child(label.clone()))
                                     .child(
                                         div()
                                             .text_size(px(11.))
                                             .text_color(theme::muted())
-                                            .child(*desc),
+                                            .child(desc.unwrap_or("")),
                                     ),
-                            )
-                            .when(active, |d| d.child(Self::check()))
-                            .into_any_element(),
-                    );
+                            ),
+                        // Filter mode shows labels as stored (palette names stay lowercase).
+                        None => row.child(label.clone()),
+                    };
+                    row.when(active, |d| d.child(Self::check()))
+                });
+                if let Some((_, rows, acts)) = current.as_mut() {
+                    rows.push(row);
+                    acts.push(RowAct::Fire(action));
                 }
             }
-            SubKind::Align => {
-                let align = self.block.align.unwrap_or(0);
-                for (i, (label, value)) in ALIGNS.iter().enumerate() {
-                    let active = align == *value;
-                    let fired = Fired::Action(MenuAction::Align(*value));
-                    rows.push(
-                        Self::row_base(("fly-align", i))
-                            .when(active, |d| d.text_color(theme::accent()))
-                            .on_click(
-                                cx.listener(move |this, _, _, cx| this.fire(fired.clone(), cx)),
-                            )
-                            .child(*label)
-                            .when(active, |d| d.child(Self::check()))
-                            .into_any_element(),
-                    );
-                }
+            if let Some(done) = current {
+                groups.push(close(done));
             }
-            SubKind::Color => {
-                let Some(t) = t else { return rows };
-                let cur = t.color.unwrap_or_default();
-                for (i, (name, text, _)) in COLORS.iter().enumerate() {
-                    let active = cur == *text;
-                    let fired = Fired::Action(MenuAction::Color(text.to_string()));
-                    rows.push(
-                        Self::row_base(("fly-color", i))
-                            .when(active, |d| d.text_color(theme::accent()))
-                            .on_click(
-                                cx.listener(move |this, _, _, cx| this.fire(fired.clone(), cx)),
-                            )
-                            .child(Self::dot(swatch_color(text, theme::fg()), false))
-                            .child(capitalize(name))
-                            .when(active, |d| d.child(Self::check()))
-                            .into_any_element(),
-                    );
-                }
-            }
-            SubKind::Background => {
-                let cur = self.block.background_color.clone().unwrap_or_default();
-                for (i, (name, _, bg)) in COLORS.iter().enumerate() {
-                    let active = cur == *bg;
-                    let fired = Fired::Action(MenuAction::Background(bg.to_string()));
-                    rows.push(
-                        Self::row_base(("fly-bg", i))
-                            .when(active, |d| d.text_color(theme::accent()))
-                            .on_click(
-                                cx.listener(move |this, _, _, cx| this.fire(fired.clone(), cx)),
-                            )
-                            .child(Self::dot(
-                                swatch_color(bg, gpui_kit::transparent_black()),
-                                true,
-                            ))
-                            .child(capitalize(name))
-                            .when(active, |d| d.child(Self::check()))
-                            .into_any_element(),
-                    );
-                }
-            }
-            SubKind::Turn => {
-                for (i, ty) in roostr_core::create::creatable_types(cx)
-                    .into_iter()
-                    .enumerate()
-                {
-                    let fired = Fired::Action(MenuAction::TurnIntoObject(ty.key.clone()));
-                    rows.push(
-                        Self::row_base(("fly-turn", i))
-                            .on_click(
-                                cx.listener(move |this, _, _, cx| this.fire(fired.clone(), cx)),
-                            )
-                            .child(div().w(px(18.)).flex_none().text_center().child(ty.icon))
-                            .child(ty.name)
-                            .into_any_element(),
-                    );
-                }
-            }
+            return groups;
         }
-        rows
+
+        let t = self.text().cloned();
+        if self.is_link() {
+            let cur = self
+                .block
+                .content
+                .custom
+                .as_ref()
+                .and_then(|c| c.meta.as_ref())
+                .and_then(|m| m.get("style").cloned())
+                .unwrap_or_else(|| "text".into());
+            let mut g = CommandGroup::new().label("APPEARANCE");
+            let mut acts = Vec::new();
+            for (label, value) in [("Text", "text"), ("Card", "card")] {
+                let active = cur == value;
+                g = g.item(CommandItem::new().label(label).child(move |_, _| {
+                    Self::row(SharedString::from(format!("link-{value}")))
+                        .when(active, |d| d.text_color(theme::accent()))
+                        .child(label)
+                        .when(active, |d| d.child(Self::check()))
+                }));
+                acts.push(RowAct::Fire(Fired::Action(MenuAction::LinkStyle(
+                    value.into(),
+                ))));
+            }
+            groups.push(Some((g, acts)));
+        }
+        let mut g = CommandGroup::new().label(if t.is_some() { "TEXT" } else { "BLOCK" });
+        let mut acts = Vec::new();
+        if let Some(t) = &t {
+            let cur = STYLES
+                .iter()
+                .find(|s| s.1 == t.style)
+                .map_or("Text", |s| s.0);
+            g = g.item(self.sub_item(SubKind::Style, Glyph::Type, "Style", Trail::Text(cur), cx));
+            acts.push(RowAct::Sub(SubKind::Style));
+        }
+        let cur_align = ALIGNS
+            .iter()
+            .find(|a| a.1 == self.block.align.unwrap_or(0))
+            .map_or("Left", |a| a.0);
+        g = g.item(self.sub_item(
+            SubKind::Align,
+            Glyph::AlignLeft,
+            "Align",
+            Trail::Text(cur_align),
+            cx,
+        ));
+        acts.push(RowAct::Sub(SubKind::Align));
+        if let Some(t) = &t {
+            let c = t.color.clone().unwrap_or_default();
+            let color = COLORS.iter().find(|x| x.1 == c).map_or("", |x| x.1);
+            g = g.item(self.sub_item(
+                SubKind::Color,
+                Glyph::Palette,
+                "Color",
+                Trail::Dot(swatch_color(color, theme::fg())),
+                cx,
+            ));
+            acts.push(RowAct::Sub(SubKind::Color));
+        }
+        let b = self.block.background_color.clone().unwrap_or_default();
+        let bg = COLORS.iter().find(|x| x.2 == b).map_or("", |x| x.2);
+        g = g.item(self.sub_item(
+            SubKind::Background,
+            Glyph::PaintBucket,
+            "Background",
+            Trail::Dot(swatch_color(bg, gpui_kit::transparent_black())),
+            cx,
+        ));
+        acts.push(RowAct::Sub(SubKind::Background));
+        if t.is_some() {
+            g = g.item(self.plain_item("clear", Glyph::Eraser, "Clear style", false, cx));
+            acts.push(RowAct::Fire(Fired::Action(MenuAction::ClearStyle)));
+        }
+        groups.push(Some((g, acts)));
+        groups.push(None);
+
+        let mut g = CommandGroup::new().item(self.sub_item(
+            SubKind::Turn,
+            Glyph::Box,
+            "Turn into object",
+            Trail::None,
+            cx,
+        ));
+        let mut acts = vec![RowAct::Sub(SubKind::Turn)];
+        if let Some(meta) = self.file_meta() {
+            if meta.get("fileId").is_some_and(|f| !f.is_empty()) {
+                g = g.item(self.plain_item(
+                    "open-file",
+                    Glyph::ExternalLink,
+                    "Open file",
+                    false,
+                    cx,
+                ));
+                acts.push(RowAct::Fire(Fired::OpenFile));
+            }
+            if meta.get("mime").is_some_and(|m| m.starts_with("image/")) {
+                g = g.item(self.plain_item("copy-image", Glyph::Copy, "Copy image", false, cx));
+                acts.push(RowAct::Fire(Fired::CopyImage));
+            }
+            g = g.item(self.plain_item("download", Glyph::Download, "Download", false, cx));
+            acts.push(RowAct::Fire(Fired::Download));
+        }
+        g = g.item(self.plain_item("duplicate", Glyph::Copy, "Duplicate", false, cx));
+        acts.push(RowAct::Fire(Fired::Action(MenuAction::Duplicate)));
+        g = g.item(self.plain_item("delete", Glyph::Trash, "Delete block", true, cx));
+        acts.push(RowAct::Fire(Fired::Action(MenuAction::Delete)));
+        groups.push(Some((g, acts)));
+        groups
+    }
+}
+
+/// A flyout pick: run `fired` on the menu.
+fn fire_on(
+    this: WeakEntity<BlockMenu>,
+    fired: Fired,
+) -> impl Fn(&ClickEvent, &mut Window, &mut App) + 'static {
+    move |_, _, cx| {
+        let _ = this.update(cx, |this, cx| this.fire(fired.clone(), cx));
     }
 }
 
@@ -758,210 +1041,48 @@ impl Render for BlockMenu {
         let h = px(440.).min(viewport.height - px(40.));
         let left = px(8.).max(self.at.x.min(viewport.width - px(MENU_W) - px(12.)));
         let top = self.at.y.min(viewport.height - h - px(12.));
-        let filtering = !self.filter.read(cx).value().trim().is_empty();
-        let t = self.text().cloned();
 
-        let mut scroll = div()
-            .id("block-menu-scroll")
-            .flex()
-            .flex_col()
-            .overflow_y_scroll()
-            .p(px(4.));
-        if filtering {
-            let items = self.items(cx);
-            if items.is_empty() {
-                scroll = scroll.child(
-                    div()
-                        .p(px(12.))
-                        .text_size(px(13.))
-                        .text_color(theme::muted())
-                        .child("No matching actions"),
-                );
+        let groups = self.groups(cx);
+        let acts: Rc<Vec<Vec<RowAct>>> =
+            Rc::new(groups.iter().flatten().map(|(_, a)| a.clone()).collect());
+        let this = cx.entity().downgrade();
+        let on_query = this.clone();
+        let mut list = Command::new(&self.cmd)
+            // The menu answers the filter itself: typing flattens the menu.
+            .filterable(false)
+            .shadow(roostr_core::ui::menu_shadow())
+            .placeholder("Filter actions…")
+            .max_h(px(390.))
+            .on_query(move |_, _, cx| {
+                let _ = on_query.update(cx, |this, cx| {
+                    this.close_sub();
+                    cx.notify();
+                });
+            })
+            .on_confirm(move |ix, _, cx| {
+                let Some(act) = acts.get(ix.section).and_then(|s| s.get(ix.row)).cloned() else {
+                    return;
+                };
+                let _ = this.update(cx, |this, cx| match act {
+                    RowAct::Sub(kind) => this.toggle_sub(kind, cx),
+                    RowAct::Fire(fired) => this.fire(fired, cx),
+                    RowAct::None => {}
+                });
+            });
+        for group in groups {
+            list = match group {
+                Some((group, _)) => list.group(group),
+                None => list.separator(),
+            };
+        }
+
+        match self.sub {
+            Some((kind, _)) if self.flyout.as_ref().map(|f| f.0) != Some(kind) => {
+                let menu = self.build_flyout(kind, window, cx);
+                self.flyout = Some((kind, menu));
             }
-            let mut last = "";
-            for (i, item) in items.into_iter().enumerate() {
-                if item.section != last {
-                    last = item.section;
-                    scroll = scroll.child(section_label(item.section).px(px(10.)));
-                }
-                let fired = item.action.clone();
-                let danger = item.label.as_ref() == "Delete";
-                let mut row = Self::row_base(("flat", i))
-                    .when(item.active, |d| d.text_color(theme::accent()))
-                    .when(danger, |d| d.text_color(rgb(0xf55522)))
-                    .on_click(cx.listener(move |this, _, _, cx| this.fire(fired.clone(), cx)));
-                if let Some(sw) = item.swatch {
-                    row = row.child(
-                        div()
-                            .size(px(14.))
-                            .rounded(px(4.))
-                            .border_1()
-                            .border_color(theme::border())
-                            .flex_none()
-                            .bg(sw),
-                    );
-                }
-                if let Some((preview, cls)) = item.preview {
-                    row = row
-                        .child(preview_tile(preview, cls, px(34.), px(30.), theme::bg()))
-                        .child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .gap(px(1.))
-                                .min_w_0()
-                                .child(div().text_size(px(13.)).child(item.label.clone()))
-                                .child(
-                                    div()
-                                        .text_size(px(11.))
-                                        .text_color(theme::muted())
-                                        .child(item.desc.unwrap_or("")),
-                                ),
-                        );
-                } else {
-                    // Filter mode shows labels as stored (palette names stay lowercase).
-                    row = row.child(item.label.clone());
-                }
-                if item.active {
-                    row = row.child(Self::check());
-                }
-                scroll = scroll.child(row);
-            }
-        } else {
-            if self.is_link() {
-                scroll = scroll.child(section_label("Appearance").px(px(10.)));
-                let cur = self
-                    .block
-                    .content
-                    .custom
-                    .as_ref()
-                    .and_then(|c| c.meta.as_ref())
-                    .and_then(|m| m.get("style").cloned())
-                    .unwrap_or_else(|| "text".into());
-                for (label, value) in [("Text", "text"), ("Card", "card")] {
-                    let active = cur == value;
-                    let fired = Fired::Action(MenuAction::LinkStyle(value.into()));
-                    scroll = scroll.child(
-                        Self::row_base(SharedString::from(format!("link-{value}")))
-                            .when(active, |d| d.text_color(theme::accent()))
-                            .on_click(
-                                cx.listener(move |this, _, _, cx| this.fire(fired.clone(), cx)),
-                            )
-                            .child(label)
-                            .when(active, |d| d.child(Self::check())),
-                    );
-                }
-            }
-            scroll =
-                scroll.child(section_label(if t.is_some() { "Text" } else { "Block" }).px(px(10.)));
-            if let Some(t) = &t {
-                let cur = STYLES
-                    .iter()
-                    .find(|s| s.1 == t.style)
-                    .map_or("Text", |s| s.0);
-                scroll = scroll.child(self.sub_row(
-                    SubKind::Style,
-                    Glyph::Type,
-                    "Style",
-                    div().child(cur).into_any_element(),
-                    cx,
-                ));
-            }
-            let cur_align = ALIGNS
-                .iter()
-                .find(|a| a.1 == self.block.align.unwrap_or(0))
-                .map_or("Left", |a| a.0);
-            scroll = scroll.child(self.sub_row(
-                SubKind::Align,
-                Glyph::AlignLeft,
-                "Align",
-                div().child(cur_align).into_any_element(),
-                cx,
-            ));
-            if let Some(t) = &t {
-                let c = t.color.clone().unwrap_or_default();
-                let color = COLORS.iter().find(|x| x.1 == c).map_or("", |x| x.1);
-                scroll = scroll.child(self.sub_row(
-                    SubKind::Color,
-                    Glyph::Palette,
-                    "Color",
-                    Self::dot(swatch_color(color, theme::fg()), true).into_any_element(),
-                    cx,
-                ));
-            }
-            let b = self.block.background_color.clone().unwrap_or_default();
-            let bg = COLORS.iter().find(|x| x.2 == b).map_or("", |x| x.2);
-            scroll = scroll.child(self.sub_row(
-                SubKind::Background,
-                Glyph::PaintBucket,
-                "Background",
-                Self::dot(swatch_color(bg, gpui_kit::transparent_black()), true).into_any_element(),
-                cx,
-            ));
-            if t.is_some() {
-                scroll = scroll.child(self.plain_row(
-                    "clear",
-                    Glyph::Eraser,
-                    "Clear style",
-                    Fired::Action(MenuAction::ClearStyle),
-                    false,
-                    cx,
-                ));
-            }
-            scroll = scroll.child(div().h(px(1.)).bg(theme::border()).mx(px(6.)).my(px(4.)));
-            scroll = scroll.child(self.sub_row(
-                SubKind::Turn,
-                Glyph::Box,
-                "Turn into object",
-                div().into_any_element(),
-                cx,
-            ));
-            if let Some(meta) = self.file_meta() {
-                if meta.get("fileId").is_some_and(|f| !f.is_empty()) {
-                    scroll = scroll.child(self.plain_row(
-                        "open-file",
-                        Glyph::ExternalLink,
-                        "Open file",
-                        Fired::OpenFile,
-                        false,
-                        cx,
-                    ));
-                }
-                if meta.get("mime").is_some_and(|m| m.starts_with("image/")) {
-                    scroll = scroll.child(self.plain_row(
-                        "copy-image",
-                        Glyph::Copy,
-                        "Copy image",
-                        Fired::CopyImage,
-                        false,
-                        cx,
-                    ));
-                }
-                scroll = scroll.child(self.plain_row(
-                    "download",
-                    Glyph::Download,
-                    "Download",
-                    Fired::Download,
-                    false,
-                    cx,
-                ));
-            }
-            scroll = scroll.child(self.plain_row(
-                "duplicate",
-                Glyph::Copy,
-                "Duplicate",
-                Fired::Action(MenuAction::Duplicate),
-                false,
-                cx,
-            ));
-            scroll = scroll.child(self.plain_row(
-                "delete",
-                Glyph::Trash,
-                "Delete block",
-                Fired::Action(MenuAction::Delete),
-                true,
-                cx,
-            ));
+            None => self.flyout = None,
+            _ => {}
         }
 
         let bounds = self.bounds.clone();
@@ -983,82 +1104,50 @@ impl Render for BlockMenu {
             .max_h(px(440.))
             .flex()
             .flex_col()
-            .bg(theme::panel())
-            .border_1()
-            .border_color(theme::border())
-            .rounded(px(10.))
-            .shadow(roostr_core::ui::menu_shadow())
-            .overflow_hidden()
             .child(record(bounds.clone()))
-            .child(
-                div()
-                    .border_b_1()
-                    .border_color(theme::border())
-                    .px(px(4.))
-                    .py(px(2.))
-                    .child(
-                        Input::new(&self.filter)
-                            .appearance(false)
-                            .text_size(px(13.)),
-                    ),
-            )
-            .when(self.group_count > 1, |d| {
-                d.child(
-                    div()
-                        .text_size(px(11.))
-                        .text_color(theme::accent())
-                        .px(px(12.))
-                        .pt(px(6.))
-                        .child(format!("Applies to {} selected blocks", self.group_count)),
-                )
-            })
-            .child(scroll);
+            .child(list);
 
-        let flyout = self.sub.map(|(kind, sub_top)| {
-            let fh = px(420.).min(viewport.height - px(24.));
-            let right_x = left + px(MENU_W) - px(6.);
-            let fl = if right_x + px(SUB_W) + px(12.) <= viewport.width {
-                right_x
-            } else {
-                px(8.).max(left - px(SUB_W) + px(6.))
-            };
-            let ft = px(8.).max(sub_top.min(viewport.height - fh - px(12.)));
-            let rows = self.flyout(kind, cx);
-            let appear = roostr_core::motion::appear_frame(
-                ElementId::Name(format!("block-flyout-appear-{kind:?}").into()),
-                -4.,
-                window,
-                cx,
-            );
-            deferred(
-                anchored().position(point(fl, ft)).child(
-                    appear.apply(
-                        div()
-                            .id("block-menu-flyout")
-                            .occlude()
-                            .relative()
-                            .w(px(SUB_W))
-                            .max_h(px(420.))
-                            .overflow_y_scroll()
-                            .bg(theme::panel())
-                            .border_1()
-                            .border_color(theme::border())
-                            .rounded(px(10.))
-                            .shadow(roostr_core::ui::menu_shadow())
-                            .p(px(4.))
-                            .on_hover(cx.listener(|this, hovered: &bool, _, _| {
-                                // Reaching the flyout cancels the pending close from rows crossed on the way.
-                                if *hovered {
-                                    this.pending = None;
-                                }
-                            }))
-                            .child(record(bounds.clone()))
-                            .children(rows),
+        let flyout = self
+            .sub
+            .zip(self.flyout.clone())
+            .map(|((kind, sub_top), (_, popup))| {
+                let fh = px(420.).min(viewport.height - px(24.));
+                let right_x = left + px(MENU_W) - px(6.);
+                let fl = if right_x + px(SUB_W) + px(12.) <= viewport.width {
+                    right_x
+                } else {
+                    px(8.).max(left - px(SUB_W) + px(6.))
+                };
+                let ft = px(8.).max(sub_top.min(viewport.height - fh - px(12.)));
+                let appear = roostr_core::motion::appear_frame(
+                    ElementId::Name(format!("block-flyout-appear-{kind:?}").into()),
+                    -4.,
+                    window,
+                    cx,
+                );
+                deferred(
+                    anchored().position(point(fl, ft)).child(
+                        appear.apply(
+                            div()
+                                .id("block-menu-flyout")
+                                .occlude()
+                                .relative()
+                                .w(px(SUB_W))
+                                // Focus stays in the filter field.
+                                .capture_any_mouse_down(|_, window, _| window.prevent_default())
+                                .on_hover(cx.listener(|this, hovered: &bool, _, _| {
+                                    // Reaching the flyout cancels the pending close from rows crossed on the way.
+                                    if *hovered {
+                                        this.pending = None;
+                                    }
+                                }))
+                                .child(record(bounds.clone()))
+                                .child(popup),
+                        ),
                     ),
-                ),
-            )
-            .with_priority(4)
-        });
+                )
+                .with_priority(4)
+            });
 
         let entity = cx.entity();
         div()

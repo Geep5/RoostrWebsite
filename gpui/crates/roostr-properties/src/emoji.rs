@@ -8,14 +8,17 @@ use std::rc::Rc;
 use std::sync::LazyLock;
 
 use base64::Engine as _;
+use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
 use gpui_kit::component::input::{InputEvent, InputState};
+use gpui_kit::component::label::Label;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use regex::Regex;
 use roostr_core::theme;
+use roostr_core::ui::disabled;
 use serde::Deserialize;
 
-use crate::widgets::{FieldSkin, field, menu_shadow, tip};
+use crate::widgets::{FieldSkin, empty_note, error_alert, field, menu_shadow};
 
 #[derive(Deserialize)]
 struct EmojiData {
@@ -367,22 +370,16 @@ impl EmojiState {
         .detach();
     }
 
+    /// One emoji: a kit ghost [`Button`] (32px, 19px glyph, named in its
+    /// tooltip). Off the tab order: the grid is thousands of cells.
     fn cell(&self, i: usize, cx: &mut Context<Self>) -> AnyElement {
         let (emoji, name, _, _) = &DATA.emoji[i];
         let value = emoji.clone();
-        div()
-            .id(("emoji", i))
-            .size(px(32.))
-            .flex()
-            .items_center()
-            .justify_center()
-            .rounded(theme::radius::sm())
-            .text_size(px(19.))
-            .cursor_pointer()
-            .hover(|s| s.bg(theme::hover()))
-            .tooltip(tip(name.clone()))
+        cell_button(("emoji", i), cx)
+            .accessibility_label(name.clone())
+            .tooltip(name.clone())
             .on_click(cx.listener(move |this, _, window, cx| this.pick(&value, window, cx)))
-            .child(emoji.clone())
+            .child(div().text_size(px(19.)).child(emoji.clone()))
             .into_any_element()
     }
 
@@ -398,48 +395,39 @@ impl EmojiState {
                 .pb(px(2.))
                 .children(cells.iter().map(|&i| self.cell(i, cx)))
                 .into_any_element(),
-            Row::None => div()
+            Row::None => empty_note("No matches — paste any emoji instead.")
                 .p(px(8.))
                 .text_size(px(12.))
-                .text_color(theme::muted())
-                .child("No matches — paste any emoji instead.")
                 .into_any_element(),
             Row::Pasted => {
                 let q = self.q(cx);
                 let value = q.clone();
                 let url = self.is_url_query(&q);
+                let tip = if url {
+                    "Use image".to_string()
+                } else {
+                    format!("Use {q}")
+                };
                 div()
                     .pb(px(2.))
                     .child(
-                        div()
-                            .id("pasted")
-                            .size(px(32.))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded(theme::radius::sm())
-                            .cursor_pointer()
-                            .hover(|s| s.bg(theme::hover()))
-                            .when(!url, |d| {
-                                d.border_1()
+                        cell_button("pasted", cx)
+                            .accessibility_label(tip.clone())
+                            .tooltip(tip)
+                            .when(!url, |b| {
+                                b.border_1()
                                     .border_dashed()
                                     .border_color(theme::accent())
-                                    .text_size(px(19.))
-                                    .child(q.clone())
+                                    .child(div().text_size(px(19.)).child(q.clone()))
                             })
-                            .when(url, |d| {
-                                d.child(
+                            .when(url, |b| {
+                                b.child(
                                     img(q.to_string())
                                         .size(px(26.))
                                         .rounded(theme::radius::sm())
                                         .object_fit(ObjectFit::Cover),
                                 )
                             })
-                            .tooltip(tip(if url {
-                                "Use image".to_string()
-                            } else {
-                                format!("Use {q}")
-                            }))
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.pick(&value, window, cx)
                             })),
@@ -450,8 +438,26 @@ impl EmojiState {
     }
 }
 
-fn group_header(label: &str, first: bool) -> Div {
-    div()
+/// A grid cell: kit [`Button`] (hover fill), 32px square.
+fn cell_button(id: impl Into<ElementId>, cx: &App) -> Button {
+    Button::new(id)
+        .custom(
+            ButtonCustomVariant::new(cx)
+                .foreground(theme::fg())
+                .hover(theme::hover())
+                .active(theme::hover()),
+        )
+        .tab_stop(false)
+        .size(px(32.))
+        .p_0()
+        .rounded(theme::radius::sm())
+        .cursor_pointer()
+}
+
+/// A group's caption (kit [`Label`]): uppercase 10.5px semibold muted on
+/// the panel, so it can also cover rows as the sticky header.
+fn group_header(label: &str, first: bool) -> Label {
+    Label::new(label.to_uppercase())
         .w_full()
         .bg(theme::panel())
         .text_color(theme::muted())
@@ -460,7 +466,6 @@ fn group_header(label: &str, first: bool) -> Div {
         .px(px(2.))
         .pt(px(if first { 0. } else { 6. }))
         .pb(px(3.))
-        .child(SharedString::from(label.to_uppercase()))
 }
 
 impl Render for EmojiState {
@@ -494,15 +499,19 @@ impl Render for EmojiState {
                     .map(|(_, g)| *g)
             })
             .flatten();
+        let top_variant = ButtonCustomVariant::new(cx).foreground(theme::muted());
         let top_button = |id: &'static str, label: &'static str, title: &'static str| {
-            div()
-                .id(id)
+            Button::new(id)
+                .custom(top_variant)
                 .flex_none()
-                .text_size(px(16.))
+                .size(px(28.))
+                .p_0()
+                .rounded(theme::radius::tab())
                 .text_color(theme::muted())
                 .cursor_pointer()
-                .tooltip(tip(title))
-                .child(label)
+                .accessibility_label(title)
+                .tooltip(title)
+                .child(div().text_size(px(16.)).child(label))
         };
         div()
             .id("emoji-picker")
@@ -538,17 +547,18 @@ impl Render for EmojiState {
                             .on_click(cx.listener(|this, _, window, cx| this.random(window, cx))),
                     )
                     .when(self.with_image, |d| {
-                        let uploading = self.uploading;
                         d.child(
-                            top_button(
-                                "upload",
-                                "⬆️",
-                                "Upload an image (PNG, JPG, WebP, GIF or SVG)",
+                            disabled(
+                                top_button(
+                                    "upload",
+                                    "⬆️",
+                                    "Upload an image (PNG, JPG, WebP, GIF or SVG)",
+                                ),
+                                self.uploading,
                             )
-                            .when(uploading, |b| b.opacity(0.5))
                             .on_click(cx.listener(
-                                move |this, _, window, cx| {
-                                    if !uploading {
+                                |this, _, window, cx| {
+                                    if !this.uploading {
                                         this.upload(window, cx)
                                     }
                                 },
@@ -563,13 +573,11 @@ impl Render for EmojiState {
             .when(!self.upload_error.is_empty(), |d| {
                 d.child(
                     div()
-                        .px(px(10.))
+                        .px(px(8.))
                         .py(px(6.))
-                        .text_size(px(12.))
-                        .text_color(rgb(0xf87171))
                         .border_b_1()
                         .border_color(theme::border())
-                        .child(self.upload_error.clone()),
+                        .child(error_alert("upload-error", self.upload_error.clone())),
                 )
             })
             .child(

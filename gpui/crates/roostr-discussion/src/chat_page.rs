@@ -3,6 +3,8 @@
 //! messages filling the window, composer pinned to the bottom.
 
 use gpui_kit::component::IconNamed as _;
+use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
+use gpui_kit::component::label::Label;
 use gpui_kit::*;
 use roostr_core::nav::{self, Route};
 use roostr_core::objects::object_icon;
@@ -98,17 +100,20 @@ impl Render for ChatPage {
                     .px(px(12.))
                     .pb(px(8.))
                     .child(
-                        div()
-                            .id("back")
+                        // The round back button with the phone's back glyph.
+                        Button::new("back")
+                            .custom(
+                                ButtonCustomVariant::new(cx)
+                                    .color(theme::panel())
+                                    .foreground(theme::fg())
+                                    .hover(theme::panel())
+                                    .active(theme::panel()),
+                            )
                             .flex_none()
                             .size(px(40.))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded_full()
+                            .p_0()
+                            .rounded(px(20.))
                             .bg(theme::panel())
-                            .text_color(theme::fg())
-                            .cursor_pointer()
                             .on_click(move |_, _, cx| {
                                 if back_in_history {
                                     Navigator::global(cx).update(cx, |nav, cx| {
@@ -148,19 +153,23 @@ impl Render for ChatPage {
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .child(icon_el)
                                     .child(
-                                        div()
+                                        Label::new(name)
                                             .min_w_0()
                                             .overflow_hidden()
                                             .text_ellipsis()
-                                            .child(name),
+                                            .line_height(phi())
+                                            .text_color(theme::fg()),
                                     ),
                             )
-                            .child(div().text_size(px(12.)).text_color(theme::muted()).child(
-                                format!(
+                            .child(
+                                Label::new(format!(
                                     "{comments} comment{}",
                                     if comments == 1 { "" } else { "s" }
-                                ),
-                            )),
+                                ))
+                                .line_height(phi())
+                                .text_size(px(12.))
+                                .text_color(theme::muted()),
+                            ),
                     )
                     .child(div().flex_none().w(px(40.))),
             )

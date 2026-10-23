@@ -318,6 +318,7 @@ const KIT_THEME: &str = r##"{
     "success.background": "#30d158",
     "success.foreground": "#ffffff",
     "switch.background": "#45454a",
+    "switch.thumb.background": "#ffffff",
     "tab.background": "#00000000",
     "tab.active.background": "#ffffff0d",
     "tab.active.foreground": "#f5f5f7",

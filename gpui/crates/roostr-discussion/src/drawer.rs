@@ -6,7 +6,11 @@
 
 use std::time::Duration;
 
-use gpui_kit::component::tooltip::Tooltip;
+use gpui_kit::component::Sizable as _;
+use gpui_kit::component::alert::Alert;
+use gpui_kit::component::button::Button;
+use gpui_kit::component::label::Label;
+use gpui_kit::component::tab::{Tab, TabBar};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use roostr_core::layout::is_mobile;
@@ -212,27 +216,19 @@ impl ConversationDrawer {
         .detach();
     }
 
-    fn render_tab(&self, tab: PaneTab, cx: &mut Context<Self>) -> impl IntoElement {
-        let active = self.tab() == tab;
+    /// A Chat / Properties tab of the sheet's switch: its icon, then its name.
+    fn render_tab(tab: PaneTab, cx: &App) -> Tab {
         let label = tab.name();
-        div()
-            .id(label)
+        Tab::new()
+            .aria_label(label)
             .debug_selector(move || format!("pane-tab-{label}"))
-            .flex()
-            .items_center()
-            .gap(px(5.))
-            .rounded(px(7.))
-            .px(px(10.))
-            .py(px(4.))
-            .text_size(px(12.5))
-            .font_weight(FontWeight::SEMIBOLD)
-            .cursor_pointer()
-            .text_color(if active { theme::fg() } else { theme::muted() })
-            .when(active, |d| d.bg(theme::hover()))
-            .hover(|s| s.text_color(theme::fg()))
-            .on_click(cx.listener(move |this, _, _, cx| this.pick(tab, cx)))
-            .child(div().text_size(px(13.)).child(tab.icon(cx)))
-            .child(label)
+            .child(div().mr(px(5.)).text_size(px(13.)).child(tab.icon(cx)))
+            .child(
+                div()
+                    .text_size(px(12.5))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(label),
+            )
     }
 
     /// The `»` button: closes the sheet, or collapses a desktop column.
@@ -243,29 +239,23 @@ impl ConversationDrawer {
             Some(PaneTab::Properties) => ("pane-collapse-Properties".into(), "Collapse properties"),
         };
         let selector = id.clone();
-        div()
-            .id(ElementId::Name(id))
+        Button::new(ElementId::Name(id))
             .debug_selector(move || selector.to_string())
+            .outline()
+            .small()
             .flex_none()
             .size(px(26.))
-            .flex()
-            .items_center()
-            .justify_center()
-            .border_1()
-            .border_color(theme::border())
+            .p_0()
             .rounded(px(7.))
-            .text_size(px(14.))
             .text_color(theme::muted())
-            .cursor_pointer()
-            .hover(|s| s.text_color(theme::fg()).border_color(theme::muted()))
-            .tooltip(move |window, cx| Tooltip::new(tip).build(window, cx))
+            .tooltip(tip)
             .on_click(move |_, _, cx| {
                 PaneState::global(cx).update(cx, |p, cx| match column {
                     None => p.set_sheet(false, cx),
                     Some(tab) => p.set_open(tab, false, cx),
                 })
             })
-            .child("»")
+            .child(div().text_size(px(14.)).child("»"))
     }
 
     /// A collapsed column folded into the open one's header: its icon and
@@ -273,30 +263,21 @@ impl ConversationDrawer {
     /// expands it again.
     fn render_folded(tab: PaneTab, cx: &App) -> impl IntoElement {
         let name = tab.name();
-        div()
-            .id(ElementId::Name(format!("pane-folded-{name}").into()))
+        Button::new(ElementId::Name(format!("pane-folded-{name}").into()))
             .debug_selector(move || format!("pane-folded-{name}"))
+            .outline()
+            .small()
             .flex_none()
-            .flex()
-            .items_center()
-            .gap(px(5.))
             .h(px(26.))
             .px(px(8.))
-            .border_1()
-            .border_color(theme::border())
             .rounded(px(7.))
-            .text_size(px(12.))
             .text_color(theme::muted())
-            .cursor_pointer()
-            .hover(|s| s.text_color(theme::fg()).border_color(theme::muted()))
-            .tooltip(move |window, cx| {
-                Tooltip::new(format!("Show {}", name.to_lowercase())).build(window, cx)
-            })
+            .tooltip(format!("Show {}", name.to_lowercase()))
             .on_click(move |_, _, cx| {
                 PaneState::global(cx).update(cx, |p, cx| p.set_open(tab, true, cx))
             })
             .child(div().text_size(px(12.)).child(tab.icon(cx)))
-            .child(name)
+            .child(div().text_size(px(12.)).child(name))
             .with_animation(
                 ElementId::Name(format!("pane-fold-in-{name}").into()),
                 Animation::new(Duration::from_millis(220)).with_easing(ease_out_quint()),
@@ -330,26 +311,24 @@ impl ConversationDrawer {
         (!self.refresh_error.is_empty()).then(|| {
             div()
                 .flex()
-                .flex_wrap()
                 .items_center()
                 .gap(px(4.))
                 .px(px(14.))
                 .my(px(12.))
-                .text_size(px(12.))
-                .text_color(theme::orange())
-                .child(self.refresh_error.clone())
                 .child(
-                    div()
-                        .id("refresh")
-                        .px(px(6.))
-                        .py(px(1.))
-                        .border_1()
-                        .border_color(theme::border())
-                        .rounded(px(4.))
-                        .text_color(theme::fg())
-                        .cursor_pointer()
-                        .on_click(cx.listener(|this, _, _, cx| this.refresh_active(cx)))
-                        .child("Refresh"),
+                    Alert::warning("refresh-error", self.refresh_error.clone())
+                        .xsmall()
+                        .flex_1()
+                        .min_w_0()
+                        .text_size(px(12.))
+                        .text_color(theme::orange()),
+                )
+                .child(
+                    Button::new("refresh")
+                        .outline()
+                        .xsmall()
+                        .label("Refresh")
+                        .on_click(cx.listener(|this, _, _, cx| this.refresh_active(cx))),
                 )
         })
     }
@@ -403,12 +382,11 @@ impl ConversationDrawer {
                 .text_size(px(13.))
                 .child(tab.icon(cx))
                 .into_any_element(),
-            div()
+            Label::new(name)
                 .flex_1()
                 .min_w_0()
                 .text_size(px(12.5))
                 .font_weight(FontWeight::SEMIBOLD)
-                .child(name)
                 .into_any_element(),
         ];
         // The other column, collapsed, folds into this header: a click opens it again.
@@ -437,17 +415,29 @@ impl Render for ConversationDrawer {
         let tab = self.tab();
         self.ensure_view(tab, window, cx);
         self.drop_view(tab.other());
-        let tabs = div()
-            .flex()
+        // The Chat / Properties switch: the kit's segmented tab bar.
+        let shown: Vec<PaneTab> = if self.chat {
+            vec![PaneTab::Chat, PaneTab::Properties]
+        } else {
+            vec![PaneTab::Properties]
+        };
+        let selected = shown.iter().position(|t| *t == tab).unwrap_or(0);
+        let tabs = TabBar::new("pane-tabs")
+            .segmented()
+            .small()
             .flex_none()
-            .gap(px(2.))
             .bg(theme::panel())
             .border_1()
             .border_color(theme::border())
             .rounded(px(9.))
             .p(px(2.))
-            .when(self.chat, |d| d.child(self.render_tab(PaneTab::Chat, cx)))
-            .child(self.render_tab(PaneTab::Properties, cx));
+            .children(shown.iter().map(|t| Self::render_tab(*t, cx)))
+            .selected_index(selected)
+            .on_click(cx.listener(move |this, ix: &usize, _, cx| {
+                if let Some(tab) = shown.get(*ix) {
+                    this.pick(*tab, cx);
+                }
+            }));
         let head = Self::render_head([
             tabs.into_any_element(),
             self.render_collapse(None).into_any_element(),
