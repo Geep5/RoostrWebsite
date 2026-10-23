@@ -115,6 +115,23 @@ pub fn unknown_tag_paint(fg: Hsla) -> TagPaint {
     }
 }
 
+/// The kit `Tag::color` look (dark theme) for any colour, e.g. a person's chat
+/// colour: its hue and saturation at the kit's 950 (fill, 50%), 800 (border,
+/// 50%) and 300 (text) lightness.
+pub fn tint_paint(color: Hsla) -> TagPaint {
+    let at = |l: f32, a: f32| Hsla {
+        h: color.h,
+        s: color.s,
+        l,
+        a,
+    };
+    TagPaint {
+        bg: at(0.16, 0.5),
+        border: at(0.32, 0.5),
+        fg: at(0.8, 1.),
+    }
+}
+
 /// The pill background of an option with no (known) color: `rgba(255,255,255,0.09)`.
 pub fn unknown_tag_bg() -> Hsla {
     Hsla {

@@ -33,7 +33,6 @@ pub(crate) struct MdTheme {
 
 const OBJ_LINK_BG: u32 = 0x2ea04338;
 const OBJ_LINK_INK: u32 = 0xb8e6c1;
-const MENTION_INK: u32 = 0x1b1b1b;
 
 enum Click {
     Object(String),
@@ -188,9 +187,15 @@ fn build_line(inline: &Inline, md: &MdTheme, names: &[(String, String)], cx: &Ap
                 && let Some((name, icon)) = mention_at(&text[i..], names)
             {
                 line.push(&text[copied..i], &run);
+                // The composer's @agent tag look (kit tag shades of the
+                // person's chat colour); a text run carries no border.
+                let chat = Store::global(cx).read(cx).chat_color.clone();
+                let paint = roostr_core::options::tint_paint(
+                    roostr_core::color::hex(&chat).unwrap_or(theme::accent()),
+                );
                 let pill = TextRun {
-                    color: rgb(MENTION_INK).into(),
-                    background_color: Some(theme::white()),
+                    color: paint.fg,
+                    background_color: Some(paint.bg),
                     font: Font {
                         weight: FontWeight::MEDIUM,
                         ..run.font.clone()

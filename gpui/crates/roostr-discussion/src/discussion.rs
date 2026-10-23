@@ -40,6 +40,7 @@ use roostr_core::color::bubble;
 use roostr_core::io;
 use roostr_core::nav::{self, Route};
 use roostr_core::objects::{is_image_icon, object_icon};
+use roostr_core::options::TagPaint;
 use roostr_core::{
     AgentEndpoint, AgentMessage, Conversation, Object, Store, StoreEvent, guest_agents, lite_ui,
     motion, theme,
@@ -1807,13 +1808,23 @@ const MENU_AVATAR: AvatarLook = AvatarLook {
     mono: false,
 };
 
+/// An avatar's corner: a squircle-like rounded square (30% of the side, the
+/// app-icon look). GPUI has no continuous corners, so this is the nearest
+/// shape that also clips a picture.
+fn avatar_radius(size: f32) -> Pixels {
+    px(size * 0.3)
+}
+
 /// A kit avatar: an image icon (a web address or `data:image/` URL, as
 /// `emoji_or_image_icon` reads them) is its picture; else the emoji, else the
 /// initials on the author's stable hue. The kit avatar only draws an icon or
 /// its own initials and palette without a picture, so those two go in the
-/// fallback slot of the kit's avatar root.
+/// fallback slot of the kit's avatar root. Every layer carries the corner:
+/// GPUI clips children to rectangles, so a fill inside a rounded root would
+/// still paint square.
 fn avatar(icon: &str, initials: String, hue_of: &str, look: AvatarLook) -> AnyElement {
     let size = px(look.size);
+    let radius = avatar_radius(look.size);
     if is_image_icon(icon) {
         let source: Option<ImageSource> = if icon.starts_with("data:") {
             roostr_core::ui::data_url_image(icon).map(ImageSource::Image)
@@ -1824,6 +1835,7 @@ fn avatar(icon: &str, initials: String, hue_of: &str, look: AvatarLook) -> AnyEl
             Some(source) => Avatar::new()
                 .src(source)
                 .with_size(size)
+                .rounded(radius)
                 .border_0()
                 .bg(theme::hl_light())
                 .into_any_element(),
@@ -1832,6 +1844,7 @@ fn avatar(icon: &str, initials: String, hue_of: &str, look: AvatarLook) -> AnyEl
     }
     let fallback = AvatarFallback::new()
         .size_full()
+        .rounded(radius)
         .flex()
         .items_center()
         .justify_center()
@@ -1851,7 +1864,7 @@ fn avatar(icon: &str, initials: String, hue_of: &str, look: AvatarLook) -> AnyEl
     AvatarRoot::new()
         .size(size)
         .flex_none()
-        .rounded_full()
+        .rounded(radius)
         .overflow_hidden()
         .fallback(fallback)
         .into_any_element()
@@ -2020,7 +2033,7 @@ impl Discussion {
             .id(id)
             .flex_none()
             .size(px(ROW_AVATAR.size))
-            .rounded_full()
+            .rounded(avatar_radius(ROW_AVATAR.size))
             .cursor_pointer()
             .hover(|s| {
                 s.shadow(vec![BoxShadow {
@@ -2921,6 +2934,10 @@ impl Discussion {
             .iter()
             .map(|t| (t.id.clone(), (t.icon.clone(), t.type_key.clone())))
             .collect();
+        // @agent tags take the kit tag look in the person's chat colour.
+        let mention_paint = roostr_core::options::tint_paint(
+            roostr_core::color::hex(&chat_color).unwrap_or(theme::accent()),
+        );
         let token_view =
             move |token: &InlineTokenContext, _: &mut Window, cx: &mut App| -> AnyElement {
                 let id = token.token().id().to_string();
@@ -2936,8 +2953,7 @@ impl Discussion {
                     let glyph = object_icon(store.read(cx), &icon, &type_key, &space);
                     return pill(
                         line,
-                        rgba(0x2ea04338).into(),
-                        theme::fg(),
+                        roostr_core::options::tint_paint(rgb(OBJECT_GREEN).into()),
                         glyph,
                         text.trim_start_matches('!').to_string(),
                     )
@@ -2949,7 +2965,7 @@ impl Discussion {
                     .cloned()
                     .filter(|i| !i.is_empty())
                     .unwrap_or_else(|| "🤖".into());
-                pill(line, theme::white(), rgb(0x1b1b1b).into(), icon, name).into_any_element()
+                pill(line, mention_paint, icon, name).into_any_element()
             };
         div()
             .relative()
@@ -3148,23 +3164,26 @@ impl Discussion {
     }
 }
 
-/// An inline pill (kit `Tag`): icon, then the name, one composer line tall
-/// (mention and object tokens in the composer).
-pub(crate) fn pill(line: Pixels, bg: Hsla, ink: Hsla, icon: String, name: String) -> Tag {
+/// The green that object links and `!object` tags are tinted with.
+pub(crate) const OBJECT_GREEN: u32 = 0x2ea043;
+
+/// An inline kit `Tag` in `paint` (the kit tag look: tinted fill, border,
+/// light text): icon, then the name, one composer line tall (mention and
+/// object tokens in the composer).
+pub(crate) fn pill(line: Pixels, paint: TagPaint, icon: String, name: String) -> Tag {
     let icon_el = if is_image_icon(&icon) {
         div().child(roostr_core::ui::emoji_or_image_icon(&icon, px(13.)))
     } else {
         div().text_size(px(12.)).child(icon)
     };
-    Tag::custom(bg, ink, transparent_black())
-        .rounded(px(3.))
+    Tag::custom(paint.bg, paint.fg, paint.border)
+        .rounded(px(4.))
         .h(line)
         .gap(px(3.))
-        .px(px(2.))
+        .px(px(4.))
         .py_0()
-        .border_0()
         .text_size(px(14.))
-        .line_height(line)
+        .line_height(line - px(2.))
         .font_weight(FontWeight::MEDIUM)
         .child(icon_el)
         .child(name)
