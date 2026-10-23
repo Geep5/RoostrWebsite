@@ -17,7 +17,7 @@ use gpui_kit::{AppContext as _, Pixels, Point, point, px, size};
 use roostr_core::io::{BoxFuture, BoxStream};
 use roostr_core::nav::{Route, navigate};
 use roostr_core::types::{Object, ObjectSummary, QueryResult, RelationDef, Settings, Space, Value};
-use roostr_core::{Backend, BackendEvent, JsonMap, PaneState};
+use roostr_core::{Backend, BackendEvent, JsonMap, PaneState, PaneTab};
 use roostr_shell::Workspace;
 use serde_json::{Value as Json, json};
 
@@ -130,25 +130,35 @@ fn wheel(cx: &mut VisualTestContext, at: Point<Pixels>, phase: TouchPhase, dy: f
 }
 
 /// Drags from the first message text at or below `at` to the right edge of
-/// the line below it, and copies: that message's text.
+/// the line below it, and copies: that message's text. A probe that lands on
+/// a wrapped message's last line moves on to the next message.
 fn copy_message_at(cx: &mut VisualTestContext, at: Point<Pixels>, right: Pixels) -> String {
-    let start = (0..40)
-        .map(|step| point(at.x, at.y + px(step as f32 * 4.)))
-        .find(|probe| {
-            cx.simulate_mouse_move(*probe, None, Modifiers::none());
-            cx.update(|window, cx| TextSelection::is_selectable_at(*probe, window, cx))
-        })
-        .expect("message text below the probe");
-    let end = point(right, start.y + px(20.));
-    cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::none());
-    cx.simulate_mouse_move(end, Some(MouseButton::Left), Modifiers::none());
-    cx.simulate_mouse_up(end, MouseButton::Left, Modifiers::none());
-    cx.run_until_parked();
-    cx.simulate_keystrokes("cmd-c");
-    cx.run_until_parked();
-    cx.read_from_clipboard()
-        .and_then(|item| item.text())
-        .unwrap_or_default()
+    let mut top = at.y;
+    for _ in 0..4 {
+        let start = (0..40)
+            .map(|step| point(at.x, top + px(step as f32 * 4.)))
+            .find(|probe| {
+                cx.simulate_mouse_move(*probe, None, Modifiers::none());
+                cx.update(|window, cx| TextSelection::is_selectable_at(*probe, window, cx))
+            })
+            .expect("message text below the probe");
+        let end = point(right, start.y + px(20.));
+        cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_move(end, Some(MouseButton::Left), Modifiers::none());
+        cx.simulate_mouse_up(end, MouseButton::Left, Modifiers::none());
+        cx.run_until_parked();
+        cx.simulate_keystrokes("cmd-c");
+        cx.run_until_parked();
+        let copied = cx
+            .read_from_clipboard()
+            .and_then(|item| item.text())
+            .unwrap_or_default();
+        if copied.contains("Message") {
+            return copied;
+        }
+        top = start.y + px(12.);
+    }
+    String::new()
 }
 
 /// The number of the message `copied` came from.
@@ -178,7 +188,7 @@ fn the_chat_pane_scrolls_and_its_text_selects(cx: &mut TestAppContext) {
     });
     cx.simulate_resize(size(px(1280.), px(800.)));
     cx.update(|_, cx| {
-        PaneState::global(cx).update(cx, |pane, cx| pane.set_open(true, cx));
+        PaneState::global(cx).update(cx, |pane, cx| pane.set_open(PaneTab::Chat, true, cx));
         navigate(Route::Object("page-1".into()), cx);
     });
     cx.run_until_parked();

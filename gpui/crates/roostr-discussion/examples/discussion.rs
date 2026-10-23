@@ -1,13 +1,13 @@
 //! `cargo run -p roostr-discussion --example discussion -- [object-id] [drawer|page|opener] [thread-id]`
 //!
 //! - `drawer` (default): the object's discussion as a chat object's page shows
-//!   it (full, natural height in a scrolling page) beside the Chat & properties
-//!   drawer at the pane's width.
+//!   it (full, natural height in a scrolling page) beside the Chat and
+//!   Properties columns at their widths.
 //! - `page`: the full-screen `/app/chat/:id` page.
-//! - `opener`: the collapsed "N comments" opener in a page, beside the drawer.
+//! - `opener`: the collapsed "N comments" opener in a page, beside the columns.
 
 use gpui_kit::*;
-use roostr_core::{PaneState, theme};
+use roostr_core::{PaneState, PaneTab, theme};
 use roostr_discussion::{ChatPage, ConversationDrawer, Discussion, DiscussionOptions, pane_counts};
 
 const DEFAULT_OBJECT: &str = "seed-page-launch-plan";
@@ -21,19 +21,47 @@ struct Frame {
 impl Render for Frame {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let pane = PaneState::global(cx);
-        let (open, width) = {
-            let p = pane.read(cx);
-            (p.open, p.width)
-        };
         let store = roostr_core::Store::global(cx);
         if let Some(object) = store.read(cx).object(&self.object_id) {
             let (count, conversations) = pane_counts(&object);
-            pane.update(cx, |p, cx| p.publish(true, count, conversations, cx));
+            pane.update(cx, |p, cx| p.publish(true, true, count, conversations, cx));
         }
+        let views = ConversationDrawer::views(&self.drawer, cx);
         let (count, conversations) = {
             let p = pane.read(cx);
             (p.count, p.conv_count)
         };
+        let columns = [PaneTab::Chat, PaneTab::Properties].map(|tab| {
+            let (open, width) = {
+                let p = pane.read(cx);
+                (p.is_open(tab), p.width(tab))
+            };
+            match views.column(tab) {
+                Some(view) if open => div()
+                    .flex_none()
+                    .w(px(width))
+                    .h_full()
+                    .ml(px(6.))
+                    .rounded(theme::radius::page())
+                    .bg(theme::bg())
+                    .child(view),
+                _ => div().flex_none().p(px(8.)).child(
+                    div()
+                        .id(tab.name())
+                        .px(px(8.))
+                        .py(px(4.))
+                        .rounded(px(7.))
+                        .border_1()
+                        .border_color(theme::border())
+                        .text_color(theme::muted())
+                        .cursor_pointer()
+                        .on_click(move |_, _, cx| {
+                            PaneState::global(cx).update(cx, |p, cx| p.set_open(tab, true, cx))
+                        })
+                        .child(format!("‹ {}", tab.name())),
+                ),
+            }
+        });
         div()
             .size_full()
             .flex()
@@ -59,32 +87,7 @@ impl Render for Frame {
                     )
                     .child(self.page.clone()),
             )
-            .child(if open {
-                div()
-                    .flex_none()
-                    .w(px(width))
-                    .h_full()
-                    .ml(px(6.))
-                    .rounded(theme::radius::page())
-                    .bg(theme::bg())
-                    .child(self.drawer.clone())
-            } else {
-                div().flex_none().p(px(8.)).child(
-                    div()
-                        .id("reopen")
-                        .px(px(8.))
-                        .py(px(4.))
-                        .rounded(px(7.))
-                        .border_1()
-                        .border_color(theme::border())
-                        .text_color(theme::muted())
-                        .cursor_pointer()
-                        .on_click(|_, _, cx| {
-                            PaneState::global(cx).update(cx, |p, cx| p.set_open(true, cx))
-                        })
-                        .child("‹ Chat & properties"),
-                )
-            })
+            .children(columns)
     }
 }
 

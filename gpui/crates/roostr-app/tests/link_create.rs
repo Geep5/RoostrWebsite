@@ -303,10 +303,10 @@ fn a_typed_name_in_a_task_link_picker_creates_and_links_the_task(cx: &mut TestAp
     cx.simulate_resize(size(px(1400.), px(900.)));
     settle(cx);
 
-    // The Human's page; its right pane's Properties tab lists `tasks`.
+    // The Human's page; its Properties column beside the page lists `tasks`.
     cx.update(|_, cx| navigate(Route::Object(HUMAN.into()), cx));
     settle(cx);
-    tap(cx, "pane-tab-Properties");
+    assert!(shown(cx, "pane-col-Properties"), "the Properties column");
     // The empty relation's editor opens straight on its link picker.
     tap(cx, "prop-row-tasks");
     assert!(shown(cx, "obj-menu"), "the link picker");

@@ -11,10 +11,11 @@ use gpui_kit::component::IconNamed as _;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use roostr_core::nav::Route;
+use roostr_core::pane::{Column, PaneLayout, PaneViews};
 use roostr_core::store::Store;
 use roostr_core::types::Space;
 use roostr_core::{
-    Connection, Glyph, NavEvent, Navigator, PaneState, StoreEvent, UiState, motion, theme,
+    Connection, Glyph, NavEvent, Navigator, PaneState, PaneTab, StoreEvent, UiState, motion, theme,
 };
 use web_time::Instant;
 
@@ -121,12 +122,16 @@ pub struct Workspace {
     pub(crate) rail_drag: Option<RailDrag>,
     pub(crate) side_width: f32,
     side_drag: Option<(Pixels, f32)>,
-    pane_drag: Option<(Pixels, f32)>,
+    /// A pane column's resizer drags: (column, pointer x, width) at the start.
+    pane_drag: Option<(PaneTab, Pixels, f32)>,
     pub(crate) nav_hidden: bool,
     dwell: Option<Dwell>,
     rail_col: motion::ValueState,
     side_col: motion::ValueState,
-    pane_col: motion::ValueState,
+    chat_col: motion::ValueState,
+    props_col: motion::ValueState,
+    /// The pane columns the last frame laid out (what a resizer drags against).
+    pane_layout: PaneLayout,
     /// The desk has rendered: columns animate only after its first frame
     /// (a CSS transition doesn't run on mount).
     desk_shown: bool,
@@ -270,7 +275,9 @@ impl Workspace {
             dwell: None,
             rail_col: motion::ValueState::new(f64::from(rail_col)),
             side_col: motion::ValueState::new(f64::from(side_col)),
-            pane_col: motion::ValueState::new(0.),
+            chat_col: motion::ValueState::new(0.),
+            props_col: motion::ValueState::new(0.),
+            pane_layout: PaneLayout::HIDDEN,
             desk_shown: false,
             pin_folds: HashMap::new(),
             legacy_folds,
@@ -450,7 +457,7 @@ impl Workspace {
         // anything else starts without one.
         let publishes = matches!(route, Route::Object(_)) && self.page_cache.contains_key(&route);
         if !publishes {
-            PaneState::global(cx).update(cx, |pane, cx| pane.publish(false, 0, 0, cx));
+            PaneState::global(cx).update(cx, |pane, cx| pane.publish(false, false, 0, 0, cx));
             crate::set_pane(None, cx);
         }
         // Views live while a tab of this space shows their route.
@@ -583,10 +590,11 @@ impl Workspace {
         cx.notify();
     }
 
+    /// The edge drawer tab: collapse both columns while any is expanded, else expand both.
     fn toggle_pane(cx: &mut App) {
         PaneState::global(cx).update(cx, |pane, cx| {
-            let open = !pane.open;
-            pane.set_open(open, cx);
+            let open = !pane.any_open();
+            pane.set_all(open, cx);
         });
     }
 
@@ -646,16 +654,20 @@ impl Workspace {
         } else if let Some((start_x, start_w)) = self.side_drag {
             self.side_width = (start_w + f32::from(position.x - start_x)).clamp(SIDE_MIN, SIDE_MAX);
             cx.notify();
-        } else if let Some((start_x, start_w)) = self.pane_drag {
-            // As wide as the window allows: the page beside it keeps its minimum.
-            let nav = if self.nav_hidden { 0. } else { self.rail_width + self.side_width };
-            let room = f32::from(window.viewport_size().width) - nav;
-            let width = (start_w + f32::from(start_x - position.x))
-                .clamp(roostr_core::pane::MIN_WIDTH, roostr_core::pane::max_width(room));
-            PaneState::global(cx).update(cx, |pane, cx| {
-                pane.width = width;
-                cx.notify();
-            });
+        } else if let Some((tab, start_x, start_w)) = self.pane_drag {
+            // As wide as the window allows: the page beside the columns keeps its minimum.
+            let nav = if self.nav_hidden {
+                0.
+            } else {
+                self.rail_width + self.side_width
+            };
+            let other = self.pane_layout.get(tab.other()).width();
+            let room = f32::from(window.viewport_size().width) - nav - other;
+            let width = (start_w + f32::from(start_x - position.x)).clamp(
+                roostr_core::pane::MIN_WIDTH,
+                roostr_core::pane::max_width(room),
+            );
+            PaneState::global(cx).update(cx, |pane, cx| pane.set_width(tab, width, cx));
         }
     }
 
@@ -673,12 +685,8 @@ impl Workspace {
             self.rail_persist(cx);
         } else if self.side_drag.take().is_some() {
             UiState::set(cx, "side-width", &self.side_width.round().to_string());
-        } else if self.pane_drag.take().is_some() {
-            let width = PaneState::global(cx).read(cx).width;
-            PaneState::global(cx).update(cx, |pane, cx| {
-                pane.width = 0.;
-                pane.set_width(width, cx);
-            });
+        } else if let Some((tab, ..)) = self.pane_drag.take() {
+            PaneState::global(cx).update(cx, |pane, cx| pane.save_width(tab, cx));
         }
         cx.notify();
     }
@@ -852,11 +860,11 @@ impl Workspace {
             .h(px(hit_h))
             .flex()
             .items_center()
-            // Shut, the pill sits a few px in from the window edge.
+            // Shut, the nav pill sits a few px in from the window edge; the
+            // pane's always sits in the gap left of its columns or strips.
             .map(|d| match (which, open) {
-                (_, true) => d.justify_center(),
                 (DwellTab::Nav, false) => d.justify_start().pl(px(4.)),
-                (DwellTab::Pane, false) => d.justify_end().pr(px(4.)),
+                _ => d.justify_center(),
             })
             .cursor_pointer()
             .child(pill)
@@ -876,6 +884,103 @@ impl Workspace {
                     DwellTab::Pane => Self::toggle_pane(cx),
                 }
             }))
+    }
+
+    /// A pane column `col` px wide (animated), its 6px gap on the right: the
+    /// published column view while expanded, else its strip.
+    fn render_pane_column(
+        &self,
+        tab: PaneTab,
+        column: Column,
+        col: f32,
+        views: Option<&PaneViews>,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let inner = match column {
+            _ if col <= 6. => None,
+            Column::Open(_) => views
+                .and_then(|v| v.column(tab))
+                .map(IntoElement::into_any_element),
+            Column::Strip => Some(self.render_pane_strip(tab, cx).into_any_element()),
+            Column::Hidden => None,
+        };
+        div()
+            .flex_none()
+            .w(px(col))
+            .h_full()
+            .py(px(6.))
+            .when_some(inner, |d, inner| {
+                d.child(
+                    div()
+                        .flex_none()
+                        .w(px(col - 6.))
+                        .h_full()
+                        .rounded(theme::radius::page())
+                        .bg(theme::bg())
+                        .overflow_hidden()
+                        .flex()
+                        .flex_col()
+                        .child(inner),
+                )
+            })
+    }
+
+    /// A collapsed column: its icon over its name, letter by letter; a click expands it.
+    fn render_pane_strip(&self, tab: PaneTab, cx: &mut Context<Self>) -> Stateful<Div> {
+        let name = tab.name();
+        let tip = match tab {
+            PaneTab::Chat => "Show chat",
+            PaneTab::Properties => "Show properties",
+        };
+        div()
+            .id(crate::eid("pane-strip", name))
+            .debug_selector(move || format!("pane-strip-{name}"))
+            .size_full()
+            .flex()
+            .flex_col()
+            .items_center()
+            .gap(px(8.))
+            .pt(px(14.))
+            .cursor_pointer()
+            .text_color(theme::muted())
+            .hover(|s| s.bg(theme::hover()).text_color(theme::fg()))
+            .tooltip(crate::tip(tip))
+            .on_click(move |_, _, cx| {
+                PaneState::global(cx).update(cx, |p, cx| p.set_open(tab, true, cx))
+            })
+            .child(div().text_size(px(13.)).child(tab.icon(cx)))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .text_size(px(11.5))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .line_height(px(13.))
+                    .children(name.chars().map(|c| div().child(c.to_string()))),
+            )
+    }
+
+    /// The resizer on an expanded column's left edge, `edge` px from the window's right.
+    fn render_pane_resize(&self, tab: PaneTab, edge: f32, cx: &mut Context<Self>) -> Stateful<Div> {
+        div()
+            .id(crate::eid("pane-resize", tab.name()))
+            .debug_selector(move || format!("pane-resize-{}", tab.name()))
+            .absolute()
+            .top(px(6.))
+            .bottom(px(6.))
+            .right(px(edge - 6.))
+            .w(px(12.))
+            .cursor_col_resize()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, e: &MouseDownEvent, _, cx| {
+                    let width = this.pane_layout.get(tab).width();
+                    this.pane_drag = Some((tab, e.position.x, width));
+                    cx.stop_propagation();
+                    cx.notify();
+                }),
+            )
     }
 
     fn render_main(&mut self, wide: bool, window: &mut Window, cx: &mut Context<Self>) -> Div {
@@ -927,20 +1032,34 @@ impl Workspace {
         // Build (or fetch) the page first: a new page publishes its pane while being built.
         let route = Navigator::global(cx).read(cx).route().clone();
         self.page(&route, window, cx);
-        let pane = PaneState::global(cx).read(cx);
-        let (pane_open, pane_available, pane_width) = (pane.open, pane.available, pane.width);
-        let pane_view = PaneHost::global(cx).read(cx).view.clone();
-        let affixed = pane_open && pane_available && pane_view.is_some();
+        let views = PaneHost::global(cx).read(cx).views.clone();
         let animate = !self.resizing() && self.desk_shown;
         self.desk_shown = true;
         let rail_target = if self.nav_hidden { 0. } else { self.rail_width };
         let rail_col = column(&mut self.rail_col, rail_target, animate, window, cx);
         let side_target = if self.nav_hidden { 0. } else { self.side_width };
         let side_col = column(&mut self.side_col, side_target, animate, window, cx);
-        // A narrower window narrows the pane to fit; the chosen width comes back when there is room.
+        // A narrower window narrows the columns to fit (or shows one and a
+        // strip); the chosen widths come back when there is room.
         let room = f32::from(window.viewport_size().width) - rail_target - side_target;
-        let pane_target = if affixed { pane_width.min(roostr_core::pane::max_width(room)) } else { 0. };
-        let pane_col = column(&mut self.pane_col, pane_target, animate, window, cx);
+        let (layout, pane_open) = {
+            let pane = PaneState::global(cx).read(cx);
+            let layout = if views.is_some() {
+                pane.layout(room)
+            } else {
+                PaneLayout::HIDDEN
+            };
+            (layout, pane.any_open())
+        };
+        self.pane_layout = layout;
+        let chat_col = column(&mut self.chat_col, layout.chat.width(), animate, window, cx);
+        let props_col = column(
+            &mut self.props_col,
+            layout.properties.width(),
+            animate,
+            window,
+            cx,
+        );
         let wide = Self::open_object_id(cx)
             .and_then(|id| {
                 Store::global(cx)
@@ -991,28 +1110,21 @@ impl Workspace {
                     }),
             )
             .child(self.render_main(wide, window, cx))
-            // Right pane column.
-            .child(
-                div()
-                    .flex_none()
-                    .w(px(pane_col))
-                    .h_full()
-                    .py(px(6.))
-                    .when_some(pane_view.filter(|_| pane_col > 6.), |d, view| {
-                        d.child(
-                            div()
-                                .flex_none()
-                                .w(px(pane_col - 6.))
-                                .h_full()
-                                .rounded(theme::radius::page())
-                                .bg(theme::bg())
-                                .overflow_hidden()
-                                .flex()
-                                .flex_col()
-                                .child(view),
-                        )
-                    }),
-            )
+            // The right pane's columns: Chat, then Properties.
+            .child(self.render_pane_column(
+                PaneTab::Chat,
+                layout.chat,
+                chat_col,
+                views.as_ref(),
+                cx,
+            ))
+            .child(self.render_pane_column(
+                PaneTab::Properties,
+                layout.properties,
+                props_col,
+                views.as_ref(),
+                cx,
+            ))
             // Resizers (in the gaps between panes).
             .when(!self.nav_hidden, |d| {
                 d.child(self.render_rail_resize(rail_col, window, cx))
@@ -1035,38 +1147,22 @@ impl Workspace {
                             ),
                     )
             })
-            .when(affixed, |d| {
-                d.child(
-                    div()
-                        .id("dd-resize")
-                        .absolute()
-                        .top(px(6.))
-                        .bottom(px(6.))
-                        .right(px(pane_col - 6.))
-                        .w(px(12.))
-                        .cursor_col_resize()
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(|this, e: &MouseDownEvent, _, cx| {
-                                this.pane_drag =
-                                    Some((e.position.x, PaneState::global(cx).read(cx).width));
-                                cx.stop_propagation();
-                                cx.notify();
-                            }),
-                        ),
-                )
-            })
+            .children(
+                [
+                    (PaneTab::Chat, layout.chat, chat_col + props_col),
+                    (PaneTab::Properties, layout.properties, props_col),
+                ]
+                .into_iter()
+                .filter(|(_, column, _)| column.is_open())
+                .map(|(tab, _, edge)| self.render_pane_resize(tab, edge, cx)),
+            )
             // Drawer tabs.
             .child(
                 self.render_drawer_tab(DwellTab::Nav, !self.nav_hidden, window, cx)
                     .left(px(nav_tab_left)),
             )
-            .when(pane_available, |d| {
-                let right = if pane_open {
-                    (pane_col + 3. - 8. - drawer_tab_spill()).max(0.)
-                } else {
-                    0.
-                };
+            .when(layout != PaneLayout::HIDDEN, |d| {
+                let right = (chat_col + props_col + 3. - 8. - drawer_tab_spill()).max(0.);
                 d.child(
                     self.render_drawer_tab(DwellTab::Pane, pane_open, window, cx)
                         .right(px(right)),

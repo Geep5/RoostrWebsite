@@ -303,9 +303,15 @@ impl Workspace {
         // On a phone the chat & properties pane is a full-screen sheet over
         // the object (`.disc-drawer` @media 720).
         let pane = PaneState::global(cx).read(cx);
-        let (pane_open, pane_available) = (pane.open, pane.available);
-        let sheet = (matches!(route, Route::Object(_)) && pane_open && pane_available)
-            .then(|| PaneHost::global(cx).read(cx).view.clone())
+        let (sheet_open, pane_available) = (pane.sheet, pane.available);
+        let sheet = (matches!(route, Route::Object(_)) && sheet_open && pane_available)
+            .then(|| {
+                PaneHost::global(cx)
+                    .read(cx)
+                    .views
+                    .as_ref()
+                    .map(|v| v.sheet.clone())
+            })
             .flatten()
             .map(|view| {
                 div()
@@ -714,7 +720,9 @@ impl Workspace {
                     )
                 })
                 .map(|d| self.data_tip(d, "tip-m-pane", "Chat & properties", cx))
-                .on_click(|_, _, cx| PaneState::global(cx).update(cx, |p, cx| p.set_open(true, cx)))
+                .on_click(|_, _, cx| {
+                    PaneState::global(cx).update(cx, |p, cx| p.set_sheet(true, cx))
+                })
         });
         let sync = (relation || summary).then(|| self.render_m_sync(window, cx));
         let actions = (relation || summary || space).then(|| {

@@ -3,7 +3,7 @@
 //! per-space tab strip, page header with back/forward, search path, graph link
 //! and the More menu, drawer tabs, resizers, the search modal (⌘K) and the
 //! boot states. The main area shows whatever [`PageFactory`] builds for the
-//! active route; the right "Chat & properties" pane shows what the page
+//! active route; the right "Chat & properties" columns show what the page
 //! publishes with [`set_pane`]. At [`roostr_core::layout::is_mobile`] widths
 //! the mobile shell replaces all of that (Spaces list → space home → object).
 //!
@@ -12,7 +12,7 @@
 //!   [`OpenSettings`] action (open roostr-settings' modal).
 //! - [`Workspace::identity_gate`]: the view shown instead of the workspace
 //!   while the daemon has no identity.
-//! - [`set_pane`]: the object page's right pane (ConversationDrawer).
+//! - [`set_pane`]: the object page's right pane (ConversationDrawer's views).
 //! - Actions [`Search`], [`NewObject`], [`OpenSettings`] for the app menu.
 
 mod back_swipe;
@@ -32,6 +32,7 @@ mod workspace;
 use gpui_kit::{
     AnyView, App, AppContext as _, Entity, Global, KeyBinding, SharedString, Window, actions,
 };
+use roostr_core::PaneViews;
 
 pub use workspace::{PageFactory, Workspace};
 
@@ -77,27 +78,27 @@ pub fn init(cx: &mut App) {
 }
 
 /// The right pane's content (`discussionUI` aside): the page shown in the
-/// main area publishes its pane view here when it becomes the active route
+/// main area publishes its pane views here when it becomes the active route
 /// (`None` = no pane). The shell clears it whenever it shows a route whose
 /// page has not been built yet or that is not an object page.
-pub fn set_pane(view: Option<AnyView>, cx: &mut App) {
+pub fn set_pane(views: Option<PaneViews>, cx: &mut App) {
     let host = PaneHost::global(cx);
     host.update(cx, |host, cx| {
-        let same = match (&host.view, &view) {
-            (Some(a), Some(b)) => a.entity_id() == b.entity_id(),
+        let same = match (&host.views, &views) {
+            (Some(a), Some(b)) => a.sheet.entity_id() == b.sheet.entity_id(),
             (None, None) => true,
             _ => false,
         };
         if !same {
-            host.view = view;
+            host.views = views;
             cx.notify();
         }
     });
 }
 
-/// Holder of the published pane view.
+/// Holder of the published pane views.
 pub(crate) struct PaneHost {
-    pub(crate) view: Option<AnyView>,
+    pub(crate) views: Option<PaneViews>,
 }
 
 struct GlobalPaneHost(Entity<PaneHost>);
@@ -109,7 +110,7 @@ impl PaneHost {
         if let Some(host) = cx.try_global::<GlobalPaneHost>() {
             return host.0.clone();
         }
-        let host = cx.new(|_| Self { view: None });
+        let host = cx.new(|_| Self { views: None });
         cx.set_global(GlobalPaneHost(host.clone()));
         host
     }

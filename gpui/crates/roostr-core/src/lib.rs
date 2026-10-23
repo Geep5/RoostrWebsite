@@ -54,7 +54,7 @@ use gpui_kit::App;
 pub use backend::{Backend, BackendEvent, JsonMap};
 pub use icons::{Assets, Glyph};
 pub use nav::{NavEvent, Navigator, Route};
-pub use pane::PaneState;
+pub use pane::{PaneState, PaneTab, PaneViews};
 pub use store::{AgentRef, Connection, ObjectSlot, Store, StoreEvent, TypeDef};
 pub use types::*;
 pub use ui_state::UiState;

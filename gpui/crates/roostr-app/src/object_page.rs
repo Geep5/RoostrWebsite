@@ -164,7 +164,7 @@ impl ObjectPage {
     /// object opens on its own page; the header's chat button opens the sheet.
     fn close_sheet_on_phone(&self, window: &Window, cx: &mut App) {
         if is_mobile(window) {
-            PaneState::global(cx).update(cx, |pane, cx| pane.set_open(false, cx));
+            PaneState::global(cx).update(cx, |pane, cx| pane.set_sheet(false, cx));
         }
     }
 
@@ -273,15 +273,19 @@ impl ObjectPage {
     /// `discussionUI.available/count/convCount` + the pane view, for the shell.
     fn publish_pane(&mut self, cx: &mut Context<Self>) {
         let Some(object) = self.object(cx) else {
-            PaneState::global(cx).update(cx, |p, cx| p.publish(false, 0, 0, cx));
+            PaneState::global(cx).update(cx, |p, cx| p.publish(false, false, 0, 0, cx));
             roostr_shell::set_pane(None, cx);
             return;
         };
         let (has_discussion, has_pane) = pane_flags(&object);
         let (count, conversations) = roostr_discussion::pane_counts(&object);
         let conversations = if has_discussion { conversations } else { 0 };
-        PaneState::global(cx).update(cx, |p, cx| p.publish(has_pane, count, conversations, cx));
-        roostr_shell::set_pane(self.pane.as_ref().map(|(_, view)| view.clone().into()), cx);
+        PaneState::global(cx).update(cx, |p, cx| {
+            p.publish(has_pane, has_discussion, count, conversations, cx)
+        });
+        let drawer = self.pane.as_ref().map(|(_, drawer)| drawer.clone());
+        let views = drawer.map(|drawer| ConversationDrawer::views(&drawer, cx));
+        roostr_shell::set_pane(views, cx);
     }
 
     fn save_name(&mut self, cx: &mut Context<Self>) {

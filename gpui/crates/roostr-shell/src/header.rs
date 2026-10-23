@@ -169,7 +169,7 @@ impl Workspace {
         let object_id = Self::open_object_id(cx);
         let route = Navigator::global(cx).read(cx).route().clone();
         let (path_icon, path_name, graph_path) = self.header_path(&route, cx);
-        let (has_more, pane_available, pane_open, count) = {
+        let (has_more, pane_closed, count) = {
             let store = Store::global(cx).read(cx);
             let has_more = object_id.as_ref().is_some_and(|id| {
                 store.relations.iter().any(|r| r.id == *id)
@@ -177,7 +177,10 @@ impl Workspace {
                     || store.space(id).is_some()
             });
             let pane = PaneState::global(cx).read(cx);
-            (has_more, pane.available, pane.open, pane.count)
+            // The pane button opens Chat (Properties without one) while it is collapsed.
+            let primary = pane.primary();
+            let closed = (pane.available && !pane.is_open(primary)).then_some(primary);
+            (has_more, closed, pane.count)
         };
         let path = div()
             .id("path")
@@ -238,7 +241,7 @@ impl Workspace {
                     }),
             )
             .when(has_more, |d| d.child(self.render_more(window, cx)))
-            .when(pane_available && !pane_open, |d| {
+            .when_some(pane_closed, |d, primary| {
                 let badge = if count > 99 {
                     "99+".to_string()
                 } else {
@@ -277,8 +280,8 @@ impl Workspace {
                             )
                         })
                         .map(|d| self.data_tip(d, "tip-pane", "Chat & properties", cx))
-                        .on_click(|_, _, cx| {
-                            PaneState::global(cx).update(cx, |p, cx| p.set_open(true, cx))
+                        .on_click(move |_, _, cx| {
+                            PaneState::global(cx).update(cx, |p, cx| p.set_open(primary, true, cx))
                         }),
                 )
             });

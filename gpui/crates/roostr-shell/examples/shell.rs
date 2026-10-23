@@ -7,8 +7,9 @@
 //!   cargo run -p roostr-shell --example shell [-- <object id to open>]
 //! ```
 //!
-//! Object pages publish a stand-in right pane so the pane column, its drawer
-//! tab, resizer and the header's pane button can be exercised too.
+//! Object pages publish stand-in pane views so the Chat and Properties
+//! columns, their strips, drawer tab, resizers and the header's pane button
+//! can be exercised too.
 
 use std::rc::Rc;
 use std::sync::Arc;
@@ -19,16 +20,17 @@ use roostr_core::daemon::{DaemonBackend, DaemonConfig};
 use roostr_core::harness::Harness;
 use roostr_core::nav::{NavEvent, Navigator, Route};
 use roostr_core::store::Store;
-use roostr_core::{PaneState, theme};
+use roostr_core::{PaneState, PaneViews, theme};
 use roostr_shell::{PageFactory, Workspace};
 
 /// A stand-in page: the route and what the store knows about it.
 struct RoutePage {
     route: Route,
-    pane: Option<Entity<PanePlaceholder>>,
+    pane: Option<PaneViews>,
 }
 
-struct PanePlaceholder(String);
+/// A stand-in for one part of the pane: (object id, part).
+struct PanePlaceholder(String, &'static str);
 
 impl Render for PanePlaceholder {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
@@ -37,7 +39,7 @@ impl Render for PanePlaceholder {
             .p_4()
             .text_color(theme::muted())
             .text_size(px(13.))
-            .child(format!("Right pane for {}", self.0))
+            .child(format!("{} for {}", self.1, self.0))
     }
 }
 
@@ -47,8 +49,12 @@ impl RoutePage {
             .detach();
         let pane = match &route {
             Route::Object(id) => {
-                let id = id.clone();
-                Some(cx.new(|_| PanePlaceholder(id)))
+                let mut part = |name| AnyView::from(cx.new(|_| PanePlaceholder(id.clone(), name)));
+                Some(PaneViews {
+                    sheet: part("Pane sheet"),
+                    chat: Some(part("Chat")),
+                    properties: part("Properties"),
+                })
             }
             _ => None,
         };
@@ -65,8 +71,8 @@ impl RoutePage {
 
     fn publish(&mut self, cx: &mut Context<Self>) {
         if let Some(pane) = &self.pane {
-            PaneState::global(cx).update(cx, |p, cx| p.publish(true, 3, 1, cx));
-            roostr_shell::set_pane(Some(pane.clone().into()), cx);
+            PaneState::global(cx).update(cx, |p, cx| p.publish(true, true, 3, 1, cx));
+            roostr_shell::set_pane(Some(pane.clone()), cx);
         }
     }
 }
