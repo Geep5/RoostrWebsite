@@ -2,10 +2,13 @@
 //! open in new tab, change type, edit properties, add to / remove from a
 //! collection, move to bin. Bulk by construction: it acts on every id given.
 
+use std::cell::Cell;
 use std::collections::HashMap;
+use std::rc::Rc;
 
 use gpui_kit::component::Icon;
 use gpui_kit::component::input::{Escape as InputEscape, Input, InputEvent, InputState};
+use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use roostr_core::nav::{self, Route};
@@ -15,7 +18,7 @@ use roostr_core::relations::{is_reserved_key, space_relations};
 use roostr_core::{Fields, Glyph, RelationDef, Store, Value, api, theme};
 use roostr_properties::PropertyValue;
 
-use crate::common::{self, menu_surface};
+use crate::common;
 use crate::config;
 
 /// What the menu tells its host.
@@ -67,9 +70,16 @@ pub(crate) struct RowContextMenu {
     edit_key: String,
     edit_value: Option<Value>,
     blocked: HashMap<String, String>,
-    focus: FocusHandle,
-    /// The menu's bounds on the last frame: its flyouts sit against them.
+    /// The kit menu of top-level rows, and the protected-id count it was
+    /// built for (rebuilt when that changes).
+    menu: Entity<PopupMenu>,
+    menu_blocked: Option<usize>,
+    /// Set by a flyout row's click so the menu's dismiss keeps it open.
+    keep_open: Rc<Cell<bool>>,
+    /// The menu's bounds on the last frame and each flyout row's: a flyout
+    /// sits against the menu, level with its row.
     menu_bounds: common::BoundsCell,
+    fly_rows: [common::BoundsCell; 3],
     _subs: Vec<Subscription>,
 }
 
@@ -90,6 +100,7 @@ impl RowContextMenu {
         let type_filter = cx.new(|cx| InputState::new(window, cx).placeholder("Search types..."));
         let prop_filter =
             cx.new(|cx| InputState::new(window, cx).placeholder("Filter properties..."));
+        let menu = PopupMenu::build(window, cx, |menu, _, _| menu);
         let subs = vec![
             cx.subscribe_in(
                 &type_filter,
@@ -104,9 +115,12 @@ impl RowContextMenu {
                 },
             ),
             cx.observe(&prop_filter, |_, _, cx| cx.notify()),
+            cx.subscribe_in(&menu, window, |this, _, _: &DismissEvent, window, cx| {
+                this.menu_dismissed(window, cx)
+            }),
         ];
-        let focus = cx.focus_handle();
-        window.focus(&focus, cx);
+        // Keyboard focus starts in the menu: arrows, Enter and Escape.
+        window.focus(&menu.focus_handle(cx), cx);
         let task = blockers_for(&ids, cx);
         cx.spawn(async move |this, cx| {
             if let Ok(blocked) = task.await {
@@ -130,8 +144,15 @@ impl RowContextMenu {
             edit_key: String::new(),
             edit_value: None,
             blocked: HashMap::new(),
-            focus,
+            menu,
+            menu_blocked: None,
+            keep_open: Rc::new(Cell::new(false)),
             menu_bounds: common::bounds_cell(),
+            fly_rows: [
+                common::bounds_cell(),
+                common::bounds_cell(),
+                common::bounds_cell(),
+            ],
             _subs: subs,
         }
     }
@@ -434,12 +455,6 @@ impl RowContextMenu {
         .detach();
     }
 
-    fn item(&self, id: &'static str, glyph: Glyph, label: String, hovered: bool) -> Stateful<Div> {
-        menu_item(id, hovered)
-            .child(Icon::new(glyph).size(px(16.)))
-            .child(label)
-    }
-
     fn render_fly(
         &mut self,
         kind: Fly,
@@ -478,7 +493,7 @@ impl RowContextMenu {
                             if this.type_filter.read(cx).value().is_empty() {
                                 this.fly = None;
                                 // Keep keyboard focus in the menu: the next Escape closes it.
-                                window.focus(&this.focus, cx);
+                                window.focus(&this.menu.focus_handle(cx), cx);
                             } else {
                                 this.type_filter
                                     .update(cx, |s, cx| s.set_value("", window, cx));
@@ -665,151 +680,130 @@ fn none_row(text: String) -> Div {
         .child(text)
 }
 
-impl Render for RowContextMenu {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+/// One top-level row's content (`.ctx-item`: 16px icon, 9px gap, 13px label,
+/// 7×10 padding). It spans the kit row edge to edge (the kit pads 8px) so the
+/// open-flyout highlight covers the whole row.
+fn row_body(glyph: Glyph, label: SharedString) -> Div {
+    div()
+        .flex()
+        .flex_1()
+        .items_center()
+        .gap(px(9.))
+        .mx(px(-8.))
+        .px(px(10.))
+        .py(px(7.))
+        .rounded(px(6.))
+        .text_size(px(13.))
+        .child(Icon::new(glyph).size(px(16.)))
+        .child(label)
+}
+
+impl RowContextMenu {
+    /// Fill the kit menu: Open, Open in new tab, the three flyout rows,
+    /// Remove from collection, a separator, then Move to bin or the locked
+    /// "Can't delete" line. Rebuilt when the protected ids arrive.
+    fn build_menu(&self, menu: PopupMenu, this: &WeakEntity<Self>) -> PopupMenu {
         let suffix = self.suffix();
-        let deletable = self.deletable();
-        let fly = self.fly;
-        let fly_item = |this: &Self,
-                        id: &'static str,
-                        glyph: Glyph,
-                        label: String,
-                        kind: Fly,
-                        cx: &mut Context<Self>| {
-            this.item(id, glyph, label, fly == Some(kind))
-                .child(
-                    div()
-                        .ml_auto()
-                        .flex()
-                        .text_color(theme::muted())
-                        .child(Icon::new(Glyph::ChevronRight).size(px(14.))),
-                )
-                .on_click(cx.listener(move |this, _, window, cx| this.open_fly(kind, window, cx)))
-        };
-        let with_fly = |item: Stateful<Div>,
-                        kind: Fly,
-                        this: &mut Self,
-                        window: &mut Window,
-                        cx: &mut Context<Self>|
-         -> Div {
-            let host = div().relative().child(item);
-            if fly == Some(kind) {
-                let content = this.render_fly(kind, window, cx);
-                // Each flyout enters as it opens (switching flyouts mounts the next).
-                let content = common::appear(("ctx-fly", kind as usize), content, window, cx);
-                // Flush against the menu's right edge, centred on the item
-                // (estimated 320px tall); flipped to the menu's left edge
-                // within 10px of the window edge, clamped to the window.
-                let menu = this.menu_bounds.get();
-                let flip = menu.right() + px(250.) > window.viewport_size().width - px(10.);
-                let slot = if flip {
-                    div().absolute().right(relative(1.)).mr(px(5.))
-                } else {
-                    div().absolute().left(relative(1.)).ml(px(5.))
-                };
-                host.child(
-                    slot.top(px(15.5 - 160.)).child(
-                        anchored()
-                            .anchor(if flip {
-                                Anchor::TopRight
-                            } else {
-                                Anchor::TopLeft
-                            })
-                            .snap_to_window_with_margin(px(8.))
-                            .child(content),
-                    ),
-                )
-            } else {
-                host
+        let act = |f: fn(&mut Self, &mut Context<Self>)| {
+            let this = this.clone();
+            move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
+                let _ = this.update(cx, |this, cx| f(this, cx));
             }
         };
+        let plain = |glyph: Glyph, label: String| {
+            let label = SharedString::from(label);
+            PopupMenuItem::element(move |_, _| row_body(glyph, label.clone()))
+        };
+        let fly_row = |glyph: Glyph, label: String, kind: Fly| {
+            let label = SharedString::from(label);
+            let (this, keep_open, cell) = (
+                this.clone(),
+                self.keep_open.clone(),
+                self.fly_rows[kind as usize].clone(),
+            );
+            let open_this = this.clone();
+            PopupMenuItem::element(move |_, cx| {
+                let open = this.upgrade().is_some_and(|e| e.read(cx).fly == Some(kind));
+                row_body(glyph, label.clone())
+                    .relative()
+                    .when(open, |d| d.bg(theme::hover()))
+                    .child(
+                        div()
+                            .ml_auto()
+                            .flex()
+                            .text_color(theme::muted())
+                            .child(Icon::new(Glyph::ChevronRight).size(px(14.))),
+                    )
+                    .child(common::track_bounds(&cell))
+            })
+            .on_click(move |_, window, cx| {
+                // A flyout row toggles its flyout; the menu stays open.
+                keep_open.set(true);
+                let _ = open_this.update(cx, |this, cx| this.open_fly(kind, window, cx));
+            })
+        };
 
-        let types_item = fly_item(
-            self,
-            "ctx-types",
-            Glyph::ArrowLeftRight,
-            format!("Change type{suffix}"),
-            Fly::Types,
-            cx,
-        );
-        let props_item = fly_item(
-            self,
-            "ctx-props",
-            Glyph::SlidersHorizontal,
-            format!("Edit properties{suffix}"),
-            Fly::Props,
-            cx,
-        );
-        let cols_item = fly_item(
-            self,
-            "ctx-cols",
-            Glyph::FolderPlus,
-            format!("Add to collection{suffix}"),
-            Fly::Cols,
-            cx,
-        );
-
-        let mut menu = menu_surface()
-            .relative()
-            .child(common::track_bounds(&self.menu_bounds))
-            .p(px(4.))
-            .gap(px(0.))
+        let mut menu = menu
             .min_w(px(200.))
-            .shadow(menu_shadow())
-            .occlude()
-            .child(
-                self.item(
-                    "ctx-open",
-                    Glyph::ArrowUpRight,
-                    format!("Open{suffix}"),
-                    false,
-                )
-                .on_click(cx.listener(|this, _, _, cx| this.open(cx))),
+            .item(plain(Glyph::ArrowUpRight, format!("Open{suffix}")).on_click(act(Self::open)))
+            .item(
+                plain(Glyph::ExternalLink, format!("Open in new tab{suffix}"))
+                    .on_click(act(Self::open_tabs)),
             )
-            .child(
-                self.item(
-                    "ctx-tab",
-                    Glyph::ExternalLink,
-                    format!("Open in new tab{suffix}"),
-                    false,
-                )
-                .on_click(cx.listener(|this, _, _, cx| this.open_tabs(cx))),
-            )
-            .child(with_fly(types_item, Fly::Types, self, window, cx))
-            .child(with_fly(props_item, Fly::Props, self, window, cx))
-            .child(with_fly(cols_item, Fly::Cols, self, window, cx));
+            .item(fly_row(
+                Glyph::ArrowLeftRight,
+                format!("Change type{suffix}"),
+                Fly::Types,
+            ))
+            .item(fly_row(
+                Glyph::SlidersHorizontal,
+                format!("Edit properties{suffix}"),
+                Fly::Props,
+            ))
+            .item(fly_row(
+                Glyph::FolderPlus,
+                format!("Add to collection{suffix}"),
+                Fly::Cols,
+            ));
         if self.collection.is_some() {
-            menu = menu.child(
-                self.item(
-                    "ctx-remove",
+            menu = menu.item(
+                plain(
                     Glyph::FolderMinus,
                     format!("Remove from collection{suffix}"),
-                    false,
                 )
-                .on_click(cx.listener(|this, _, _, cx| this.remove(cx))),
+                .on_click(act(Self::remove)),
             );
         }
-        menu = menu.child(div().h(px(1.)).bg(theme::border()).mx(px(6.)).my(px(4.)));
+        menu = menu.separator();
+        let deletable = self.deletable();
         if deletable.is_empty() {
-            let why = self.blocked.values().next().cloned().unwrap_or_default();
-            menu = menu.child(
-                div()
-                    .id("ctx-locked")
-                    .flex()
-                    .items_center()
-                    .gap(px(9.))
-                    .px(px(10.))
-                    .py(px(7.))
-                    .text_size(px(12.))
-                    .text_color(theme::muted())
-                    .tooltip(roostr_core::ui::tooltip(
-                        "Types and properties Roostr or your queries rely on can't be deleted",
-                    ))
-                    .child(Icon::new(Glyph::Lock).size(px(16.)))
-                    .child(format!("Can't delete: {why}")),
-            );
+            let why = SharedString::from(format!(
+                "Can't delete: {}",
+                self.blocked.values().next().cloned().unwrap_or_default()
+            ));
+            menu.item(
+                PopupMenuItem::element(move |_, _| {
+                    div()
+                        .id("ctx-locked")
+                        .flex()
+                        .flex_1()
+                        .items_center()
+                        .gap(px(9.))
+                        .mx(px(-8.))
+                        .px(px(10.))
+                        .py(px(7.))
+                        .text_size(px(12.))
+                        .text_color(theme::muted())
+                        .tooltip(roostr_core::ui::tooltip(
+                            "Types and properties Roostr or your queries rely on can't be deleted",
+                        ))
+                        .child(Icon::new(Glyph::Lock).size(px(16.)))
+                        .child(why.clone())
+                })
+                .disabled(true),
+            )
         } else {
-            let label = format!(
+            let label = SharedString::from(format!(
                 "Move to bin{}{}",
                 if deletable.len() > 1 {
                     format!(" ({})", deletable.len())
@@ -821,21 +815,71 @@ impl Render for RowContextMenu {
                 } else {
                     format!(" - {} protected kept", self.blocked.len())
                 }
-            );
-            menu = menu.child(
-                menu_item("ctx-bin", false)
-                    .text_color(theme::red())
-                    .child(Icon::new(Glyph::Trash).size(px(16.)))
-                    .child(label)
-                    .on_click(cx.listener(|this, _, _, cx| this.bin(cx))),
-            );
+            ));
+            menu.item(
+                PopupMenuItem::element(move |_, _| {
+                    row_body(Glyph::Trash, label.clone()).text_color(theme::red())
+                })
+                .on_click(act(Self::bin)),
+            )
         }
+    }
 
+    /// The kit menu closed itself. A flyout row asked to stay open; a press
+    /// outside is the backdrop's to handle (it must not close the menu while
+    /// a flyout's own popovers take clicks); a key (Escape, Enter on a row)
+    /// closes it.
+    fn menu_dismissed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.keep_open.replace(false) {
+            return;
+        }
+        if window.last_input_was_keyboard() {
+            self.close(cx);
+        }
+    }
+}
+
+impl Render for RowContextMenu {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.menu_blocked != Some(self.blocked.len()) {
+            self.menu_blocked = Some(self.blocked.len());
+            let this = cx.weak_entity();
+            let menu = self.menu.clone();
+            let state = &*self;
+            menu.update(cx, |menu, cx| {
+                menu.rebuild(window, cx, |menu, _, _| state.build_menu(menu, &this))
+            });
+        }
         let viewport = window.viewport_size();
         let pos = point(
             self.position.x.min(viewport.width - px(230.)),
             self.position.y,
         );
+        let flyout = self.fly.map(|kind| {
+            let content = self.render_fly(kind, window, cx);
+            // Each flyout enters as it opens (switching flyouts mounts the next).
+            let content = common::appear(("ctx-fly", kind as usize), content, window, cx);
+            // Flush against the menu's right edge, centred on its row
+            // (estimated 320px tall); flipped to the menu's left edge within
+            // 10px of the window edge, clamped to the window.
+            let menu = self.menu_bounds.get();
+            let row = self.fly_rows[kind as usize].get();
+            let flip = menu.right() + px(250.) > viewport.width - px(10.);
+            let x = if flip {
+                menu.left() - px(5.)
+            } else {
+                menu.right() + px(5.)
+            };
+            anchored()
+                .position(point(x, row.top() + px(15.5 - 160.)))
+                .anchor(if flip {
+                    Anchor::TopRight
+                } else {
+                    Anchor::TopLeft
+                })
+                .snap_to_window_with_margin(px(8.))
+                .child(content)
+        });
         // In-tree overlays (inputs keep their keyboard actions); the data view
         // paints this menu after everything else.
         div()
@@ -861,10 +905,16 @@ impl Render for RowContextMenu {
                 anchored()
                     .position(pos)
                     .snap_to_window_with_margin(px(8.))
-                    .child(common::appear("ctx-menu", menu, window, cx)),
+                    .child(common::appear(
+                        "ctx-menu",
+                        div()
+                            .relative()
+                            .child(common::track_bounds(&self.menu_bounds))
+                            .child(self.menu.clone()),
+                        window,
+                        cx,
+                    )),
             )
-            // Escape: the type search handles its own (clear, then close the
-            // flyout); otherwise the data view's Dismiss closes the menu.
-            .track_focus(&self.focus)
+            .children(flyout)
     }
 }

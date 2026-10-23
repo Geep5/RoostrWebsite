@@ -9,6 +9,13 @@ use std::collections::BTreeMap;
 use std::io::Cursor;
 use std::sync::Arc;
 
+use gpui_kit::component::Sizable as _;
+use gpui_kit::component::alert::Alert;
+use gpui_kit::component::attachment::{
+    Attachment, AttachmentContent, AttachmentDescription, AttachmentMedia, AttachmentStatus,
+    AttachmentTitle,
+};
+use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use roostr_core::motion::{self, HoverMotion};
@@ -221,39 +228,45 @@ impl Render for FileBlock {
             root = root.child(
                 div()
                     .flex()
-                    .flex_wrap()
-                    .gap(px(4.))
-                    .text_size(px(13.))
-                    .text_color(theme::red())
-                    .child(self.error.clone())
+                    .items_center()
+                    .gap(px(6.))
                     .child(
-                        div()
-                            .id("file-retry")
-                            // An unstyled <button> in the web: the browser's light default button.
-                            .px(px(6.))
-                            .py(px(1.))
-                            .bg(rgb(0xefefef))
-                            .border_1()
-                            .border_color(rgb(0x767676))
-                            .rounded(px(3.))
-                            .text_color(rgb(0x000000))
-                            .hover(|s| s.bg(rgb(0xe5e5e5)))
-                            .cursor_pointer()
+                        Alert::error("file-error", self.error.clone())
+                            .xsmall()
+                            .text_size(px(13.))
+                            .flex_1()
+                            .min_w_0(),
+                    )
+                    .child(
+                        Button::new("file-retry")
+                            .label("Retry")
+                            .outline()
+                            .xsmall()
                             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.attempt += 1;
                                 this.load(cx);
                                 cx.notify();
-                            }))
-                            .child("Retry"),
+                            })),
                     ),
             );
         } else if inline && self.bytes.is_none() {
             root = root.child(
-                div()
+                Attachment::new()
+                    .status(AttachmentStatus::Processing)
+                    .media(AttachmentMedia::new())
+                    .content(
+                        AttachmentContent::new().title(
+                            AttachmentTitle::new(format!("Loading {name}…"))
+                                .font_weight(FontWeight::NORMAL)
+                                .text_color(theme::muted()),
+                        ),
+                    )
+                    .w_full()
                     .text_size(px(13.))
-                    .text_color(theme::muted())
-                    .child(format!("Loading {name}…")),
+                    .rounded(px(8.))
+                    .bg(theme::panel())
+                    .border_color(theme::border()),
             );
         } else if mime.starts_with("image/") {
             if let Some(image) = self.image.clone() {
@@ -380,55 +393,75 @@ impl Render for FileBlock {
             let bytes = self.bytes.clone();
             let open_name = name.clone();
             root = root.child(
+                // The frame keeps the card's hover border (the kit card can only tint
+                // its fill), and the press must not reach the editor (block selection/drag).
                 div()
-                    .id("pdf-card")
-                    .flex()
-                    .items_center()
-                    .gap(px(10.))
                     .w_full()
                     .border_1()
                     .border_color(theme::border())
                     .rounded(px(8.))
-                    .px(px(14.))
-                    .py(px(12.))
                     .bg(theme::panel())
-                    .cursor_pointer()
                     .hover(|s| s.border_color(theme::muted()))
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .on_click(move |_, _, cx| {
-                        if let Some(bytes) = bytes.clone() {
-                            crate::files::open_externally(bytes, &open_name, cx)
-                                .detach_and_log_err(cx);
-                        }
-                    })
-                    .child(div().text_size(px(22.)).child("📄"))
                     .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .min_w_0()
-                            .child(div().text_size(px(13.)).child(name.clone()))
-                            .child(
-                                div()
-                                    .text_size(px(11.))
-                                    .text_color(theme::muted())
-                                    .child("PDF · Open in the system viewer"),
-                            ),
+                        Attachment::new()
+                            .id("pdf-card")
+                            .on_click(move |_, _, cx| {
+                                if let Some(bytes) = bytes.clone() {
+                                    crate::files::open_externally(bytes, &open_name, cx)
+                                        .detach_and_log_err(cx);
+                                }
+                            })
+                            .media(
+                                AttachmentMedia::new()
+                                    .size(px(28.))
+                                    .bg(transparent_black())
+                                    .child(div().text_size(px(22.)).child("📄")),
+                            )
+                            .content(
+                                AttachmentContent::new()
+                                    .title(
+                                        AttachmentTitle::new(name.clone())
+                                            .font_weight(FontWeight::NORMAL),
+                                    )
+                                    .description(
+                                        AttachmentDescription::new(
+                                            "PDF · Open in the system viewer",
+                                        )
+                                        .text_size(px(11.)),
+                                    ),
+                            )
+                            .w_full()
+                            .h_auto()
+                            .gap(px(10.))
+                            .px(px(14.))
+                            .py(px(12.))
+                            .rounded(px(7.))
+                            .border_0()
+                            .bg(transparent_black())
+                            .text_size(px(13.))
+                            .cursor_pointer(),
                     ),
             );
         }
         root.child(
-            div()
-                .id("file-caption")
-                .text_size(px(12.))
+            Button::new("file-caption")
+                .text()
+                .accessibility_label(format!("📎 {name}"))
+                .child(
+                    div()
+                        .min_w_0()
+                        .text_ellipsis()
+                        .text_size(px(12.))
+                        .child(format!("📎 {name}")),
+                )
                 .text_color(theme::muted())
-                .cursor_pointer()
-                .hover(|s| s.text_color(theme::fg()))
+                .self_start()
+                .max_w_full()
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .on_click(move |_, _, cx| {
                     roostr_core::nav::navigate(Route::Object(file_id.clone()), cx)
-                })
-                .child(format!("📎 {name}")),
+                }),
         )
     }
 }

@@ -11,6 +11,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui_kit::component::Icon;
+use gpui_kit::component::tag::Tag;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use roostr_core::color::normalize_hex;
@@ -1001,37 +1002,48 @@ fn chip_rm(
         .child("×")
 }
 
-/// A neutral chip: plain text on a quiet outline; colour only for problems.
-fn chip(id: SharedString) -> Stateful<Div> {
-    div()
-        .id(id)
-        .flex()
-        .items_center()
+/// A neutral chip as the kit `Tag`: plain text on a quiet outline; colour
+/// only for problems (`tone`). `outline` is the border, which chips that
+/// open something tint on hover.
+fn chip(tone: Hsla, outline: Hsla) -> Tag {
+    Tag::custom(transparent_black(), tone, outline)
+        .rounded(theme::radius::menu())
         .gap(px(4.))
         .min_w_0()
         .max_w_full()
         .px(px(8.))
-        .border_1()
-        .border_color(theme::border())
-        .rounded(theme::radius::menu())
+        .py_0()
         .text_size(px(12.))
         .line_height(px(20.))
-        .text_color(theme::fg())
         .overflow_hidden()
         .whitespace_nowrap()
+}
+
+/// A chip's interactive shell (`Tag` has no id, click or tooltip): it keeps
+/// the chip's element id for clicks, tooltips and tests.
+fn chip_hit(id: SharedString, chip: Tag) -> Stateful<Div> {
+    div().id(id).flex().min_w_0().max_w_full().child(chip)
+}
+
+/// A chip's outline: the quiet border, tinted to muted by `hover` (0..1).
+fn chip_outline(hover: f32) -> Hsla {
+    motion::mix(theme::border(), theme::muted(), hover)
 }
 
 fn chip_icon(glyph: Glyph, color: Hsla) -> Icon {
     Icon::new(glyph).size(px(12.)).flex_none().text_color(color)
 }
 
-fn status_val(text: String, color: &str, glyph: Glyph) -> Div {
+/// A status value as a borderless kit `Tag` in its option colour.
+fn status_val(text: String, color: &str, glyph: Glyph) -> Tag {
     let c = badge_colors(color);
-    div()
-        .flex()
-        .items_center()
+    Tag::custom(transparent_black(), c.fg, transparent_black())
+        .border_0()
+        .p_0()
+        .rounded(px(0.))
         .gap(px(5.))
-        .text_color(c.fg)
+        .text_size(px(13.))
+        .line_height(px(22.))
         .child(Icon::new(glyph).size(px(14.)).text_color(c.icon))
         .child(text)
 }
@@ -1194,15 +1206,16 @@ impl Render for PropertiesPane {
     }
 }
 
-/// The pane's tag pill (`.pill`): 0 8px, radius 10, 12px, 20px line.
-fn pane_pill(text: String, color: &str) -> Div {
+/// The pane's tag pill (`.pill`) as a kit `Tag` in the option's colours:
+/// 0 8px, radius 10, 12px, 20px line, no outline.
+fn pane_pill(text: String, color: &str) -> Tag {
     let (bg, fg) = roostr_core::options::tag_colors(color)
         .unwrap_or((roostr_core::options::unknown_tag_bg(), theme::fg()));
-    div()
-        .px(px(8.))
+    Tag::custom(bg, fg, transparent_black())
+        .border_0()
         .rounded(theme::radius::menu())
-        .bg(bg)
-        .text_color(fg)
+        .px(px(8.))
+        .py_0()
         .text_size(px(12.))
         .line_height(px(20.))
         .whitespace_nowrap()
@@ -1481,19 +1494,24 @@ impl PropertiesPane {
                         .relative()
                         .flex()
                         .max_w_full()
-                        .child(
-                            chip(format!("credchip-{id}").into())
-                                .when(warn, |d| d.text_color(theme::red()))
-                                .cursor_pointer()
-                                .hover(|s| s.border_color(theme::muted()))
-                                .tooltip(tip(title))
-                                .on_click(open_object(id.clone()))
-                                .child(chip_icon(
-                                    Glyph::PropKey,
-                                    if warn { theme::red() } else { theme::muted() },
-                                ))
-                                .child(label.clone()),
-                        )
+                        .child({
+                            let cid: SharedString = format!("credchip-{id}").into();
+                            let (hover, on_chip_hover) = rm_reveal(&cid, window, cx);
+                            let tone = if warn { theme::red() } else { theme::fg() };
+                            chip_hit(
+                                cid,
+                                chip(tone, chip_outline(hover))
+                                    .child(chip_icon(
+                                        Glyph::PropKey,
+                                        if warn { theme::red() } else { theme::muted() },
+                                    ))
+                                    .child(label.clone()),
+                            )
+                            .cursor_pointer()
+                            .on_hover(on_chip_hover)
+                            .tooltip(tip(title))
+                            .on_click(open_object(id.clone()))
+                        })
                         .when(editable, |d| {
                             d.child(chip_rm(
                                 format!("rm-{id}").into(),
@@ -1542,12 +1560,22 @@ impl PropertiesPane {
                         .flex()
                         .max_w_full()
                         .child(
-                            chip(format!("agentchip-{id}").into())
-                                .when(gone, |d| d.text_color(theme::red()))
-                                .when(loading, |d| d.text_color(theme::muted()))
-                                .tooltip(tip(title))
+                            chip_hit(
+                                format!("agentchip-{id}").into(),
+                                chip(
+                                    if gone {
+                                        theme::red()
+                                    } else if loading {
+                                        theme::muted()
+                                    } else {
+                                        theme::fg()
+                                    },
+                                    theme::border(),
+                                )
                                 .child(div().text_size(px(12.)).flex_none().child(icon))
                                 .child(name),
+                            )
+                            .tooltip(tip(title)),
                         )
                         .when(editable, |d| {
                             d.child(chip_rm(
@@ -1613,14 +1641,19 @@ impl PropertiesPane {
                         .flex()
                         .max_w_full()
                         .child(
-                            chip(format!("{key}chip-{id}").into())
-                                .when(warn, |d| d.text_color(theme::red()))
-                                .tooltip(tip(title))
+                            chip_hit(
+                                format!("{key}chip-{id}").into(),
+                                chip(
+                                    if warn { theme::red() } else { theme::fg() },
+                                    theme::border(),
+                                )
                                 .child(chip_icon(
                                     glyph,
                                     if warn { theme::red() } else { theme::muted() },
                                 ))
                                 .child(name),
+                            )
+                            .tooltip(tip(title)),
                         )
                         .when(editable, |d| {
                             d.child(chip_rm(
@@ -1690,14 +1723,19 @@ impl PropertiesPane {
                         .relative()
                         .flex()
                         .max_w_full()
-                        .child(
-                            chip(format!("objchip-{id}").into())
-                                .cursor_pointer()
-                                .hover(|s| s.border_color(theme::muted()))
-                                .on_click(open_object(id.clone()))
-                                .child(lead)
-                                .child(name),
-                        )
+                        .child({
+                            let cid: SharedString = format!("objchip-{id}").into();
+                            let (hover, on_chip_hover) = rm_reveal(&cid, window, cx);
+                            chip_hit(
+                                cid,
+                                chip(theme::fg(), chip_outline(hover))
+                                    .child(lead)
+                                    .child(name),
+                            )
+                            .cursor_pointer()
+                            .on_hover(on_chip_hover)
+                            .on_click(open_object(id.clone()))
+                        })
                         .when(editable, |d| {
                             d.child(chip_rm(
                                 format!("rm-{id}").into(),

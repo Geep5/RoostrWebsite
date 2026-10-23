@@ -1495,7 +1495,7 @@ impl SetTable {
                             .and_then(|rel| rel.options.iter().find(|o| o.text == t))
                             .map(|o| o.color.clone())
                             .unwrap_or_default();
-                        cell = cell.child(tag_pill(t, &color, false));
+                        cell = cell.child(tag_pill(t, &color, false, theme::fg()));
                     }
                 }
                 "checkbox" => {

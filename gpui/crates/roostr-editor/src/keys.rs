@@ -783,7 +783,7 @@ impl Editor {
                 start,
                 filter: String::new(),
                 pos: None,
-                sel: 0,
+                cmd: None,
             });
         }
     }
@@ -1023,9 +1023,9 @@ impl Editor {
     /// ArrowUp/Down: the slash menu owns them while open; at the text's edge
     /// the caret moves to the previous/next text block, otherwise a row.
     fn vertical(&mut self, down: bool, select: bool, window: &mut Window, cx: &mut Context<Self>) {
-        self.with_key(window, cx, |this, _, cx| {
+        self.with_key(window, cx, |this, window, cx| {
             if !select && this.slash_owns_key() {
-                this.slash_move(if down { 1 } else { -1 });
+                this.slash_move(if down { 1 } else { -1 }, window, cx);
                 return;
             }
             let Some(id) = this.active.clone() else {
@@ -1265,36 +1265,49 @@ impl Editor {
         let filter = t.text.get(slash.start + 1..end).unwrap_or("").to_string();
         let count = self.slash_entries(&filter).len();
         let slash = self.slash.as_mut().expect("slash");
+        // The highlight lives in the menu's CommandState, which keeps it on
+        // the same row when that row survives the new filter, else the first.
         slash.filter = filter;
-        if slash.sel >= count {
-            slash.sel = count.saturating_sub(1);
-        }
         // Anytype auto-closes once the filter clearly matches nothing.
         if count == 0 && slash.filter.chars().count() > 3 {
             self.slash = None;
         }
     }
 
-    fn slash_move(&mut self, delta: isize) {
-        let filter = self
-            .slash
-            .as_ref()
-            .map(|s| s.filter.clone())
-            .unwrap_or_default();
-        let n = self.slash_entries(&filter).len() as isize;
+    /// The flat index of the highlighted entry, if the menu has one.
+    fn slash_selected(&self, entries: &[crate::slash_menu::SlashEntry], cx: &App) -> Option<usize> {
+        let cmd = self.slash.as_ref()?.cmd.as_ref()?;
+        let ix = cmd.read(cx).selected_index()?;
+        crate::slash_menu::slash_paths(entries)
+            .iter()
+            .position(|p| *p == ix)
+    }
+
+    fn slash_move(&mut self, delta: isize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(slash) = self.slash.as_ref() else {
+            return;
+        };
+        let entries = self.slash_entries(&slash.filter);
+        let n = entries.len() as isize;
         if n == 0 {
             return;
         }
-        if let Some(s) = self.slash.as_mut() {
-            s.sel = ((s.sel as isize + delta + n) % n) as usize;
-        }
+        let Some(cmd) = slash.cmd.clone() else {
+            return;
+        };
+        let sel = self.slash_selected(&entries, cx).unwrap_or(0) as isize;
+        let next = ((sel + delta + n) % n) as usize;
+        let path = crate::slash_menu::slash_paths(&entries)[next];
+        cmd.update(cx, |cmd, cx| cmd.set_selected_index(Some(path), window, cx));
     }
 
     fn slash_confirm(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(slash) = self.slash.clone() else {
             return;
         };
-        match self.slash_entries(&slash.filter).into_iter().nth(slash.sel) {
+        let entries = self.slash_entries(&slash.filter);
+        let sel = self.slash_selected(&entries, cx).unwrap_or(0);
+        match entries.into_iter().nth(sel) {
             Some(entry) => self.apply_slash(entry.pick, window, cx),
             None => self.slash = None,
         }

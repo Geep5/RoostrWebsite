@@ -5,6 +5,8 @@
 use std::sync::Arc;
 
 use chrono::{Datelike, Local, NaiveDate, TimeZone};
+use gpui_kit::component::shimmer::ShimmerText;
+use gpui_kit::component::skeleton::Skeleton;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use roostr_core::filters::{engine_filters_of, space_filter_of};
@@ -383,12 +385,33 @@ impl Render for PinnedWidget {
         } else {
             "table"
         };
-        // Lite: the space is downloading - its progress instead of partial rows.
+        // Lite: the space is downloading - its progress (`lite_ui`'s text,
+        // shimmering) over skeleton rows instead of partial rows.
         if let Some(space) = &self.partial_space {
-            return div().px(px(8.)).children(
-                lite_ui::loading_line(space, cx)
-                    .or_else(|| lite_ui::space_notice(format!("pin-{}", self.id), space, cx)),
-            );
+            let load = roostr_core::lite::status(cx)
+                .and_then(|status| status.loading(space).map(lite_ui::loading_text));
+            return match load {
+                Some(text) => div()
+                    .px(px(8.))
+                    .flex()
+                    .flex_col()
+                    .gap(px(8.))
+                    .pb(px(6.))
+                    .child(
+                        ShimmerText::new(text)
+                            .id(SharedString::from(format!("pin-load-{}", self.id)))
+                            .py(px(6.))
+                            .text_size(px(12.))
+                            .text_color(theme::muted()),
+                    )
+                    .child(Skeleton::new().h(px(10.)).w(relative(0.8)).rounded(px(5.)))
+                    .child(Skeleton::new().h(px(10.)).w(relative(0.55)).rounded(px(5.))),
+                None => div().px(px(8.)).children(lite_ui::space_notice(
+                    format!("pin-{}", self.id),
+                    space,
+                    cx,
+                )),
+            };
         }
         if self.rows.is_empty() && view_type != "calendar" {
             return div();

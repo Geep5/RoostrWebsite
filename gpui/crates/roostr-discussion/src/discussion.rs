@@ -1,22 +1,35 @@
 //! An object's discussion (`src/lib/components/Discussion.svelte`). Human and
 //! private chat stays local; exchanges send immutable mailbox envelopes.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
-use gpui_kit::component::button::Button;
+use gpui_kit::base::{Avatar as AvatarRoot, AvatarFallback};
+use gpui_kit::component::alert::{Alert, AlertVariant};
+use gpui_kit::component::avatar::Avatar;
+use gpui_kit::component::bubble::{Bubble, BubbleContent, BubbleReactions, BubbleVariant};
+use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
 use gpui_kit::component::checkbox::Checkbox;
+use gpui_kit::component::command::{Command, CommandItem, CommandState};
+use gpui_kit::component::empty::Empty;
 use gpui_kit::component::input::{Enter, Escape, IndentInline};
 use gpui_kit::component::input::{
     InlineToken, InlineTokenContext, InputContent, InputEvent, MoveDown, MoveUp, Textarea,
     TextareaState,
 };
+use gpui_kit::component::label::Label;
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
+use gpui_kit::component::message::{
+    Message, MessageAlignment, MessageAvatar, MessageContent, MessageFooter, MessageHeader,
+};
+use gpui_kit::component::message_scroller::{MessageScroller, MessageScrollerState};
+use gpui_kit::component::tag::Tag;
 use gpui_kit::component::tooltip::Tooltip;
-use gpui_kit::component::{Disableable as _, Sizable as _};
+use gpui_kit::component::{Disableable as _, ElementExt as _, IconName, IndexPath, Sizable as _};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use roostr_core::color::bubble;
@@ -109,6 +122,17 @@ struct TagQuery {
 /// A Retry button's action.
 type RetryAction = Box<dyn Fn(&mut Discussion, &mut Context<Discussion>)>;
 
+/// Where the message list and its rows were last laid out, recorded while
+/// they prepaint: the kit's scroller state keeps its list private, and the
+/// reader's distance from the end and a new reply's height are read from
+/// these instead. Rows are cleared each render, so only rows laid out in the
+/// latest frame are here.
+#[derive(Default)]
+struct ListLayout {
+    viewport: Option<Bounds<Pixels>>,
+    rows: HashMap<usize, Bounds<Pixels>>,
+}
+
 const PRESENCE_POLL: Duration = Duration::from_millis(2500);
 const AGENT_TOKEN: &str = "agent:";
 const OBJECT_TOKEN: &str = "object:";
@@ -135,7 +159,11 @@ pub struct Discussion {
     exchange_title: String,
 
     open: bool,
-    list: ListState,
+    /// The message list's virtual-list state (the drawer's and chat page's
+    /// own scroller): following the newest message, jump to latest, splices.
+    scroller: Entity<MessageScrollerState>,
+    /// Where the list and its rows were last laid out.
+    layout: Rc<RefCell<ListLayout>>,
     fingerprints: Vec<u64>,
     landed_on: String,
     /// The `object:thread` whose messages are shown (an arrival needs a
@@ -175,7 +203,10 @@ pub struct Discussion {
     object_tag_index: usize,
     tagged_objects: Vec<ObjectTag>,
     opened_rank: HashMap<String, usize>,
-    object_menu_scroll: ScrollHandle,
+    /// The `@` agent menu and the `!` object menu: kit command lists whose
+    /// highlight follows `mention_index` / `object_tag_index`.
+    mention_menu: Entity<CommandState>,
+    object_menu: Entity<CommandState>,
 
     presence: Vec<AgentPresence>,
     presence_error: String,
@@ -205,7 +236,10 @@ impl Discussion {
                 .submit_on_enter(true)
         });
         composer.update(cx, |state, cx| state.set_value(draft.clone(), window, cx));
-        let list = ListState::new(1, ListAlignment::Top, px(600.));
+        // One row: the trailing footer (empty note, typing, problem).
+        let scroller = cx.new(|cx| MessageScrollerState::new(1, cx));
+        let mention_menu = cx.new(|cx| CommandState::new(window, cx));
+        let object_menu = cx.new(|cx| CommandState::new(window, cx));
         let subscriptions = vec![
             cx.observe(&store, |this, _, cx| this.sync_object(cx)),
             // Lite: the agent list is what this device holds; a refresh (the
@@ -239,7 +273,8 @@ impl Discussion {
             members: Vec::new(),
             exchange_title: "Exchange".into(),
             open: false,
-            list,
+            scroller,
+            layout: Rc::default(),
             fingerprints: Vec::new(),
             landed_on: String::new(),
             arrival_key: String::new(),
@@ -272,7 +307,8 @@ impl Discussion {
             object_tag_index: 0,
             tagged_objects: Vec::new(),
             opened_rank: HashMap::new(),
-            object_menu_scroll: ScrollHandle::new(),
+            mention_menu,
+            object_menu,
             presence: Vec::new(),
             presence_error: String::new(),
             poll: None,
@@ -375,9 +411,9 @@ impl Discussion {
         let previous = std::mem::replace(&mut self.messages, Rc::new(messages));
         // Whether the reader was at the end, measured before the splice
         // re-estimates the new rows' heights.
-        let at_end = self.at_end();
+        let at_end = self.at_end(cx);
         self.note_arrival(&previous, at_end);
-        self.sync_list();
+        self.sync_list(cx);
         self.follow_new_messages(at_end, cx);
         self.update_polling(cx);
         if !self.seeded {
@@ -414,8 +450,10 @@ impl Discussion {
         }
     }
 
-    /// Splice the list from the first message whose rendering inputs changed.
-    fn sync_list(&mut self) {
+    /// Splice the list from the first message whose rendering inputs changed;
+    /// older messages arriving in front are prepended, keeping the reader's
+    /// place.
+    fn sync_list(&mut self, cx: &mut Context<Self>) {
         let fingerprints: Vec<u64> = self
             .messages
             .iter()
@@ -459,27 +497,47 @@ impl Discussion {
             .count();
         let old_total = old.len() + 1;
         let new_total = fingerprints.len() + 1;
-        // Everything from the first difference on, plus the trailing presence row.
-        self.list.splice(prefix..old_total, new_total - prefix);
+        let older = prefix == 0
+            && !old.is_empty()
+            && fingerprints.len() > old.len()
+            && fingerprints.ends_with(old);
+        self.scroller.update(cx, |list, cx| {
+            if older {
+                list.prepend(new_total - old_total, cx);
+            } else {
+                // Everything from the first difference on, plus the trailing presence row.
+                list.splice(prefix..old_total, new_total - prefix, cx);
+            }
+        });
         self.fingerprints = fingerprints;
     }
 
     /// The trailing row (empty note, typing, problem) changed height.
-    fn remeasure_footer(&self) {
+    fn remeasure_footer(&self, cx: &mut Context<Self>) {
         let n = self.fingerprints.len();
-        self.list.splice(n..n + 1, 1);
+        self.scroller.update(cx, |list, cx| {
+            list.splice(n..n + 1, 1, cx);
+        });
     }
 
     /// Within a message or so of the end: the reader is following along.
-    /// Read from the list when needed, never from its scroll handler: the
-    /// list calls that with its state borrowed, so reading the offsets there
-    /// panicked on the first wheel or touch scroll (`RefCell already mutably
-    /// borrowed`), which aborted the desktop app and left the browser and iOS
-    /// apps taking no input at all.
-    fn at_end(&self) -> bool {
-        let max = self.list.max_offset_for_scrollbar().y;
-        let offset = -self.list.scroll_px_offset_for_scrollbar().y;
-        max - offset < px(120.)
+    /// Read when needed, never from the list's scroll handler: the list calls
+    /// that with its state borrowed, so reading the offsets there panicked on
+    /// the first wheel or touch scroll (`RefCell already mutably borrowed`),
+    /// which aborted the desktop app and left the browser and iOS apps taking
+    /// no input at all. (The kit scroller's own handler only defers a notify.)
+    /// Away from the end, the distance is measured from where the trailing row
+    /// was last laid out; not laid out at all means far up.
+    fn at_end(&self, cx: &App) -> bool {
+        let list = self.scroller.read(cx);
+        if list.is_following_tail() || !list.is_scrolled_up() {
+            return true;
+        }
+        let layout = self.layout.borrow();
+        match (layout.viewport, layout.rows.get(&self.fingerprints.len())) {
+            (Some(view), Some(footer)) => footer.bottom() - view.bottom() < px(120.),
+            _ => false,
+        }
     }
 
     /// Land at the end once per opened thread; on new messages follow when the
@@ -495,7 +553,7 @@ impl Discussion {
         } else if self.landed_on != key && self.object.is_some() {
             self.landed_on = key;
             self.seen_count = self.messages.len();
-            self.list.set_follow_mode(FollowMode::Tail);
+            self.scroller.update(cx, |list, cx| list.scroll_to_end(cx));
             return;
         }
         let count = self.messages.len();
@@ -513,9 +571,8 @@ impl Discussion {
         if !(self.page_mode || at_end || mine_before || newest.author == self.me) {
             return;
         }
-        self.list.set_follow_mode(FollowMode::Tail);
+        self.scroller.update(cx, |list, cx| list.scroll_to_end(cx));
         self.tall_check = Some(count - 1);
-        let _ = cx;
     }
 
     // --------------------------------------------------------------- identity
@@ -540,7 +597,7 @@ impl Discussion {
                         };
                     }
                 }
-                this.sync_list();
+                this.sync_list(cx);
                 cx.notify();
             });
         })
@@ -561,7 +618,7 @@ impl Discussion {
             {
                 self.presence.clear();
                 self.presence_error.clear();
-                self.remeasure_footer();
+                self.remeasure_footer(cx);
             }
             return;
         }
@@ -589,7 +646,7 @@ impl Discussion {
                         if presence != this.presence || error != this.presence_error {
                             this.presence = presence;
                             this.presence_error = error;
-                            this.remeasure_footer();
+                            this.remeasure_footer(cx);
                             cx.notify();
                         }
                     })
@@ -1120,11 +1177,10 @@ impl Discussion {
             .collect()
     }
 
+    /// Move the object menu's highlight; the menu scrolls it into view.
     fn move_object_tag(&mut self, delta: isize, count: usize) {
         let n = count as isize;
         self.object_tag_index = ((self.object_tag_index as isize + delta + n) % n) as usize;
-        self.object_menu_scroll
-            .scroll_to_item(self.object_tag_index);
     }
 
     fn pick_object(&mut self, option: ObjectTag, window: &mut Window, cx: &mut Context<Self>) {
@@ -1470,7 +1526,7 @@ impl Discussion {
         self.thread_id = thread;
         self.landed_on.clear();
         self.fingerprints.clear();
-        self.list.reset(1);
+        self.scroller.update(cx, |list, cx| list.reset(1, cx));
         let draft = load_draft(&self.object_id, &self.thread_id, cx);
         self.tagged.clear();
         self.tagged_objects.clear();
@@ -1522,7 +1578,7 @@ impl Discussion {
         }
         self.picker_for.clear();
         self.send_error.clear();
-        self.sync_list();
+        self.sync_list(cx);
         let task = roostr_core::api::chat::react(&self.object_id, &message_id, &emoji, cx);
         cx.spawn(async move |this, cx| {
             if let Err(error) = task.await {
@@ -1542,7 +1598,7 @@ impl Discussion {
         } else {
             message_id.to_string()
         };
-        self.sync_list();
+        self.sync_list(cx);
         cx.notify();
     }
 
@@ -1550,9 +1606,8 @@ impl Discussion {
         if let Some(ix) = self.message_index(id)
             && self.own_scroller()
         {
-            self.list.scroll_to(ListOffset {
-                item_ix: ix,
-                offset_in_item: px(0.),
+            self.scroller.update(cx, |list, cx| {
+                list.scroll_to_item(ix, cx);
             });
             cx.notify();
         }
@@ -1707,49 +1762,265 @@ fn arrival(id: &str, window: &mut Window, cx: &mut App) -> motion::Frame {
         .update(cx, |state, cx| state.frame(arrive, window, cx))
 }
 
+/// How a round avatar is drawn in one place: message rows and the typing
+/// row, or the mention menu.
+#[derive(Clone, Copy)]
+struct AvatarLook {
+    size: f32,
+    /// The initials' text size.
+    letters: f32,
+    /// An emoji's text size.
+    emoji: f32,
+    /// An emoji sits on a light disc (the mention menu shows it bare).
+    disc: bool,
+    /// Initials in the monospace face.
+    mono: bool,
+}
+
+const ROW_AVATAR: AvatarLook = AvatarLook {
+    size: 28.,
+    letters: 10.,
+    emoji: 17.,
+    disc: true,
+    mono: true,
+};
+
+const MENU_AVATAR: AvatarLook = AvatarLook {
+    size: 20.,
+    letters: 9.,
+    emoji: 13.,
+    disc: false,
+    mono: false,
+};
+
+/// A kit avatar: an image icon (a web address or `data:image/` URL, as
+/// `emoji_or_image_icon` reads them) is its picture; else the emoji, else the
+/// initials on the author's stable hue. The kit avatar only draws an icon or
+/// its own initials and palette without a picture, so those two go in the
+/// fallback slot of the kit's avatar root.
+fn avatar(icon: &str, initials: String, hue_of: &str, look: AvatarLook) -> AnyElement {
+    let size = px(look.size);
+    if is_image_icon(icon) {
+        let source: Option<ImageSource> = if icon.starts_with("data:") {
+            roostr_core::ui::data_url_image(icon).map(ImageSource::Image)
+        } else {
+            Some(SharedUri::from(icon.to_string()).into())
+        };
+        return match source {
+            Some(source) => Avatar::new()
+                .src(source)
+                .with_size(size)
+                .border_0()
+                .bg(theme::hl_light())
+                .into_any_element(),
+            None => div().size(size).flex_none().into_any_element(),
+        };
+    }
+    let fallback = AvatarFallback::new()
+        .size_full()
+        .flex()
+        .items_center()
+        .justify_center()
+        .text_color(theme::white());
+    let fallback = if icon.is_empty() {
+        fallback
+            .bg(avatar_color(hue_of))
+            .text_size(px(look.letters))
+            .when(look.mono, |f| f.font_family(theme::fonts::MONO))
+            .child(initials)
+    } else {
+        fallback
+            .when(look.disc, |f| f.bg(theme::hl_light()))
+            .text_size(px(look.emoji))
+            .child(icon.to_string())
+    };
+    AvatarRoot::new()
+        .size(size)
+        .flex_none()
+        .rounded_full()
+        .overflow_hidden()
+        .fallback(fallback)
+        .into_any_element()
+}
+
+/// Let a kit part's children paint past its box (a bubble's touch selection
+/// handles, an avatar's hover ring), where the part clips them by default.
+fn overflow_visible<S: Styled>(mut el: S) -> S {
+    let style = el.style();
+    style.overflow.x = Some(Overflow::Visible);
+    style.overflow.y = Some(Overflow::Visible);
+    el
+}
+
+/// Lay a kit part out in the flow instead of pinned over its parent's edge
+/// (the bubble's reaction region: Roostr's chips wrap in a row under it).
+fn in_flow<S: Styled>(mut el: S) -> S {
+    let style = el.style();
+    style.position = Some(Position::Relative);
+    style.inset.top = Some(Length::Auto);
+    style.inset.right = Some(Length::Auto);
+    style.inset.bottom = Some(Length::Auto);
+    style.inset.left = Some(Length::Auto);
+    el
+}
+
+/// An agent in the `@` menu: avatar, `@Name`, and the object's own name.
+fn mention_row(option: &ObjectAgentOption) -> Div {
+    let initials = option
+        .agent_name
+        .chars()
+        .take(2)
+        .collect::<String>()
+        .to_uppercase();
+    div()
+        .flex()
+        .flex_1()
+        .min_w_0()
+        .items_center()
+        .gap(px(8.))
+        .text_size(px(13.))
+        .text_color(theme::fg())
+        .child(avatar(
+            &option.icon,
+            initials,
+            &option.endpoint.agent_id,
+            MENU_AVATAR,
+        ))
+        .child(
+            div()
+                .flex_none()
+                .font_weight(FontWeight::MEDIUM)
+                .child(format!("@{}", option.agent_name)),
+        )
+        .when(option.name != option.agent_name, |d| {
+            d.child(
+                div()
+                    .min_w_0()
+                    .text_size(px(11.))
+                    .text_color(theme::muted())
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .whitespace_nowrap()
+                    .child(option.name.clone()),
+            )
+        })
+}
+
+/// An object in the `!` menu: icon, name, and `opened` when recently opened.
+fn object_row(icon: &str, name: &str, opened: bool) -> Div {
+    let icon_el = div()
+        .size(px(20.))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center();
+    let icon_el = if is_image_icon(icon) {
+        icon_el.child(roostr_core::ui::emoji_or_image_icon(icon, px(18.)))
+    } else {
+        icon_el.text_size(px(13.)).child(icon.to_string())
+    };
+    div()
+        .flex()
+        .flex_1()
+        .min_w_0()
+        .items_center()
+        .gap(px(8.))
+        .text_size(px(13.))
+        .text_color(theme::fg())
+        .child(icon_el)
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .font_weight(FontWeight::MEDIUM)
+                .overflow_hidden()
+                .text_ellipsis()
+                .whitespace_nowrap()
+                .child(name.to_string()),
+        )
+        .when(opened, |d| {
+            d.child(
+                Tag::secondary()
+                    .small()
+                    .flex_none()
+                    .ml_auto()
+                    .child("opened"),
+            )
+        })
+}
+
+/// The `!` menu's search row: what is typed after `!` in the composer, or
+/// the hint before anything is.
+fn object_search_row(q: &str) -> Div {
+    div()
+        .flex()
+        .items_center()
+        .gap(px(8.))
+        .px(px(12.))
+        .py(px(8.))
+        .border_b_1()
+        .border_color(theme::border())
+        .flex_none()
+        .text_color(if q.is_empty() {
+            theme::muted()
+        } else {
+            theme::fg()
+        })
+        .child(
+            svg()
+                .path("icons/search.svg")
+                .size(px(14.))
+                .flex_none()
+                .text_color(theme::muted()),
+        )
+        .child(
+            div()
+                .min_w_0()
+                .overflow_hidden()
+                .text_ellipsis()
+                .whitespace_nowrap()
+                .child(if q.is_empty() {
+                    "Search objects - recently opened first".to_string()
+                } else {
+                    q.to_string()
+                }),
+        )
+}
+
 impl Discussion {
+    /// A row's avatar; an author that is an object opens it on click, with a
+    /// hover ring and an "Open …" tooltip.
     fn render_avatar(&self, id: ElementId, author: &str, store: &Store) -> AnyElement {
-        let emoji = self.avatar_emoji(author, store);
-        let link = self.author_links(author, store).then(|| author.to_string());
+        let face = avatar(
+            &self.avatar_emoji(author, store),
+            self.initials(author, store),
+            author,
+            ROW_AVATAR,
+        );
+        if !self.author_links(author, store) {
+            return face;
+        }
+        let target = author.to_string();
         let title = format!("Open {}", self.who(author, store));
-        let base = div()
+        div()
             .id(id)
             .flex_none()
-            .size(px(28.))
+            .size(px(ROW_AVATAR.size))
             .rounded_full()
-            .flex()
-            .items_center()
-            .justify_center()
-            .text_color(theme::white());
-        let base = if emoji.is_empty() {
-            base.bg(avatar_color(author))
-                .text_size(px(10.))
-                .font_family(theme::fonts::MONO)
-                .child(self.initials(author, store))
-        } else if is_image_icon(&emoji) {
-            base.bg(theme::hl_light())
-                .overflow_hidden()
-                .child(roostr_core::ui::emoji_or_image_icon(&emoji, px(28.)))
-        } else {
-            base.bg(theme::hl_light()).text_size(px(17.)).child(emoji)
-        };
-        match link {
-            Some(target) => base
-                .cursor_pointer()
-                .hover(|s| {
-                    s.shadow(vec![BoxShadow {
-                        color: theme::accent(),
-                        offset: point(px(0.), px(0.)),
-                        blur_radius: px(0.),
-                        spread_radius: px(2.),
-                        inset: false,
-                    }])
-                })
-                .tooltip(move |window, cx| Tooltip::new(title.clone()).build(window, cx))
-                .on_click(move |_, _, cx| nav::navigate(Route::Object(target.clone()), cx))
-                .into_any_element(),
-            None => base.into_any_element(),
-        }
+            .cursor_pointer()
+            .hover(|s| {
+                s.shadow(vec![BoxShadow {
+                    color: theme::accent(),
+                    offset: point(px(0.), px(0.)),
+                    blur_radius: px(0.),
+                    spread_radius: px(2.),
+                    inset: false,
+                }])
+            })
+            .tooltip(move |window, cx| Tooltip::new(title.clone()).build(window, cx))
+            .on_click(move |_, _, cx| nav::navigate(Route::Object(target.clone()), cx))
+            .child(face)
+            .into_any_element()
     }
 
     fn render_message(&self, ix: usize, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
@@ -1764,6 +2035,12 @@ impl Discussion {
             let id = SharedString::from(format!("picker-appear-{}", m.id));
             motion::appear_frame(id, -4., window, cx)
         });
+        // The kit row puts 0.5rem between avatar and column and starts the
+        // footer 2.5rem in; Roostr's bubble column is 38px in (28px avatar,
+        // 10px gap) and its status text 40px.
+        let rem = window.rem_size();
+        let column_inset = (px(10.) - rem * 0.5).max(px(0.));
+        let status_inset = (px(40.) - rem * 2.5).max(px(0.));
         let store_entity = Store::global(cx);
         let store = store_entity.read(cx);
         let own = m.author == self.me;
@@ -1778,20 +2055,27 @@ impl Discussion {
         let tinted = !color.is_empty();
         let colors = bubble(&color);
         let mid = SharedString::from(m.id.clone());
-
-        let mut body = div().min_w_0().max_w(relative(0.78)).flex().flex_col();
-        body = if own {
-            body.items_end()
+        // Your messages on the right, everyone else's on the left.
+        let align = if own {
+            MessageAlignment::End
         } else {
-            body.items_start()
+            MessageAlignment::Start
         };
 
-        // Reply quote.
+        // Header: the reply quote, then author, origin and time.
+        let mut header = MessageHeader::new()
+            .content_inset(false)
+            .flex_col()
+            .gap_0()
+            .map(|h| if own { h.items_end() } else { h.items_start() })
+            .font_weight(FontWeight::NORMAL)
+            .line_height(phi())
+            .text_color(theme::fg());
         if !m.reply_to.is_empty()
             && let Some(target) = self.message(&m.reply_to)
         {
             let target_id = target.id.clone();
-            body = body.child(
+            header = header.child(
                 div()
                     .id(("quote", ix))
                     .flex()
@@ -1826,8 +2110,6 @@ impl Discussion {
                     ),
             );
         }
-
-        // Meta row: author, origin, time.
         let mut meta = div().flex().items_baseline().gap(px(8.));
         if own {
             meta = meta.justify_end();
@@ -1856,19 +2138,15 @@ impl Discussion {
         if !m.origin.is_empty() {
             let target = m.origin.clone();
             meta = meta.child(
-                div()
-                    .id(("origin", ix))
-                    .text_size(px(11.))
-                    .text_color(theme::accent())
-                    .border_1()
-                    .border_color(theme::border())
+                Button::new(("origin", ix))
+                    .outline()
+                    .xsmall()
                     .rounded(px(6.))
                     .px(px(6.))
-                    .cursor_pointer()
-                    .hover(|s| s.border_color(theme::accent()))
-                    .tooltip(|window, cx| Tooltip::new("Asked from this object").build(window, cx))
-                    .on_click(move |_, _, cx| nav::navigate(Route::Object(target.clone()), cx))
-                    .child(format!("↳ {}", self.origin_name(&m.origin, store))),
+                    .text_color(theme::accent())
+                    .label(format!("↳ {}", self.origin_name(&m.origin, store)))
+                    .tooltip("Asked from this object")
+                    .on_click(move |_, _, cx| nav::navigate(Route::Object(target.clone()), cx)),
             );
         }
         meta = meta.child(
@@ -1877,9 +2155,10 @@ impl Discussion {
                 .text_color(theme::muted())
                 .child(when(m.ts)),
         );
-        body = body.child(meta);
+        header = header.child(meta);
 
-        // The bubble.
+        // The bubble: your chat colour, an agent's own colour, else neutral;
+        // the corner by the sender is the sharp one.
         let md_theme = MdTheme {
             ink: if tinted { colors.ink } else { theme::fg() },
             tint: if tinted { Some(colors.tint) } else { None },
@@ -1892,11 +2171,14 @@ impl Discussion {
         };
         // Each message's lines read after the previous message's.
         let text = render_markdown(("md", ix), &m.text, &md_theme, (ix as u64) << 24, cx);
-        let bubble_el = div()
-            .text_size(px(14.))
-            .line_height(relative(1.45))
-            .px(px(12.))
-            .py(px(7.))
+        let variant = if !tinted {
+            BubbleVariant::Muted
+        } else if own {
+            BubbleVariant::Filled
+        } else {
+            BubbleVariant::Tinted
+        };
+        let surface = BubbleContent::new()
             .rounded(px(16.))
             .map(|d| {
                 if own {
@@ -1905,13 +2187,70 @@ impl Discussion {
                     d.rounded_bl(px(5.))
                 }
             })
+            .border_0()
+            .px(px(12.))
+            .py(px(7.))
+            .text_size(px(14.))
+            .line_height(relative(1.45))
             .bg(if tinted { colors.bg } else { theme::hover() })
             .text_color(if tinted { colors.ink } else { theme::fg() })
             .max_w_full()
+            .map(overflow_visible)
             .child(text);
-        body = body.child(bubble_el);
+        let mut bubble_el = Bubble::new()
+            .alignment(align)
+            .with_variant(variant)
+            .max_w_full()
+            .content(surface);
+
+        // Reactions: a chip per emoji under the bubble; a click toggles yours,
+        // the tooltip names who reacted, yours is tinted in your colour.
+        if !m.reactions.is_empty() {
+            let mine_color = roostr_core::color::hex(&store.chat_color).unwrap_or(theme::accent());
+            let mut reactions = BubbleReactions::new()
+                .alignment(align)
+                .map(in_flow)
+                .border_0()
+                .bg(transparent_black())
+                .p_0()
+                .flex_wrap()
+                .gap(px(4.))
+                .map(|r| {
+                    if own {
+                        r.justify_end()
+                    } else {
+                        r.justify_start()
+                    }
+                });
+            for (i, r) in m.reactions.iter().enumerate() {
+                let mine = r.authors.contains(&self.me);
+                let names = r
+                    .authors
+                    .iter()
+                    .map(|a| self.who(a, store))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let (id, emoji) = (m.id.clone(), r.emoji.clone());
+                reactions = reactions.action(
+                    Button::new(("chip", i))
+                        .outline()
+                        .xsmall()
+                        .px(px(8.))
+                        .label(format!("{} {}", r.emoji, r.authors.len()))
+                        .when(mine, |b| {
+                            b.border_color(mine_color).bg(mine_color.opacity(0.16))
+                        })
+                        .tooltip(names)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.toggle_reaction(id.clone(), emoji.clone(), cx)
+                        })),
+                );
+            }
+            bubble_el = bubble_el.reactions(reactions);
+        }
 
         // Delivery / processing status: quiet when all is well.
+        let mut status_line = None;
         if let Some(entry) = &m.mailbox {
             let failed_delivery = if entry.outgoing {
                 entry.deliveries.iter().find(|d| d.status == "failed")
@@ -1959,7 +2298,14 @@ impl Discussion {
                     .gap_x(px(6.))
                     .gap_y(px(3.))
                     .pt(px(2.))
-                    .px(px(2.))
+                    // Under the bubble column, 2px in.
+                    .map(|d| {
+                        if own {
+                            d.px(px(2.))
+                        } else {
+                            d.pl(status_inset).pr(px(2.))
+                        }
+                    })
                     .text_size(px(11.))
                     .line_height(relative(1.5))
                     .text_color(if failed {
@@ -1970,23 +2316,18 @@ impl Discussion {
                     .child(div().min_w_0().max_w_full().child(text))
             };
             let retry_button = |id: ElementId, disabled: bool, on: RetryAction| {
-                div()
-                    .id(id)
-                    .border_1()
-                    .border_color(theme::border())
-                    .rounded(px(5.))
-                    .px(px(5.))
-                    .py(px(1.))
-                    .when(disabled, |d| d.opacity(0.5))
-                    .when(!disabled, |d| d.cursor_pointer())
+                Button::new(id)
+                    .outline()
+                    .xsmall()
+                    .label("Retry")
+                    .disabled(disabled)
                     .on_click(cx.listener(move |this, _, _, cx| {
                         if !disabled {
                             on(this, cx)
                         }
                     }))
-                    .child("Retry")
             };
-            let line = if let Some(failed) = failed_delivery {
+            status_line = if let Some(failed) = failed_delivery {
                 let recipient = failed.recipient.object_id.clone();
                 let key = format!("{}:delivery:{}", m.id, recipient);
                 let id = m.id.clone();
@@ -2040,90 +2381,45 @@ impl Discussion {
             } else {
                 None
             };
-            body = body.children(line);
         }
 
-        // Reactions.
-        if !m.reactions.is_empty() {
-            let disabled = self.read_only || self.is_exchange;
-            let mine_color = roostr_core::color::hex(&store.chat_color).unwrap_or(theme::accent());
-            let chips = m.reactions.iter().enumerate().map(|(i, r)| {
-                let mine = r.authors.contains(&self.me);
-                let names = r
-                    .authors
-                    .iter()
-                    .map(|a| self.who(a, store))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                let (id, emoji) = (m.id.clone(), r.emoji.clone());
-                div()
-                    .id(("chip", i))
-                    .border_1()
-                    .border_color(if mine { mine_color } else { theme::border() })
-                    .when(mine, |d| d.bg(mine_color.opacity(0.16)))
-                    .rounded_full()
-                    .px(px(8.))
-                    .py(px(1.))
-                    .text_size(px(12.))
-                    .when(!disabled, |d| {
-                        d.cursor_pointer()
-                            .hover(|s| s.border_color(theme::accent()))
-                    })
-                    .tooltip(move |window, cx| Tooltip::new(names.clone()).build(window, cx))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.toggle_reaction(id.clone(), emoji.clone(), cx)
-                    }))
-                    .child(format!("{} {}", r.emoji, r.authors.len()))
-            });
-            body = body.child(
-                div()
-                    .id(("reactions", ix))
-                    .flex()
-                    .flex_wrap()
-                    .gap(px(4.))
-                    .mt(px(4.))
-                    .when(own, |d| d.justify_end())
-                    .children(chips),
-            );
-        }
-
-        // Hover actions.
+        // Hover actions, beside the bubble on the side away from the sender.
         let actions = reveal.as_ref().map(|(opacity, _)| {
-            let action_button = |id: &'static str, label: &'static str| {
-                div()
-                    .id((id, ix))
-                    .text_size(px(13.))
-                    .px(px(4.))
-                    .py(px(2.))
-                    .rounded(px(6.))
-                    .cursor_pointer()
-                    .hover(|s| s.bg(theme::hover()))
-                    .child(label)
-            };
             let id = m.id.clone();
             let id2 = m.id.clone();
             let id3 = m.id.clone();
             let exchange = self.is_exchange;
             div()
+                .absolute()
+                .top_0()
+                .map(|d| {
+                    if own {
+                        d.right(relative(1.)).pr(px(10.))
+                    } else {
+                        d.left(relative(1.)).pl(px(10.))
+                    }
+                })
                 .flex()
                 .gap(px(2.))
-                .self_start()
                 .opacity(*opacity)
                 .when(!exchange, |d| {
                     d.child(
-                        action_button("react", "😀")
-                            .tooltip(|window, cx| Tooltip::new("Add reaction").build(window, cx))
+                        Button::new(("react", ix))
+                            .ghost()
+                            .xsmall()
+                            .label("😀")
+                            .tooltip("Add reaction")
                             .on_click(
                                 cx.listener(move |this, _, _, cx| this.toggle_picker(&id, cx)),
                             ),
                     )
                 })
                 .child(
-                    action_button("reply", "↩")
-                        .tooltip(move |window, cx| {
-                            Tooltip::new(if exchange { "Reply to all" } else { "Reply" })
-                                .build(window, cx)
-                        })
+                    Button::new(("reply", ix))
+                        .ghost()
+                        .xsmall()
+                        .label("↩")
+                        .tooltip(if exchange { "Reply to all" } else { "Reply" })
                         .on_click(cx.listener(move |this, _, window, cx| {
                             this.start_reply(&id2, false, window, cx)
                         })),
@@ -2134,13 +2430,12 @@ impl Discussion {
                         .is_some_and(|e| e.message.sender.object_id != self.object_id),
                     |d| {
                         d.child(
-                            action_button("private", "Private")
-                                .text_size(px(11.))
+                            Button::new(("private", ix))
+                                .ghost()
+                                .xsmall()
+                                .label("Private")
                                 .text_color(theme::muted())
-                                .tooltip(|window, cx| {
-                                    Tooltip::new("Reply privately in a separate exchange")
-                                        .build(window, cx)
-                                })
+                                .tooltip("Reply privately in a separate exchange")
                                 .on_click(cx.listener(move |this, _, window, cx| {
                                     this.start_reply(&id3, true, window, cx)
                                 })),
@@ -2169,7 +2464,7 @@ impl Discussion {
                                 .occlude()
                                 .on_mouse_down_out(cx.listener(|this, _, _, cx| {
                                     this.picker_for.clear();
-                                    this.sync_list();
+                                    this.sync_list(cx);
                                     cx.notify();
                                 }))
                                 .child(
@@ -2183,7 +2478,7 @@ impl Discussion {
                                         .on_close(move |_, cx| {
                                             let _ = entity2.update(cx, |this, cx| {
                                                 this.picker_for.clear();
-                                                this.sync_list();
+                                                this.sync_list(cx);
                                                 cx.notify();
                                             });
                                         }),
@@ -2192,21 +2487,57 @@ impl Discussion {
                 ))
         });
 
+        // The bubble column is at most 78% of the row.
+        let mut column = StyleRefinement::default()
+            .w_auto()
+            .max_w(relative(0.78))
+            .gap_0();
+        if !own {
+            column = column.pl(column_inset);
+        }
+        let mut message = Message::new()
+            .alignment(align)
+            .gap_0()
+            .with_stack_style(column)
+            .header(header)
+            .content(
+                // Sized by its bubble: a 100% width inside the column (itself
+                // sized by its content) counts as nothing when the column
+                // measures, which left the bubble as narrow as the header.
+                MessageContent::new()
+                    .w_auto()
+                    .relative()
+                    .bubble(bubble_el)
+                    .children(actions),
+            );
+        if !own {
+            message = message.avatar_slot(
+                MessageAvatar::new()
+                    .min_w(px(ROW_AVATAR.size))
+                    .size(px(ROW_AVATAR.size))
+                    .bg(transparent_black())
+                    .map(overflow_visible)
+                    .child(self.render_avatar(("avatar", ix).into(), &m.author, store)),
+            );
+        }
+        if let Some(status) = status_line {
+            message = message.footer(
+                MessageFooter::new()
+                    .content_inset(false)
+                    .max_w(relative(0.78))
+                    .font_weight(FontWeight::NORMAL)
+                    .child(status),
+            );
+        }
+
         div()
             .id(ElementId::Name(format!("msg-{mid}").into()))
             .when_some(reveal.map(|(_, hover)| hover), |d, hover| {
                 d.on_hover(move |hovered, _, cx| motion::HoverMotion::set(&hover, *hovered, cx))
             })
             .relative()
-            .flex()
-            .gap(px(10.))
-            .items_end()
-            .when(own, |d| d.flex_row_reverse())
-            .when(!own, |d| {
-                d.child(self.render_avatar(("avatar", ix).into(), &m.author, store))
-            })
-            .child(body)
-            .children(actions)
+            .w_full()
+            .child(message)
             .children(picker)
             .into_any_element()
     }
@@ -2215,9 +2546,17 @@ impl Discussion {
     fn render_footer(&self, cx: &mut Context<Self>) -> AnyElement {
         let mut footer = div().flex().flex_col();
         if self.messages.is_empty() {
+            // A muted one-liner, not the kit's centred empty-state card.
             footer = footer.child(
-                div()
+                Empty::new()
+                    .flex_none()
+                    .items_start()
+                    .justify_start()
+                    .gap_0()
+                    .p_0()
                     .my(px(13.))
+                    .rounded_none()
+                    .text_left()
                     .text_size(px(13.))
                     .text_color(theme::muted())
                     .child("No messages yet."),
@@ -2225,26 +2564,6 @@ impl Discussion {
         }
         let working = self.agent_working().cloned();
         if let Some(agent) = &working {
-            let avatar = div()
-                .flex_none()
-                .size(px(28.))
-                .rounded_full()
-                .flex()
-                .items_center()
-                .justify_center()
-                .text_color(theme::white());
-            let avatar = if agent.icon.is_empty() {
-                avatar
-                    .bg(avatar_color(&agent.id))
-                    .text_size(px(10.))
-                    .font_family(theme::fonts::MONO)
-                    .child(agent.name.chars().take(2).collect::<String>())
-            } else {
-                avatar
-                    .bg(theme::hl_light())
-                    .text_size(px(17.))
-                    .child(agent.icon.clone())
-            };
             footer = footer.child(
                 div()
                     .id("working")
@@ -2258,7 +2577,12 @@ impl Discussion {
                     .tooltip(|window, cx| {
                         Tooltip::new("The agent is composing a reply").build(window, cx)
                     })
-                    .child(avatar)
+                    .child(avatar(
+                        &agent.icon,
+                        agent.name.chars().take(2).collect(),
+                        &agent.id,
+                        ROW_AVATAR,
+                    ))
                     .child(
                         div()
                             .font_weight(FontWeight::MEDIUM)
@@ -2282,31 +2606,25 @@ impl Discussion {
                 }
             };
             footer = footer.child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(8.))
-                    .pt(px(2.))
-                    .pb(px(6.))
-                    .text_size(px(12.))
-                    .text_color(theme::orange())
-                    .child(div().text_size(px(13.)).child("⚠︎"))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .line_height(relative(1.4))
-                            .child(format!(
-                                "{} hit a problem: {}{}",
-                                agent.name,
-                                agent.detail,
-                                if hint.is_empty() {
-                                    String::new()
-                                } else {
-                                    format!(" — {hint}")
-                                }
-                            )),
+                Alert::warning(
+                    "agent-problem",
+                    format!(
+                        "{} hit a problem: {}{}",
+                        agent.name,
+                        agent.detail,
+                        if hint.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" — {hint}")
+                        }
                     ),
+                )
+                .xsmall()
+                .mt(px(2.))
+                .mb(px(6.))
+                .text_size(px(12.))
+                .line_height(relative(1.4))
+                .text_color(theme::orange()),
             );
         }
         let _ = cx;
@@ -2321,8 +2639,18 @@ impl Discussion {
     ) -> AnyElement {
         let n = self.messages.len();
         let top = if ix == 0 { px(4.) } else { px(14.) };
+        // Only records the bounds: the list holds its state borrowed while it
+        // lays rows out, so nothing here may read or change the scroller.
+        let layout = self.layout.clone();
+        let laid_out = move |bounds: Bounds<Pixels>, _: &mut Window, _: &mut App| {
+            layout.borrow_mut().rows.insert(ix, bounds);
+        };
         if ix < n {
-            let item = div().pt(top).child(self.render_message(ix, window, cx));
+            let item = div()
+                .relative()
+                .pt(top)
+                .child(self.render_message(ix, window, cx))
+                .on_prepaint(laid_out);
             if self.arrived.as_deref() != Some(self.messages[ix].id.as_str()) {
                 return item.into_any_element();
             }
@@ -2335,11 +2663,38 @@ impl Discussion {
             let footer = self.render_footer(cx);
             let has = n == 0 || self.agent_working().is_some() || self.agent_error().is_some();
             div()
+                .relative()
                 .when(has, |d| d.pt(top))
                 .pb(px(4.))
                 .child(footer)
+                .on_prepaint(laid_out)
                 .into_any_element()
         }
+    }
+
+    /// Highlight row `index` of a command menu once this frame has installed
+    /// its rows. The keyboard moves `mention_index` / `object_tag_index`
+    /// (the composer keeps the focus); a hovered row reports back through
+    /// the menu's `on_select`.
+    fn sync_highlight(
+        menu: &Entity<CommandState>,
+        index: usize,
+        count: usize,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        if count == 0 {
+            return;
+        }
+        let want = IndexPath::new(index.min(count - 1));
+        let menu = menu.clone();
+        window.defer(cx, move |window, cx| {
+            menu.update(cx, |state, cx| {
+                if state.matched_count() > want.row && state.selected_index() != Some(want) {
+                    state.set_selected_index(Some(want), window, cx);
+                }
+            })
+        });
     }
 
     fn render_mention_menu(
@@ -2371,111 +2726,79 @@ impl Discussion {
                     spread_radius: px(0.),
                     inset: false,
                 }])
+                .max_h(px(260.))
+                .overflow_hidden()
+                .flex()
+                .flex_col()
                 .text_size(px(13.))
                 .text_color(theme::muted())
                 .occlude()
+                // The composer keeps the focus: a press in the menu picks
+                // without moving it there.
+                .capture_any_mouse_down(|_, window, _| window.prevent_default())
         };
-        let row = |id: ElementId, active: bool| {
-            div()
-                .id(id)
-                .flex()
-                .items_center()
-                .gap(px(8.))
-                .w_full()
-                .px(px(8.))
-                .py(px(7.))
-                .rounded(px(6.))
-                .text_color(theme::fg())
-                .cursor_pointer()
-                .when(active, |d| d.bg(theme::border()))
-        };
+        let entity = cx.entity().downgrade();
         if let Some(mention) = &self.mention {
             let matches = self.mention_matches();
-            if !matches.is_empty() {
+            if !matches.is_empty() || self.tag_options.is_some() {
                 let frame = appear(window, cx);
-                let rows = matches.into_iter().enumerate().map(|(i, option)| {
-                    let icon = if option.icon.is_empty() {
-                        div()
-                            .size(px(20.))
-                            .flex_none()
-                            .rounded_full()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .bg(avatar_color(&option.endpoint.agent_id))
-                            .text_color(theme::white())
-                            .text_size(px(9.))
-                            .child(
-                                option
-                                    .agent_name
-                                    .chars()
-                                    .take(2)
-                                    .collect::<String>()
-                                    .to_uppercase(),
-                            )
-                    } else {
-                        div()
-                            .size(px(20.))
-                            .flex_none()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .text_size(px(13.))
-                            .child(option.icon.clone())
-                    };
-                    let picked = option.clone();
-                    row(("mention", i).into(), i == self.mention_index)
-                        .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
-                            if *hovered && this.mention_index != i {
-                                this.mention_index = i;
+                let found = !matches.is_empty();
+                let query = mention.query.clone();
+                Self::sync_highlight(
+                    &self.mention_menu,
+                    self.mention_index,
+                    matches.len(),
+                    window,
+                    cx,
+                );
+                let items = matches.into_iter().map(|option| {
+                    CommandItem::new()
+                        .label(format!("@{}", option.agent_name))
+                        .child(move |_, _| mention_row(&option))
+                });
+                let selected = entity.clone();
+                let command = Command::new(&self.mention_menu)
+                    .searchable(false)
+                    .bordered(false)
+                    .max_h(px(252.))
+                    .bg(transparent_black())
+                    .text_size(px(13.))
+                    .text_color(theme::muted())
+                    .items(items)
+                    .on_select(move |ix, _, cx| {
+                        let _ = selected.update(cx, |this, cx| {
+                            if this.mention_index != ix.row {
+                                this.mention_index = ix.row;
                                 cx.notify();
                             }
-                        }))
-                        .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            this.pick_mention(picked.clone(), window, cx)
-                        }))
-                        .child(icon)
-                        .child(
-                            div()
-                                .font_weight(FontWeight::MEDIUM)
-                                .child(format!("@{}", option.agent_name)),
-                        )
-                        .when(option.name != option.agent_name, |d| {
-                            d.child(
-                                div()
-                                    .min_w_0()
-                                    .text_size(px(11.))
-                                    .text_color(theme::muted())
-                                    .overflow_hidden()
-                                    .text_ellipsis()
-                                    .whitespace_nowrap()
-                                    .child(option.name.clone()),
-                            )
-                        })
-                });
+                        });
+                    })
+                    .on_confirm(move |ix, window, cx| {
+                        let _ = entity.update(cx, |this, cx| {
+                            if let Some(option) = this.mention_matches().get(ix.row).cloned() {
+                                this.pick_mention(option, window, cx);
+                            }
+                        });
+                    })
+                    .empty(move |_, _, _| {
+                        div()
+                            .px(px(8.))
+                            .py(px(6.))
+                            .child(format!("No agent matches “{query}”."))
+                    })
+                    .footer(|_, _, cx| {
+                        Self::lite_agents_notice(cx).unwrap_or_else(|| div().into_any_element())
+                    });
                 return Some(
                     menu(frame)
-                        .id("mention-menu")
-                        .debug_selector(|| "mention-menu".into())
-                        .p(px(4.))
-                        .flex()
-                        .flex_col()
-                        .max_h(px(260.))
-                        .overflow_y_scroll()
-                        .children(rows)
-                        .children(Self::lite_agents_notice(cx))
-                        .into_any_element(),
-                );
-            }
-            if self.tag_options.is_some() {
-                return Some(
-                    menu(appear(window, cx))
-                        .debug_selector(|| "mention-none".into())
-                        .px(px(12.))
-                        .py(px(10.))
-                        .child(format!("No agent matches “{}”.", mention.query))
-                        .children(Self::lite_agents_notice(cx))
+                        .debug_selector(move || {
+                            if found {
+                                "mention-menu".into()
+                            } else {
+                                "mention-none".into()
+                            }
+                        })
+                        .child(command)
                         .into_any_element(),
                 );
             }
@@ -2483,128 +2806,64 @@ impl Discussion {
         let tag = self.object_tag.as_ref()?;
         let frame = appear(window, cx);
         let matches = self.object_matches(cx);
+        Self::sync_highlight(
+            &self.object_menu,
+            self.object_tag_index,
+            matches.len(),
+            window,
+            cx,
+        );
         let store = Store::global(cx);
         let space = roostr_core::nav::Navigator::global(cx)
             .read(cx)
             .space()
             .to_string();
-        let q = tag.query.trim().to_string();
-        let search = div()
-            .flex()
-            .items_center()
-            .gap(px(8.))
-            .px(px(12.))
-            .py(px(8.))
-            .border_b_1()
-            .border_color(theme::border())
-            .flex_none()
-            .text_color(if q.is_empty() {
-                theme::muted()
-            } else {
-                theme::fg()
-            })
-            .child(
-                svg()
-                    .path("icons/search.svg")
-                    .size(px(14.))
-                    .flex_none()
-                    .text_color(theme::muted()),
-            )
-            .child(
-                div()
-                    .min_w_0()
-                    .overflow_hidden()
-                    .text_ellipsis()
-                    .whitespace_nowrap()
-                    .child(if q.is_empty() {
-                        "Search objects - recently opened first".to_string()
-                    } else {
-                        q.clone()
-                    }),
-            );
-        let body = if matches.is_empty() {
-            div()
-                .px(px(12.))
-                .py(px(10.))
-                .child(format!("No object matches “{q}”."))
-                .into_any_element()
-        } else {
-            let rows = matches.into_iter().enumerate().map(|(i, option)| {
+        let items: Vec<CommandItem> = matches
+            .into_iter()
+            .map(|option| {
                 let icon = object_icon(store.read(cx), &option.icon, &option.type_key, &space);
-                let icon_el = if is_image_icon(&icon) {
-                    div()
-                        .size(px(20.))
-                        .flex_none()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .child(roostr_core::ui::emoji_or_image_icon(&icon, px(18.)))
-                } else {
-                    div()
-                        .size(px(20.))
-                        .flex_none()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .text_size(px(13.))
-                        .child(icon)
-                };
-                let picked = option.clone();
                 let opened = self.opened_rank.contains_key(&option.id);
-                row(("object-tag", i).into(), i == self.object_tag_index)
-                    .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
-                        if *hovered && this.object_tag_index != i {
-                            this.object_tag_index = i;
-                            cx.notify();
-                        }
-                    }))
-                    .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.pick_object(picked.clone(), window, cx)
-                    }))
-                    .child(icon_el)
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .font_weight(FontWeight::MEDIUM)
-                            .overflow_hidden()
-                            .text_ellipsis()
-                            .whitespace_nowrap()
-                            .child(option.name.clone()),
-                    )
-                    .when(opened, |d| {
-                        d.child(
-                            div()
-                                .ml_auto()
-                                .flex_none()
-                                .text_size(px(11.))
-                                .text_color(theme::muted())
-                                .child("opened"),
-                        )
-                    })
+                let name = option.name;
+                CommandItem::new()
+                    .label(name.clone())
+                    .child(move |_, _| object_row(&icon, &name, opened))
+            })
+            .collect();
+        let q = tag.query.trim().to_string();
+        let search = q.clone();
+        let selected = entity.clone();
+        let command = Command::new(&self.object_menu)
+            .searchable(false)
+            .bordered(false)
+            .max_h(px(220.))
+            .bg(transparent_black())
+            .text_size(px(13.))
+            .text_color(theme::muted())
+            .header(move |_, _, _| object_search_row(&search))
+            .items(items)
+            .on_select(move |ix, _, cx| {
+                let _ = selected.update(cx, |this, cx| {
+                    if this.object_tag_index != ix.row {
+                        this.object_tag_index = ix.row;
+                        cx.notify();
+                    }
+                });
+            })
+            .on_confirm(move |ix, window, cx| {
+                let _ = entity.update(cx, |this, cx| {
+                    let pick = this.object_matches(cx).get(ix.row).cloned();
+                    if let Some(option) = pick {
+                        this.pick_object(option, window, cx);
+                    }
+                });
+            })
+            .empty(move |_, _, _| {
+                div()
+                    .px(px(8.))
+                    .py(px(6.))
+                    .child(format!("No object matches “{q}”."))
             });
-            div()
-                .id("object-menu-list")
-                .flex()
-                .flex_col()
-                .p(px(4.))
-                .min_h_0()
-                .overflow_y_scroll()
-                .track_scroll(&self.object_menu_scroll)
-                .children(rows)
-                .into_any_element()
-        };
-        Some(
-            menu(frame)
-                .flex()
-                .flex_col()
-                .max_h(px(260.))
-                .overflow_hidden()
-                .child(search)
-                .child(body)
-                .into_any_element(),
-        )
+        Some(menu(frame).child(command).into_any_element())
     }
 
     fn render_composer(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
@@ -2734,17 +2993,21 @@ impl Discussion {
                     .min_h(px(48.))
                     .child(div())
                     .child(
-                        div()
-                            .id("send")
+                        // A round button in your chat colour; dimmed (not
+                        // the kit's disabled look) while there is nothing to send.
+                        Button::new("send")
+                            .custom(
+                                ButtonCustomVariant::new(cx)
+                                    .color(colors.bg)
+                                    .foreground(colors.ink)
+                                    .hover(colors.bg)
+                                    .active(colors.bg),
+                            )
+                            .rounded(px(12.))
                             .size(px(24.))
-                            .rounded_full()
-                            .flex()
-                            .items_center()
-                            .justify_center()
+                            .p_0()
                             .bg(colors.bg)
-                            .text_color(colors.ink)
-                            .when(disabled, |d| d.opacity(0.35))
-                            .when(!disabled, |d| d.cursor_pointer())
+                            .when(disabled, |b| b.opacity(0.35))
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 if !disabled {
                                     this.send(window, cx)
@@ -2926,15 +3189,21 @@ impl Render for Discussion {
                 composer.update(cx, |s, cx| s.focus(window, cx))
             });
         }
+        // Rows laid out in this frame record themselves again.
+        self.layout.borrow_mut().rows.clear();
         if let Some(ix) = self.tall_check.take() {
             cx.on_next_frame(window, move |this, _, cx| {
                 // A reply taller than the pane opens at its first line, not its last.
-                if let Some(item) = this.list.bounds_for_item(ix)
-                    && item.size.height > this.list.viewport_bounds().size.height * 0.8
-                {
-                    this.list.scroll_to(ListOffset {
-                        item_ix: ix,
-                        offset_in_item: px(0.),
+                let tall = {
+                    let layout = this.layout.borrow();
+                    match (layout.rows.get(&ix), layout.viewport) {
+                        (Some(item), Some(view)) => item.size.height > view.size.height * 0.8,
+                        _ => false,
+                    }
+                };
+                if tall {
+                    this.scroller.update(cx, |list, cx| {
+                        list.scroll_to_item(ix, cx);
                     });
                     cx.notify();
                 }
@@ -2972,49 +3241,53 @@ impl Render for Discussion {
             } else {
                 "Start a discussion".into()
             };
+            let opener = Button::new("opener")
+                .custom(
+                    ButtonCustomVariant::new(cx)
+                        .color(rgba(0xffffff0f).into())
+                        .foreground(theme::muted())
+                        .hover(theme::hover())
+                        .active(theme::hover()),
+                )
+                .xsmall()
+                .bg(rgba(0xffffff0f))
+                .font_weight(FontWeight::MEDIUM)
+                .map(|b| {
+                    if mobile {
+                        // A centred round chat button.
+                        b.rounded(px(24.))
+                            .size(px(48.))
+                            .p_0()
+                            .child(div().text_size(px(20.)).child("💬"))
+                    } else {
+                        b.rounded(px(18.))
+                            .h_auto()
+                            .pl(px(10.))
+                            .pr(px(12.))
+                            .py(px(7.))
+                            .child(div().text_size(px(12.)).child("💬"))
+                            .child(div().text_size(px(12.)).child(label))
+                    }
+                })
+                .on_click(cx.listener(|this, _, window, cx| {
+                    // Anytype's phone idiom: the discussion opens as its own page.
+                    if roostr_core::layout::is_mobile(window) {
+                        nav::navigate(Route::Chat(this.object_id.clone()), cx);
+                        return;
+                    }
+                    this.open = true;
+                    this.derive(cx);
+                    this.composer.update(cx, |s, cx| s.focus(window, cx));
+                    cx.notify();
+                }));
             return root
                 .child(
-                    div().flex().justify_center().pt(px(4.)).pb(px(12.)).child(
-                        div()
-                            .id("opener")
-                            .flex()
-                            .items_center()
-                            .bg(rgba(0xffffff0f))
-                            .text_color(theme::muted())
-                            .font_weight(FontWeight::MEDIUM)
-                            .cursor_pointer()
-                            .hover(|s| s.bg(theme::hover()).text_color(theme::fg()))
-                            .map(|d| {
-                                if mobile {
-                                    // A centred round chat button.
-                                    d.size(px(48.))
-                                        .rounded_full()
-                                        .justify_center()
-                                        .text_size(px(20.))
-                                        .child("💬")
-                                } else {
-                                    d.gap(px(4.))
-                                        .text_size(px(12.))
-                                        .pl(px(10.))
-                                        .pr(px(12.))
-                                        .py(px(7.))
-                                        .rounded(px(18.))
-                                        .child(div().text_size(px(12.)).child("💬"))
-                                        .child(label)
-                                }
-                            })
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                // Anytype's phone idiom: the discussion opens as its own page.
-                                if roostr_core::layout::is_mobile(window) {
-                                    nav::navigate(Route::Chat(this.object_id.clone()), cx);
-                                    return;
-                                }
-                                this.open = true;
-                                this.derive(cx);
-                                this.composer.update(cx, |s, cx| s.focus(window, cx));
-                                cx.notify();
-                            })),
-                    ),
+                    div()
+                        .flex()
+                        .justify_center()
+                        .pt(px(4.))
+                        .pb(px(12.))
+                        .child(opener),
                 )
                 .into_any_element();
         }
@@ -3029,46 +3302,54 @@ impl Render for Discussion {
                         .items_center()
                         .justify_between()
                         .mb(px(8.))
-                        .child(div().text_size(px(11.)).text_color(theme::muted()).child(
-                            if self.is_exchange {
+                        .child(
+                            Label::new(if self.is_exchange {
                                 self.exchange_title.to_uppercase()
                             } else {
                                 "DISCUSSION".into()
-                            },
-                        ))
+                            })
+                            .line_height(phi())
+                            .text_size(px(11.))
+                            .text_color(theme::muted()),
+                        )
                         .child(
-                            div()
-                                .id("collapse")
-                                .text_size(px(14.))
+                            Button::new("collapse")
+                                .ghost()
+                                .xsmall()
                                 .text_color(theme::muted())
-                                .cursor_pointer()
-                                .tooltip(|window, cx| Tooltip::new("Collapse").build(window, cx))
+                                .tooltip("Collapse")
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.open = false;
                                     this.derive(cx);
                                     cx.notify();
                                 }))
-                                .child("×"),
+                                .child(div().text_size(px(14.)).child("×")),
                         ),
                 );
         }
 
-        let notice = |text: String, error: bool| {
-            div()
+        // Notices: warnings in orange, the rest muted.
+        let notice = |id: &'static str, text: String, error: bool| {
+            Alert::new(id, text)
+                .with_variant(if error {
+                    AlertVariant::Warning
+                } else {
+                    AlertVariant::Default
+                })
+                .when(error, |a| a.icon(IconName::TriangleAlert))
+                .xsmall()
                 .my(px(12.))
-                .pt(px(2.))
-                .pb(px(6.))
                 .text_size(px(12.))
                 .text_color(if error {
                     theme::orange()
                 } else {
                     theme::muted()
                 })
-                .child(text)
         };
         if !self.identity_error.is_empty() {
             root = root
                 .child(notice(
+                    "identity-error",
                     format!(
                         "Cannot load your discussion identity: {}",
                         self.identity_error
@@ -3086,6 +3367,7 @@ impl Render for Discussion {
         let paired = roostr_core::harness::harness(cx).is_some();
         if !self.is_exchange && paired && !self.presence_error.is_empty() {
             root = root.child(notice(
+                "presence-error",
                 format!(
                     "{} Check that the paired native app and harness are running. Discussion remains available.",
                     self.presence_error
@@ -3128,36 +3410,53 @@ impl Render for Discussion {
                     .map(|p| self.who(p, store))
                     .collect::<Vec<_>>()
                     .join(", ");
-                root = root.child(notice(format!("Participants: {names}"), false));
+                root = root.child(notice(
+                    "participants",
+                    format!("Participants: {names}"),
+                    false,
+                ));
             }
         }
         if self.legacy {
             root = root.child(notice(
+                "legacy",
                 "This shared exchange is read-only, awaiting migration to object inboxes.".into(),
                 false,
             ));
         }
         if self.is_exchange && self.conversation.as_ref().is_some_and(|c| c.closed) {
-            root = root.child(notice("This exchange is closed.".into(), false));
+            root = root.child(notice("closed", "This exchange is closed.".into(), false));
         }
         if !self.retry_error.is_empty() {
-            root = root.child(notice(format!("Retry failed: {}", self.retry_error), true));
+            root = root.child(notice(
+                "retry-error",
+                format!("Retry failed: {}", self.retry_error),
+                true,
+            ));
         }
 
         // Messages.
         if self.own_scroller() {
+            // The kit's message scroller: follows the newest message, a
+            // "Jump to latest" button while reading further up. Rows carry
+            // their own spacing, so its row and list padding are off.
+            let layout = self.layout.clone();
             root = root.child(
                 div()
                     .debug_selector(|| "chat-messages".into())
                     .relative()
                     .flex_1()
                     .min_h_0()
+                    .on_prepaint(move |bounds, _, _| layout.borrow_mut().viewport = Some(bounds))
                     .child(
-                        list(
-                            self.list.clone(),
+                        MessageScroller::new(
+                            "chat-messages",
+                            self.scroller.clone(),
                             cx.processor(|this, ix, window, cx| this.render_item(ix, window, cx)),
                         )
-                        .size_full(),
+                        .scrollbar(false)
+                        .with_list_style(StyleRefinement::default().p_0())
+                        .with_row_style(StyleRefinement::default().p_0()),
                     ),
             );
         } else {
@@ -3208,12 +3507,12 @@ impl Render for Discussion {
                             .child(target.text.chars().take(60).collect::<String>()),
                     )
                     .child(
-                        div()
-                            .id("cancel-reply")
+                        Button::new("cancel-reply")
+                            .ghost()
+                            .xsmall()
                             .ml_auto()
                             .flex_none()
-                            .cursor_pointer()
-                            .tooltip(|window, cx| Tooltip::new("Cancel reply").build(window, cx))
+                            .tooltip("Cancel reply")
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.reply_to.clear();
                                 this.private_recipient.clear();
@@ -3224,7 +3523,7 @@ impl Render for Discussion {
             );
         }
         if !self.send_error.is_empty() {
-            root = root.child(notice(self.send_error.clone(), true));
+            root = root.child(notice("send-error", self.send_error.clone(), true));
         }
         if !self.read_only {
             if self.is_exchange {

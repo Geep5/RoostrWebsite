@@ -68,12 +68,6 @@ enum Desk {
     Offline,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Menu {
-    Export,
-    PlanServer,
-}
-
 /// The settings panel (the modal's content).
 pub struct Settings {
     focus: FocusHandle,
@@ -153,8 +147,6 @@ pub struct Settings {
     show_older_devices: bool,
     renaming_device: Option<String>,
     device_name_draft: Entity<InputState>,
-
-    open_menu: Option<Menu>,
     /// The mobile sheet's drag-to-close: how far it is pulled down, where
     /// the finger started while it drags, its presented offset (entering
     /// from below, then following the finger 1:1 and settling back over
@@ -354,7 +346,6 @@ impl Settings {
             show_older_devices: false,
             renaming_device: None,
             device_name_draft,
-            open_menu: None,
             sheet_y: px(0.),
             sheet_drag: None,
             sheet: None,
@@ -905,23 +896,44 @@ impl Settings {
         let progress = sync_progress(&status).map(|p| progress_text(&p));
         let (state, state_color) = match status.phase {
             SyncPhase::Error => (
-                format!("Sync error{}", status.detail.as_deref().map(|d| format!(": {d}")).unwrap_or_default()),
+                format!(
+                    "Sync error{}",
+                    status
+                        .detail
+                        .as_deref()
+                        .map(|d| format!(": {d}"))
+                        .unwrap_or_default()
+                ),
                 theme::red(),
             ),
             _ if progress.is_some() => (progress.unwrap_or_default(), theme::orange()),
-            _ if !replica => ("Holds your whole vault (this computer's engine)".to_string(), theme::green()),
+            _ if !replica => (
+                "Holds your whole vault (this computer's engine)".to_string(),
+                theme::green(),
+            ),
             _ if lite => (
                 match &self.estimate {
-                    Some(e) => format!("About {}% on this device · the rest downloads as you open it", e.percent()),
-                    None => "Part of your vault on this device · the rest downloads as you open it".to_string(),
+                    Some(e) => format!(
+                        "About {}% on this device · the rest downloads as you open it",
+                        e.percent()
+                    ),
+                    None => "Part of your vault on this device · the rest downloads as you open it"
+                        .to_string(),
                 },
                 theme::muted(),
             ),
-            SyncPhase::Live if status.bootstrapped => ("100% synced · up to date".to_string(), theme::green()),
+            SyncPhase::Live if status.bootstrapped => {
+                ("100% synced · up to date".to_string(), theme::green())
+            }
             SyncPhase::Live | SyncPhase::Backfill => ("Syncing…".to_string(), theme::orange()),
             SyncPhase::Idle => ("Not connected to a relay".to_string(), theme::muted()),
         };
-        let pending = status.pending.filter(|n| *n > 0).map(|n| format!(" · {n} change{} not sent yet", if n == 1 { "" } else { "s" }));
+        let pending = status.pending.filter(|n| *n > 0).map(|n| {
+            format!(
+                " · {n} change{} not sent yet",
+                if n == 1 { "" } else { "s" }
+            )
+        });
         div()
             .mt(px(10.))
             .flex()
@@ -1419,15 +1431,6 @@ impl Settings {
         })
         .detach();
     }
-
-    fn set_menu(&mut self, menu: Menu, open: bool, cx: &mut Context<Self>) {
-        self.open_menu = if open {
-            Some(menu)
-        } else {
-            self.open_menu.filter(|m| *m != menu)
-        };
-        cx.notify();
-    }
 }
 
 impl Focusable for Settings {
@@ -1480,14 +1483,12 @@ fn error_p(text: impl Into<SharedString>) -> Div {
 }
 
 /// The rounded outline badge of the mode line ("Full mode") and the device rows.
-fn pill(text: impl Into<SharedString>, color: Hsla) -> Div {
-    div()
+fn pill(text: impl Into<SharedString>, color: Hsla) -> gpui_kit::component::tag::Tag {
+    gpui_kit::component::tag::Tag::custom(color, color, color)
+        .outline()
+        .rounded(px(999.))
         .px(px(8.))
         .py(px(2.))
-        .rounded(px(999.))
-        .border_1()
-        .border_color(color)
-        .text_color(color)
         .text_size(px(12.))
         .font_weight(gpui_kit::FontWeight::SEMIBOLD)
         .child(text.into())
@@ -1840,15 +1841,9 @@ impl Render for Settings {
                                     )),
                             ),
                     )
-                    .child(switch(
-                        ("relay-switch", ix),
-                        on,
-                        move |on, _, cx| {
-                            row_this.update(cx, |this, cx| this.toggle_relay(url, on, cx))
-                        },
-                        window,
-                        cx,
-                    )),
+                    .child(switch(("relay-switch", ix), on, move |on, _, cx| {
+                        row_this.update(cx, |this, cx| this.toggle_relay(url, on, cx))
+                    })),
             );
         }
         for r in self
@@ -2023,11 +2018,7 @@ impl Render for Settings {
                     .items_center()
                     .gap(px(10.))
                     .child(
-                        Select::new("export-format", formats, selected_format, self.open_menu == Some(Menu::Export))
-                            .on_open({
-                                let this = this.clone();
-                                move |open, _, cx| this.update(cx, |this, cx| this.set_menu(Menu::Export, open, cx))
-                            })
+                        Select::new("export-format", formats, selected_format)
                             .on_pick({
                                 let this = this.clone();
                                 move |value, _, cx| {
@@ -2132,21 +2123,7 @@ impl Render for Settings {
                     .text_size(px(13.))
                     .child("Kept fresh by")
                     .child(
-                        Select::new(
-                            "plan-server",
-                            machines,
-                            self.plan_server.clone(),
-                            self.open_menu == Some(Menu::PlanServer),
-                        )
-                        .on_open({
-                            let this = this.clone();
-                            move |open, _, cx| {
-                                this.update(cx, |this, cx| {
-                                    this.set_menu(Menu::PlanServer, open, cx)
-                                })
-                            }
-                        })
-                        .on_pick({
+                        Select::new("plan-server", machines, self.plan_server.clone()).on_pick({
                             let this = this.clone();
                             move |machine, _, cx| {
                                 let machine = machine.to_string();

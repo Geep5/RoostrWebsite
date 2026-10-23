@@ -340,14 +340,24 @@ fn pane_flags(object: &Object) -> (bool, bool) {
     (has_discussion, has_pane)
 }
 
-/// `.tpl-note`: 12px muted, margin 0 0 8 48 (16 on a phone).
-fn note(text: impl Into<SharedString>, mobile: bool) -> Div {
-    div()
+/// `.tpl-note` as a quiet kit info [`Alert`](gpui_kit::component::alert::Alert):
+/// no fill or border, 12px muted, margin 0 0 8 48 (16 on a phone).
+fn note(
+    id: &'static str,
+    text: impl Into<SharedString>,
+    mobile: bool,
+) -> gpui_kit::component::alert::Alert {
+    use gpui_kit::component::{Sizable as _, Size};
+    gpui_kit::component::alert::Alert::info(id, text.into())
+        .with_size(Size::XSmall)
+        .w_auto()
         .ml(px(if mobile { 16. } else { 48. }))
         .mb(px(8.))
+        .p_0()
+        .bg(transparent_black())
+        .border_color(transparent_black())
         .text_size(px(12.))
         .text_color(theme::muted())
-        .child(text.into())
 }
 
 impl Render for ObjectPage {
@@ -563,16 +573,17 @@ impl Render for ObjectPage {
                 .filter(|n| !n.is_empty())
                 .map(|n| format!(" of {n}"))
                 .unwrap_or_default();
-            article = article.child(note(format!(
+            article = article.child(note("tpl-note", format!(
                 "Template{of} — new objects copy these blocks, and its properties fill in any the new object doesn't already have."
             ), mobile));
         }
         if locked_tool {
-            article = article.child(note("Built-in tool, written by an older Roostr that runs it from its own code — this page doesn't change what runs, so it is read-only here. A computer with a current Roostr turns it into the shipped code, which you can then edit.", mobile));
+            article = article.child(note("tool-note", "Built-in tool, written by an older Roostr that runs it from its own code — this page doesn't change what runs, so it is read-only here. A computer with a current Roostr turns it into the shipped code, which you can then edit.", mobile));
         } else if builtin_tool {
-            article = article.child(note("Built-in tool, shipped with Roostr — the code below is what runs, so editing it changes this tool for every agent in the space. If an edit breaks it, each computer keeps running the last version that worked there and says so under Error.", mobile));
+            article = article.child(note("tool-note", "Built-in tool, shipped with Roostr — the code below is what runs, so editing it changes this tool for every agent in the space. If an edit breaks it, each computer keeps running the last version that worked there and says so under Error.", mobile));
             if object.field("tool_update_available").is_some() {
                 article = article.child(note(
+                    "tool-update-note",
                     "Roostr now ships a different version of this tool. It was edited here, so your version was kept.",
                     mobile,
                 ));

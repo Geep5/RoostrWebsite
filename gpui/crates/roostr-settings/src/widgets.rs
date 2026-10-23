@@ -4,30 +4,13 @@
 
 use std::rc::Rc;
 
+use gpui_kit::component::IndexPath;
 use gpui_kit::component::input::{Input, InputState};
+use gpui_kit::component::searchable_list::{SearchableListItem, SearchableVec};
+use gpui_kit::component::select::{self, SelectEvent, SelectState};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use roostr_core::{motion, theme, ui};
-
-/// A full-window modal layer (`.del-overlay`: `rgb(0 0 0/0.55)`, centered)
-/// painted above everything. The caller wires the backdrop's mouse-down
-/// (cancel) and key handling; the content should `occlude()`.
-pub fn window_overlay(id: impl Into<ElementId>, window: &Window) -> Stateful<Div> {
-    div()
-        .id(id)
-        .occlude()
-        .w(window.viewport_size().width)
-        .h(window.viewport_size().height)
-        .flex()
-        .items_center()
-        .justify_center()
-        .bg(hsla(0., 0., 0., 0.55))
-}
-
-/// Paint `layer` (from [`window_overlay`]) over the whole window.
-pub fn over_window(layer: impl IntoElement) -> Deferred {
-    deferred(anchored().position(point(px(0.), px(0.))).child(layer)).with_priority(2)
-}
+use roostr_core::{motion, theme};
 
 /// `#f55522`: the danger hover / armed colour of these screens.
 pub fn danger() -> Hsla {
@@ -290,87 +273,73 @@ impl Btn {
 }
 
 impl RenderOnce for Btn {
-    fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
+    fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
+        use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
+        use gpui_kit::component::{Disableable as _, Sizable as _, Size};
         let disabled = self.disabled;
         let line = (self.size * 1.25).round();
-        let mut el = div()
-            .id(self.id)
-            .flex()
+        let bg = self.bg.unwrap_or(transparent_black());
+        // The kit paints the hover state from the variant: border from
+        // `color`, text from `foreground`, fill from `hover`. The resting
+        // look is the instance style below, which the kit layers on top.
+        let hover_fill = self.hover_bg.unwrap_or(bg);
+        let hover = ButtonCustomVariant::new(cx)
+            .color(
+                self.hover_border
+                    .or(self.border)
+                    .unwrap_or(transparent_black()),
+            )
+            .foreground(self.hover_color.unwrap_or(self.color))
+            .hover(hover_fill)
+            .active(hover_fill);
+        Button::new(self.id)
+            .custom(hover)
+            // A free size: no fixed height, so the web padding sets it.
+            .with_size(Size::Size(self.size))
+            .rounded(self.radius)
+            .accessibility_label(self.label.clone())
+            .disabled(disabled)
             .flex_none()
-            .items_center()
-            .gap(px(6.))
             .px(self.px)
             .py(self.py)
-            .rounded(self.radius)
-            .text_size(self.size)
-            .line_height(line)
-            .font_weight(self.weight)
+            .bg(bg)
             .text_color(self.color)
-            .when(self.centered, |d| d.justify_center())
-            .when(self.full_width, |d| d.w_full())
-            .when_some(self.bg, |d, bg| d.bg(bg))
-            .when_some(self.border, |d, border| d.border_1().border_color(border))
-            .when(disabled, |d| d.opacity(self.disabled_opacity))
-            .when(!disabled, |d| d.cursor_pointer())
-            .children(self.leading)
-            .child(self.label);
-        if !disabled {
-            let (hb, hc, hbg) = (self.hover_border, self.hover_color, self.hover_bg);
-            el = el.hover(move |s| {
-                let s = match hb {
-                    Some(c) => s.border_color(c),
-                    None => s,
-                };
-                let s = match hc {
-                    Some(c) => s.text_color(c),
-                    None => s,
-                };
-                match hbg {
-                    Some(c) => s.bg(c),
-                    None => s,
-                }
-            });
-            if let Some(handler) = self.on_click {
-                el = el.on_click(move |event, window, cx| handler(event, window, cx));
-            }
-        }
-        if let Some(text) = self.tooltip {
-            el = el.tooltip(ui::tooltip(text));
-        }
-        el
+            .when_some(self.border, |b, border| b.border_1().border_color(border))
+            .when(self.full_width, |b| b.w_full())
+            .when(disabled, |b| b.opacity(self.disabled_opacity))
+            .when(!disabled, |b| b.cursor_pointer())
+            // Leading slot first, then the label (the kit puts children after
+            // its own label, so both go in one row of ours).
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .when(self.centered, |d| d.justify_center())
+                    .gap(px(6.))
+                    .text_size(self.size)
+                    .line_height(line)
+                    .font_weight(self.weight)
+                    .children(self.leading)
+                    .child(self.label),
+            )
+            .when_some(self.tooltip, |b, text| b.tooltip(text))
+            .when_some(self.on_click.filter(|_| !disabled), |b, handler| {
+                b.on_click(move |event, window, cx| handler(event, window, cx))
+            })
     }
 }
 
-/// The settings toggle (`.switch`): 34×20 track, 16px white knob, both
-/// easing between states (`transition: left 0.15s ease` / `background 0.15s`).
+/// The settings toggle (`.switch`): the kit switch in the accent colour, the
+/// knob springing between states. `toggle` gets the requested state.
 pub fn switch(
     id: impl Into<ElementId>,
     on: bool,
     toggle: impl Fn(bool, &mut Window, &mut App) + 'static,
-    window: &mut Window,
-    cx: &mut App,
-) -> Stateful<Div> {
-    let id = id.into();
-    let t = motion::progress(id.clone(), on, motion::CONTROL, window, cx);
-    div()
-        .id(id)
-        .relative()
-        .flex_none()
-        .w(px(34.))
-        .h(px(20.))
-        .rounded_full()
-        .cursor_pointer()
-        .bg(motion::mix(theme::border(), theme::accent(), t))
-        .child(
-            div()
-                .absolute()
-                .top(px(2.))
-                .left(px(2. + 14. * t))
-                .size(px(16.))
-                .rounded_full()
-                .bg(theme::white()),
-        )
-        .on_click(move |_, window, cx| toggle(!on, window, cx))
+) -> gpui_kit::component::switch::Switch {
+    gpui_kit::component::switch::Switch::new(id)
+        .checked(on)
+        .color(theme::accent())
+        .on_change(move |next, window, cx| toggle(*next, window, cx))
 }
 
 /// How a text field is drawn.
@@ -506,19 +475,60 @@ pub fn rich(spans: &[Span], color: Hsla, window: &Window) -> StyledText {
 }
 
 type PickHandler = Rc<dyn Fn(&str, &mut Window, &mut App)>;
-type OpenHandler = Rc<dyn Fn(bool, &mut Window, &mut App)>;
 
-/// A `<select>`: a bordered trigger showing the current option and a menu
-/// of the options below it. The host keeps `open` and flips it in `on_open`.
+/// One `<option>`: its value and the label shown.
+#[derive(Clone)]
+struct SelectOption {
+    value: String,
+    label: SharedString,
+}
+
+impl SearchableListItem for SelectOption {
+    type Value = String;
+
+    fn title(&self) -> SharedString {
+        self.label.clone()
+    }
+
+    fn value(&self) -> &String {
+        &self.value
+    }
+}
+
+type OptionList = SearchableVec<SelectOption>;
+
+fn option_list(options: &[(String, SharedString)]) -> OptionList {
+    SearchableVec::new(
+        options
+            .iter()
+            .map(|(value, label)| SelectOption {
+                value: value.clone(),
+                label: label.clone(),
+            })
+            .collect::<Vec<_>>(),
+    )
+}
+
+/// Per-select element state: the kit state, the options it holds, and the
+/// latest pick handler its confirm subscription calls.
+struct SelectHost {
+    state: Entity<SelectState<OptionList>>,
+    options: Vec<(String, SharedString)>,
+    on_pick: Option<PickHandler>,
+    _confirm: Subscription,
+}
+
+/// A `<select>` over the kit [`select::Select`]: a bordered trigger showing
+/// the current option and a menu of the options below it. The kit owns the
+/// open state (outside click and Escape close it); the host keeps the value
+/// and is told of picks through `on_pick`.
 #[derive(IntoElement)]
 pub struct Select {
     id: ElementId,
     options: Vec<(String, SharedString)>,
     selected: String,
-    open: bool,
     bg: Hsla,
     min_w: Pixels,
-    on_open: Option<OpenHandler>,
     on_pick: Option<PickHandler>,
 }
 
@@ -527,16 +537,13 @@ impl Select {
         id: impl Into<ElementId>,
         options: Vec<(String, SharedString)>,
         selected: impl Into<String>,
-        open: bool,
     ) -> Self {
         Self {
             id: id.into(),
             options,
             selected: selected.into(),
-            open,
             bg: theme::bg(),
             min_w: px(0.),
-            on_open: None,
             on_pick: None,
         }
     }
@@ -551,11 +558,6 @@ impl Select {
         self
     }
 
-    pub fn on_open(mut self, f: impl Fn(bool, &mut Window, &mut App) + 'static) -> Self {
-        self.on_open = Some(Rc::new(f));
-        self
-    }
-
     pub fn on_pick(mut self, f: impl Fn(&str, &mut Window, &mut App) + 'static) -> Self {
         self.on_pick = Some(Rc::new(f));
         self
@@ -563,89 +565,79 @@ impl Select {
 }
 
 impl RenderOnce for Select {
-    fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
-        let label = self
-            .options
-            .iter()
-            .find(|(v, _)| *v == self.selected)
-            .map(|(_, l)| l.clone())
-            .unwrap_or_default();
-        let on_open = self.on_open.clone();
-        let open = self.open;
-        let trigger = div()
-            .id(self.id.clone())
-            .flex()
-            .items_center()
-            .justify_between()
-            .gap(px(8.))
-            .min_w(self.min_w)
-            .px(px(10.))
-            .py(px(6.))
-            .rounded(px(8.))
-            .bg(self.bg)
-            .border_1()
-            .border_color(theme::border())
-            .text_size(px(13.))
-            .line_height(px(16.))
-            .cursor_pointer()
-            .child(label)
-            .child(
-                gpui_kit::component::Icon::new(roostr_core::Glyph::ChevronDown)
-                    .size(px(12.))
-                    .text_color(theme::muted()),
-            )
-            .on_click(move |_, window, cx| {
-                if let Some(f) = &on_open {
-                    f(!open, window, cx);
-                }
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let Self {
+            id,
+            options,
+            selected,
+            bg,
+            min_w,
+            on_pick,
+        } = self;
+        let host = window.use_keyed_state((id.clone(), "host"), cx, |window, cx| {
+            let ix = options.iter().position(|(v, _)| *v == selected);
+            let state = cx.new(|cx| {
+                SelectState::new(option_list(&options), ix.map(IndexPath::new), window, cx)
             });
-        let menu = self.open.then(|| {
-            let on_open = self.on_open.clone();
-            let items = self.options.iter().enumerate().map(|(ix, (value, label))| {
-                let value = value.clone();
-                let checked = value == self.selected;
-                let on_pick = self.on_pick.clone();
-                let on_open = self.on_open.clone();
-                ui::MenuItem::new(ix, label.clone())
-                    .icon(div().w(px(14.)).flex_none().when(checked, |d| {
-                        d.child(
-                            gpui_kit::component::Icon::new(roostr_core::Glyph::Check).size(px(12.)),
-                        )
-                    }))
-                    .on_click(move |_, window, cx| {
-                        if let Some(f) = &on_open {
-                            f(false, window, cx);
-                        }
-                        if let Some(f) = &on_pick {
-                            f(&value, window, cx);
-                        }
-                    })
-            });
-            deferred(
-                anchored().snap_to_window_with_margin(px(8.)).child(
-                    ui::menu_panel()
-                        .id((self.id.clone(), "menu"))
-                        .occlude()
-                        .mt(px(4.))
-                        .min_w(self.min_w.max(px(160.)))
-                        .max_h(px(320.))
-                        .overflow_y_scroll()
-                        .on_mouse_down_out(move |_, window, cx| {
-                            if let Some(f) = &on_open {
-                                f(false, window, cx);
-                            }
-                        })
-                        .children(items),
-                ),
-            )
-            .with_priority(1)
+            let confirm = cx.subscribe_in(
+                &state,
+                window,
+                |host: &mut SelectHost, _, event: &SelectEvent<OptionList>, window, cx| {
+                    let SelectEvent::Confirm(Some(value)) = event else {
+                        return;
+                    };
+                    if let Some(f) = host.on_pick.clone() {
+                        f(value, window, cx);
+                    }
+                },
+            );
+            SelectHost {
+                state,
+                options: options.clone(),
+                on_pick: None,
+                _confirm: confirm,
+            }
         });
-        // The anchor sits in a zero-height box under the trigger, so the menu opens below it.
-        div()
-            .flex()
-            .flex_col()
-            .child(trigger)
-            .child(div().h_0().children(menu))
+        // Follow the host's options and value without echoing a pick back.
+        let state = host.update(cx, |host, cx| {
+            host.on_pick = on_pick;
+            let state = host.state.clone();
+            let reselect = host.options != options;
+            if reselect {
+                host.options = options.clone();
+                state.update(cx, |s, cx| s.set_items(option_list(&options), window, cx));
+            }
+            let want = options
+                .iter()
+                .any(|(v, _)| *v == selected)
+                .then_some(&selected);
+            if reselect || state.read(cx).selected_value() != want {
+                state.update(cx, |s, cx| match want {
+                    Some(value) => s.set_selected_value(value, window, cx),
+                    None => s.set_selected_index(None, window, cx),
+                });
+            }
+            state
+        });
+        // The kit select fills its parent; this box sizes it to its content.
+        div().flex_none().min_w(min_w).child(
+            select::Select::new(&state)
+                .id(id)
+                .icon(gpui_kit::component::Icon::new(roostr_core::Glyph::ChevronDown).size(px(12.)))
+                .menu_width(min_w.max(px(160.)))
+                .menu_max_h(px(320.))
+                .min_w(min_w)
+                .h(px(30.))
+                .px(px(10.))
+                .py(px(6.))
+                .gap(px(8.))
+                .rounded(px(8.))
+                .bg(bg)
+                .border_color(theme::border())
+                .text_size(px(13.))
+                .line_height(px(16.))
+                .cursor_pointer(),
+        )
     }
 }
 

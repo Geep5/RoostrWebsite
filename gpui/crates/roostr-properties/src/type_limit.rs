@@ -8,6 +8,8 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use roostr_core::{Store, theme};
 
+use crate::widgets::empty_note;
+
 type ToggleFn = Rc<dyn Fn(&str, &mut Window, &mut App)>;
 
 /// The type list with checks; `on_toggle` gets the type object id.
@@ -116,7 +118,13 @@ impl RenderOnce for TypeLimitPicker {
                 );
         }
         if types.is_empty() {
-            list = list.child(limit_note("This space has no types yet."));
+            list = list.child(
+                empty_note("This space has no types yet.")
+                    .px(px(6.))
+                    .pt(px(2.))
+                    .pb(px(4.))
+                    .text_size(px(11.)),
+            );
         }
         div()
             .flex()

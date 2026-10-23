@@ -15,7 +15,7 @@ use regex::Regex;
 use roostr_core::theme;
 use serde::Deserialize;
 
-use crate::widgets::{FieldSkin, field, menu_shadow, tip};
+use crate::widgets::{FieldSkin, empty_note, field, menu_shadow, tip};
 
 #[derive(Deserialize)]
 struct EmojiData {
@@ -398,11 +398,9 @@ impl EmojiState {
                 .pb(px(2.))
                 .children(cells.iter().map(|&i| self.cell(i, cx)))
                 .into_any_element(),
-            Row::None => div()
+            Row::None => empty_note("No matches — paste any emoji instead.")
                 .p(px(8.))
                 .text_size(px(12.))
-                .text_color(theme::muted())
-                .child("No matches — paste any emoji instead.")
                 .into_any_element(),
             Row::Pasted => {
                 let q = self.q(cx);

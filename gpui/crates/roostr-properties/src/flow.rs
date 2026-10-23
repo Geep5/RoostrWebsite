@@ -6,7 +6,9 @@
 use std::cell::Cell;
 use std::rc::Rc;
 
+use gpui_kit::component::Sizable as _;
 use gpui_kit::component::input::{Escape, InputEvent, InputState};
+use gpui_kit::component::switch::Switch;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use roostr_core::relations::{create_relation, is_reserved_key, space_relations};
@@ -14,7 +16,7 @@ use roostr_core::{RelationDef, Store, motion, theme};
 
 use crate::credentials::{COOKIE_META, is_secret_field};
 use crate::type_limit::{TypeLimitPicker, toggled};
-use crate::widgets::{FieldSkin, field, pop_shadow};
+use crate::widgets::{FieldSkin, empty_note, field, pop_shadow};
 
 /// A stage-1 row: a current/available property and its toggle state.
 #[derive(Clone, Debug, PartialEq)]
@@ -314,9 +316,11 @@ fn section(text: &'static str) -> Div {
         .child(text)
 }
 
-/// Anytype's switch: 30×18 track, 14px knob. The knob slides and the track
-/// recolours over 150ms (`transition: left 0.15s` / `background 0.15s`).
-fn switch(key: &str, on: bool, window: &mut Window, cx: &mut App) -> Stateful<Div> {
+/// Anytype's switch as the kit `Switch` (small: 28×16 track, 12px knob).
+/// The track recolours over Roostr's 150ms control tween: the checked colour
+/// is mixed from the motion keyed `switch-knob-{key}`, so turning on fades in
+/// as before; the knob's travel is the kit's spring.
+fn switch(key: &str, on: bool, window: &mut Window, cx: &mut App) -> Switch {
     let p = motion::progress(
         SharedString::from(format!("switch-knob-{key}")),
         on,
@@ -324,24 +328,12 @@ fn switch(key: &str, on: bool, window: &mut Window, cx: &mut App) -> Stateful<Di
         window,
         cx,
     );
-    div()
-        .id(SharedString::from(format!("switch-{key}")))
+    Switch::new(SharedString::from(format!("switch-{key}")))
+        .checked(on)
+        .small()
+        .tab_stop(false)
+        .color(motion::mix(theme::hover(), theme::accent(), p))
         .flex_none()
-        .relative()
-        .w(px(30.))
-        .h(px(18.))
-        .rounded(px(9.))
-        .bg(motion::mix(theme::hover(), theme::accent(), p))
-        .cursor_pointer()
-        .child(
-            div()
-                .absolute()
-                .top(px(2.))
-                .left(px(2. + 12. * p))
-                .size(px(14.))
-                .rounded_full()
-                .bg(theme::white()),
-        )
 }
 
 impl Render for PropertyFlow {
@@ -403,18 +395,18 @@ impl Render for PropertyFlow {
                             ))
                             .child(r_name(it.name.clone()))
                             .child(switch(&it.key, on, window, cx).on_click(cx.listener(
-                                move |_, _, _, cx| cx.emit(FlowEvent::Toggle(key.clone(), !on)),
+                                move |_, next: &bool, _, cx| {
+                                    cx.emit(FlowEvent::Toggle(key.clone(), *next))
+                                },
                             ))),
                     );
                 }
                 if self.items.is_empty() {
                     list = list.child(
-                        div()
+                        empty_note("No properties yet.")
                             .px(px(8.))
                             .py(px(4.))
-                            .text_size(px(12.))
-                            .text_color(theme::muted())
-                            .child("No properties yet."),
+                            .text_size(px(12.)),
                     );
                 }
                 flow = flow.child(list).child(sep()).child(

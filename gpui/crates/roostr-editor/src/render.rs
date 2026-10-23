@@ -6,6 +6,9 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use gpui_kit::component::Icon;
+use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
+use gpui_kit::component::toolbar::Toolbar;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use roostr_core::motion::{self, HoverMotion};
@@ -1479,105 +1482,35 @@ impl Editor {
             );
         }
         if let Some(menu) = self.spell_menu.clone() {
-            let entity = cx.entity();
-            let mut card = div()
-                .id("spell-menu")
-                .occlude()
-                .relative()
-                .flex()
-                .flex_col()
-                .gap(px(4.))
-                .min_w(px(180.))
-                .bg(theme::panel())
-                .border_1()
-                .border_color(theme::border())
-                .rounded(px(8.))
-                .px(px(8.))
-                .py(px(5.))
-                .text_size(px(13.))
-                .shadow(vec![BoxShadow {
-                    color: hsla(0., 0., 0., 0.5),
-                    offset: point(px(0.), px(8.)),
-                    blur_radius: px(24.),
-                    spread_radius: px(0.),
-                    inset: false,
-                }]);
-            let btn = |id: ElementId| {
-                div()
-                    .id(id)
-                    .px(px(6.))
-                    .py(px(2.))
-                    .rounded(px(5.))
-                    .cursor_pointer()
-                    .text_color(theme::fg())
-                    .hover(|s| s.bg(theme::hl_med()))
+            let popup = match menu.popup.clone() {
+                Some(popup) => popup,
+                None => {
+                    let popup = self.build_spell_popup(&menu, window, cx);
+                    if let Some(m) = self.spell_menu.as_mut() {
+                        m.popup = Some(popup.clone());
+                    }
+                    popup
+                }
             };
-            if menu.options.is_empty() {
-                card = card.child(
-                    div()
-                        .text_color(theme::muted())
-                        .max_w(px(240.))
-                        .overflow_hidden()
-                        .text_ellipsis()
-                        .whitespace_nowrap()
-                        .px(px(6.))
-                        .py(px(2.))
-                        .child(format!("No suggestions for \"{}\"", menu.word)),
-                );
-            } else {
-                card = card.child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .border_b_1()
-                        .border_color(theme::border())
-                        .pb(px(4.))
-                        .children(menu.options.iter().enumerate().map(|(i, o)| {
-                            let o2 = o.clone();
-                            btn(ElementId::Name(format!("spell-opt-{i}").into()))
-                                .font_weight(FontWeight::MEDIUM)
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.replace_misspelling(&o2, cx)
-                                }))
-                                .child(o.clone())
-                        })),
-                );
-            }
-            card = card.child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .gap(px(8.))
-                    .child(
-                        btn("spell-add".into())
-                            .text_color(theme::muted())
-                            .on_click(cx.listener(|this, _, _, cx| this.spell_add_word(cx)))
-                            .child(format!("Add \"{}\" to dictionary", menu.word)),
-                    )
-                    .child(
-                        btn("spell-close".into())
-                            .text_color(theme::muted())
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.spell_menu = None;
-                                cx.notify();
-                            }))
-                            .child("✕"),
-                    ),
-            );
-            card = card.child(crate::link_picker::outside_click(
-                entity,
-                |this: &mut Editor, cx| {
-                    this.spell_menu = None;
-                    cx.notify();
-                },
-            ));
             out.push(
                 deferred(
                     anchored()
                         .position(point(menu.pos.x, menu.pos.y + px(6.)))
                         .snap_to_window_with_margin(px(8.))
-                        .child(card),
+                        .child(
+                            popup_frame(
+                                "spell-menu",
+                                px(8.),
+                                vec![BoxShadow {
+                                    color: hsla(0., 0., 0., 0.5),
+                                    offset: point(px(0.), px(8.)),
+                                    blur_radius: px(24.),
+                                    spread_radius: px(0.),
+                                    inset: false,
+                                }],
+                            )
+                            .child(popup),
+                        ),
                 )
                 .with_priority(5)
                 .into_any_element(),
@@ -1630,100 +1563,41 @@ impl Editor {
             );
         }
         if let Some(menu) = self.paste_menu.clone() {
-            let item = |id: &'static str, label: &'static str| {
-                div()
-                    .id(id)
-                    .px(px(8.))
-                    .py(px(6.))
-                    .rounded(px(6.))
-                    .text_size(px(13.))
-                    .cursor_pointer()
-                    .hover(|s| s.bg(theme::hover()))
-                    .child(label)
+            let popup = match menu.popup.clone() {
+                Some(popup) => popup,
+                None => {
+                    let popup = self.build_paste_popup(&menu, window, cx);
+                    if let Some(m) = self.paste_menu.as_mut() {
+                        m.popup = Some(popup.clone());
+                    }
+                    popup
+                }
             };
-            let entity = cx.entity();
-            let card = div()
-                .id("paste-menu")
-                .occlude()
-                .relative()
-                .min_w(px(160.))
-                .flex()
-                .flex_col()
-                .bg(theme::panel())
-                .border_1()
-                .border_color(theme::border())
-                .rounded(px(10.))
-                .p(px(6.))
-                .shadow(vec![BoxShadow {
-                    color: hsla(0., 0., 0., 0.45),
-                    offset: point(px(0.), px(12.)),
-                    blur_radius: px(32.),
-                    spread_radius: px(0.),
-                    inset: false,
-                }])
-                .text_color(theme::fg())
-                .child(
-                    div()
-                        .text_size(px(10.))
-                        .text_color(theme::muted())
-                        .px(px(8.))
-                        .pt(px(6.))
-                        .pb(px(4.))
-                        .child("PASTE AS"),
-                )
-                .when(menu.processor.is_some(), |d| {
-                    d.child(
-                        item("paste-embed", "Embed")
-                            .on_click(cx.listener(|this, _, _, cx| this.paste_as_block(true, cx))),
-                    )
-                })
-                .child(
-                    item("paste-bookmark", "Bookmark")
-                        .on_click(cx.listener(|this, _, _, cx| this.paste_as_block(false, cx))),
-                )
-                .child(
-                    item("paste-link", "Link")
-                        .on_click(cx.listener(|this, _, _, cx| this.paste_as_text(true, cx))),
-                )
-                .child(
-                    item("paste-text", "Text")
-                        .on_click(cx.listener(|this, _, _, cx| this.paste_as_text(false, cx))),
-                )
-                .child(crate::link_picker::outside_click(
-                    entity,
-                    |this: &mut Editor, cx| {
-                        this.paste_menu = None;
-                        cx.notify();
-                    },
-                ));
             out.push(
                 deferred(
                     anchored()
                         .position(menu.pos)
                         .snap_to_window_with_margin(px(8.))
-                        .child(card),
+                        .child(
+                            popup_frame(
+                                "paste-menu",
+                                px(10.),
+                                vec![BoxShadow {
+                                    color: hsla(0., 0., 0., 0.45),
+                                    offset: point(px(0.), px(12.)),
+                                    blur_radius: px(32.),
+                                    spread_radius: px(0.),
+                                    inset: false,
+                                }],
+                            )
+                            .child(popup),
+                        ),
                 )
                 .with_priority(5)
                 .into_any_element(),
             );
         }
         if let Some(tb) = self.toolbar.clone() {
-            let b = |id: &'static str, tip: &'static str, label: AnyElement| {
-                div()
-                    .id(id)
-                    .size(px(30.))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(6.))
-                    .text_size(px(14.))
-                    .text_color(theme::fg())
-                    .cursor_pointer()
-                    .hover(|s| s.bg(theme::hover()))
-                    .tooltip(roostr_core::ui::tooltip(tip))
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .child(label)
-            };
             let block = tb.block.clone();
             let mk = |kind: u32| {
                 let block = block.clone();
@@ -1731,10 +1605,8 @@ impl Editor {
                     this.apply_mark(&block, kind, None, cx)
                 })
             };
-            let bar = div()
-                .id("marks-toolbar")
-                .occlude()
-                .flex()
+            let bar = Toolbar::new("marks-toolbar")
+                .h_auto()
                 .gap(px(2.))
                 .bg(theme::panel())
                 .border_1()
@@ -1748,63 +1620,56 @@ impl Editor {
                     spread_radius: px(0.),
                     inset: false,
                 }])
-                .child(
-                    b(
-                        "tb-bold",
-                        "Bold (⌘B)",
-                        div()
-                            .font_weight(FontWeight::BOLD)
-                            .child("B")
-                            .into_any_element(),
-                    )
-                    .on_click(mk(mark::BOLD)),
-                )
-                .child(
-                    b(
-                        "tb-italic",
-                        "Italic (⌘I)",
-                        div().italic().child("I").into_any_element(),
-                    )
-                    .on_click(mk(mark::ITALIC)),
-                )
-                .child(
-                    b(
-                        "tb-underline",
-                        "Underline (⌘U)",
-                        div().underline().child("U").into_any_element(),
-                    )
-                    .on_click(mk(mark::UNDERLINE)),
-                )
-                .child(
-                    b(
-                        "tb-strike",
-                        "Strikethrough",
-                        div().line_through().child("S").into_any_element(),
-                    )
-                    .on_click(mk(mark::STRIKETHROUGH)),
-                )
-                .child(
-                    b("tb-code", "Code (⌘E)", div().child("<>").into_any_element())
-                        .on_click(mk(mark::INLINE_CODE)),
-                )
-                .child(
-                    b("tb-link", "Link", div().child("🔗").into_any_element())
-                        .on_click(cx.listener(|this, _, window, cx| this.add_link(window, cx))),
-                )
-                .child(
-                    b(
-                        "tb-object",
-                        "Turn into object",
-                        div()
-                            .text_size(px(12.))
-                            .whitespace_nowrap()
-                            .child("↗ Object")
-                            .into_any_element(),
-                    )
-                    .w_auto()
-                    .px(px(8.))
-                    .on_click(cx.listener(|this, _, window, cx| this.open_turn_into(window, cx))),
-                );
+                .content(tool_button(
+                    "tb-bold",
+                    "Bold (⌘B)",
+                    div()
+                        .font_weight(FontWeight::BOLD)
+                        .child("B")
+                        .into_any_element(),
+                    mk(mark::BOLD),
+                ))
+                .content(tool_button(
+                    "tb-italic",
+                    "Italic (⌘I)",
+                    div().italic().child("I").into_any_element(),
+                    mk(mark::ITALIC),
+                ))
+                .content(tool_button(
+                    "tb-underline",
+                    "Underline (⌘U)",
+                    div().underline().child("U").into_any_element(),
+                    mk(mark::UNDERLINE),
+                ))
+                .content(tool_button(
+                    "tb-strike",
+                    "Strikethrough",
+                    div().line_through().child("S").into_any_element(),
+                    mk(mark::STRIKETHROUGH),
+                ))
+                .content(tool_button(
+                    "tb-code",
+                    "Code (⌘E)",
+                    div().child("<>").into_any_element(),
+                    mk(mark::INLINE_CODE),
+                ))
+                .content(tool_button(
+                    "tb-link",
+                    "Link",
+                    div().child("🔗").into_any_element(),
+                    cx.listener(|this, _, window, cx| this.add_link(window, cx)),
+                ))
+                .content(tool_button_wide(
+                    "tb-object",
+                    "Turn into object",
+                    div()
+                        .text_size(px(12.))
+                        .whitespace_nowrap()
+                        .child("↗ Object")
+                        .into_any_element(),
+                    cx.listener(|this, _, window, cx| this.open_turn_into(window, cx)),
+                ));
+            let bar = div().occlude().child(bar);
             // translateX(-50%) at the selection's center, 44px above it.
             let w = px(7. * 32. + 50.);
             out.push(
@@ -2470,4 +2335,231 @@ impl Render for Editor {
             .children(ghost)
             .children(overlays)
     }
+}
+
+impl Editor {
+    /// The spelling menu: suggestions, then "Add … to dictionary" with a
+    /// close button. Outside clicks and picks dismiss it.
+    fn build_spell_popup(
+        &self,
+        menu: &crate::editor::SpellMenu,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<PopupMenu> {
+        let editor = cx.entity().downgrade();
+        let word = menu.word.clone();
+        let options = menu.options.clone();
+        let popup = PopupMenu::build(window, cx, move |mut m, _, _| {
+            m = m.min_w(px(180.));
+            if options.is_empty() {
+                let word = word.clone();
+                m = m.item(
+                    PopupMenuItem::element(move |_, _| {
+                        div()
+                            .text_size(px(13.))
+                            .text_color(theme::muted())
+                            .max_w(px(240.))
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .whitespace_nowrap()
+                            .child(format!("No suggestions for \"{word}\""))
+                    })
+                    .disabled(true),
+                );
+            } else {
+                for (i, option) in options.iter().enumerate() {
+                    let label = option.clone();
+                    let pick = option.clone();
+                    let editor = editor.clone();
+                    m = m.item(
+                        PopupMenuItem::element(move |_, _| {
+                            div()
+                                .id(ElementId::Name(format!("spell-opt-{i}").into()))
+                                .text_size(px(13.))
+                                .font_weight(FontWeight::MEDIUM)
+                                .child(label.clone())
+                        })
+                        .on_click(move |_, _, cx| {
+                            let _ =
+                                editor.update(cx, |this, cx| this.replace_misspelling(&pick, cx));
+                        }),
+                    );
+                }
+                m = m.separator();
+            }
+            let add = editor.clone();
+            let close = editor.clone();
+            let word = word.clone();
+            m.item(
+                PopupMenuItem::element(move |_, _| {
+                    let close = close.clone();
+                    div()
+                        .flex()
+                        .flex_1()
+                        .items_center()
+                        .justify_between()
+                        .gap(px(8.))
+                        .text_size(px(13.))
+                        .text_color(theme::muted())
+                        .child(
+                            div()
+                                .id("spell-add")
+                                .child(format!("Add \"{word}\" to dictionary")),
+                        )
+                        .child(
+                            div()
+                                .id("spell-close")
+                                .px(px(6.))
+                                .py(px(2.))
+                                .rounded(px(5.))
+                                .cursor_pointer()
+                                .hover(|s| s.bg(theme::hl_med()).text_color(theme::fg()))
+                                .on_click(move |_, _, cx| {
+                                    // Not the row's "Add".
+                                    cx.stop_propagation();
+                                    let _ = close.update(cx, |this, cx| {
+                                        this.spell_menu = None;
+                                        cx.notify();
+                                    });
+                                })
+                                .child("✕"),
+                        )
+                })
+                .on_click(move |_, _, cx| {
+                    let _ = add.update(cx, |this, cx| this.spell_add_word(cx));
+                }),
+            )
+        });
+        cx.subscribe(&popup, |this, popup, _: &DismissEvent, cx| {
+            if this.spell_menu.as_ref().and_then(|m| m.popup.as_ref()) == Some(&popup) {
+                this.spell_menu = None;
+                cx.notify();
+            }
+        })
+        .detach();
+        popup
+    }
+
+    /// "Paste as": Embed (when a processor knows the URL), Bookmark, Link, Text.
+    fn build_paste_popup(
+        &self,
+        menu: &crate::editor::PasteMenu,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<PopupMenu> {
+        let editor = cx.entity().downgrade();
+        let embed = menu.processor.is_some();
+        let popup = PopupMenu::build(window, cx, move |mut m, _, _| {
+            m = m.min_w(px(160.)).item(
+                PopupMenuItem::element(|_, _| {
+                    div()
+                        .text_size(px(10.))
+                        .text_color(theme::muted())
+                        .pt(px(2.))
+                        .child("PASTE AS")
+                })
+                .disabled(true),
+            );
+            // (id, label, as a block, embed / link)
+            let choices: [(&'static str, &'static str, bool, bool); 4] = [
+                ("paste-embed", "Embed", true, true),
+                ("paste-bookmark", "Bookmark", true, false),
+                ("paste-link", "Link", false, true),
+                ("paste-text", "Text", false, false),
+            ];
+            for (id, label, block, flag) in choices {
+                if id == "paste-embed" && !embed {
+                    continue;
+                }
+                let editor = editor.clone();
+                m = m.item(
+                    PopupMenuItem::element(move |_, _| {
+                        div().id(id).text_size(px(13.)).child(label)
+                    })
+                    .on_click(move |_, _, cx| {
+                        let _ = editor.update(cx, |this, cx| {
+                            if block {
+                                this.paste_as_block(flag, cx)
+                            } else {
+                                this.paste_as_text(flag, cx)
+                            }
+                        });
+                    }),
+                );
+            }
+            m
+        });
+        cx.subscribe(&popup, |this, popup, _: &DismissEvent, cx| {
+            if this.paste_menu.as_ref().and_then(|m| m.popup.as_ref()) == Some(&popup) {
+                this.paste_menu = None;
+                cx.notify();
+            }
+        })
+        .detach();
+        popup
+    }
+}
+
+/// Roostr's frame around a kit popup menu: its border, radius and shadow
+/// (the kit draws a ring at the theme radius, clipped away here). The editor
+/// keeps focus: a click in the menu must not move it there.
+fn popup_frame(id: &'static str, radius: Pixels, shadow: Vec<BoxShadow>) -> Stateful<Div> {
+    div()
+        .id(id)
+        .occlude()
+        .bg(theme::panel())
+        .border_1()
+        .border_color(theme::border())
+        .rounded(radius)
+        .overflow_hidden()
+        .p(px(2.))
+        .shadow(shadow)
+        .text_color(theme::fg())
+        .capture_any_mouse_down(|_, window, _| window.prevent_default())
+}
+
+/// A marks-toolbar control: a kit ghost button (30px square) under Roostr's
+/// tooltip — the kit Button takes only its own tooltip — whose mouse-down
+/// stays off the text so the selection survives the click.
+fn tool_button(
+    id: &'static str,
+    tip: &'static str,
+    label: AnyElement,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> AnyElement {
+    tool_button_with(id, tip, Button::new(id).w(px(30.)).p_0(), label, on_click)
+}
+
+/// [`tool_button`] sized to its label.
+fn tool_button_wide(
+    id: &'static str,
+    tip: &'static str,
+    label: AnyElement,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> AnyElement {
+    tool_button_with(id, tip, Button::new(id).px(px(8.)), label, on_click)
+}
+
+fn tool_button_with(
+    id: &'static str,
+    tip: &'static str,
+    button: Button,
+    label: AnyElement,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> AnyElement {
+    div()
+        .id(SharedString::from(format!("{id}-tip")))
+        .flex_none()
+        .tooltip(roostr_core::ui::tooltip(tip))
+        .child(
+            button
+                .ghost()
+                .h(px(30.))
+                .text_size(px(14.))
+                .text_color(theme::fg())
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_click(on_click)
+                .child(label),
+        )
+        .into_any_element()
 }

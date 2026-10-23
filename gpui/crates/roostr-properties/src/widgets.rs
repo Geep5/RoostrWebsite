@@ -4,6 +4,7 @@
 
 use std::rc::Rc;
 
+use gpui_kit::component::empty::Empty;
 use gpui_kit::component::input::{Input, InputState, Textarea, TextareaState};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -115,10 +116,6 @@ pub(crate) enum FieldSkin {
     Value,
     /// Anytype's filter field: filled `hl-light` (focus `hl-med`), borderless, radius 10, 8px 12px.
     Filter,
-    /// Menu search boxes: `--bg`, 1px border (accent on focus), radius 6, 6px 8px.
-    Search,
-    /// TypeSuggest: `--bg`, 1px border (accent on focus), radius 8, 6px 10px.
-    Suggest,
     /// The emoji picker's search: `--bg`, border, radius 7, 5px 9px.
     Emoji,
     /// Repeat editor fields: white 5% fill, 1px border, radius 6, 3px 6px, 12.5px.
@@ -162,28 +159,6 @@ pub(crate) fn field(state: &Entity<InputState>, skin: FieldSkin, window: &Window
             .rounded(theme::radius::menu())
             .px(px(12.))
             .py(px(8.)),
-        FieldSkin::Search => base
-            .bg(theme::bg())
-            .border_1()
-            .border_color(if focused {
-                theme::accent()
-            } else {
-                theme::border()
-            })
-            .rounded(theme::radius::sm())
-            .px(px(8.))
-            .py(px(6.)),
-        FieldSkin::Suggest => base
-            .bg(theme::bg())
-            .border_1()
-            .border_color(if focused {
-                theme::accent()
-            } else {
-                theme::border()
-            })
-            .rounded(theme::radius::md())
-            .px(px(10.))
-            .py(px(6.)),
         FieldSkin::Emoji => base
             .bg(theme::bg())
             .border_1()
@@ -263,6 +238,21 @@ pub(crate) fn placeholder(group: SharedString, hint: impl Into<SharedString>) ->
                 .group_hover(group, |s| s.visible())
                 .child(hint.into()),
         )
+}
+
+/// A list's one-line empty note as the kit `Empty`, restyled to Roostr's
+/// quiet left-aligned muted line; callers set its padding and text size.
+pub(crate) fn empty_note(text: impl Into<SharedString>) -> Empty {
+    Empty::new()
+        .flex_none()
+        .items_start()
+        .justify_start()
+        .gap_0()
+        .p_0()
+        .rounded_none()
+        .text_left()
+        .text_color(theme::muted())
+        .child(text.into())
 }
 
 /// A plain outline action button (`.act`): bg, 1px border, radius 7, 5px 12px, 12px.

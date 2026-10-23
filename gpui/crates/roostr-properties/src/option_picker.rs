@@ -13,7 +13,7 @@ use roostr_core::options::{
 use roostr_core::ui::TagPill;
 use roostr_core::{RelationDef, RelationOption, Store, theme};
 
-use crate::widgets::{FieldSkin, field, tip};
+use crate::widgets::{FieldSkin, empty_note, field, tip};
 
 pub(crate) enum OptionEvent {
     /// Toggle/select this option text.
@@ -318,12 +318,10 @@ impl Render for OptionPicker {
         }
         if matches.is_empty() && !can_create {
             list = list.child(
-                div()
+                empty_note("No options yet — type a name.")
                     .px(px(6.))
                     .py(px(2.))
-                    .text_size(px(12.))
-                    .text_color(theme::muted())
-                    .child("No options yet — type a name."),
+                    .text_size(px(12.)),
             );
         }
         if !self.multi && !self.selected.is_empty() {

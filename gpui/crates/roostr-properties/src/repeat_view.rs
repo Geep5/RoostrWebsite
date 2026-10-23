@@ -4,7 +4,10 @@
 //! turn repeating off.
 
 use chrono::{Datelike as _, Local, NaiveDate, TimeZone as _};
+use gpui_kit::component::FocusableExt as _;
 use gpui_kit::component::input::{InputEvent, InputState};
+use gpui_kit::component::searchable_list::SearchableListItem;
+use gpui_kit::component::select::{Select, SelectEvent, SelectState};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use roostr_core::repeat::{
@@ -220,10 +223,58 @@ fn same_rule(a: &RepeatDraft, b: &RepeatDraft) -> bool {
         && aw == bw
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Menu {
-    Agent,
-    Freq,
+/// One choice of the Agent / Every selects: its value and how it reads.
+#[derive(Clone, PartialEq)]
+struct Choice {
+    value: String,
+    label: SharedString,
+}
+
+impl SearchableListItem for Choice {
+    type Value = String;
+
+    fn title(&self) -> SharedString {
+        self.label.clone()
+    }
+
+    fn value(&self) -> &String {
+        &self.value
+    }
+}
+
+type ChoiceSelect = Entity<SelectState<Vec<Choice>>>;
+
+/// A kit select over `choices`, its items and value kept in step with the
+/// draft: re-seeded only when they change, so an open list is left alone.
+struct Picker {
+    select: ChoiceSelect,
+    choices: Vec<Choice>,
+    value: String,
+}
+
+impl Picker {
+    fn new(window: &mut Window, cx: &mut App) -> Self {
+        Self {
+            select: cx.new(|cx| SelectState::new(Vec::<Choice>::new(), None, window, cx)),
+            choices: vec![],
+            value: String::new(),
+        }
+    }
+
+    fn sync(&mut self, choices: Vec<Choice>, value: &str, window: &mut Window, cx: &mut App) {
+        let changed = choices != self.choices;
+        if changed {
+            self.choices = choices.clone();
+            self.select
+                .update(cx, |s, cx| s.set_items(choices, window, cx));
+        }
+        if changed || value != self.value {
+            self.value = value.to_string();
+            let value = value.to_string();
+            self.select
+                .update(cx, |s, cx| s.set_selected_value(&value, window, cx));
+        }
+    }
 }
 
 pub(crate) struct RepeatView {
@@ -238,7 +289,8 @@ pub(crate) struct RepeatView {
     machines_known: Vec<MachineRow>,
     /// The object state serving was last resolved for.
     resolved_for: Option<(String, i64)>,
-    menu: Option<Menu>,
+    agent_picker: Picker,
+    freq_picker: Picker,
     calendar: Option<Entity<CalendarPicker>>,
     interval: Entity<InputState>,
     times: Vec<Entity<InputState>>,
@@ -292,6 +344,39 @@ impl RepeatView {
                 this.window_edge(1, input, ev, cx)
             }),
         ];
+        let agent_picker = Picker::new(window, cx);
+        let freq_picker = Picker::new(window, cx);
+        let subs = subs
+            .into_iter()
+            .chain([
+                cx.subscribe_in(
+                    &agent_picker.select,
+                    window,
+                    |this, _, ev: &SelectEvent<Vec<Choice>>, _, cx| {
+                        let SelectEvent::Confirm(Some(id)) = ev else {
+                            return;
+                        };
+                        this.assignee = id.clone();
+                        cx.notify();
+                    },
+                ),
+                cx.subscribe_in(
+                    &freq_picker.select,
+                    window,
+                    |this, _, ev: &SelectEvent<Vec<Choice>>, window, cx| {
+                        let SelectEvent::Confirm(Some(name)) = ev else {
+                            return;
+                        };
+                        if let Some(&f) = FREQS
+                            .iter()
+                            .find(|&&f| roostr_core::repeat::freq_name(f) == name.as_str())
+                        {
+                            this.set_freq(f, window, cx);
+                        }
+                    },
+                ),
+            ])
+            .collect();
         Self {
             object_id,
             open: false,
@@ -303,7 +388,8 @@ impl RepeatView {
             serving_warning: String::new(),
             machines_known: vec![],
             resolved_for: None,
-            menu: None,
+            agent_picker,
+            freq_picker,
             calendar: None,
             interval,
             times: vec![],
@@ -422,7 +508,6 @@ impl RepeatView {
         } else {
             guests.first().cloned().unwrap_or_default()
         };
-        self.menu = None;
         self.calendar = None;
         self.sync_inputs(window, cx);
         self.open = true;
@@ -441,7 +526,6 @@ impl RepeatView {
         self.draft.interval = self.draft.interval.min(max_interval(freq));
         let n = self.draft.interval.to_string();
         self.interval.update(cx, |s, cx| s.set_value(n, window, cx));
-        self.menu = None;
         cx.notify();
     }
 
@@ -686,31 +770,26 @@ fn select_box(id: impl Into<ElementId>, label: impl Into<SharedString>) -> State
         )
 }
 
-fn menu_list() -> Div {
-    div()
-        .flex()
-        .flex_col()
-        .min_w(px(140.))
-        .bg(theme::panel())
-        .border_1()
-        .border_color(theme::border())
-        .rounded(theme::radius::menu())
-        .p(px(4.))
-        .shadow(pop_shadow())
-        .occlude()
-}
-
-fn menu_row(id: impl Into<ElementId>, label: impl Into<SharedString>, on: bool) -> Stateful<Div> {
-    div()
-        .id(id.into())
-        .px(px(8.))
-        .py(px(5.))
-        .rounded(theme::radius::sm())
-        .text_size(px(12.5))
-        .cursor_pointer()
-        .when(on, |d| d.bg(theme::hl_med()))
-        .hover(|s| s.bg(theme::hover()))
-        .child(label.into())
+/// The Agent / Every select: the kit `Select` dressed as `select_box` (white
+/// 5% fill, 1px border, radius 6, 3px 6px, 12.5px), its list `menu_w` wide.
+fn choice_select(select: &ChoiceSelect, id: &'static str, menu_w: f32) -> impl IntoElement {
+    div().flex().flex_none().child(
+        Select::new(select)
+            .id(id)
+            .focus_ring(false)
+            // Like the old box: nothing chosen reads as blank, not "Select…".
+            .placeholder("")
+            .menu_width(px(menu_w))
+            .bg(hsla(0., 0., 1., 0.05))
+            .border_color(theme::border())
+            .rounded(theme::radius::sm())
+            .h_auto()
+            .px(px(6.))
+            .py(px(3.))
+            .gap(px(6.))
+            .text_size(px(12.5))
+            .text_color(theme::fg()),
+    )
 }
 
 fn seg(
@@ -968,38 +1047,11 @@ impl Render for RepeatView {
             );
         } else {
             // Agent
-            let current = guests.iter().find(|a| a.id == self.assignee);
-            let agent_label = current.map_or_else(String::new, |a| {
-                format!(
-                    "{}{}",
-                    if a.icon.is_empty() {
-                        String::new()
-                    } else {
-                        format!("{} ", a.icon)
-                    },
-                    if a.name.is_empty() { "Agent" } else { &a.name }
-                )
-            });
-            let mut agent_wrap =
-                div()
-                    .relative()
-                    .child(
-                        select_box("agent-select", agent_label).on_click(cx.listener(
-                            |this, _, _, cx| {
-                                this.menu = if this.menu == Some(Menu::Agent) {
-                                    None
-                                } else {
-                                    Some(Menu::Agent)
-                                };
-                                cx.notify();
-                            },
-                        )),
-                    );
-            if self.menu == Some(Menu::Agent) {
-                let mut list = menu_list();
-                for a in &guests {
-                    let id = a.id.clone();
-                    let label = format!(
+            let agents: Vec<Choice> = guests
+                .iter()
+                .map(|a| Choice {
+                    value: a.id.clone(),
+                    label: format!(
                         "{}{}",
                         if a.icon.is_empty() {
                             String::new()
@@ -1007,62 +1059,34 @@ impl Render for RepeatView {
                             format!("{} ", a.icon)
                         },
                         if a.name.is_empty() { "Agent" } else { &a.name }
-                    );
-                    list = list.child(
-                        menu_row(
-                            SharedString::from(format!("agent-{}", a.id)),
-                            label,
-                            a.id == self.assignee,
-                        )
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.assignee = id.clone();
-                            this.menu = None;
-                            cx.notify();
-                        })),
-                    );
-                }
-                agent_wrap = agent_wrap.child(below("agent-menu", 4., list));
-            }
-            pop = pop.child(fieldrow().child(lbl("Agent")).child(agent_wrap));
+                    )
+                    .into(),
+                })
+                .collect();
+            let assignee = self.assignee.clone();
+            self.agent_picker.sync(agents, &assignee, window, cx);
+            pop = pop.child(fieldrow().child(lbl("Agent")).child(choice_select(
+                &self.agent_picker.select,
+                "agent-select",
+                180.,
+            )));
 
             // Every N <freq>
             let plural = d.interval != 1;
-            let mut freq_wrap = div().relative().child(
-                select_box("freq-select", freq_word(d.freq, plural)).on_click(cx.listener(
-                    |this, _, _, cx| {
-                        this.menu = if this.menu == Some(Menu::Freq) {
-                            None
-                        } else {
-                            Some(Menu::Freq)
-                        };
-                        cx.notify();
-                    },
-                )),
-            );
-            if self.menu == Some(Menu::Freq) {
-                let mut list = menu_list();
-                for f in FREQS {
-                    list = list.child(
-                        menu_row(
-                            SharedString::from(format!(
-                                "freq-{}",
-                                roostr_core::repeat::freq_name(f)
-                            )),
-                            freq_word(f, plural),
-                            f == d.freq,
-                        )
-                        .on_click(
-                            cx.listener(move |this, _, window, cx| this.set_freq(f, window, cx)),
-                        ),
-                    );
-                }
-                freq_wrap = freq_wrap.child(below("freq-menu", 4., list));
-            }
+            let freqs: Vec<Choice> = FREQS
+                .iter()
+                .map(|&f| Choice {
+                    value: roostr_core::repeat::freq_name(f).to_string(),
+                    label: freq_word(f, plural).into(),
+                })
+                .collect();
+            self.freq_picker
+                .sync(freqs, roostr_core::repeat::freq_name(d.freq), window, cx);
             pop = pop.child(
                 fieldrow()
                     .child(lbl("Every"))
                     .child(field(&self.interval, FieldSkin::Compact, window, cx).w(px(48.)))
-                    .child(freq_wrap),
+                    .child(choice_select(&self.freq_picker.select, "freq-select", 140.)),
             );
 
             if !sub {

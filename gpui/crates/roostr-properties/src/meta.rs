@@ -3,6 +3,7 @@
 //! removable, more addable) and how many objects link here (`backlinks.ts`).
 
 use gpui_kit::component::Icon;
+use gpui_kit::component::tag::Tag;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use roostr_core::objects::{builtin_glyph, kind_name, object_icon, type_glyph};
@@ -189,7 +190,9 @@ fn object_space(fields: &Fields, cx: &App) -> String {
     }
 }
 
-/// An `ObjectMeta` badge: h26, padding 0 10 0 6, gap 6, radius 8, 13/500, neutral badge colours.
+/// An `ObjectMeta` badge: a kit `Tag` (h26, padding 0 10 0 6, gap 6,
+/// radius 8, 13/500, neutral badge colours) inside the interactive shell
+/// that carries its id, hover brighten, click and tooltip (`Tag` has none).
 fn badge(
     id: impl Into<ElementId>,
     lead: AnyElement,
@@ -201,21 +204,26 @@ fn badge(
         .id(id.into())
         .flex()
         .flex_none()
-        .items_center()
-        .gap(px(6.))
-        .h(px(26.))
-        .pl(px(6.))
-        .pr(px(10.))
         .rounded(theme::radius::md())
         .bg(c.bg)
-        .text_color(c.fg)
-        .text_size(px(13.))
-        .font_weight(FontWeight::MEDIUM)
-        .whitespace_nowrap()
         .hover(move |s| s.bg(brighten(c.bg, 1.18)))
         .when(clickable, |d| d.cursor_pointer())
-        .child(lead)
-        .child(text.into())
+        .child(
+            Tag::custom(transparent_black(), c.fg, transparent_black())
+                .border_0()
+                .rounded(theme::radius::md())
+                .gap(px(6.))
+                .h(px(26.))
+                .py_0()
+                .pl(px(6.))
+                .pr(px(10.))
+                .text_size(px(13.))
+                .line_height(px(26.))
+                .font_weight(FontWeight::MEDIUM)
+                .whitespace_nowrap()
+                .child(lead)
+                .child(text.into()),
+        )
 }
 
 fn emoji(e: String) -> AnyElement {

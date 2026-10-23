@@ -29,8 +29,10 @@ mod sidebar;
 mod tabs;
 mod workspace;
 
+use gpui_kit::component::kbd::Kbd;
 use gpui_kit::{
-    AnyView, App, AppContext as _, Entity, Global, KeyBinding, SharedString, Window, actions,
+    AnyElement, AnyView, App, AppContext as _, Entity, Global, IntoElement as _, KeyBinding,
+    Keystroke, ParentElement as _, SharedString, Styled as _, Window, actions, div, px,
 };
 use roostr_core::PaneViews;
 
@@ -55,6 +57,47 @@ pub(crate) fn tip(
     text: impl Into<SharedString>,
 ) -> impl Fn(&mut Window, &mut App) -> AnyView + 'static {
     roostr_core::ui::tooltip(text)
+}
+
+/// A `[data-tip]`'s content: its text, with a trailing shortcut hint
+/// ("Search (⌘K)") drawn as gpui-kit's [`Kbd`] after the label.
+pub(crate) fn tip_content(text: &str) -> AnyElement {
+    if let Some((label, hint)) = text.strip_suffix(')').and_then(|t| t.rsplit_once(" ("))
+        && let Some(stroke) = shortcut(hint)
+    {
+        return div()
+            .flex()
+            .items_center()
+            .gap(px(6.))
+            .child(label.to_string())
+            .child(Kbd::new(stroke))
+            .into_any_element();
+    }
+    text.to_string().into_any_element()
+}
+
+/// A hint such as "⌘K" as its keystroke (⌘ is Ctrl off macOS, like the
+/// bindings in [`init`]); `None` if it has no modifier glyph.
+fn shortcut(hint: &str) -> Option<Keystroke> {
+    let mut modifiers = Vec::new();
+    let mut key = String::new();
+    for c in hint.chars() {
+        match c {
+            '⌘' => modifiers.push(if cfg!(target_os = "macos") {
+                "cmd"
+            } else {
+                "ctrl"
+            }),
+            '⌃' => modifiers.push("ctrl"),
+            '⌥' => modifiers.push("alt"),
+            '⇧' => modifiers.push("shift"),
+            c => key.extend(c.to_lowercase()),
+        }
+    }
+    if modifiers.is_empty() || key.is_empty() {
+        return None;
+    }
+    Keystroke::parse(&format!("{}-{key}", modifiers.join("-"))).ok()
 }
 
 /// A per-object element id (`"<prefix>:<id>"`).

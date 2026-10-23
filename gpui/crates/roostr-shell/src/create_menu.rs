@@ -1,7 +1,11 @@
 //! The sidebar's New menu (`createMenuBody`, `+layout.svelte:896-905`, logic
 //! 149-207, CSS 1796-1857): a type search over the space's Default type,
 //! Query, Collection and the space's other types; ↑/↓ highlight, Enter creates.
+//! The choices are a gpui-kit [`Command`] list (one group per kind of
+//! choice, separated) under the menu's own type search.
 
+use gpui_kit::component::IndexPath;
+use gpui_kit::component::command::{Command, CommandGroup, CommandItem, CommandState};
 use gpui_kit::component::input::{Enter, Escape, Input, InputEvent, InputState, MoveDown, MoveUp};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -41,7 +45,10 @@ pub(crate) struct CreateMenu {
     /// Highlighted choice (-1 = none: the first ↓ lands on the first).
     active: i32,
     default_key: String,
-    scroll: ScrollHandle,
+    /// The choice list (rows, hover, click, scrolling to the highlight).
+    list: Entity<CommandState>,
+    /// Each choice's path in the list, in choice order.
+    paths: Vec<IndexPath>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -51,13 +58,25 @@ impl CreateMenu {
     pub(crate) fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let input = cx.new(|cx| InputState::new(window, cx).placeholder("Search types…"));
         input.update(cx, |input, cx| input.focus(window, cx));
-        let subscriptions = vec![cx.subscribe(&input, |this, input, event: &InputEvent, cx| {
-            if matches!(event, InputEvent::Change) {
-                this.filter = input.read(cx).value().to_string();
-                this.active = -1;
-                cx.notify();
-            }
-        })];
+        // Nothing highlighted until ↓ or a hover.
+        let list = cx.new(|cx| {
+            let mut list = CommandState::new(window, cx);
+            list.set_selected_index(None, window, cx);
+            list
+        });
+        let subscriptions = vec![cx.subscribe_in(
+            &input,
+            window,
+            |this, input, event: &InputEvent, window, cx| {
+                if matches!(event, InputEvent::Change) {
+                    this.filter = input.read(cx).value().to_string();
+                    this.active = -1;
+                    this.list
+                        .update(cx, |list, cx| list.set_selected_index(None, window, cx));
+                    cx.notify();
+                }
+            },
+        )];
         let space = Workspace::space_id(cx);
         let fetch = default_type_key(&space, cx);
         cx.spawn(async move |this, cx| {
@@ -75,7 +94,8 @@ impl CreateMenu {
             filter: String::new(),
             active: -1,
             default_key: "note".into(),
-            scroll: ScrollHandle::new(),
+            list,
+            paths: Vec::new(),
             _subscriptions: subscriptions,
         }
     }
@@ -126,7 +146,7 @@ impl CreateMenu {
             .collect()
     }
 
-    fn step(&mut self, down: bool, cx: &mut Context<Self>) {
+    fn step(&mut self, down: bool, window: &mut Window, cx: &mut Context<Self>) {
         let n = self.choices(cx).len() as i32;
         if n == 0 {
             return;
@@ -138,7 +158,27 @@ impl CreateMenu {
         } else {
             self.active - 1
         };
+        // The list highlights it and scrolls it into view.
+        let path = self.paths.get(self.active as usize).copied();
+        self.list
+            .update(cx, |list, cx| list.set_selected_index(path, window, cx));
         cx.notify();
+    }
+
+    /// The list's highlight moved (a hover): follow it.
+    fn follow(&mut self, path: IndexPath, cx: &mut Context<Self>) {
+        if let Some(ix) = self.paths.iter().position(|p| *p == path) {
+            self.active = ix as i32;
+            cx.notify();
+        }
+    }
+
+    /// A choice clicked in the list.
+    fn pick(&mut self, path: IndexPath, cx: &mut Context<Self>) {
+        if let Some(ix) = self.paths.iter().position(|p| *p == path) {
+            self.active = ix as i32;
+            self.create_active(cx);
+        }
     }
 
     fn create_active(&mut self, cx: &mut Context<Self>) {
@@ -154,46 +194,70 @@ impl Render for CreateMenu {
         // `.m-create-menu button`: bigger touch rows on a phone.
         let mobile = roostr_core::layout::is_mobile(window);
         let choices = self.choices(cx);
-        let mut list = div().flex().flex_col();
-        let mut child_ix = 0;
-        let mut active_child = None;
+        let this = cx.entity().downgrade();
+        let mut list = Command::new(&self.list)
+            .searchable(false)
+            .bordered(false)
+            .max_h(px(1_000_000.))
+            .flex_1()
+            .min_h_0()
+            // Out past the list's own 4px inset: rows sit on the menu's padding.
+            .mx(px(-4.))
+            .my(px(-4.))
+            .bg(transparent_black())
+            .text_color(theme::fg())
+            // Rows round at `radius::sm` (the kit's 6); on a phone at
+            // 12 − the 4px inset = `radius::md`.
+            .when(mobile, |d| d.rounded(px(12.)))
+            .on_select({
+                let this = this.clone();
+                move |path, _, cx| {
+                    let _ = this.update(cx, |this, cx| this.follow(path, cx));
+                }
+            })
+            .on_confirm(move |path, _, cx| {
+                let _ = this.update(cx, |this, cx| this.pick(path, cx));
+            })
+            .empty(|_, _, _| {
+                div()
+                    .px(px(8.))
+                    .py(px(6.))
+                    .text_size(px(12.5))
+                    .text_color(theme::muted())
+                    .child("No matching type")
+            });
+        let mut paths = Vec::with_capacity(choices.len());
+        let mut section = 0;
+        let mut group = CommandGroup::new();
+        let mut row = 0;
         for (i, c) in choices.iter().enumerate() {
             if i > 0 && c.group != choices[i - 1].group {
-                list = list.child(ui::menu_separator());
-                child_ix += 1;
+                list = list.group(group).separator();
+                group = CommandGroup::new();
+                section += 1;
+                row = 0;
             }
-            if i as i32 == self.active {
-                active_child = Some(child_ix);
-            }
-            let key = c.key.clone();
-            list = list.child(
+            paths.push(IndexPath::new(row).section(section));
+            row += 1;
+            let (icon, name, default) = (c.icon.clone(), c.name.clone(), c.group == Group::Default);
+            group = group.item(CommandItem::new().label(c.name.clone()).child(move |_, _| {
+                // The kit row pads 8×6; a phone's rows are 10×11.
                 div()
-                    .id(("create-choice", i))
                     .flex()
-                    .flex_none()
+                    .flex_1()
                     .items_center()
-                    .map(|d| {
-                        if mobile {
-                            d.gap(px(10.))
-                                .px(px(10.))
-                                .py(px(11.))
-                                .rounded(theme::radius::md())
-                                .text_size(px(15.))
-                        } else {
-                            d.gap(px(8.))
-                                .px(px(8.))
-                                .py(px(6.))
-                                .rounded(theme::radius::sm())
-                                .text_size(px(13.))
-                        }
-                    })
                     .whitespace_nowrap()
                     .cursor_pointer()
-                    .when(i as i32 == self.active, |d| d.bg(theme::hover()))
-                    .hover(|s| s.bg(theme::hover()))
-                    .child(crate::sidebar::obj_icon(&c.icon))
-                    .child(c.name.clone())
-                    .when(c.group == Group::Default, |d| {
+                    .map(|d| {
+                        if mobile {
+                            d.gap(px(10.)).px(px(2.)).py(px(5.)).text_size(px(15.))
+                        } else {
+                            d.gap(px(8.)).text_size(px(13.))
+                        }
+                    })
+                    .child(crate::sidebar::obj_icon(&icon))
+                    .child(name.clone())
+                    .when(default, |d| {
                         d.child(
                             div()
                                 .ml_auto()
@@ -203,31 +267,12 @@ impl Render for CreateMenu {
                                 .child("Default"),
                         )
                     })
-                    .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
-                        if *hovered && this.active != i as i32 {
-                            this.active = i as i32;
-                            cx.notify();
-                        }
-                    }))
-                    .on_click(cx.listener(move |_, _, _, cx| {
-                        cx.emit(CreateMenuEvent::Create(key.clone()))
-                    })),
-            );
-            child_ix += 1;
+            }));
         }
-        if choices.is_empty() {
-            list = list.child(
-                div()
-                    .px(px(8.))
-                    .py(px(6.))
-                    .text_size(px(12.5))
-                    .text_color(theme::muted())
-                    .child("No matching type"),
-            );
+        if !choices.is_empty() {
+            list = list.group(group);
         }
-        if let Some(ix) = active_child {
-            self.scroll.scroll_to_item(ix);
-        }
+        self.paths = paths;
         ui::menu_panel()
             .id("create-menu")
             .line_height(relative(1.2))
@@ -240,13 +285,13 @@ impl Render for CreateMenu {
             })
             .max_h_full()
             .occlude()
-            .capture_action(cx.listener(|this, _: &MoveDown, _, cx| {
+            .capture_action(cx.listener(|this, _: &MoveDown, window, cx| {
                 cx.stop_propagation();
-                this.step(true, cx);
+                this.step(true, window, cx);
             }))
-            .capture_action(cx.listener(|this, _: &MoveUp, _, cx| {
+            .capture_action(cx.listener(|this, _: &MoveUp, window, cx| {
                 cx.stop_propagation();
-                this.step(false, cx);
+                this.step(false, window, cx);
             }))
             .capture_action(cx.listener(|this, _: &Enter, _, cx| {
                 cx.stop_propagation();
@@ -257,15 +302,7 @@ impl Render for CreateMenu {
                 cx.emit(CreateMenuEvent::Close);
             }))
             .child(type_search(&self.input).mx_0().mt_0().mb(px(4.)))
-            .child(
-                div()
-                    .id("create-list")
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .track_scroll(&self.scroll)
-                    .child(list),
-            )
+            .child(list)
     }
 }
 

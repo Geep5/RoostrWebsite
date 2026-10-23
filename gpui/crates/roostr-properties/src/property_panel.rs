@@ -14,7 +14,7 @@ use roostr_core::{Object, QueryRow, Route, Store, StoreEvent, Value, api, nav, t
 use serde_json::json;
 
 use crate::value::number_text;
-use crate::widgets::{prefix, text_area};
+use crate::widgets::{empty_note, prefix, text_area};
 
 /// Property object page body: definition + holders table.
 pub struct PropertyPanel {
@@ -281,12 +281,8 @@ impl Render for PropertyPanel {
                     }),
             );
         if self.loaded && n == 0 {
-            return panel.child(
-                div()
-                    .my(px(13.))
-                    .text_color(theme::muted())
-                    .child("No objects have a value for this property yet."),
-            );
+            return panel
+                .child(empty_note("No objects have a value for this property yet.").my(px(13.)));
         }
         if n == 0 {
             return panel;

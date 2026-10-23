@@ -322,7 +322,7 @@ impl Render for GalleryView {
                                 .find(|o| o.text == tg)
                                 .map(|o| o.color.clone())
                                 .unwrap_or_default();
-                            c = c.child(tag_pill(tg.to_string(), &color, true));
+                            c = c.child(tag_pill(tg.to_string(), &color, true, theme::muted()));
                         }
                         card = card.child(c);
                     } else {

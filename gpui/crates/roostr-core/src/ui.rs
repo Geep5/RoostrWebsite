@@ -255,21 +255,26 @@ impl TagPill {
 impl RenderOnce for TagPill {
     fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
         let (bg, fg) = tag_colors(&self.color).unwrap_or((unknown_tag_bg(), theme::fg()));
-        div()
-            .flex()
-            .flex_none()
-            .items_center()
-            .h(px(20.))
-            .px(px(6.))
-            .rounded(px(10.))
-            .bg(bg)
-            .text_color(fg)
-            .text_size(px(12.))
-            .whitespace_nowrap()
-            .overflow_hidden()
-            .text_ellipsis()
-            .child(self.text)
+        tag(bg, fg, px(20.), px(12.)).child(self.text)
     }
+}
+
+/// The kit [`Tag`](gpui_kit::component::tag::Tag) as Anytype draws a tagItem:
+/// filled `bg`, `fg` text, no border, radius 10, 0 6px padding, one line of
+/// `height` and `text` size, ellipsis when squeezed.
+pub fn tag(bg: Hsla, fg: Hsla, height: Pixels, text: Pixels) -> gpui_kit::component::tag::Tag {
+    gpui_kit::component::tag::Tag::custom(bg, fg, bg)
+        .rounded(px(10.))
+        .border_0()
+        .flex_none()
+        .h(height)
+        .line_height(height)
+        .px(px(6.))
+        .py_0()
+        .text_size(text)
+        .whitespace_nowrap()
+        .overflow_hidden()
+        .text_ellipsis()
 }
 
 /// A property badge (`ObjectMeta .badge`): h26, padding 0 10 0 6, gap 6,

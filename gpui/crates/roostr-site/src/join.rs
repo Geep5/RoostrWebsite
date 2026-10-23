@@ -4,7 +4,9 @@
 //! local harness (`POST /join-requests/send`); they approve in space
 //! settings, and the space key arrives gift-wrapped back.
 
+use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
 use gpui_kit::component::scroll::ScrollableElement as _;
+use gpui_kit::component::{Disableable as _, Sizable as _, Size};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use roostr_core::harness::{HarnessError, harness};
@@ -128,7 +130,7 @@ impl JoinPage {
                     "The owner of {} will see your request in their space settings. Once they approve, the space key is delivered to you and the space appears in your app.",
                     link.name.as_deref().filter(|n| !n.is_empty()).unwrap_or("the space")
                 )))
-                .child(open_app_button());
+                .child(open_app_button(cx));
         }
         let name = link
             .name
@@ -181,18 +183,16 @@ impl JoinPage {
                     } else {
                         "Request to join"
                     },
+                    self.busy,
+                    cx,
                 )
-                .when(self.busy, |el| el.opacity(0.5).cursor_default())
-                .when(!self.busy, |el| {
-                    el.hover(|s| s.bg(rgb(0x3395ff)).border_color(rgb(0x3395ff)))
-                        .on_click(cx.listener(|this, _, _, cx| this.request(cx)))
-                }),
+                .on_click(cx.listener(|this, _, _, cx| this.request(cx))),
             )
         } else {
             card.child(muted_text(
                 "Set up your key in the app first, then reopen this link.",
             ))
-            .child(open_app_button())
+            .child(open_app_button(cx))
         };
         card.when(!self.error.is_empty(), |el| {
             el.child(
@@ -232,28 +232,43 @@ fn muted_text(text: impl Into<SharedString>) -> Div {
         .child(text.into())
 }
 
-/// `.btn.primary`.
-fn button(id: &'static str, label: &'static str) -> Stateful<Div> {
-    div()
-        .id(id)
-        .cursor_pointer()
+/// `.btn.primary` as a kit button: site blue `#0a84ff`, lightening to
+/// `#3395ff` (fill and border) on hover; busy dims to 50% and stops taking
+/// clicks.
+fn button(id: &'static str, label: &'static str, busy: bool, cx: &App) -> Button {
+    let hover = rgb(0x3395ff).into();
+    Button::new(id)
+        .custom(
+            ButtonCustomVariant::new(cx)
+                .color(hover)
+                .foreground(rgb(0xffffff).into())
+                .hover(hover)
+                .active(hover),
+        )
+        .with_size(Size::Size(px(15.)))
+        .rounded(px(8.))
+        .accessibility_label(label)
+        .disabled(busy)
         .py(px(10.))
         .px(px(24.))
-        .rounded(px(8.))
         .border_1()
         .border_color(rgb(0x0a84ff))
         .bg(rgb(0x0a84ff))
         .text_color(rgb(0xffffff))
-        .text_size(px(15.))
-        .line_height(relative(1.2))
-        .font_weight(FontWeight::MEDIUM)
-        .child(label)
+        .when(busy, |b| b.opacity(0.5))
+        .when(!busy, |b| b.cursor_pointer())
+        .child(
+            div()
+                .text_size(px(15.))
+                .line_height(relative(1.2))
+                .font_weight(FontWeight::MEDIUM)
+                .child(label),
+        )
 }
 
 /// `<a class="btn primary" href="/app">Open Roostr Web</a>`.
-fn open_app_button() -> Stateful<Div> {
-    button("open-app", "Open Roostr Web")
-        .hover(|s| s.bg(rgb(0x3395ff)).border_color(rgb(0x3395ff)))
+fn open_app_button(cx: &App) -> Button {
+    button("open-app", "Open Roostr Web", false, cx)
         .on_click(|_, _, cx| nav::navigate(Route::Home, cx))
 }
 

@@ -4,7 +4,9 @@
 
 use std::time::Duration;
 
-use gpui_kit::component::IconNamed as _;
+use gpui_kit::component::avatar::Avatar;
+use gpui_kit::component::progress::ProgressCircle;
+use gpui_kit::component::{self, Sizable as _};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use roostr_core::store::Store;
@@ -372,15 +374,14 @@ impl Workspace {
                 .apply(dot);
             let dot = match (err, pct) {
                 (true, _) => dot.into_any_element(),
+                // The pass's percentage as the kit's progress ring (eased to
+                // each new value) on the dot's border-grey fill.
                 (false, Some(pct)) => dot
                     .child(
-                        canvas(
-                            |_, _, _| {},
-                            move |bounds, _, window, _| {
-                                paint_ring(bounds, pct as f32 / 100., window);
-                            },
-                        )
-                        .size_full(),
+                        ProgressCircle::new("sync-ring")
+                            .color(theme::accent())
+                            .value(pct as f32)
+                            .size_full(),
                     )
                     .into_any_element(),
                 (false, None) => dot
@@ -397,14 +398,10 @@ impl Workspace {
         }
 
         // Account / Settings.
-        let (profile_name, pic, avatar) = {
-            let profile = roostr_core::profile::ProfileCache::global(cx).read(cx);
-            (
-                profile.name().to_string(),
-                profile.picture().to_string(),
-                profile.avatar(),
-            )
-        };
+        let profile_name = roostr_core::profile::ProfileCache::global(cx)
+            .read(cx)
+            .name()
+            .to_string();
         let label = if profile_name.is_empty() {
             "Settings".to_string()
         } else {
@@ -429,34 +426,10 @@ impl Workspace {
                     }
                 })
                 .child(
-                    div()
-                        .flex_none()
-                        .size(px(if wide { 38. } else { 36. }))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .rounded_full()
-                        .overflow_hidden()
-                        .map(|d| match (&avatar, pic.is_empty()) {
-                            (Some(image), _) => d.child(
-                                img(ImageSource::Image(image.clone()))
-                                    .size_full()
-                                    .rounded_full()
-                                    .object_fit(ObjectFit::Cover),
-                            ),
-                            (None, false) => d.child(
-                                img(SharedString::from(pic.clone()))
-                                    .size_full()
-                                    .rounded_full()
-                                    .object_fit(ObjectFit::Cover),
-                            ),
-                            (None, true) => d.child(
-                                svg()
-                                    .path(Glyph::Person.path())
-                                    .size(px(18.))
-                                    .text_color(theme::muted()),
-                            ),
-                        }),
+                    account_avatar(px(if wide { 38. } else { 36. }), Glyph::Person, cx)
+                        .border_0()
+                        .bg(gpui_kit::transparent_black())
+                        .text_color(theme::muted()),
                 )
                 .when(wide, |d| {
                     d.child(
@@ -561,34 +534,19 @@ impl Workspace {
     }
 }
 
-/// The conic progress ring (`conic-gradient(accent pct, border 0)`) with a 2px centre dot.
-fn paint_ring(bounds: Bounds<Pixels>, fraction: f32, window: &mut Window) {
-    let center = bounds.center();
-    let r = bounds.size.width / 2.;
-    if fraction > 0. {
-        let mut path = PathBuilder::fill();
-        path.move_to(center);
-        let steps = 32;
-        for i in 0..=steps {
-            let angle = std::f32::consts::TAU * fraction * i as f32 / steps as f32
-                - std::f32::consts::FRAC_PI_2;
-            path.line_to(point(
-                center.x + r * angle.cos(),
-                center.y + r * angle.sin(),
-            ));
-        }
-        path.close();
-        if let Ok(path) = path.build() {
-            window.paint_path(path, theme::accent());
-        }
+/// The account picture as gpui-kit's [`Avatar`]: the profile image (cached
+/// avatar first, else the picture URL), else `placeholder` - which also
+/// shows while the image loads or if it fails.
+pub(crate) fn account_avatar(size: Pixels, placeholder: Glyph, cx: &App) -> Avatar {
+    let profile = roostr_core::profile::ProfileCache::global(cx).read(cx);
+    let avatar = Avatar::new()
+        .with_size(component::Size::Size(size))
+        .placeholder(component::Icon::new(placeholder).size(size * 0.5));
+    match (profile.avatar(), profile.picture()) {
+        (Some(image), _) => avatar.src(ImageSource::Image(image)),
+        (None, pic) if !pic.is_empty() => avatar.src(SharedString::from(pic.to_string())),
+        _ => avatar,
     }
-    window.paint_quad(
-        fill(
-            Bounds::centered_at(center, size(px(4.), px(4.))),
-            theme::accent(),
-        )
-        .corner_radii(px(2.)),
-    );
 }
 
 /// `commitSpaceMove`: midpoint between the drop neighbours, or a step past the edge.

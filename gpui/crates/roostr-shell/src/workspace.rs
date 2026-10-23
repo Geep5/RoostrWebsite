@@ -780,6 +780,7 @@ impl Workspace {
                                         "retry",
                                         "Retry opening vault",
                                         false,
+                                        cx,
                                     )
                                     .on_click(|_, _, cx| {
                                         Store::global(cx)
@@ -1282,7 +1283,7 @@ impl Workspace {
                             .text_color(theme::fg())
                             .whitespace_nowrap()
                             .shadow(roostr_core::ui::tooltip_shadow())
-                            .child(text),
+                            .child(crate::tip_content(&text)),
                     )
                     .into_any_element(),
             );

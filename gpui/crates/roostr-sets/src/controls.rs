@@ -18,8 +18,8 @@ use serde_json::{Value as Json, json};
 
 use crate::DataViewKind;
 use crate::common::{
-    self, BoundsCell, Place, appear, bounds_cell, floating, inside_any, menu_surface, menu_title,
-    new_button, separator, tag_pill, track_bounds, vrow,
+    self, BoundsCell, Place, appear, bounds_cell, floating, inside_any, kit_menu, kit_row,
+    kit_title, menu_surface, menu_title, new_button, separator, tag_pill, track_bounds, vrow,
 };
 use crate::config::{self, FilterRule, SortRule, ViewProp};
 use crate::layout_icon::layout_icon;
@@ -103,8 +103,6 @@ pub(crate) struct QueryControls {
     plist_bounds: BoundsCell,
     chip_bounds: BoundsCell,
     tpl_bounds: BoundsCell,
-    more_bounds: BoundsCell,
-    cond_bounds: BoundsCell,
     /// Positions of the filter / sort rules: they slide to their new place
     /// after a reorder, an add or a removal.
     rules_layout: LayoutGroup,
@@ -158,8 +156,6 @@ impl QueryControls {
             plist_bounds: bounds_cell(),
             chip_bounds: bounds_cell(),
             tpl_bounds: bounds_cell(),
-            more_bounds: bounds_cell(),
-            cond_bounds: bounds_cell(),
             rules_layout: LayoutGroup::default(),
             rule_motions: Motions::default(),
             rules_seen: None,
@@ -835,7 +831,7 @@ impl QueryControls {
                                 .opacity(if on { 1. } else { 0.45 })
                                 .hover(|s| if on { s } else { s.opacity(0.75) })
                                 .child(
-                                    tag_pill(opt.clone(), &color, false)
+                                    tag_pill(opt.clone(), &color, false, theme::fg())
                                         .px(px(10.))
                                         .rounded(px(999.)),
                                 )
@@ -996,33 +992,41 @@ impl QueryControls {
                 })),
         );
         if open {
-            let mut menu = menu_surface()
-                .relative()
-                .min_w(px(160.))
-                .occlude()
-                .child(track_bounds(&self.cond_bounds));
-            for c in conds {
-                let id = c.id.to_string();
-                menu = menu.child(
-                    vrow(SharedString::from(format!("fcond-{i}-{}", c.id)), false)
-                        .child(c.label)
-                        .when(c.id == f.condition, |d| {
-                            d.child(div().text_color(theme::accent()).child("✓"))
-                        })
-                        .on_click(cx.listener(move |this, _, _, cx| {
+            let key = (
+                i,
+                f.condition.clone(),
+                conds.iter().map(|c| c.id).collect::<Vec<_>>(),
+            );
+            let this = cx.weak_entity();
+            let current = f.condition.clone();
+            let dismiss = this.clone();
+            let menu = kit_menu(
+                ("fcond-kit", i),
+                key,
+                window,
+                cx,
+                |menu, _, _| {
+                    conds.iter().fold(menu.min_w(px(160.)), |menu, c| {
+                        let id = c.id.to_string();
+                        let this = this.clone();
+                        menu.item(kit_row(c.label, c.id == current).on_click(move |_, _, cx| {
+                            let _ = this.update(cx, |this, cx| {
+                                this.cond_open = None;
+                                this.update_filter(i, None, Some(id.clone()), None, cx)
+                            });
+                        }))
+                    })
+                },
+                move |_, cx| {
+                    let _ = dismiss.update(cx, |this, cx| {
+                        if this.cond_open == Some(i) {
                             this.cond_open = None;
-                            this.update_filter(i, None, Some(id.clone()), None, cx)
-                        })),
-                );
-            }
-            let cond_bounds = self.cond_bounds.clone();
-            menu = menu.on_mouse_down_out(cx.listener(move |this, e: &MouseDownEvent, _, cx| {
-                if !inside_any(&[&cond_bounds], e.position) {
-                    this.cond_open = None;
-                    cx.notify();
-                }
-            }));
-            let menu = appear(("fcond-menu", i), menu, window, cx);
+                            cx.notify();
+                        }
+                    });
+                },
+            );
+            let menu = appear(("fcond-menu", i), div().child(menu), window, cx);
             host = host.child(floating(Place::BelowLeft, 4., menu));
         }
         host
@@ -1170,75 +1174,55 @@ impl QueryControls {
                         },
                     )));
             if more_open {
-                let a = sorts.clone();
-                let b = sorts.clone();
-                let more_bounds = self.more_bounds.clone();
-                let menu = menu_surface()
-                    .relative()
-                    .min_w(px(174.))
-                    .occlude()
-                    .child(track_bounds(&self.more_bounds))
-                    .child(menu_title("Show empty"))
-                    .child(
-                        vrow(("empty-top", i), false)
-                            .child("At the top")
-                            .when(s.empty_start, |d| {
-                                d.child(div().text_color(theme::accent()).child("✓"))
+                let this = cx.weak_entity();
+                let pick = |empty_start: bool| {
+                    let (this, sorts) = (this.clone(), sorts.clone());
+                    move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
+                        let next = sorts
+                            .iter()
+                            .enumerate()
+                            .map(|(j, x)| {
+                                if j == i {
+                                    SortRule {
+                                        empty_start,
+                                        ..x.clone()
+                                    }
+                                } else {
+                                    x.clone()
+                                }
                             })
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.sort_more = None;
-                                let next = a
-                                    .iter()
-                                    .enumerate()
-                                    .map(|(j, x)| {
-                                        if j == i {
-                                            SortRule {
-                                                empty_start: true,
-                                                ..x.clone()
-                                            }
-                                        } else {
-                                            x.clone()
-                                        }
-                                    })
-                                    .collect();
-                                this.save_sorts(next, cx);
-                            })),
-                    )
-                    .child(
-                        vrow(("empty-bottom", i), false)
-                            .child("At the bottom")
-                            .when(!s.empty_start, |d| {
-                                d.child(div().text_color(theme::accent()).child("✓"))
-                            })
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.sort_more = None;
-                                let next = b
-                                    .iter()
-                                    .enumerate()
-                                    .map(|(j, x)| {
-                                        if j == i {
-                                            SortRule {
-                                                empty_start: false,
-                                                ..x.clone()
-                                            }
-                                        } else {
-                                            x.clone()
-                                        }
-                                    })
-                                    .collect();
-                                this.save_sorts(next, cx);
-                            })),
-                    )
-                    .on_mouse_down_out(cx.listener(move |this, e: &MouseDownEvent, _, cx| {
-                        if !inside_any(&[&more_bounds], e.position) {
+                            .collect();
+                        let _ = this.update(cx, |this, cx| {
                             this.sort_more = None;
-                            cx.notify();
-                        }
-                    }));
+                            this.save_sorts(next, cx);
+                        });
+                    }
+                };
+                let dismiss = this.clone();
+                let menu = kit_menu(
+                    ("sort-more-kit", i),
+                    (i, sorts.clone()),
+                    window,
+                    cx,
+                    |menu, _, _| {
+                        menu.min_w(px(174.))
+                            .item(kit_title("Show empty"))
+                            .item(kit_row("At the top", s.empty_start).on_click(pick(true)))
+                            .item(kit_row("At the bottom", !s.empty_start).on_click(pick(false)))
+                    },
+                    move |_, cx| {
+                        let _ = dismiss.update(cx, |this, cx| {
+                            if this.sort_more == Some(i) {
+                                this.sort_more = None;
+                                cx.notify();
+                            }
+                        });
+                    },
+                );
                 more = more.child(floating(
                     Place::BelowRight,
                     4.,
-                    appear(("sort-more-menu", i), menu, window, cx),
+                    appear(("sort-more-menu", i), div().child(menu), window, cx),
                 ));
             }
             let row = div()
@@ -1802,43 +1786,52 @@ impl Render for QueryControls {
             );
             if self.tpl_pick_open {
                 let default_tpl = field_str(&object.fields, "default_template_id").to_string();
-                let mut pick = menu_surface()
-                    .p(px(4.))
-                    .gap(px(0.))
-                    .min_w(px(170.))
-                    .occlude()
-                    .child(tpl_row("tpl-blank", "Blank".into()).on_click(cx.listener(
-                        |this, _, _, cx| {
+                let this = cx.weak_entity();
+                let create = |tpl: Option<String>| {
+                    let this = this.clone();
+                    move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
+                        let _ = this.update(cx, |this, cx| {
                             this.tpl_pick_open = false;
-                            this.create_record(String::new(), Some(None), cx).detach();
-                        },
-                    )));
-                for (id, name) in &self.type_templates {
-                    let label = format!(
-                        "{}{}",
-                        if name.is_empty() { "Untitled" } else { name },
-                        if *id == default_tpl { " ★" } else { "" }
-                    );
-                    let tpl = id.clone();
-                    pick = pick.child(
-                        tpl_row(SharedString::from(format!("tpl-{id}")), label.into()).on_click(
-                            cx.listener(move |this, _, _, cx| {
-                                this.tpl_pick_open = false;
-                                this.create_record(String::new(), Some(Some(tpl.clone())), cx)
-                                    .detach();
-                            }),
-                        ),
-                    );
-                }
+                            this.create_record(String::new(), Some(tpl.clone()), cx)
+                                .detach();
+                        });
+                    }
+                };
+                let templates = self.type_templates.clone();
                 let tb = self.tpl_bounds.clone();
-                pick =
-                    pick.on_mouse_down_out(cx.listener(move |this, e: &MouseDownEvent, _, cx| {
-                        if !inside_any(&[&tb], e.position) {
+                let dismiss = this.clone();
+                let pick = kit_menu(
+                    "tpl-kit",
+                    (default_tpl.clone(), templates.clone()),
+                    window,
+                    cx,
+                    |menu, _, _| {
+                        let menu = menu
+                            .min_w(px(170.))
+                            .item(kit_row("Blank", false).on_click(create(None)));
+                        templates.iter().fold(menu, |menu, (id, name)| {
+                            let label = format!(
+                                "{}{}",
+                                if name.is_empty() { "Untitled" } else { name },
+                                if *id == default_tpl { " ★" } else { "" }
+                            );
+                            menu.item(kit_row(label, false).on_click(create(Some(id.clone()))))
+                        })
+                    },
+                    move |window, cx| {
+                        // A press on New/▾ is theirs: the chevron toggles the picker.
+                        if !window.last_input_was_keyboard()
+                            && inside_any(&[&tb], window.mouse_position())
+                        {
+                            return;
+                        }
+                        let _ = dismiss.update(cx, |this, cx| {
                             this.tpl_pick_open = false;
                             cx.notify();
-                        }
-                    }));
-                let pick = appear("tpl-pick", pick, window, cx);
+                        });
+                    },
+                );
+                let pick = appear("tpl-pick", div().child(pick), window, cx);
                 new_wrap = new_wrap.child(floating(Place::BelowRight, 4., pick));
             }
         }
@@ -1859,19 +1852,6 @@ impl Render for QueryControls {
         }
         root
     }
-}
-
-fn tpl_row(id: impl Into<ElementId>, label: SharedString) -> Stateful<Div> {
-    div()
-        .id(id)
-        .px(px(10.))
-        .py(px(6.))
-        .rounded(px(7.))
-        .text_size(px(13.))
-        .text_color(theme::fg())
-        .cursor_pointer()
-        .hover(|s| s.bg(theme::hover()))
-        .child(label)
 }
 
 #[cfg(test)]

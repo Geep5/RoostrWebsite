@@ -3,15 +3,17 @@
 //! the More menu with every item and submenu, the pane button with its badge,
 //! and the delete-property modal (1623-1638).
 
-use gpui_kit::component::IconNamed as _;
-use gpui_kit::component::input::{Enter, InputEvent, InputState};
+use gpui_kit::component::breadcrumb::{Breadcrumb, BreadcrumbItem};
+use gpui_kit::component::input::{InputEvent, InputState};
+use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
+use gpui_kit::component::{Disableable as _, Icon, IconNamed as _};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use roostr_core::nav::{Navigator, Route, navigate, open_tab};
 use roostr_core::objects::{is_image_icon, object_icon, type_glyph};
 use roostr_core::store::Store;
 use roostr_core::types::{Block, Fields, RelationDef, Value, pos};
-use roostr_core::{Glyph, PaneState, TypeDef, api, theme, ui};
+use roostr_core::{Glyph, PaneState, api, theme, ui};
 use serde_json::json;
 
 use crate::modal::{dialog_appear, outline_button, overlay, small_card};
@@ -19,13 +21,48 @@ use crate::workspace::Workspace;
 
 pub(crate) fn init(_: &mut App) {}
 
-/// The open More menu's state.
+/// The open More menu: gpui-kit's [`PopupMenu`] with its Change type flyout.
 pub(crate) struct MoreMenu {
-    show_collections: bool,
-    /// The Change type submenu's search, while open.
-    type_pick: Option<Entity<InputState>>,
-    type_filter: String,
-    _subscription: Option<Subscription>,
+    menu: Entity<PopupMenu>,
+    /// What `menu` was last filled from.
+    model: Option<MoreModel>,
+    /// The Change type flyout, refilled as its search changes.
+    types: Entity<PopupMenu>,
+    type_search: Entity<InputState>,
+    _subscriptions: Vec<Subscription>,
+}
+
+/// What the More menu shows (a change refills it).
+#[derive(Clone, PartialEq)]
+struct MoreModel {
+    id: String,
+    /// A phone leads with Graph (its header has no graph link) instead of
+    /// Open in new tab (it has no tabs).
+    mobile: bool,
+    /// Why the object can't be deleted (empty: it can).
+    blocker: String,
+    kind: MoreKind,
+}
+
+#[derive(Clone, PartialEq)]
+enum MoreKind {
+    Property,
+    Object {
+        channel_id: String,
+        pinned: bool,
+        /// The space's collections: (id, "icon name").
+        collections: Vec<(String, String)>,
+        can_retype: bool,
+        copy_id: bool,
+    },
+    Space,
+}
+
+/// A Change type choice.
+struct TypeChoice {
+    key: String,
+    icon: String,
+    name: String,
 }
 
 /// The delete-property confirmation.
@@ -64,95 +101,6 @@ fn glyph(glyph: Glyph, size: f32) -> Svg {
         .size(px(size))
         .flex_none()
         .text_color(theme::muted())
-}
-
-/// A More-menu row: gap 8, padding 7×10, radius 6, 13px; hover accent + white
-/// (danger: red text, hover red + white).
-fn more_item(
-    id: impl Into<ElementId>,
-    icon: Option<Glyph>,
-    label: impl Into<SharedString>,
-    danger: bool,
-) -> Stateful<Div> {
-    let color = if danger { theme::red() } else { theme::fg() };
-    more_row(id, danger)
-        .when_some(icon, |d, icon| {
-            d.child(
-                svg()
-                    .path(icon.path())
-                    .size(px(16.))
-                    .flex_none()
-                    .text_color(color),
-            )
-        })
-        .child(label.into())
-}
-
-/// A More-menu row's frame, before its icon and label.
-fn more_row(id: impl Into<ElementId>, danger: bool) -> Stateful<Div> {
-    let color = if danger { theme::red() } else { theme::fg() };
-    let hover_bg = if danger {
-        theme::red()
-    } else {
-        theme::accent()
-    };
-    div()
-        .id(id)
-        .flex()
-        .flex_none()
-        .items_center()
-        .gap(px(8.))
-        .px(px(10.))
-        .py(px(7.))
-        .rounded(theme::radius::sm())
-        .text_size(px(13.))
-        .text_color(color)
-        .whitespace_nowrap()
-        .cursor_pointer()
-        .hover(move |s| s.bg(hover_bg).text_color(theme::white()))
-}
-
-/// `.menu-sep`.
-fn menu_sep() -> Div {
-    div()
-        .h(px(1.))
-        .mx(px(6.))
-        .my(px(4.))
-        .flex_none()
-        .bg(theme::border())
-}
-
-fn chev() -> Div {
-    div().ml_auto().flex().opacity(0.6).child(
-        svg()
-            .path(Glyph::ChevronRight.path())
-            .size(px(14.))
-            .text_color(theme::fg()),
-    )
-}
-
-/// `.menu-none`: muted 12px note with an optional leading icon.
-fn menu_none(id: impl Into<ElementId>, lock: bool, text: impl Into<SharedString>) -> Stateful<Div> {
-    div()
-        .id(id)
-        .flex()
-        .items_center()
-        .gap(px(8.))
-        .px(px(10.))
-        .py(px(6.))
-        .text_size(px(12.))
-        .text_color(theme::muted())
-        .when(lock, |d| d.child(glyph(Glyph::Lock, 16.)))
-        .child(text.into())
-}
-
-fn submenu() -> Div {
-    div()
-        .flex()
-        .flex_col()
-        .border_l_2()
-        .border_color(theme::border())
-        .ml(px(12.))
 }
 
 fn refresh(cx: &mut App) {
@@ -217,7 +165,20 @@ impl Workspace {
                     )
                 }
             })
-            .child(div().min_w_0().truncate().child(path_name))
+            // The path is one crumb (the open object, space or graph); the
+            // whole pill opens search, so the crumb itself takes no click.
+            .child(
+                Breadcrumb::new()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .text_size(px(14.))
+                    .child(
+                        BreadcrumbItem::new(path_name)
+                            .min_w_0()
+                            .truncate()
+                            .text_color(theme::fg()),
+                    ),
+            )
             .map(|d| self.data_tip(d, "tip-path", "Search (⌘K)", cx))
             .on_click(cx.listener(|this, _, window, cx| this.open_search(window, cx)));
 
@@ -379,17 +340,59 @@ impl Workspace {
         }
     }
 
-    pub(crate) fn toggle_more(&mut self, cx: &mut Context<Self>) {
-        self.more = if self.more.is_some() {
-            None
-        } else {
-            Some(MoreMenu {
-                show_collections: false,
-                type_pick: None,
-                type_filter: String::new(),
-                _subscription: None,
-            })
-        };
+    /// Open or close the More menu. The menu is gpui-kit's [`PopupMenu`]
+    /// (keyboard: arrows, Enter, Escape, ← → into the flyouts); it is filled
+    /// from [`MoreModel`] and refilled when that changes (a delete blocker
+    /// resolving, a pin toggling elsewhere).
+    pub(crate) fn toggle_more(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.more.take().is_some() {
+            cx.notify();
+            return;
+        }
+        let menu = PopupMenu::build(window, cx, |menu, _, _| menu.min_w(px(234.)));
+        let types = PopupMenu::build(window, cx, |menu, _, _| {
+            menu.min_w(px(220.)).max_h(px(360.)).scrollable(true)
+        });
+        let input = cx.new(|cx| InputState::new(window, cx).placeholder("Search types..."));
+        let subscriptions = vec![
+            // Escape, an item, or (desktop) a click outside closes it. A
+            // phone has no click-away: its ⋯ toggles, and items close it.
+            cx.subscribe_in(&menu, window, |this, _, _: &DismissEvent, window, cx| {
+                if window.last_input_was_keyboard() || !roostr_core::layout::is_mobile(window) {
+                    this.more = None;
+                    cx.notify();
+                }
+            }),
+            cx.subscribe_in(
+                &input,
+                window,
+                |this, input, event: &InputEvent, window, cx| match event {
+                    InputEvent::Change => this.fill_type_menu(window, cx),
+                    // Enter takes the first match.
+                    InputEvent::PressEnter { .. } => {
+                        let filter = input.read(cx).value().to_string();
+                        let Some(id) = Self::open_object_id(cx) else {
+                            return;
+                        };
+                        if let Some(choice) = type_choices(&id, &filter, cx).into_iter().next() {
+                            this.more = None;
+                            cx.notify();
+                            change_type(&id, &choice.key, cx);
+                        }
+                    }
+                    _ => {}
+                },
+            ),
+        ];
+        menu.focus_handle(cx).focus(window, cx);
+        self.more = Some(MoreMenu {
+            menu,
+            model: None,
+            types,
+            type_search: input,
+            _subscriptions: subscriptions,
+        });
+        self.fill_type_menu(window, cx);
         cx.notify();
     }
 
@@ -399,96 +402,24 @@ impl Workspace {
                 .child("⋯")
                 .child(self.anchor_probe("more"))
                 .map(|d| self.data_tip(d, "tip-more", "More", cx))
-                .on_click(cx.listener(|this, _, _, cx| this.toggle_more(cx))),
+                .on_click(cx.listener(|this, _, window, cx| this.toggle_more(window, cx))),
         )
     }
 
-    /// The mobile More menu's first row: the graph around the object.
-    fn more_graph(&self, id: &str, cx: &Context<Self>) -> Stateful<Div> {
-        let focus = id.to_string();
-        more_row("more-graph", false)
-            .debug_selector(|| "more-graph".into())
-            .child(
-                svg()
-                    .path(Glyph::Graph.path())
-                    .size(px(14.))
-                    .mr(px(2.))
-                    .flex_none()
-                    .text_color(theme::fg()),
-            )
-            .child("Graph")
-            .on_click(cx.listener(move |this, _, _, cx| {
-                this.more = None;
-                cx.notify();
-                navigate(
-                    Route::Graph {
-                        focus: Some(focus.clone()),
-                    },
-                    cx,
-                );
-            }))
-    }
-
-    pub(crate) fn render_more_menu(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Stateful<Div> {
-        let Some(id) = Self::open_object_id(cx) else {
-            return div().id("more-menu");
-        };
-        // A phone's menu leads with Graph (its header has no graph link)
-        // instead of Open in new tab (it has no tabs).
-        let mobile = roostr_core::layout::is_mobile(window);
+    /// What the More menu shows for the open object, `None` without one.
+    fn more_model(&self, mobile: bool, cx: &App) -> Option<MoreModel> {
+        let id = Self::open_object_id(cx)?;
         let blocker = if self.delete_blocker.0 == id {
             self.delete_blocker.1.clone()
         } else {
             String::new()
         };
         let store = Store::global(cx).read(cx);
-        let relation = store.relations.iter().find(|r| r.id == id).cloned();
-        let summary = store.summary(&id).cloned();
-        let space = if summary.is_none() {
-            store.space(&id).cloned()
-        } else {
-            None
-        };
-        let panel = ui::menu_panel()
-            .id("more-menu")
-            .line_height(relative(1.2))
-            .min_w(px(234.))
-            .occlude()
-            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation());
-        let blocked_line = |blocker: &str| {
-            menu_none("more-blocked", true, format!("Can't delete: {blocker}")).tooltip(crate::tip(
-                "Types and properties Roostr or your queries rely on can't be deleted",
-            ))
-        };
-
-        if let Some(rel) = relation {
-            let panel = if mobile {
-                panel.child(self.more_graph(&id, cx)).child(menu_sep())
-            } else {
-                panel
-            };
-            return panel.child(if blocker.is_empty() {
-                more_item("delete-prop", Some(Glyph::Trash), "Delete property", true)
-                    .on_click(
-                        cx.listener(move |this, _, _, cx| {
-                            this.open_delete_property(rel.clone(), cx)
-                        }),
-                    )
-                    .into_any_element()
-            } else {
-                blocked_line(&blocker).into_any_element()
-            });
-        }
-
-        if let Some(summary) = summary {
+        let kind = if store.relations.iter().any(|r| r.id == id) {
+            MoreKind::Property
+        } else if let Some(summary) = store.summary(&id) {
             let active = Navigator::global(cx).read(cx).space().to_string();
-            let owning = roostr_core::pins::space_of(store, &summary.channel_id);
-            let pinned = owning
-                .as_ref()
+            let pinned = roostr_core::pins::space_of(store, &summary.channel_id)
                 .is_some_and(|s| s.pinned_ids.contains(&summary.id));
             let collections_space = if !summary.channel_id.is_empty() {
                 summary.channel_id.clone()
@@ -501,7 +432,7 @@ impl Workspace {
                     .map(|c| c.id.clone())
                     .unwrap_or_default()
             };
-            let collections: Vec<(String, String, String)> = store
+            let collections = store
                 .summaries
                 .iter()
                 .filter(|s| {
@@ -509,286 +440,112 @@ impl Workspace {
                 })
                 .map(|s| {
                     let name = if s.name.is_empty() {
-                        "Untitled".to_string()
+                        "Untitled"
                     } else {
-                        s.name.clone()
+                        s.name.as_str()
                     };
-                    (
-                        s.id.clone(),
-                        object_icon(store, &s.icon, &s.type_key, &active),
-                        name,
-                    )
+                    let icon = object_icon(store, &s.icon, &s.type_key, &active);
+                    (s.id.clone(), format!("{icon} {name}"))
                 })
                 .collect();
-            let can_retype = !matches!(summary.type_key.as_str(), "query" | "collection" | "set");
-            let space_id = Self::space_id(cx);
-            let filter = self
-                .more
-                .as_ref()
-                .map(|m| m.type_filter.trim().to_lowercase())
-                .unwrap_or_default();
-            let type_choices: Vec<TypeDef> = store
-                .types
-                .iter()
-                .filter(|t| {
-                    t.space == space_id
-                        && t.key != summary.type_key
-                        && (filter.is_empty()
-                            || if t.name.is_empty() { &t.key } else { &t.name }
-                                .to_lowercase()
-                                .contains(&filter))
-                })
-                .cloned()
-                .collect();
-            let type_icons: Vec<String> = type_choices
-                .iter()
-                .map(|t| {
-                    if t.icon.is_empty() {
-                        type_glyph(store, &t.key, &active)
-                    } else {
-                        t.icon.clone()
-                    }
-                })
-                .collect();
-            let show_collections = self.more.as_ref().is_some_and(|m| m.show_collections);
-            let type_pick = self.more.as_ref().and_then(|m| m.type_pick.clone());
-            let raw_filter = self
-                .more
-                .as_ref()
-                .map(|m| m.type_filter.trim().to_string())
-                .unwrap_or_default();
-
-            let open_id = id.clone();
-            let pin_id = id.clone();
-            let mut panel = panel
-                .child(if mobile {
-                    self.more_graph(&id, cx)
-                } else {
-                    more_item(
-                        "open-tab",
-                        Some(Glyph::ExternalLink),
-                        "Open in new tab",
-                        false,
-                    )
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.more = None;
-                        open_tab(Route::Object(open_id.clone()), true, cx);
-                    }))
-                })
-                .child(
-                    more_item(
-                        "pin",
-                        Some(if pinned { Glyph::StarOff } else { Glyph::Star }),
-                        if pinned {
-                            "Unpin from space"
-                        } else {
-                            "Pin to space"
-                        },
-                        false,
-                    )
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.more = None;
-                        if let Some(space) = &owning {
-                            roostr_core::pins::set_pinned(&pin_id, space, !pinned, cx)
-                                .detach_and_log_err(cx);
-                        }
-                        cx.notify();
-                    })),
-                )
-                .child(
-                    more_item(
-                        "add-collection",
-                        Some(Glyph::FolderPlus),
-                        "Add to collection",
-                        false,
-                    )
-                    .child(chev())
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        if let Some(more) = &mut this.more {
-                            more.show_collections = !more.show_collections;
-                        }
-                        cx.notify();
-                    })),
-                )
-                .when(show_collections, |d| {
-                    let mut sub = submenu();
-                    if collections.is_empty() {
-                        sub = sub.child(menu_none(
-                            "no-collections",
-                            false,
-                            "No collections in this space",
-                        ));
-                    }
-                    for (cid, icon, name) in collections {
-                        let target = id.clone();
-                        sub = sub.child(
-                            more_item(
-                                crate::eid("collection", &cid),
-                                None,
-                                format!("{icon} {name}"),
-                                false,
-                            )
-                            .on_click(cx.listener(
-                                move |this, _, _, cx| {
-                                    this.more = None;
-                                    cx.notify();
-                                    add_to_collection(&target, &cid, cx);
-                                },
-                            )),
-                        );
-                    }
-                    d.child(sub)
-                })
-                .when(can_retype, |d| {
-                    d.child(
-                        more_item(
-                            "change-type",
-                            Some(Glyph::ArrowLeftRight),
-                            "Change type",
-                            false,
-                        )
-                        .child(chev())
-                        .on_click(
-                            cx.listener(|this, _, window, cx| this.toggle_type_pick(window, cx)),
-                        ),
-                    )
-                })
-                .when_some(type_pick, |d, input| {
-                    let first = type_choices.first().map(|t| t.key.clone());
-                    let target = id.clone();
-                    let mut sub = submenu()
-                        .id("type-pick")
-                        .capture_action(cx.listener(move |this, _: &Enter, _, cx| {
-                            cx.stop_propagation();
-                            if let Some(key) = &first {
-                                this.more = None;
-                                cx.notify();
-                                change_type(&target, key, cx);
-                            }
-                        }))
-                        .child(crate::create_menu::type_search(&input));
-                    for (t, icon) in type_choices.iter().zip(type_icons) {
-                        let key = t.key.clone();
-                        let target = id.clone();
-                        let name = if t.name.is_empty() {
-                            t.key.clone()
-                        } else {
-                            t.name.clone()
-                        };
-                        sub = sub.child(
-                            more_item(
-                                crate::eid("type-choice", &t.id),
-                                None,
-                                format!("{icon} {name}"),
-                                false,
-                            )
-                            .on_click(cx.listener(
-                                move |this, _, _, cx| {
-                                    this.more = None;
-                                    cx.notify();
-                                    change_type(&target, &key, cx);
-                                },
-                            )),
-                        );
-                    }
-                    if type_choices.is_empty() {
-                        sub = sub.child(menu_none(
-                            "no-type",
-                            false,
-                            format!("No type matches “{raw_filter}”"),
-                        ));
-                    }
-                    d.child(sub)
-                })
-                .child(
-                    more_item("duplicate", Some(Glyph::Copy), "Duplicate", false).on_click(
-                        cx.listener({
-                            let id = id.clone();
-                            move |this, _, _, cx| {
-                                this.more = None;
-                                cx.notify();
-                                duplicate_object(&id, cx);
-                            }
-                        }),
-                    ),
-                );
-            if store.space(&summary.channel_id).is_some() {
-                let copy_id = id.clone();
-                panel = panel.child(
-                    more_item("copy-id", Some(Glyph::Hash), "Copy ID", false).on_click(
-                        cx.listener(move |this, _, _, cx| {
-                            this.more = None;
-                            cx.write_to_clipboard(ClipboardItem::new_string(copy_id.clone()));
-                            cx.notify();
-                        }),
-                    ),
-                );
+            MoreKind::Object {
+                channel_id: summary.channel_id.clone(),
+                pinned,
+                collections,
+                can_retype: !matches!(summary.type_key.as_str(), "query" | "collection" | "set"),
+                copy_id: store.space(&summary.channel_id).is_some(),
             }
-            return panel.child(menu_sep()).child(if blocker.is_empty() {
-                let bin_id = id.clone();
-                more_item("bin", Some(Glyph::Trash), "Move to bin", true)
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.more = None;
-                        cx.notify();
-                        move_to_bin(&bin_id, cx);
-                    }))
-                    .into_any_element()
-            } else {
-                blocked_line(&blocker).into_any_element()
-            });
-        }
-
-        if space.is_some() {
-            let open_id = id.clone();
-            return panel
-                .child(if mobile {
-                    self.more_graph(&id, cx)
-                } else {
-                    more_item(
-                        "open-tab",
-                        Some(Glyph::ExternalLink),
-                        "Open in new tab",
-                        false,
-                    )
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.more = None;
-                        open_tab(Route::Object(open_id.clone()), true, cx);
-                    }))
-                })
-                .child(
-                    more_item("copy-id", Some(Glyph::Hash), "Copy ID", false).on_click(
-                        cx.listener(move |this, _, _, cx| {
-                            this.more = None;
-                            cx.write_to_clipboard(ClipboardItem::new_string(id.clone()));
-                            cx.notify();
-                        }),
-                    ),
-                );
-        }
-        panel
+        } else if store.space(&id).is_some() {
+            MoreKind::Space
+        } else {
+            return None;
+        };
+        Some(MoreModel {
+            id,
+            mobile,
+            blocker,
+            kind,
+        })
     }
 
-    fn toggle_type_pick(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(more) = &mut self.more else { return };
-        more.type_filter.clear();
-        if more.type_pick.take().is_some() {
-            more._subscription = None;
-            cx.notify();
-            return;
+    /// The open More menu, refilled first if what it shows changed.
+    pub(crate) fn render_more_menu(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let model = self.more_model(roostr_core::layout::is_mobile(window), cx);
+        let workspace = cx.entity().downgrade();
+        let Some(more) = &mut self.more else {
+            return div().id("more-menu");
+        };
+        let Some(model) = model else {
+            return div().id("more-menu");
+        };
+        if more.model.as_ref() != Some(&model) {
+            more.model = Some(model.clone());
+            let types = more.types.clone();
+            more.menu.update(cx, |menu, cx| {
+                menu.rebuild(window, cx, move |menu, window, cx| {
+                    more_items(menu, &model, &workspace, &types, window, cx)
+                })
+            });
         }
-        let input = cx.new(|cx| InputState::new(window, cx).placeholder("Search types..."));
-        input.update(cx, |input, cx| input.focus(window, cx));
-        let subscription = cx.subscribe(&input, |this, input, event: &InputEvent, cx| {
-            if matches!(event, InputEvent::Change)
-                && let Some(more) = &mut this.more
-            {
-                more.type_filter = input.read(cx).value().to_string();
-                cx.notify();
-            }
+        div()
+            .id("more-menu")
+            .line_height(relative(1.2))
+            .child(more.menu.clone())
+    }
+
+    /// Fill the Change type flyout: its search, then the space's other
+    /// types matching it.
+    fn fill_type_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(more) = &self.more else { return };
+        let Some(id) = Self::open_object_id(cx) else {
+            return;
+        };
+        let input = more.type_search.clone();
+        let filter = input.read(cx).value().trim().to_string();
+        let choices = type_choices(&id, &filter, cx);
+        let workspace = cx.entity().downgrade();
+        more.types.update(cx, |menu, cx| {
+            let menu_focus = menu.focus_handle(cx);
+            menu.rebuild(window, cx, move |mut menu, _, _| {
+                // The search takes the keys while the flyout shows: at once
+                // under the pointer, once → enters it from the keyboard.
+                menu = menu.item(
+                    PopupMenuItem::element(move |window, cx| {
+                        let focused = input.read(cx).focus_handle(cx).is_focused(window);
+                        if !focused
+                            && (!window.last_input_was_keyboard() || menu_focus.is_focused(window))
+                        {
+                            let input = input.clone();
+                            window.defer(cx, move |window, cx| {
+                                input.update(cx, |input, cx| input.focus(window, cx))
+                            });
+                        }
+                        crate::create_menu::type_search(&input).flex_1().mx_0()
+                    })
+                    .disabled(true),
+                );
+                if choices.is_empty() {
+                    return menu.label(format!("No type matches “{filter}”"));
+                }
+                for choice in choices {
+                    let target = id.clone();
+                    let workspace = workspace.clone();
+                    menu = menu.item(
+                        PopupMenuItem::new(format!("{} {}", choice.icon, choice.name)).on_click(
+                            move |_, _, cx| {
+                                close_more(&workspace, cx);
+                                change_type(&target, &choice.key, cx);
+                            },
+                        ),
+                    );
+                }
+                menu
+            })
         });
-        more.type_pick = Some(input);
-        more._subscription = Some(subscription);
-        cx.notify();
     }
 
     fn open_delete_property(&mut self, rel: RelationDef, cx: &mut Context<Self>) {
@@ -934,26 +691,29 @@ impl Workspace {
                                 .justify_end()
                                 .gap(px(8.))
                                 .child(
-                                    ui::disabled(outline_button("prop-del-cancel", "Cancel", false), deleting).when(
-                                        !deleting,
-                                        |b| {
+                                    outline_button("prop-del-cancel", "Cancel", false, cx)
+                                        .disabled(deleting)
+                                        .when(deleting, |b| b.opacity(0.5))
+                                        .when(!deleting, |b| {
                                             b.on_click(cx.listener(|this, _, _, cx| {
                                                 this.delete_prop = None;
                                                 cx.notify();
                                             }))
-                                        },
-                                    ),
+                                        }),
                                 )
                                 .child(
-                                    ui::disabled(
-                                        outline_button(
-                                            "prop-del-ok",
-                                            if deleting { "Deleting…" } else { "Delete property" },
-                                            !deleting,
-                                        )
-                                        .when(deleting, |b| b.border_color(theme::red()).text_color(theme::red())),
-                                        deleting,
+                                    outline_button(
+                                        "prop-del-ok",
+                                        if deleting { "Deleting…" } else { "Delete property" },
+                                        !deleting,
+                                        cx,
                                     )
+                                    .when(deleting, |b| {
+                                        b.border_color(theme::red())
+                                            .text_color(theme::red())
+                                            .opacity(0.5)
+                                    })
+                                    .disabled(deleting)
                                     .when(!deleting, |b| {
                                         b.on_click(cx.listener(|this, _, _, cx| this.delete_property(cx)))
                                     }),
@@ -964,6 +724,216 @@ impl Workspace {
         .with_priority(10)
         .into_any_element()
     }
+}
+
+/// Close the More menu from one of its items.
+fn close_more(workspace: &WeakEntity<Workspace>, cx: &mut App) {
+    let _ = workspace.update(cx, |this, cx| {
+        this.more = None;
+        cx.notify();
+    });
+}
+
+const BLOCKED_TIP: &str = "Types and properties Roostr or your queries rely on can't be deleted";
+
+/// A red row with the bin glyph (Move to bin, Delete property).
+fn danger_item(label: &'static str) -> PopupMenuItem {
+    PopupMenuItem::element(move |_, _| div().text_color(theme::red()).child(label))
+        .icon(Icon::new(Glyph::Trash).text_color(theme::red()))
+}
+
+/// The disabled row saying why the object can't be deleted; it still
+/// explains itself in a tooltip.
+fn blocked_item(blocker: &str) -> PopupMenuItem {
+    let text = SharedString::from(format!("Can't delete: {blocker}"));
+    PopupMenuItem::element(move |_, _| {
+        div()
+            .id("more-blocked")
+            .flex_1()
+            .text_size(px(12.))
+            .child(text.clone())
+            .tooltip(crate::tip(BLOCKED_TIP))
+    })
+    .icon(Icon::new(Glyph::Lock))
+    .disabled(true)
+}
+
+/// The More menu's rows for `m`.
+fn more_items(
+    menu: PopupMenu,
+    m: &MoreModel,
+    workspace: &WeakEntity<Workspace>,
+    types: &Entity<PopupMenu>,
+    window: &mut Window,
+    cx: &mut Context<PopupMenu>,
+) -> PopupMenu {
+    let id = m.id.clone();
+    let lead = if m.mobile {
+        let (ws, focus) = (workspace.clone(), id.clone());
+        Some(
+            PopupMenuItem::element(|_, _| {
+                div().debug_selector(|| "more-graph".into()).child("Graph")
+            })
+            .icon(Icon::new(Glyph::Graph))
+            .on_click(move |_, _, cx| {
+                close_more(&ws, cx);
+                navigate(
+                    Route::Graph {
+                        focus: Some(focus.clone()),
+                    },
+                    cx,
+                );
+            }),
+        )
+    } else if matches!(m.kind, MoreKind::Property) {
+        None
+    } else {
+        let (ws, target) = (workspace.clone(), id.clone());
+        Some(
+            PopupMenuItem::new("Open in new tab")
+                .icon(Icon::new(Glyph::ExternalLink))
+                .on_click(move |_, _, cx| {
+                    close_more(&ws, cx);
+                    open_tab(Route::Object(target.clone()), true, cx);
+                }),
+        )
+    };
+    let copy_id = {
+        let (ws, id) = (workspace.clone(), id.clone());
+        PopupMenuItem::new("Copy ID")
+            .icon(Icon::new(Glyph::Hash))
+            .on_click(move |_, _, cx| {
+                close_more(&ws, cx);
+                cx.write_to_clipboard(ClipboardItem::new_string(id.clone()));
+            })
+    };
+    let menu = menu.when_some(lead, |menu, lead| menu.item(lead));
+    match &m.kind {
+        MoreKind::Property => menu.separator().item(if m.blocker.is_empty() {
+            let ws = workspace.clone();
+            danger_item("Delete property").on_click(move |_, _, cx| {
+                let rel = Store::global(cx)
+                    .read(cx)
+                    .relations
+                    .iter()
+                    .find(|r| r.id == id)
+                    .cloned();
+                if let Some(rel) = rel {
+                    let _ = ws.update(cx, |this, cx| this.open_delete_property(rel, cx));
+                }
+            })
+        } else {
+            blocked_item(&m.blocker)
+        }),
+        MoreKind::Object {
+            channel_id,
+            pinned,
+            collections,
+            can_retype,
+            copy_id: has_copy_id,
+        } => {
+            let pinned = *pinned;
+            let (ws, target, channel) = (workspace.clone(), id.clone(), channel_id.clone());
+            let mut menu = menu.item(
+                PopupMenuItem::new(if pinned {
+                    "Unpin from space"
+                } else {
+                    "Pin to space"
+                })
+                .icon(Icon::new(if pinned { Glyph::StarOff } else { Glyph::Star }))
+                .on_click(move |_, _, cx| {
+                    close_more(&ws, cx);
+                    let space = roostr_core::pins::space_of(Store::global(cx).read(cx), &channel);
+                    if let Some(space) = space {
+                        roostr_core::pins::set_pinned(&target, &space, !pinned, cx)
+                            .detach_and_log_err(cx);
+                    }
+                }),
+            );
+            let (ws, target, entries) = (workspace.clone(), id.clone(), collections.clone());
+            menu = menu.submenu_with_icon(
+                Some(Icon::new(Glyph::FolderPlus)),
+                "Add to collection",
+                window,
+                cx,
+                move |mut sub, _, _| {
+                    if entries.is_empty() {
+                        return sub.label("No collections in this space");
+                    }
+                    for (cid, label) in &entries {
+                        let (ws, target, cid) = (ws.clone(), target.clone(), cid.clone());
+                        sub = sub.item(PopupMenuItem::new(label.clone()).on_click(
+                            move |_, _, cx| {
+                                close_more(&ws, cx);
+                                add_to_collection(&target, &cid, cx);
+                            },
+                        ));
+                    }
+                    sub
+                },
+            );
+            if *can_retype {
+                menu = menu.item(
+                    PopupMenuItem::submenu("Change type", types.clone())
+                        .icon(Icon::new(Glyph::ArrowLeftRight)),
+                );
+            }
+            let (ws, target) = (workspace.clone(), id.clone());
+            menu = menu.item(
+                PopupMenuItem::new("Duplicate")
+                    .icon(Icon::new(Glyph::Copy))
+                    .on_click(move |_, _, cx| {
+                        close_more(&ws, cx);
+                        duplicate_object(&target, cx);
+                    }),
+            );
+            if *has_copy_id {
+                menu = menu.item(copy_id);
+            }
+            menu.separator().item(if m.blocker.is_empty() {
+                let ws = workspace.clone();
+                danger_item("Move to bin").on_click(move |_, _, cx| {
+                    close_more(&ws, cx);
+                    move_to_bin(&id, cx);
+                })
+            } else {
+                blocked_item(&m.blocker)
+            })
+        }
+        MoreKind::Space => menu.item(copy_id),
+    }
+}
+
+/// The space's types an object can change to, matching `filter`.
+fn type_choices(object_id: &str, filter: &str, cx: &App) -> Vec<TypeChoice> {
+    let store = Store::global(cx).read(cx);
+    let Some(summary) = store.summary(object_id) else {
+        return Vec::new();
+    };
+    let active = Navigator::global(cx).read(cx).space().to_string();
+    let space_id = Workspace::space_id(cx);
+    let filter = filter.trim().to_lowercase();
+    store
+        .types
+        .iter()
+        .filter(|t| t.space == space_id && t.key != summary.type_key)
+        .filter_map(|t| {
+            let name = if t.name.is_empty() {
+                t.key.clone()
+            } else {
+                t.name.clone()
+            };
+            (filter.is_empty() || name.to_lowercase().contains(&filter)).then(|| TypeChoice {
+                key: t.key.clone(),
+                icon: if t.icon.is_empty() {
+                    type_glyph(store, &t.key, &active)
+                } else {
+                    t.icon.clone()
+                },
+                name,
+            })
+        })
+        .collect()
 }
 
 /// `addToCollection`: append the object to the collection's members.

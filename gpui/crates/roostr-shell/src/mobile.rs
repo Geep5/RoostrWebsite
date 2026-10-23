@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use chrono::{Local, TimeZone as _};
 use gpui_kit::component::IconNamed as _;
+use gpui_kit::component::progress::ProgressCircle;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use roostr_core::layout::{self, sync_now};
@@ -205,38 +206,6 @@ fn short_date(ms: i64) -> String {
     } else {
         d.format("%b %-d").to_string()
     }
-}
-
-/// The conic ring around the sync dot: `arc` of a 20px ring (2px thick)
-/// from `start` (fractions of a turn, 0 = 12 o'clock) in orange, the rest
-/// in the border colour.
-fn paint_sync_ring(bounds: Bounds<Pixels>, start: f32, arc: f32, window: &mut Window) {
-    let center = bounds.center();
-    let ring = |from: f32, to: f32, color: Hsla, window: &mut Window| {
-        if to <= from {
-            return;
-        }
-        let mut path = PathBuilder::stroke(px(2.));
-        let steps = 48;
-        for i in 0..=steps {
-            let turn = from + (to - from) * i as f32 / steps as f32;
-            let angle = std::f32::consts::TAU * turn - std::f32::consts::FRAC_PI_2;
-            let p = point(
-                center.x + px(9.) * angle.cos(),
-                center.y + px(9.) * angle.sin(),
-            );
-            if i == 0 {
-                path.move_to(p);
-            } else {
-                path.line_to(p);
-            }
-        }
-        if let Ok(path) = path.build() {
-            window.paint_path(path, color);
-        }
-    };
-    ring(start + arc, start + 1., theme::border(), window);
-    ring(start, start + arc, theme::orange(), window);
 }
 
 impl Workspace {
@@ -739,7 +708,9 @@ impl Workspace {
                             .child("⋯")
                             .child(self.anchor_probe("more"))
                             .map(|d| self.data_tip(d, "tip-more", "More", cx))
-                            .on_click(cx.listener(|this, _, _, cx| this.toggle_more(cx))),
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.toggle_more(window, cx)),
+                            ),
                     ),
                 )
                 .children(pane_btn)
@@ -811,39 +782,23 @@ impl Workspace {
         } else {
             dot.into_any_element()
         };
-        let ring = match (progress, shown_pct) {
-            (Some(_), Some(pct)) => Some(
-                canvas(
-                    |_, _, _| {},
-                    move |bounds, _, window, _| paint_sync_ring(bounds, 0., pct / 100., window),
-                )
+        // The 20px ring around the dot: filled to the pass's percentage (the
+        // kit eases it to each new value), or an indeterminate arc.
+        let ring = progress.map(|_| {
+            div()
                 .absolute()
                 .inset_0()
-                .into_any_element(),
-            ),
-            (Some(_), None) => Some(
-                div()
-                    .absolute()
-                    .inset_0()
-                    .with_animation(
-                        "m-sync-spin",
-                        Animation::new(Duration::from_millis(1600)).repeat(),
-                        |d, t| {
-                            d.child(
-                                canvas(
-                                    |_, _, _| {},
-                                    move |bounds, _, window, _| {
-                                        paint_sync_ring(bounds, t, 0.25, window)
-                                    },
-                                )
-                                .size_full(),
-                            )
-                        },
-                    )
-                    .into_any_element(),
-            ),
-            (None, _) => None,
-        };
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(
+                    ProgressCircle::new("m-sync-ring")
+                        .color(theme::orange())
+                        .loading(pct.is_none())
+                        .value(pct.map_or(0., |pct| pct as f32))
+                        .size(px(20.)),
+                )
+        });
         let label = progress.map(|p| {
             div()
                 .absolute()
@@ -953,10 +908,6 @@ impl Workspace {
                 })
                 .collect();
             (spaces, latest, store.status.clone())
-        };
-        let (pic, avatar) = {
-            let profile = roostr_core::profile::ProfileCache::global(cx).read(cx);
-            (profile.picture().to_string(), profile.avatar())
         };
         let lift = self.space_lift.clone();
         let over = self.space_over.clone().filter(|_| lift.is_some());
@@ -1161,33 +1112,15 @@ impl Workspace {
                         div().flex().justify_end().pb(px(10.)).child(
                             div()
                                 .id("m-avatar")
-                                .size(px(36.))
+                                .flex_none()
                                 .rounded_full()
-                                .overflow_hidden()
-                                .bg(theme::hover())
-                                .border_1()
-                                .border_color(theme::border())
-                                .text_color(theme::fg())
-                                .text_size(px(16.))
-                                .flex()
-                                .items_center()
-                                .justify_center()
                                 .cursor_pointer()
-                                .map(|d| match (avatar, pic.is_empty()) {
-                                    (Some(image), _) => d.child(
-                                        img(ImageSource::Image(image))
-                                            .size_full()
-                                            .rounded_full()
-                                            .object_fit(ObjectFit::Cover),
-                                    ),
-                                    (None, false) => d.child(
-                                        img(SharedString::from(pic))
-                                            .size_full()
-                                            .rounded_full()
-                                            .object_fit(ObjectFit::Cover),
-                                    ),
-                                    (None, true) => d.child("⚙"),
-                                })
+                                .child(
+                                    crate::rail::account_avatar(px(36.), Glyph::Settings, cx)
+                                        .bg(theme::hover())
+                                        .border_color(theme::border())
+                                        .text_color(theme::fg()),
+                                )
                                 .map(|d| self.data_tip(d, "tip-m-avatar", "Settings", cx))
                                 .on_click(
                                     cx.listener(|this, _, window, cx| this.settings(window, cx)),

@@ -19,7 +19,7 @@ use roostr_core::{Fields, RelationDef, Store, Value, api, theme};
 
 use crate::calendar::{CalendarEvent, CalendarPicker};
 use crate::option_picker::{OptionEvent, OptionPicker};
-use crate::widgets::{FieldSkin, below, field, pop_shadow, prefix, text_area, tip};
+use crate::widgets::{FieldSkin, below, empty_note, field, pop_shadow, prefix, text_area, tip};
 
 pub(crate) type SaveFn = Rc<dyn Fn(&Value, &mut Window, &mut App)>;
 
@@ -1072,12 +1072,10 @@ impl ValueEditor {
         }
         if candidates.is_empty() {
             menu = menu.child(
-                div()
+                empty_note("No matches")
                     .px(px(6.))
                     .py(px(4.))
-                    .text_size(px(11.))
-                    .text_color(theme::muted())
-                    .child("No matches"),
+                    .text_size(px(11.)),
             );
         }
         if let Some((name, label)) = self.offer_create(cx) {

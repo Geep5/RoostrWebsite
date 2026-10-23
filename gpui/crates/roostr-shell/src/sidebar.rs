@@ -3,6 +3,8 @@
 //! object, then Recently edited, Types and Properties.
 
 use gpui_kit::component::IconNamed as _;
+use gpui_kit::component::empty::Empty;
+use gpui_kit::component::sidebar::{SidebarItem, SidebarMenuItem};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use roostr_core::motion::{self, HoverMotion};
@@ -58,28 +60,66 @@ fn builtin_mark(id: impl Into<ElementId>) -> Stateful<Div> {
         .tooltip(crate::tip("Roostr default - can't be deleted"))
 }
 
-/// A sidebar row (`.item`): h26, padding 0 8, radius 6, 13px, hover/current hl-med.
-fn item(id: impl Into<ElementId>, current: bool) -> Stateful<Div> {
-    div()
-        .id(id)
-        .flex()
-        .items_center()
-        .gap(px(6.))
-        .h(px(26.))
+/// A sidebar row (`.item`) as gpui-kit's [`SidebarMenuItem`], held to
+/// Roostr's h26, padding 0 8, radius 6, 13px (hover and current are the
+/// kit's sidebar accent, `hl-med`). The label leaves 26px for the row's
+/// lead, which [`Row`] lays over it.
+fn item(label: impl Into<SharedString>, current: bool) -> SidebarMenuItem {
+    SidebarMenuItem::new(label)
+        .active(current)
+        .label_style(StyleRefinement::default().pl(px(26.)).truncate())
+        .min_h(px(26.))
+        .max_h(px(26.))
+        .py_0()
         .px(px(8.))
         .rounded(theme::radius::sm())
         .text_size(px(13.))
         .line_height(px(22.))
-        .whitespace_nowrap()
-        .overflow_hidden()
         .cursor_pointer()
-        .map(|d| {
-            if current {
-                d.bg(theme::hl_med())
-            } else {
-                d.hover(|s| s.bg(theme::hl_med()))
-            }
-        })
+}
+
+/// A sidebar row to draw: the kit item needs the window and app, so the
+/// rows are gathered under the store borrow and drawn after it.
+struct Row {
+    id: ElementId,
+    /// What wraps the row (the Types list's current fill and selector).
+    outer: Div,
+    item: SidebarMenuItem,
+    /// The object icon, or a task's checkbox (clickable on its own).
+    lead: AnyElement,
+}
+
+impl Row {
+    fn render(self, window: &mut Window, cx: &mut App) -> Div {
+        self.outer
+            .relative()
+            .child(SidebarItem::render(self.item, self.id, window, cx))
+            .child(
+                div()
+                    .absolute()
+                    .left(px(8.))
+                    .top_0()
+                    .bottom_0()
+                    .flex()
+                    .items_center()
+                    .child(self.lead),
+            )
+    }
+
+    /// `rows` drawn, or the section's `none` note when there are none.
+    fn render_all(
+        rows: Vec<Row>,
+        none_text: &'static str,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Vec<AnyElement> {
+        if rows.is_empty() {
+            return vec![none(none_text)];
+        }
+        rows.into_iter()
+            .map(|row| row.render(window, cx).into_any_element())
+            .collect()
+    }
 }
 
 fn open(id: String) -> impl Fn(&ClickEvent, &mut Window, &mut App) + 'static {
@@ -610,9 +650,9 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> Div {
         let active = Navigator::global(cx).read(cx).space().to_string();
-        let rows: Vec<AnyElement> = {
+        let rows: Vec<Row> = {
             let store = Store::global(cx).read(cx);
-            let recent: Vec<&ObjectSummary> = store
+            store
                 .summaries
                 .iter()
                 .filter(|s| {
@@ -621,64 +661,59 @@ impl Workspace {
                         && s.channel_id == current.id
                 })
                 .take(8)
-                .collect();
-            if recent.is_empty() {
-                vec![none("Nothing yet")]
-            } else {
-                recent
-                    .into_iter()
-                    .map(|r| {
-                        let name = if r.name.is_empty() {
-                            "Untitled".to_string()
-                        } else {
-                            r.name.clone()
-                        };
-                        let lead = if store.layout_of(&r.type_key) == "task" {
-                            let done = r.done == Some(true);
-                            let id = r.id.clone();
-                            div()
-                                .id(crate::eid("row-check", &r.id))
-                                .flex()
-                                .flex_none()
-                                .mr(px(6.))
-                                .text_color(if done {
-                                    theme::accent()
-                                } else {
-                                    theme::muted()
+                .map(|r| {
+                    let name = if r.name.is_empty() {
+                        "Untitled".to_string()
+                    } else {
+                        r.name.clone()
+                    };
+                    let lead = if store.layout_of(&r.type_key) == "task" {
+                        let done = r.done == Some(true);
+                        let id = r.id.clone();
+                        div()
+                            .id(crate::eid("row-check", &r.id))
+                            .flex()
+                            .flex_none()
+                            .mr(px(6.))
+                            .text_color(if done {
+                                theme::accent()
+                            } else {
+                                theme::muted()
+                            })
+                            .child(checkbox_icon(done, 16.))
+                            .on_click(move |_, _, cx| {
+                                cx.stop_propagation();
+                                let task = roostr_core::api::note::set_field(
+                                    &id,
+                                    "done",
+                                    Value::bool(!done),
+                                    cx,
+                                );
+                                cx.spawn(async move |cx| {
+                                    if task.await.is_ok() {
+                                        cx.update(|cx| {
+                                            Store::global(cx).update(cx, |s, cx| s.refresh_all(cx))
+                                        });
+                                    }
                                 })
-                                .child(checkbox_icon(done, 16.))
-                                .on_click(move |_, _, cx| {
-                                    cx.stop_propagation();
-                                    let task = roostr_core::api::note::set_field(
-                                        &id,
-                                        "done",
-                                        Value::bool(!done),
-                                        cx,
-                                    );
-                                    cx.spawn(async move |cx| {
-                                        if task.await.is_ok() {
-                                            cx.update(|cx| {
-                                                Store::global(cx)
-                                                    .update(cx, |s, cx| s.refresh_all(cx))
-                                            });
-                                        }
-                                    })
-                                    .detach();
-                                })
-                                .into_any_element()
-                        } else {
-                            obj_icon(&object_icon(store, &r.icon, &r.type_key, &active))
-                                .into_any_element()
-                        };
-                        item(crate::eid("recent", &r.id), open_id == Some(r.id.as_str()))
-                            .child(lead)
-                            .child(div().min_w_0().truncate().child(name))
-                            .on_click(open(r.id.clone()))
+                                .detach();
+                            })
                             .into_any_element()
-                    })
-                    .collect()
-            }
+                    } else {
+                        obj_icon(&object_icon(store, &r.icon, &r.type_key, &active))
+                            .into_any_element()
+                    };
+                    Row {
+                        id: crate::eid("recent", &r.id),
+                        outer: div(),
+                        item: item(name, open_id == Some(r.id.as_str()))
+                            .on_click(open(r.id.clone())),
+                        lead,
+                    }
+                })
+                .collect()
         };
+        let rows = Row::render_all(rows, "Nothing yet", window, cx);
         self.section("recent", "Recently edited", None, rows, window, cx)
     }
 
@@ -689,7 +724,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> Div {
         let space_id = Self::space_id(cx);
-        let rows: Vec<AnyElement> = {
+        let rows: Vec<Row> = {
             let store = Store::global(cx).read(cx);
             let active = Navigator::global(cx).read(cx).space().to_string();
             store
@@ -709,23 +744,27 @@ impl Workspace {
                     };
                     let current = open_id == Some(t.id.as_str());
                     let selector = format!("type:{}", t.id);
-                    div()
-                        .rounded(theme::radius::sm())
-                        .when(current, |d| d.bg(theme::hover()))
-                        .child(
-                            item(crate::eid("type", &t.id), false)
-                                .debug_selector(move || selector)
-                                .child(obj_icon(&icon))
-                                .child(div().min_w_0().truncate().child(name))
-                                .when(t.builtin, |d| {
-                                    d.child(builtin_mark(crate::eid("type-lock", &t.id)))
-                                })
-                                .on_click(open(t.id.clone())),
-                        )
-                        .into_any_element()
+                    let lock = crate::eid("type-lock", &t.id);
+                    Row {
+                        id: crate::eid("type", &t.id),
+                        outer: div()
+                            .rounded(theme::radius::sm())
+                            .when(current, |d| d.bg(theme::hover()))
+                            .debug_selector(move || selector),
+                        item: item(name, false)
+                            .when(t.builtin, |d| {
+                                d.suffix(move |_, _| builtin_mark(lock.clone()))
+                            })
+                            .on_click(open(t.id.clone())),
+                        lead: obj_icon(&icon).into_any_element(),
+                    }
                 })
                 .collect()
         };
+        let rows = rows
+            .into_iter()
+            .map(|row| row.render(window, cx).into_any_element())
+            .collect();
         let add = Self::section_add("new-type", "New type")
             .on_click(cx.listener(|this, _, window, cx| this.new_type(window, cx)))
             .into_any_element();
@@ -739,7 +778,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> Div {
         let space_id = Self::space_id(cx);
-        let rows: Vec<AnyElement> = {
+        let rows: Vec<Row> = {
             let store = Store::global(cx).read(cx);
             let mut props: Vec<&RelationDef> = space_relations(&store.relations, &space_id)
                 .into_iter()
@@ -753,34 +792,34 @@ impl Workspace {
                 }
             };
             props.sort_by_key(|r| label(r));
-            if props.is_empty() {
-                vec![none("No properties yet")]
-            } else {
-                props
-                    .into_iter()
-                    .map(|r| {
-                        let icon = r
-                            .icon_emoji
-                            .clone()
-                            .filter(|i| !i.is_empty())
-                            .unwrap_or_else(|| format_glyph(&r.format).to_string());
-                        let name = if r.name.is_empty() {
-                            r.key.clone()
-                        } else {
-                            r.name.clone()
-                        };
-                        item(crate::eid("prop", &r.id), open_id == Some(r.id.as_str()))
-                            .child(obj_icon(&icon))
-                            .child(div().min_w_0().truncate().child(name))
+            props
+                .into_iter()
+                .map(|r| {
+                    let icon = r
+                        .icon_emoji
+                        .clone()
+                        .filter(|i| !i.is_empty())
+                        .unwrap_or_else(|| format_glyph(&r.format).to_string());
+                    let name = if r.name.is_empty() {
+                        r.key.clone()
+                    } else {
+                        r.name.clone()
+                    };
+                    let lock = crate::eid("prop-lock", &r.id);
+                    Row {
+                        id: crate::eid("prop", &r.id),
+                        outer: div(),
+                        item: item(name, open_id == Some(r.id.as_str()))
                             .when(store.builtin_ids.contains(&r.id), |d| {
-                                d.child(builtin_mark(crate::eid("prop-lock", &r.id)))
+                                d.suffix(move |_, _| builtin_mark(lock.clone()))
                             })
-                            .on_click(open(r.id.clone()))
-                            .into_any_element()
-                    })
-                    .collect()
-            }
+                            .on_click(open(r.id.clone())),
+                        lead: obj_icon(&icon).into_any_element(),
+                    }
+                })
+                .collect()
         };
+        let rows = Row::render_all(rows, "No properties yet", window, cx);
         let add = Self::section_add("new-prop", "New property")
             .child(self.anchor_probe("new-prop"))
             .on_click(cx.listener(|this, _, window, cx| this.open_new_property(window, cx)))
@@ -897,12 +936,18 @@ impl Workspace {
     }
 }
 
-/// `.none`: the empty-section note.
+/// `.none`: the empty-section note, as gpui-kit's [`Empty`] reduced to a
+/// muted 12px line.
 fn none(text: &'static str) -> AnyElement {
-    div()
+    Empty::new()
+        .flex_none()
+        .items_start()
+        .gap_0()
+        .p_0()
+        .px(px(8.))
+        .rounded(px(0.))
         .text_size(px(12.))
         .text_color(theme::muted())
-        .px(px(8.))
         .child(text)
         .into_any_element()
 }

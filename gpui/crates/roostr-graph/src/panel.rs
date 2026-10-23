@@ -484,7 +484,7 @@ pub(crate) fn side_panel(
 }
 
 /// Lite: "N not loaded" and, unless the space is downloading already (then
-/// its progress), "Load this space fully".
+/// its progress, shimmering while it runs), "Load this space fully".
 fn shadow_row(n: u64, channel: &str, cx: &App) -> Div {
     let loading = roostr_core::lite::status(cx)
         .and_then(|s| s.loading(channel).map(roostr_core::lite_ui::loading_text));
@@ -496,7 +496,14 @@ fn shadow_row(n: u64, channel: &str, cx: &App) -> Div {
         .gap(px(10.))
         .child(muted_small(roostr_core::lite_ui::shadow_label(n)))
         .map(|d| match loading {
-            Some(text) => d.child(muted_small(text)),
+            Some(text) => d.child(
+                // One identity across progress updates, so the sweep runs on.
+                gpui_kit::component::shimmer::ShimmerText::new(text)
+                    .id("graph-space-loading")
+                    .font_family(MONO)
+                    .text_size(px(11.))
+                    .text_color(hex(0x8a90a0, 1.)),
+            ),
             None => d.child(
                 roostr_core::ui::outline_button(
                     "graph-load-space",
