@@ -123,23 +123,32 @@ fn tap(cx: &mut VisualTestContext, selector: &'static str) {
     settle(cx);
 }
 
-/// (Chat column, Properties column) as expanded columns on screen; panics
-/// unless each is exactly one of its column or its strip.
-fn columns(cx: &mut VisualTestContext) -> (bool, bool) {
-    let chat = (shown(cx, "pane-col-Chat"), shown(cx, "pane-strip-Chat"));
-    let props = (
-        shown(cx, "pane-col-Properties"),
-        shown(cx, "pane-strip-Properties"),
-    );
-    assert!(
-        chat.0 != chat.1,
-        "Chat shows as a column or a strip: {chat:?}"
-    );
-    assert!(
-        props.0 != props.1,
-        "Properties shows as a column or a strip: {props:?}"
-    );
-    (chat.0, props.0)
+/// Clicks the right edge tab, then moves off it before time passes: a
+/// pointer resting on it would toggle the columns again once its dwell runs out.
+fn tap_edge_tab(cx: &mut VisualTestContext) {
+    let at = cx.debug_bounds("pane-drawer").expect("the edge tab").center();
+    cx.simulate_click(at, Modifiers::none());
+    cx.simulate_mouse_move(point(px(600.), px(450.)), None, Modifiers::none());
+    settle(cx);
+}
+
+/// How a column shows: "col" (expanded), "strip", or "none" (folded away).
+/// Panics if it shows as both a column and a strip.
+fn how(cx: &mut VisualTestContext, col: &'static str, strip: &'static str) -> &'static str {
+    match (shown(cx, col), shown(cx, strip)) {
+        (true, false) => "col",
+        (false, true) => "strip",
+        (false, false) => "none",
+        (true, true) => panic!("{col} shows as both a column and a strip"),
+    }
+}
+
+/// (Chat, Properties), each "col", "strip" or "none".
+fn columns(cx: &mut VisualTestContext) -> (&'static str, &'static str) {
+    (
+        how(cx, "pane-col-Chat", "pane-strip-Chat"),
+        how(cx, "pane-col-Properties", "pane-strip-Properties"),
+    )
 }
 
 /// A desktop app on `page-1` in a `width` x 900 window.
@@ -159,7 +168,7 @@ fn open(cx: &mut TestAppContext, width: f32) -> &mut VisualTestContext {
 }
 
 #[gpui::test]
-fn chat_and_properties_are_columns_that_collapse_to_strips_and_persist(
+fn chat_and_properties_are_columns_that_fold_into_each_other_and_persist(
     first: &mut TestAppContext,
     second: &mut TestAppContext,
 ) {
@@ -169,41 +178,53 @@ fn chat_and_properties_are_columns_that_collapse_to_strips_and_persist(
 
     let cx = open(first, 1600.);
     // Both columns by default, Chat then Properties, right of the page.
-    assert_eq!(columns(cx), (true, true));
+    assert_eq!(columns(cx), ("col", "col"));
     let chat = cx.debug_bounds("pane-col-Chat").unwrap();
     let props = cx.debug_bounds("pane-col-Properties").unwrap();
     assert!(chat.right() <= props.left(), "Chat sits left of Properties");
     assert!(shown(cx, "chat-messages"), "the chat");
     assert!(!shown(cx, "pane-tab-Chat"), "no tab switch on a desktop");
+    assert!(!shown(cx, "pane-folded-Chat") && !shown(cx, "pane-folded-Properties"));
 
-    // Collapsing Chat leaves Properties and a Chat strip; the strip expands it.
+    // Collapsing Chat folds it into Properties: no strip, a chip in the
+    // Properties header that brings it back.
     tap(cx, "pane-collapse-Chat");
-    assert_eq!(columns(cx), (false, true));
+    assert_eq!(columns(cx), ("none", "col"));
     assert!(!shown(cx, "chat-messages"));
-    tap(cx, "pane-strip-Chat");
-    assert_eq!(columns(cx), (true, true));
+    let chip = cx.debug_bounds("pane-folded-Chat").unwrap();
+    let props = cx.debug_bounds("pane-col-Properties").unwrap();
+    assert!(props.contains(&chip.center()), "the chip is in the Properties column");
+    tap(cx, "pane-folded-Chat");
+    assert_eq!(columns(cx), ("col", "col"));
+    assert!(!shown(cx, "pane-folded-Chat"));
     assert!(shown(cx, "chat-messages"), "the chat is back");
 
-    // Properties likewise; then both collapsed are two strips.
+    // Properties likewise, into the Chat header.
     tap(cx, "pane-collapse-Properties");
-    assert_eq!(columns(cx), (true, false));
+    assert_eq!(columns(cx), ("col", "none"));
+    let chip = cx.debug_bounds("pane-folded-Properties").unwrap();
+    let chat = cx.debug_bounds("pane-col-Chat").unwrap();
+    assert!(chat.contains(&chip.center()), "the chip is in the Chat column");
+    // Both collapsed: both go, no chips; the edge tab brings both back.
     tap(cx, "pane-collapse-Chat");
-    assert_eq!(columns(cx), (false, false));
-    tap(cx, "pane-strip-Properties");
-    assert_eq!(columns(cx), (false, true));
-    tap(cx, "pane-strip-Chat");
-    assert_eq!(columns(cx), (true, true));
+    assert_eq!(columns(cx), ("none", "none"));
+    assert!(!shown(cx, "pane-folded-Chat") && !shown(cx, "pane-folded-Properties"));
+    tap_edge_tab(cx);
+    assert_eq!(columns(cx), ("col", "col"));
 
     // Escape that nothing focused handles (the chat's composer has the
     // focus as it opens) collapses the column expanded last (Chat), then the other.
+    tap(cx, "pane-collapse-Chat");
+    tap(cx, "pane-folded-Chat");
     cx.update(|window, cx| window.blur(cx));
     cx.simulate_keystrokes("escape");
     settle(cx);
-    assert_eq!(columns(cx), (false, true));
+    assert_eq!(columns(cx), ("none", "col"));
     cx.simulate_keystrokes("escape");
     settle(cx);
-    assert_eq!(columns(cx), (false, false));
-    tap(cx, "pane-strip-Chat");
+    assert_eq!(columns(cx), ("none", "none"));
+    tap_edge_tab(cx);
+    assert_eq!(columns(cx), ("col", "col"));
 
     // The Chat column's resizer: dragged 100px left, the column is 100px wider.
     let before = cx.debug_bounds("pane-col-Chat").unwrap().size.width;
@@ -229,11 +250,16 @@ fn chat_and_properties_are_columns_that_collapse_to_strips_and_persist(
     assert_eq!(after - before, px(100.));
     let chat_width = cx.update(|_, cx| PaneState::global(cx).read(cx).chat_width);
 
+    // Chat expanded last: collapse and re-open it.
+    tap(cx, "pane-collapse-Chat");
+    tap(cx, "pane-folded-Chat");
+    assert_eq!(columns(cx), ("col", "col"));
+
     // A window too narrow for both (the page keeps its 420px): Chat, the
     // column expanded last, and a Properties strip; nothing overflows.
     cx.simulate_resize(size(px(1100.), px(900.)));
     settle(cx);
-    assert_eq!(columns(cx), (true, false));
+    assert_eq!(columns(cx), ("col", "strip"));
     let desk = cx.debug_bounds("desk").unwrap();
     let strip = cx.debug_bounds("pane-strip-Properties").unwrap();
     assert!(
@@ -242,23 +268,24 @@ fn chat_and_properties_are_columns_that_collapse_to_strips_and_persist(
     );
     // The strip brings Properties in, Chat giving way to its strip.
     tap(cx, "pane-strip-Properties");
-    assert_eq!(columns(cx), (false, true));
+    assert_eq!(columns(cx), ("strip", "col"));
     // With the room back, both show again.
     cx.simulate_resize(size(px(1600.), px(900.)));
     settle(cx);
-    assert_eq!(columns(cx), (true, true));
+    assert_eq!(columns(cx), ("col", "col"));
     // Leave Chat expanded and Properties collapsed.
     tap(cx, "pane-collapse-Properties");
-    assert_eq!(columns(cx), (true, false));
+    assert_eq!(columns(cx), ("col", "none"));
 
     // A new app on the same UI-state file opens the columns as they were left.
     let cx = open(second, 1600.);
-    assert_eq!(columns(cx), (true, false));
+    assert_eq!(columns(cx), ("col", "none"));
+    assert!(shown(cx, "pane-folded-Properties"));
     assert_eq!(
         cx.update(|_, cx| PaneState::global(cx).read(cx).chat_width),
         chat_width,
         "the Chat column's width"
     );
-    tap(cx, "pane-strip-Properties");
-    assert_eq!(columns(cx), (true, true));
+    tap(cx, "pane-folded-Properties");
+    assert_eq!(columns(cx), ("col", "col"));
 }

@@ -853,6 +853,7 @@ impl Workspace {
             });
         div()
             .id(id)
+            .debug_selector(move || id.into())
             .absolute()
             .top(relative(0.5))
             .mt(px(-hit_h / 2.))
