@@ -132,6 +132,8 @@ pub struct Workspace {
     props_col: motion::ValueState,
     /// The pane columns the last frame laid out (what a resizer drags against).
     pane_layout: PaneLayout,
+    /// The middle column as its own cached view (see [`MainColumn`]).
+    main_column: Option<Entity<MainColumn>>,
     /// The desk has rendered: columns animate only after its first frame
     /// (a CSS transition doesn't run on mount).
     desk_shown: bool,
@@ -278,6 +280,7 @@ impl Workspace {
             chat_col: motion::ValueState::new(0.),
             props_col: motion::ValueState::new(0.),
             pane_layout: PaneLayout::HIDDEN,
+            main_column: None,
             desk_shown: false,
             pin_folds: HashMap::new(),
             legacy_folds,
@@ -992,10 +995,10 @@ impl Workspace {
         let route = Navigator::global(cx).read(cx).route().clone();
         let page = self.page(&route, window, cx);
         let scroll = self.scrolls.entry(route.clone()).or_default().clone();
+        // Fills the cached box `main_column` lays it out in (which carries the
+        // flex share and the 6px margin).
         div()
-            .flex_1()
-            .min_w_0()
-            .m(px(6.))
+            .size_full()
             .rounded(theme::radius::page())
             .bg(theme::bg())
             .flex()
@@ -1031,6 +1034,34 @@ impl Workspace {
                             .child(page),
                     ),
             )
+    }
+
+    /// The middle column, cached: GPUI reuses its last layout and paint until
+    /// something it read changes (its page, the header, navigation, the
+    /// store - tracked for it). Uncached, every frame of the chat scrolling
+    /// beside it laid the whole page out again - the space page's settings
+    /// made that ~200ms a wheel step.
+    fn main_column(&mut self, wide: bool, cx: &mut Context<Self>) -> AnyElement {
+        let workspace = cx.entity();
+        let view = self
+            .main_column
+            .get_or_insert_with(|| {
+                cx.new(|cx| MainColumn {
+                    // What the column draws is the workspace's: any change there redraws it.
+                    _workspace_changed: cx.observe(&workspace, |_, _, cx| cx.notify()),
+                    workspace: workspace.downgrade(),
+                    wide,
+                })
+            })
+            .clone();
+        view.update(cx, |column, cx| {
+            if column.wide != wide {
+                column.wide = wide;
+                cx.notify();
+            }
+        });
+        view.cached(StyleRefinement::default().flex_1().min_w_0().m(px(6.)))
+            .into_any_element()
     }
 
     fn render_desk(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
@@ -1117,7 +1148,7 @@ impl Workspace {
                         d.child(self.render_sidebar(side_col - 6., window, cx))
                     }),
             )
-            .child(self.render_main(wide, window, cx))
+            .child(self.main_column(wide, cx))
             // The right pane's columns: Chat, then Properties.
             .child(self.render_pane_column(
                 PaneTab::Chat,
@@ -1457,4 +1488,22 @@ fn json_number(v: &serde_json::Value) -> Option<f32> {
     v.as_f64()
         .map(|n| n as f32)
         .or_else(|| v.as_str().and_then(|s| s.trim().parse::<f32>().ok()))
+}
+
+/// The workspace's middle column (header + scrolling page) as a view of its
+/// own, so it can be cached (see [`Workspace::main_column`]).
+struct MainColumn {
+    workspace: WeakEntity<Workspace>,
+    /// Queries, sets and collections run wide (no 920px column).
+    wide: bool,
+    _workspace_changed: Subscription,
+}
+
+impl Render for MainColumn {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let wide = self.wide;
+        self.workspace
+            .update(cx, |workspace, cx| workspace.render_main(wide, window, cx))
+            .unwrap_or_else(|_| div())
+    }
 }
