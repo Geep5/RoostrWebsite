@@ -1777,6 +1777,10 @@ struct AvatarLook {
     mono: bool,
 }
 
+/// A max width no bubble surface reaches: overrides the kit surface's 100%
+/// cap (see `render_message`), leaving the bubble's own cap as the real limit.
+const UNCAPPED: f32 = 100_000.;
+
 const ROW_AVATAR: AvatarLook = AvatarLook {
     size: 28.,
     letters: 10.,
@@ -2194,12 +2198,33 @@ impl Discussion {
             .line_height(relative(1.45))
             .bg(if tinted { colors.bg } else { theme::hover() })
             .text_color(if tinted { colors.ink } else { theme::fg() })
-            .max_w_full()
+            // No percentage cap on the surface. The kit gives it 100% of the
+            // bubble, which is sized by its text: while the list measured a
+            // row that resolved one way and when it drew another, so the text
+            // was measured on fewer lines than it drew and ran over the next
+            // messages. A fixed cap (none, really) overrides it; the bubble's
+            // own cap below is the real limit, and min_w_0 wraps the text to it.
+            .min_w_0()
+            .max_w(px(UNCAPPED))
             .map(overflow_visible)
-            .child(text);
+            .child(
+                div()
+                    .debug_selector({
+                        let mid = mid.clone();
+                        move || format!("msg-text-{mid}")
+                    })
+                    .min_w_0()
+                    .child(text),
+            );
+        // Not `.alignment(...)`: the kit aligns a bubble with auto side
+        // margins, which size it to its one-line text width - measured and
+        // drawn differently (bubbles over the next messages) and wider than
+        // the chat. The message content aligns it to its side instead.
         let mut bubble_el = Bubble::new()
-            .alignment(align)
             .with_variant(variant)
+            .min_w_0()
+            // 100% of the message content, which fills the column (78% of the
+            // full-width row): measured and drawn the same.
             .max_w_full()
             .content(surface);
 
@@ -2208,7 +2233,6 @@ impl Discussion {
         if !m.reactions.is_empty() {
             let mine_color = roostr_core::color::hex(&store.chat_color).unwrap_or(theme::accent());
             let mut reactions = BubbleReactions::new()
-                .alignment(align)
                 .map(in_flow)
                 .border_0()
                 .bg(transparent_black())
@@ -2487,9 +2511,14 @@ impl Discussion {
                 ))
         });
 
-        // The bubble column is at most 78% of the row.
+        // The bubble column is at most 78% of the row. It stays full-width
+        // (the kit's default) under that cap: a column sized by its content
+        // made every percentage inside it count as nothing while the list
+        // measured the row and as the real width when it drew, so text was
+        // measured on fewer lines than it drew - bubbles over the next ones.
+        // The bubble still hugs its text: the kit aligns it to its side.
         let mut column = StyleRefinement::default()
-            .w_auto()
+            .w_full()
             .max_w(relative(0.78))
             .gap_0();
         if !own {
@@ -2501,13 +2530,13 @@ impl Discussion {
             .with_stack_style(column)
             .header(header)
             .content(
-                // Sized by its bubble: a 100% width inside the column (itself
-                // sized by its content) counts as nothing when the column
-                // measures, which left the bubble as narrow as the header.
                 MessageContent::new()
-                    .w_auto()
+                    .w_full()
                     .relative()
-                    .bubble(bubble_el)
+                    // Aligns the bubble to its side (see bubble_el: not the kit's
+                    // own alignment, which `.bubble(...)` would pass down to it).
+                    .map(|c| if own { c.items_end() } else { c.items_start() })
+                    .child(bubble_el)
                     .children(actions),
             );
         if !own {
@@ -2532,6 +2561,10 @@ impl Discussion {
 
         div()
             .id(ElementId::Name(format!("msg-{mid}").into()))
+            .debug_selector({
+                let mid = mid.clone();
+                move || format!("msg-{mid}")
+            })
             .when_some(reveal.map(|(_, hover)| hover), |d, hover| {
                 d.on_hover(move |hovered, _, cx| motion::HoverMotion::set(&hover, *hovered, cx))
             })
