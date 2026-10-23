@@ -379,8 +379,8 @@ impl LandingPage {
                 .font_family(lede_family)
                 .font_weight(FontWeight(450.))
                 .child(
-                    "Notes, tasks, people and agents are linked objects in one graph — no files, no folders. \
-                     Put an agent on anything and it works right there with you, in the open.",
+                    "Not for making projects — for keeping them on track and growing them. \
+                     Agents and people work side by side on the same linked objects, in the open.",
                 ),
         )
         .child(

@@ -28,6 +28,7 @@ const MATCHERINO: &str = "sp-matcherino";
 const VIV_AGENT: &str = "bundled-type-agent-viv";
 const MATCHERINO_AGENT: &str = "bundled-type-agent-matcherino";
 const ALL_AGENTS: &str = "q-all-agents";
+const PLAN: &str = "page-plan";
 
 /// Viv (shared by another owner) and Matcherino (own, with a pinned "All
 /// Agents" query), each with an agent type. Until `prepared`, Matcherino's
@@ -57,10 +58,11 @@ type Row = (
     &'static str,
 );
 
-const OBJECTS: [Row; 3] = [
+const OBJECTS: [Row; 4] = [
     (VIV_AGENT, "type", "Agent", VIV, "agent"),
     (MATCHERINO_AGENT, "type", "Agent", MATCHERINO, "agent"),
     (ALL_AGENTS, "query", "All Agents", MATCHERINO, ""),
+    (PLAN, "page", "Plan", MATCHERINO, ""),
 ];
 
 impl Vault {
@@ -132,7 +134,8 @@ impl Backend for Vault {
             spaces.push(Space {
                 id: MATCHERINO.into(),
                 name: "Matcherino".into(),
-                pinned_ids: vec![ALL_AGENTS.into()],
+                // A pinned section first (no object), then the sidebar's order.
+                pinned_ids: vec!["any-favorites".into(), PLAN.into(), ALL_AGENTS.into()],
                 created_at: 2,
                 ..Space::default()
             });
@@ -269,4 +272,21 @@ fn a_click_while_the_remembered_space_prepares_stays_where_it_was_made(cx: &mut 
     settle(cx);
     assert_eq!(route(cx), Route::Object(VIV_AGENT.into()));
     assert_eq!(space(cx), VIV);
+
+    // The rail: a space with a last-opened page reopens it ("All Agents",
+    // though "Plan" is its first pin)...
+    let rail = |selector: &'static str, cx: &mut VisualTestContext| {
+        let tile = cx.debug_bounds(selector).expect("the space's rail tile");
+        cx.simulate_click(tile.center(), Modifiers::none());
+        settle(cx);
+    };
+    rail("space:sp-matcherino", cx);
+    assert_eq!(space(cx), MATCHERINO);
+    assert_eq!(route(cx), Route::Object(ALL_AGENTS.into()), "last opened");
+    // ...and one with nothing open opens its first pinned object.
+    cx.update(|_, cx| Navigator::global(cx).update(cx, |nav, cx| nav.close(0, cx)));
+    assert_eq!(route(cx), Route::Home);
+    rail("space:sp-viv", cx);
+    rail("space:sp-matcherino", cx);
+    assert_eq!(route(cx), Route::Object(PLAN.into()), "the first pin");
 }

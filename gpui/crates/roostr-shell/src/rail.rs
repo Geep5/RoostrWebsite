@@ -228,10 +228,14 @@ impl Workspace {
                     )
                 })
                 .tooltip(crate::tip(title))
+                .debug_selector({
+                    let id = id.clone();
+                    move || format!("space:{id}")
+                })
                 .on_click(cx.listener({
                     let id = id.clone();
                     move |_, _, _, cx| {
-                        Navigator::global(cx).update(cx, |nav, cx| nav.use_space(&id, cx));
+                        roostr_core::nav::open_space(&id, cx);
                     }
                 }))
                 .on_drag(payload, |payload, _, _, cx| {
