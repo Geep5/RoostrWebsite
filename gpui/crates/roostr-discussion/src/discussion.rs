@@ -947,15 +947,24 @@ impl Discussion {
         }
         // `@Name ` typed out in full (not picked from the menu) tags the agent
         // as a pick would - once the agents are known (re-run when they load).
+        // Capitals don't matter: the text takes the agent's own spelling.
         if hit.query.ends_with(char::is_whitespace)
             && let Some(options) = &self.tag_options
         {
             let name = hit.query.trim_end();
-            if let Some(option) = options
-                .iter()
-                .find(|o| o.agent_name == name && !self.tagged.iter().any(|t| t.key() == o.key()))
-            {
-                self.tagged.push(option.clone());
+            let lower = name.to_lowercase();
+            if let Some(option) = options.iter().find(|o| {
+                o.agent_name.to_lowercase() == lower
+                    && !self.tagged.iter().any(|t| t.key() == o.key())
+            }) {
+                let option = option.clone();
+                if option.agent_name != name {
+                    // `@` + the typed name -> `@` + the agent's name.
+                    let at = hit.start + '@'.len_utf8();
+                    self.draft
+                        .replace_range(at..at + name.len(), &option.agent_name);
+                }
+                self.tagged.push(option);
                 self.repill = true;
                 self.mention = None;
                 cx.notify();

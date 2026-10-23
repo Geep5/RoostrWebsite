@@ -176,4 +176,14 @@ fn a_typed_out_agent_name_tags_the_agent(cx: &mut TestAppContext) {
     assert!(!shown(cx, "mention-menu"), "the menu closes on the tag");
     send(cx, "hi");
     assert_eq!(posts(&backend), [post("chat-1", "@Grant Email hi")]);
+
+    // In other capitals: tagged too, in the agent's own spelling.
+    cx.simulate_keystrokes("cmd-a backspace");
+    cx.run_until_parked();
+    cx.simulate_input("@grant email ");
+    cx.run_until_parked();
+    assert!(!shown(cx, "mention-none"), "no 'No agent matches'");
+    assert!(!shown(cx, "mention-menu"), "the menu closes on the tag");
+    send(cx, "again");
+    assert_eq!(posts(&backend)[1..], [post("chat-1", "@Grant Email again")]);
 }
