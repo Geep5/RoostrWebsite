@@ -30,7 +30,7 @@ fn ready<T: Send + 'static>(value: T) -> BoxFuture<T> {
 }
 
 /// Message `n`: every few is long enough to wrap over several lines, every
-/// third is yours, every fourth replies to the one before.
+/// third is yours.
 fn message(n: usize) -> Json {
     let long = n % 3 == 1;
     let text = if n % 7 == 2 {
@@ -53,10 +53,7 @@ fn message(n: usize) -> Json {
         format!("Message {n}")
     };
     let author = if n % 3 == 0 { ME } else { "peer" };
-    let mut meta = json!({ "author": author, "ts": (1_000 + n).to_string(), "text": text });
-    if n % 4 == 0 && n > 1 {
-        meta["replyTo"] = json!(format!("m{}", n - 1));
-    }
+    let meta = json!({ "author": author, "ts": (1_000 + n).to_string(), "text": text });
     json!({
         "id": format!("m{n}"),
         "childrenIds": [],

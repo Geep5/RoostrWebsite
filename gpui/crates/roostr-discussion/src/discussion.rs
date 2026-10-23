@@ -167,6 +167,9 @@ pub struct Discussion {
     /// Where the list and its rows were last laid out.
     layout: Rc<RefCell<ListLayout>>,
     fingerprints: Vec<u64>,
+    /// Each shown origin object's tag name (`None`: not listed, no tag), as
+    /// the rows were last fingerprinted.
+    origins: HashMap<String, Option<String>>,
     landed_on: String,
     /// The `object:thread` whose messages are shown (an arrival needs a
     /// thread already on screen).
@@ -277,6 +280,7 @@ impl Discussion {
             scroller,
             layout: Rc::default(),
             fingerprints: Vec::new(),
+            origins: HashMap::new(),
             landed_on: String::new(),
             arrival_key: String::new(),
             arrived: None,
@@ -341,6 +345,16 @@ impl Discussion {
         if changed {
             self.object = object;
             self.derive(cx);
+        } else {
+            let store = Store::global(cx);
+            let store = store.read(cx);
+            let renamed = self
+                .origins
+                .iter()
+                .any(|(id, label)| origin_label(id, store) != *label);
+            if renamed {
+                self.sync_list(cx);
+            }
         }
         cx.notify();
     }
@@ -422,10 +436,6 @@ impl Discussion {
         }
     }
 
-    fn message_index(&self, id: &str) -> Option<usize> {
-        self.messages.iter().position(|m| m.id == id)
-    }
-
     fn message(&self, id: &str) -> Option<&ChatMessage> {
         self.messages.iter().find(|m| m.id == id)
     }
@@ -454,6 +464,16 @@ impl Discussion {
     /// older messages arriving in front are prepended, keeping the reader's
     /// place.
     fn sync_list(&mut self, cx: &mut Context<Self>) {
+        let store = Store::global(cx);
+        let store = store.read(cx);
+        // A message's origin tag shows its object's name, or nothing once the
+        // object is gone: a store change can redraw a row without touching it.
+        let origins: HashMap<String, Option<String>> = self
+            .messages
+            .iter()
+            .filter(|m| !m.origin.is_empty())
+            .map(|m| (m.origin.clone(), origin_label(&m.origin, store)))
+            .collect();
         let fingerprints: Vec<u64> = self
             .messages
             .iter()
@@ -464,8 +484,8 @@ impl Discussion {
                     &m.author,
                     m.ts,
                     &m.text,
-                    &m.reply_to,
                     &m.origin,
+                    origins.get(&m.origin),
                     &self.me,
                     self.read_only,
                     self.is_exchange,
@@ -507,6 +527,7 @@ impl Discussion {
             }
         });
         self.fingerprints = fingerprints;
+        self.origins = origins;
     }
 
     /// The trailing row (empty note, typing, problem) changed height.
@@ -782,14 +803,6 @@ impl Discussion {
             };
         }
         endpoint_name(store, endpoint)
-    }
-
-    fn origin_name(&self, id: &str, store: &Store) -> String {
-        store
-            .summary(id)
-            .map(|s| s.name.clone())
-            .filter(|n| !n.is_empty())
-            .unwrap_or_else(|| "object".into())
     }
 
     /// Emoji avatar for an author, when it has one.
@@ -1569,17 +1582,6 @@ impl Discussion {
         cx.notify();
     }
 
-    fn scroll_to_message(&mut self, id: &str, cx: &mut Context<Self>) {
-        if let Some(ix) = self.message_index(id)
-            && self.own_scroller()
-        {
-            self.scroller.update(cx, |list, cx| {
-                list.scroll_to_item(ix, cx);
-            });
-            cx.notify();
-        }
-    }
-
     // ------------------------------------------------------------- keyboard
 
     fn on_enter(&mut self, action: &Enter, window: &mut Window, cx: &mut Context<Self>) {
@@ -1714,6 +1716,18 @@ fn when(ts: i64) -> String {
     } else {
         format!("{}, {time}", d.format("%b %-d"))
     }
+}
+
+/// The name an origin object's tag shows: none for no origin or an object
+/// the store doesn't list (deleted, or never known here).
+fn origin_label(id: &str, store: &Store) -> Option<String> {
+    store.summary(id).map(|s| {
+        if s.name.is_empty() {
+            "Untitled".to_string()
+        } else {
+            s.name.clone()
+        }
+    })
 }
 
 // ===================================================================== render
@@ -2029,7 +2043,7 @@ impl Discussion {
             MessageAlignment::Start
         };
 
-        // Header: the reply quote, then author, origin and time.
+        // Header: author and time.
         let mut header = MessageHeader::new()
             .content_inset(false)
             .flex_col()
@@ -2038,45 +2052,6 @@ impl Discussion {
             .font_weight(FontWeight::NORMAL)
             .line_height(phi())
             .text_color(theme::fg());
-        if !m.reply_to.is_empty()
-            && let Some(target) = self.message(&m.reply_to)
-        {
-            let target_id = target.id.clone();
-            header = header.child(
-                div()
-                    .id(("quote", ix))
-                    .flex()
-                    .gap(px(6.))
-                    .items_baseline()
-                    .max_w_full()
-                    .text_size(px(11.))
-                    .text_color(theme::muted())
-                    .border_l_2()
-                    .border_color(theme::accent())
-                    .px(px(6.))
-                    .py(px(1.))
-                    .mb(px(2.))
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .cursor_pointer()
-                    .on_click(
-                        cx.listener(move |this, _, _, cx| this.scroll_to_message(&target_id, cx)),
-                    )
-                    .child(
-                        div()
-                            .flex_none()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .child(self.who(&target.author, store)),
-                    )
-                    .child(
-                        div()
-                            .min_w_0()
-                            .overflow_hidden()
-                            .text_ellipsis()
-                            .child(target.text.chars().take(80).collect::<String>()),
-                    ),
-            );
-        }
         let mut meta = div().flex().items_baseline().gap(px(8.));
         if own {
             meta = meta.justify_end();
@@ -2100,20 +2075,6 @@ impl Discussion {
                     .into_any_element()
             });
         }
-        if !m.origin.is_empty() {
-            let target = m.origin.clone();
-            meta = meta.child(
-                Button::new(("origin", ix))
-                    .outline()
-                    .xsmall()
-                    .rounded(px(6.))
-                    .px(px(6.))
-                    .text_color(theme::accent())
-                    .label(format!("↳ {}", self.origin_name(&m.origin, store)))
-                    .tooltip("Asked from this object")
-                    .on_click(move |_, _, cx| nav::navigate(Route::Object(target.clone()), cx)),
-            );
-        }
         meta = meta.child(
             div()
                 .text_size(px(11.))
@@ -2134,8 +2095,17 @@ impl Discussion {
                 .map(|a| (a.name.clone(), a.icon.clone()))
                 .collect(),
         };
-        // Each message's lines read after the previous message's.
-        let text = render_markdown(("md", ix), &m.text, &md_theme, (ix as u64) << 24, cx);
+        // Each message's lines read after the previous message's. The object
+        // it came from leads the body as that object's tag; a deleted one, none.
+        let origin = origin_label(&m.origin, store);
+        let text = render_markdown(
+            ("md", ix),
+            &m.text,
+            origin.as_deref().map(|name| (m.origin.as_str(), name)),
+            &md_theme,
+            (ix as u64) << 24,
+            cx,
+        );
         let variant = if !tinted {
             BubbleVariant::Muted
         } else if own {

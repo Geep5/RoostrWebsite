@@ -21,7 +21,6 @@ pub(crate) struct ChatMessage {
     pub author: String,
     pub ts: i64,
     pub text: String,
-    pub reply_to: String,
     pub origin: String,
     pub mailbox: Option<MailboxEntry>,
 }
@@ -284,7 +283,6 @@ fn envelope_message(object: &Object, entry: &MailboxEntry) -> ChatMessage {
         },
         ts: m.sent_at,
         text: m.text.clone(),
-        reply_to: m.reply_to.clone(),
         origin: if m.sender.object_id == object.id {
             String::new()
         } else {
@@ -300,7 +298,6 @@ fn block_message(block: &Block) -> ChatMessage {
         author: meta(block, "author").to_string(),
         ts: meta_ts(block),
         text: meta(block, "text").to_string(),
-        reply_to: meta(block, "replyTo").to_string(),
         origin: meta_origin(block),
         mailbox: None,
     }
@@ -331,6 +328,21 @@ pub(crate) fn chat_messages(object: &Object, root_id: &str) -> Vec<ChatMessage> 
 pub(crate) fn object_chat_messages(object: &Object) -> Vec<ChatMessage> {
     let mut out: Vec<ChatMessage> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
+    // The same author's same text within the same ~10s window: one line
+    // written twice (to two places, a moment apart).
+    let echo_key = |author: &str, text: &str, ts: i64| {
+        (
+            author.to_string(),
+            text.to_string(),
+            (ts as f64 / 10_000.).round() as i64,
+        )
+    };
+    // The window, or the adjacent one.
+    let echoes = |shown: &HashSet<(String, String, i64)>, m: &ChatMessage| {
+        [m.ts, m.ts - 10_000, m.ts + 10_000]
+            .iter()
+            .any(|&ts| shown.contains(&echo_key(&m.author, &m.text, ts)))
+    };
     // Envelopes (human asks, agent replies) from every thread on the object.
     for entry in mailbox_entries(object, None) {
         let message = envelope_message(object, &entry);
@@ -340,6 +352,12 @@ pub(crate) fn object_chat_messages(object: &Object) -> Vec<ChatMessage> {
             *slot = message;
         }
     }
+    // An agent's answer is its reply envelope; the plain line it also writes
+    // (to its transcript or the discussion) is that same answer again.
+    let enveloped: HashSet<(String, String, i64)> = out
+        .iter()
+        .map(|m| echo_key(&m.author, &m.text, m.ts))
+        .collect();
     // Plain chat lines: the human discussion (all of it) and each agent's
     // private transcript (only what that agent wrote - its answers; the
     // harness's framed copies of the question are authored by the asker and
@@ -356,29 +374,17 @@ pub(crate) fn object_chat_messages(object: &Object) -> Vec<ChatMessage> {
     // An agent answering in the discussion also writes the same line to its
     // private transcript; show that copy only when the discussion lacks it.
     let mut in_discussion: HashSet<(String, String, i64)> = HashSet::new();
-    let echo_key = |author: &str, text: &str, ts: i64| {
-        (
-            author.to_string(),
-            text.to_string(),
-            (ts as f64 / 10_000.).round() as i64,
-        )
-    };
     for (root, authors) in &sources {
         for block in chat_blocks(object, root) {
             if seen.contains(&block.id) {
                 continue;
             }
             let message = block_message(block);
+            if echoes(&enveloped, &message) {
+                continue;
+            }
             if let Some(authors) = authors {
-                if !authors.contains(message.author.as_str()) {
-                    continue;
-                }
-                // Same author + text within the same ~10s window, or the adjacent one.
-                let (a, t, ts) = (&message.author, &message.text, message.ts);
-                if in_discussion.contains(&echo_key(a, t, ts))
-                    || in_discussion.contains(&echo_key(a, t, ts - 10_000))
-                    || in_discussion.contains(&echo_key(a, t, ts + 10_000))
-                {
+                if !authors.contains(message.author.as_str()) || echoes(&in_discussion, &message) {
                     continue;
                 }
             } else {
@@ -622,6 +628,39 @@ mod tests {
             ["pulled the sheet", "median is $29"]
         );
         assert!(chat_messages(&object, "__thread__b").is_empty());
+    }
+
+    #[test]
+    fn an_agents_plain_copy_of_its_reply_envelope_shows_once() {
+        let answer = "median is $29";
+        let reply_id = format!("reply:q:{AGENT}");
+        let reply = envelope(&reply_id, 1_790_193_115_461, |m| {
+            m.sender = home_agent();
+            m.recipients = vec![home()];
+            m.author = AGENT.into();
+            m.text = answer.into();
+        });
+        // The agent also wrote the answer as plain lines a moment earlier: to
+        // its private transcript and to the discussion.
+        let written = object(serde_json::json!({
+            "id": "obj", "typeKey": "note", "fields": {},
+            "blocks": [
+                root(DISCUSSION, &["d1"]),
+                msg("d1", AGENT, 1_790_193_115_460, answer),
+                root("__thread__b", &["p1", "p2"]),
+                msg("p1", AGENT, 1_790_193_115_459, answer),
+                msg("p2", AGENT, 1_790_193_115_470, "and one more thing"),
+            ],
+            "conversations": [
+                { "id": DISCUSSION, "kind": "human" },
+                { "id": "__thread__b", "kind": "agent_private", "participants": [AGENT] },
+            ],
+        }));
+        let shown = object_chat_messages(&Object {
+            mailbox: Some(vec![reply]),
+            ..written
+        });
+        assert_eq!(ids(&shown), [reply_id.as_str(), "p2"]);
     }
 
     #[test]

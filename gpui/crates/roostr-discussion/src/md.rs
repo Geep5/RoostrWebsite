@@ -16,7 +16,7 @@ use gpui_kit::component::Sizable as _;
 use gpui_kit::component::separator::Separator;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use roostr_core::markdown::{Align, Block, Inline, TaskCheck, parse};
+use roostr_core::markdown::{Align, Block, Inline, Link, Span, TaskCheck, parse};
 use roostr_core::nav::{self, Route};
 use roostr_core::objects::{is_image_icon, object_icon};
 use roostr_core::options::{TagPaint, tint_paint};
@@ -722,7 +722,7 @@ fn render_block(
 fn bold(inline: &Inline) -> Inline {
     inline
         .iter()
-        .map(|s| roostr_core::markdown::Span {
+        .map(|s| Span {
             bold: true,
             ..s.clone()
         })
@@ -731,10 +731,13 @@ fn bold(inline: &Inline) -> Inline {
 
 /// A message body: parsed markdown laid out with the chat's `.md` styles.
 /// Its lines take part in the window text selection in reading order from
-/// `order` (one message's lines after the previous message's).
+/// `order` (one message's lines after the previous message's). `origin`
+/// (object id, name) leads the body as that object's tag, the same pill an
+/// object link in the text gets.
 pub(crate) fn render_markdown(
     id: impl Into<ElementId>,
     src: &str,
+    origin: Option<(&str, &str)>,
     md: &MdTheme,
     order: u64,
     cx: &App,
@@ -743,7 +746,22 @@ pub(crate) fn render_markdown(
     let key = format!("{id:?}");
     let mut names = md.mention_names.clone();
     names.sort_by_key(|(n, _)| std::cmp::Reverse(n.len()));
-    let blocks = parse(src);
+    let mut blocks = parse(src);
+    if let Some((object_id, name)) = origin {
+        let tag = vec![Span {
+            text: name.to_string(),
+            link: Some(Link {
+                href: format!("/app/object/{object_id}"),
+                object_id: Some(object_id.to_string()),
+            }),
+            ..Span::default()
+        }];
+        // The first line of the body: a line of its own in the opening paragraph.
+        match blocks.first_mut() {
+            Some(Block::Paragraph(lines)) => lines.insert(0, tag),
+            _ => blocks.insert(0, Block::Paragraph(vec![tag])),
+        }
+    }
     let order = Cell::new(order);
     let mut out = div().flex().flex_col().min_w_0();
     let mut prev_bottom = 0.;
