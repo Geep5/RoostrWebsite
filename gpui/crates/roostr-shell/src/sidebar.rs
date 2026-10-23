@@ -154,34 +154,6 @@ impl Workspace {
             .pt(px(10.))
             .pb(px(6.))
             .bg(theme::bg())
-            // The rail, folded, folds into this header: a click opens it again.
-            .when(self.rail_folded, |d| {
-                d.child(crate::rail::slide_in(
-                    "rail-folded-chip",
-                    div()
-                        .id("rail-unfold")
-                        .debug_selector(|| "rail-unfold".to_string())
-                        .flex_none()
-                        .size(px(26.))
-                        .mr(px(4.))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .border_1()
-                        .border_color(theme::border())
-                        .rounded(px(7.))
-                        .text_size(px(14.))
-                        .text_color(theme::muted())
-                        .cursor_pointer()
-                        .hover(|s| s.text_color(theme::fg()).border_color(theme::muted()))
-                        .tooltip(crate::tip("Show spaces"))
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            let side = this.side_folded;
-                            this.set_folds(false, side, cx);
-                        }))
-                        .child("»"),
-                ))
-            })
             .child(
                 div()
                     .id("space-head")
@@ -274,15 +246,6 @@ impl Workspace {
                         .child(self.anchor_probe("create")),
                 ),
             )
-            // Fold the sidebar: it slides shut into the rail, whose space tile offers it back.
-            .child(div().ml(px(4.)).child(
-                crate::rail::fold_button("side-fold", "Hide sidebar").on_click(cx.listener(
-                    |this, _, _, cx| {
-                        let rail = this.rail_folded;
-                        this.set_folds(rail, true, cx);
-                    },
-                )),
-            ))
     }
 
     pub(crate) fn open_create_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {

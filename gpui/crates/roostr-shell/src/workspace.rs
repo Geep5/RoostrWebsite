@@ -124,10 +124,7 @@ pub struct Workspace {
     side_drag: Option<(Pixels, f32)>,
     /// A pane column's resizer drags: (column, pointer x, width) at the start.
     pane_drag: Option<(PaneTab, Pixels, f32)>,
-    /// The spaces rail and the sidebar, each folded on its own (both folded: the
-    /// left edge tab alone brings them back). Folding slides the strip shut.
-    pub(crate) rail_folded: bool,
-    pub(crate) side_folded: bool,
+    pub(crate) nav_hidden: bool,
     dwell: Option<Dwell>,
     rail_col: motion::ValueState,
     side_col: motion::ValueState,
@@ -249,20 +246,17 @@ impl Workspace {
             .and_then(|v| json_number(&v))
             .filter(|w| *w > 0.)
             .unwrap_or(SIDE_DEFAULT);
-        // A device that hid the whole left side before the strips folded apart: both folded.
-        let flag = |key: &str| {
-            UiState::get::<serde_json::Value>(cx, key)
-                .map(|v| v.as_str() == Some("1") || v.as_bool() == Some(true))
-        };
-        let nav_hidden = flag("nav-hidden").unwrap_or(false);
-        let rail_folded = flag("rail-folded").unwrap_or(nav_hidden);
-        let side_folded = flag("side-folded").unwrap_or(nav_hidden);
+        let nav_hidden = UiState::get::<serde_json::Value>(cx, "nav-hidden")
+            .is_some_and(|v| v.as_str() == Some("1") || v.as_bool() == Some(true));
         let legacy_folds = crate::pin_collapse::legacy_folds(cx);
         let section_collapsed = UiState::get(cx, "section-collapsed").unwrap_or_default();
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
-        let rail_col = if rail_folded { 0. } else { rail_width };
-        let side_col = if side_folded { 0. } else { side_width };
+        let (rail_col, side_col) = if nav_hidden {
+            (0., 0.)
+        } else {
+            (rail_width, side_width)
+        };
         let mut this = Self {
             pages,
             page_cache: HashMap::new(),
@@ -277,8 +271,7 @@ impl Workspace {
             side_width,
             side_drag: None,
             pane_drag: None,
-            rail_folded,
-            side_folded,
+            nav_hidden,
             dwell: None,
             rail_col: motion::ValueState::new(f64::from(rail_col)),
             side_col: motion::ValueState::new(f64::from(side_col)),
@@ -591,23 +584,9 @@ impl Workspace {
         }
     }
 
-    /// Both strips folded: the left side is gone, only its edge tab shows.
-    pub(crate) fn nav_hidden(&self) -> bool {
-        self.rail_folded && self.side_folded
-    }
-
-    /// The left edge tab: fold both while either is open, else open both.
     pub(crate) fn toggle_nav(&mut self, cx: &mut Context<Self>) {
-        let fold = !self.nav_hidden();
-        self.set_folds(fold, fold, cx);
-    }
-
-    /// Fold or open the rail and the sidebar, remembered on this device.
-    pub(crate) fn set_folds(&mut self, rail: bool, side: bool, cx: &mut Context<Self>) {
-        self.rail_folded = rail;
-        self.side_folded = side;
-        UiState::set(cx, "rail-folded", &if rail { "1" } else { "0" });
-        UiState::set(cx, "side-folded", &if side { "1" } else { "0" });
+        self.nav_hidden = !self.nav_hidden;
+        UiState::set(cx, "nav-hidden", &if self.nav_hidden { "1" } else { "0" });
         cx.notify();
     }
 
@@ -677,17 +656,11 @@ impl Workspace {
             cx.notify();
         } else if let Some((tab, start_x, start_w)) = self.pane_drag {
             // As wide as the window allows: the page beside the columns keeps its minimum.
-            let rail = if self.rail_folded {
+            let nav = if self.nav_hidden {
                 0.
             } else {
-                self.rail_width
+                self.rail_width + self.side_width
             };
-            let nav = rail
-                + if self.side_folded {
-                    0.
-                } else {
-                    self.side_width
-                };
             let other = self.pane_layout.get(tab.other()).width();
             let room = f32::from(window.viewport_size().width) - nav - other;
             let width = (start_w + f32::from(start_x - position.x)).clamp(
@@ -1066,17 +1039,9 @@ impl Workspace {
         let views = PaneHost::global(cx).read(cx).views.clone();
         let animate = !self.resizing() && self.desk_shown;
         self.desk_shown = true;
-        let rail_target = if self.rail_folded {
-            0.
-        } else {
-            self.rail_width
-        };
+        let rail_target = if self.nav_hidden { 0. } else { self.rail_width };
         let rail_col = column(&mut self.rail_col, rail_target, animate, window, cx);
-        let side_target = if self.side_folded {
-            0.
-        } else {
-            self.side_width
-        };
+        let side_target = if self.nav_hidden { 0. } else { self.side_width };
         let side_col = column(&mut self.side_col, side_target, animate, window, cx);
         // A narrower window narrows the columns to fit (or shows one and a
         // strip); the chosen widths come back when there is room.
@@ -1111,22 +1076,11 @@ impl Workspace {
             })
             .is_some_and(|k| matches!(k.as_str(), "query" | "set" | "collection"));
         let tabs_shown = Navigator::global(cx).read(cx).tabs().len() > 1;
-        let nav_tab_left = if self.nav_hidden() {
+        let nav_tab_left = if self.nav_hidden {
             0.
         } else {
             rail_col + side_col + 3. - 8. - drawer_tab_spill()
         };
-        // Sliding shut, a strip keeps its width and is cut off, not squeezed.
-        let rail_inner = if self.rail_folded {
-            self.rail_width
-        } else {
-            rail_col
-        } - 6.;
-        let side_inner = if self.side_folded {
-            self.side_width
-        } else {
-            side_col
-        } - 6.;
         // The drawer dwell fill grows frame by frame.
         if self.dwell.is_some() {
             window.request_animation_frame();
@@ -1147,9 +1101,8 @@ impl Workspace {
                     .w(px(rail_col))
                     .h_full()
                     .py(px(6.))
-                    .overflow_hidden()
-                    .when(rail_col > 6., |d| {
-                        d.child(self.render_rail(rail_inner, window, cx))
+                    .when(!self.nav_hidden && rail_col > 6., |d| {
+                        d.child(self.render_rail(rail_col - 6., window, cx))
                     }),
             )
             // Sidebar column.
@@ -1159,9 +1112,8 @@ impl Workspace {
                     .w(px(side_col))
                     .h_full()
                     .py(px(6.))
-                    .overflow_hidden()
-                    .when(side_col > 6., |d| {
-                        d.child(self.render_sidebar(side_inner, window, cx))
+                    .when(!self.nav_hidden && side_col > 6., |d| {
+                        d.child(self.render_sidebar(side_col - 6., window, cx))
                     }),
             )
             .child(self.render_main(wide, window, cx))
@@ -1181,28 +1133,26 @@ impl Workspace {
                 cx,
             ))
             // Resizers (in the gaps between panes).
-            .when(!self.rail_folded, |d| {
+            .when(!self.nav_hidden, |d| {
                 d.child(self.render_rail_resize(rail_col, window, cx))
-            })
-            .when(!self.side_folded, |d| {
-                d.child(
-                    div()
-                        .id("side-resize")
-                        .absolute()
-                        .top(px(6.))
-                        .bottom(px(6.))
-                        .left(px(rail_col + side_col - 8.))
-                        .w(px(8.))
-                        .cursor_col_resize()
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(|this, e: &MouseDownEvent, _, cx| {
-                                this.side_drag = Some((e.position.x, this.side_width));
-                                cx.stop_propagation();
-                                cx.notify();
-                            }),
-                        ),
-                )
+                    .child(
+                        div()
+                            .id("side-resize")
+                            .absolute()
+                            .top(px(6.))
+                            .bottom(px(6.))
+                            .left(px(rail_col + side_col - 8.))
+                            .w(px(8.))
+                            .cursor_col_resize()
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, e: &MouseDownEvent, _, cx| {
+                                    this.side_drag = Some((e.position.x, this.side_width));
+                                    cx.stop_propagation();
+                                    cx.notify();
+                                }),
+                            ),
+                    )
             })
             .children(
                 [
@@ -1215,7 +1165,7 @@ impl Workspace {
             )
             // Drawer tabs.
             .child(
-                self.render_drawer_tab(DwellTab::Nav, !self.nav_hidden(), window, cx)
+                self.render_drawer_tab(DwellTab::Nav, !self.nav_hidden, window, cx)
                     .left(px(nav_tab_left)),
             )
             .when(pane_here, |d| {
