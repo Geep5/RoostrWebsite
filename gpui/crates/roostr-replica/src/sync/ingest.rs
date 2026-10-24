@@ -588,20 +588,38 @@ impl Inner {
         for item in batch {
             // Unauthorized payloads stay unheld: a later reconcile (a lite
             // fetch: its next round) re-judges them.
-            if let Some(p) = &item.provenance
-                && !self
+            if let Some(p) = &item.provenance {
+                let verdict = match self
                     .authorized(item, p, &mut pending, &mut states, imported)
                     .await
-                    .context("authorize")?
-            {
-                roostr_core::sync_trace!(
-                    "import REFUSED for {} (signer {}, space {}): the authority gate said no",
-                    item.object_id,
-                    short_id(&p.signer),
-                    short_id(&p.space_id)
-                );
-                self.state.lock().stats.refused += 1;
-                continue;
+                {
+                    Ok(ok) => ok,
+                    // Beyond this engine's request memory (the web engine's is
+                    // bounded): judged like a refusal - left unheld, asked for
+                    // again by a later pass - so one oversized object cannot
+                    // stop the whole sync.
+                    Err(error)
+                        if error.downcast_ref::<EngineError>().is_some_and(|e| {
+                            matches!(e, EngineError::Runtime(_) | EngineError::RequestTooLarge(_))
+                        }) =>
+                    {
+                        log::warn!("[sync] authorize {} skipped: {error:#}", item.object_id);
+                        false
+                    }
+                    Err(error) => {
+                        return Err(error.context(format!("authorize {}", item.object_id)));
+                    }
+                };
+                if !verdict {
+                    roostr_core::sync_trace!(
+                        "import REFUSED for {} (signer {}, space {}): the authority gate said no",
+                        item.object_id,
+                        short_id(&p.signer),
+                        short_id(&p.space_id)
+                    );
+                    self.state.lock().stats.refused += 1;
+                    continue;
+                }
             }
             roostr_core::sync_trace!(
                 "import {} for {}",
