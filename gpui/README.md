@@ -293,8 +293,11 @@ yet — load it fully once", a vault without a built personal directory "This
 vault isn't ready for lite yet" (button: fully sync). Settings → "Where your
 vault lives" shows "This device holds about N% of your vault" on any replica
 and, when lite, "Fully sync this device": a details sheet (what it
-downloads, how long, storage used now, offline afterwards, only logging out
-undoes it) before it switches; the sync status line then shows the download.
+downloads, how long, storage used now, offline afterwards) before it
+switches; the sync status line then shows the download. A browser holding
+the whole vault shows "Switch to Lite" instead: after a confirm it drops its
+local copy and reloads lite, still signed in with its space keys
+(`LiteControl::switch_to_lite`); it refuses while changes are not sent yet.
 
 ### Your devices
 

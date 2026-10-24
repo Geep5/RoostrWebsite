@@ -192,6 +192,61 @@ fn offline_replica_round_trip() {
     });
 }
 
+/// Settings → "Switch to Lite": refused while this device holds changes not
+/// sent yet (they would be lost); otherwise the local copy goes and the next
+/// start is lite, still signed in.
+#[test]
+fn switch_to_lite_keeps_unsent_changes_and_otherwise_starts_lite() {
+    use roostr_core::lite::LiteControl;
+    let _turn = support::ENGINE_TURN.lock();
+    async_io::block_on(async {
+        let dir = tempfile::tempdir().unwrap();
+        let (backend, store) = open(dir.path()).await;
+        let keys = roostr_nostr::Keys::generate();
+        backend
+            .mutate("nostr_key_import", params(json!({ "key": keys.nsec() })))
+            .await
+            .unwrap();
+        let kv = backend.kv();
+        // A browser that holds the whole vault.
+        kv.set(roostr_replica::HOLDING, Some("full"));
+        // Offline: the page is written here and not sent.
+        let page = backend
+            .mutate("create", params(json!({ "name": "Unsent" })))
+            .await
+            .unwrap();
+        let page_id = page["id"].as_str().unwrap().to_string();
+        // A save still settling (its shared-space refresh) answers "wait".
+        let switch = async || loop {
+            match backend.switch_to_lite().await {
+                Err(e) if e.to_string().starts_with("Wait for the current save") => {
+                    async_io::Timer::after(std::time::Duration::from_millis(20)).await;
+                }
+                other => return other,
+            }
+        };
+        let refused = switch().await.unwrap_err().to_string();
+        assert!(refused.contains("not sent yet"), "{refused}");
+        assert!(
+            backend.object(&page_id).await.is_ok(),
+            "the unsent page stays"
+        );
+        assert_eq!(kv.get(roostr_replica::HOLDING).as_deref(), Some("full"));
+
+        // Nothing owed: the copy goes, the next start is lite, the key stays.
+        for pending in store.pending_publishes().await.unwrap() {
+            store.mark_published(pending.key).await.unwrap();
+        }
+        switch().await.unwrap();
+        assert!(store.object_ids().await.unwrap().is_empty());
+        assert_eq!(kv.get(roostr_replica::HOLDING).as_deref(), Some("lite"));
+        assert!(
+            roostr_replica::identity::load(&*kv).is_some(),
+            "still signed in"
+        );
+    });
+}
+
 /// Device reminders read each recurring object's `repeat.next`.
 #[test]
 fn upcoming_occurrences_follow_repeat_next() {

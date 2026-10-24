@@ -28,8 +28,13 @@ pub trait LiteControl: MaybeSend + MaybeSync {
     /// download. Approximate; may ask the relays.
     fn estimate(&self) -> BoxFuture<Result<VaultEstimate>>;
     /// Settings → "Fully sync this device": from now on this device holds
-    /// and follows the whole vault (one way; only logging out undoes it).
+    /// and follows the whole vault ([`LiteControl::switch_to_lite`] undoes it).
     fn sync_fully(&self) -> BoxFuture<Result<()>>;
+    /// Settings → "Switch to Lite": a full replica drops its local copy and
+    /// starts again lite - signed in, its space keys kept - holding only what
+    /// is opened. Refused while changes are not sent yet. The caller reloads
+    /// (the browser) once it resolves.
+    fn switch_to_lite(&self) -> BoxFuture<Result<()>>;
 }
 
 /// [`LiteControl::estimate`]: approximate counts and sizes.

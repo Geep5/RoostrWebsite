@@ -96,7 +96,7 @@ pub fn estimate_lines(e: &VaultEstimate) -> Vec<String> {
         format!("Takes {}", duration(e.seconds)),
         format!("Storage used now: {}", bytes(e.held_bytes)),
         "Works offline afterwards".into(),
-        "Can't be undone except by logging out".into(),
+        "You can switch back to Lite later in Settings".into(),
     ]
 }
 
@@ -206,6 +206,27 @@ pub fn sync_fully(cx: &mut App) {
             log::warn!("full sync failed to start: {error:#}");
         }
         cx.update(refresh);
+    })
+    .detach();
+}
+
+/// Settings → "Switch to Lite": this device drops its copy and the page
+/// reloads lite; `on_error` gets the reason when the replica refuses (changes
+/// not sent yet, a save in progress).
+pub fn switch_to_lite(cx: &mut App, on_error: impl FnOnce(String, &mut App) + 'static) {
+    let Some(control) = lite::lite(cx) else {
+        return;
+    };
+    let task = io::spawn(cx, async move { control.switch_to_lite().await });
+    cx.spawn(async move |cx| match task.await {
+        Ok(()) =>
+        {
+            #[cfg(target_family = "wasm")]
+            if let Some(window) = web_sys::window() {
+                let _ = window.location().reload();
+            }
+        }
+        Err(error) => cx.update(|cx| on_error(format!("{error:#}"), cx)),
     })
     .detach();
 }

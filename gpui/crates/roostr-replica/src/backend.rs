@@ -1926,6 +1926,32 @@ impl Inner {
         replayed
     }
 
+    /// [`LiteControl::switch_to_lite`]: drop the local copy and start lite on
+    /// the next load - as logging out does, but the identity, its space keys
+    /// and relays stay, so the page reopens signed in.
+    async fn switch_to_lite(self: &Arc<Self>) -> Result<()> {
+        {
+            let mut st = self.state.lock();
+            if st.logging_out || st.mutations > 0 || st.shared_refreshes > 0 {
+                bail!("Wait for the current save before switching");
+            }
+            st.logging_out = true;
+        }
+        let result = async {
+            if !self.store.pending_publishes().await?.is_empty() {
+                bail!("Changes on this device are not sent yet. Switch once they are.");
+            }
+            self.stop();
+            self.store.clear().await?;
+            self.kv.set(HOLDING, Some("lite"));
+            self.kv.set("roostr-shared-queued", None);
+            Ok(())
+        }
+        .await;
+        self.state.lock().logging_out = false;
+        result
+    }
+
     /// [`LiteControl::sync_fully`]: from now on this replica holds the whole
     /// vault. Resolves once the download started.
     async fn sync_fully(self: &Arc<Self>) -> Result<()> {
@@ -3282,6 +3308,11 @@ impl LiteControl for ReplicaBackend {
     fn sync_fully(&self) -> BoxFuture<Result<()>> {
         let inner = self.inner.clone();
         Box::pin(async move { inner.sync_fully().await })
+    }
+
+    fn switch_to_lite(&self) -> BoxFuture<Result<()>> {
+        let inner = self.inner.clone();
+        Box::pin(async move { inner.switch_to_lite().await })
     }
 }
 

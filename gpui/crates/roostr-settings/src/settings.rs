@@ -143,6 +143,10 @@ pub struct Settings {
     estimate: Option<VaultEstimate>,
     confirm_full: bool,
     full_requested: bool,
+    // Full replica in a browser: the "Switch to Lite" sheet, and why the
+    // replica refused (changes not sent yet).
+    confirm_lite: bool,
+    lite_error: Option<String>,
 
     // "Your devices": every device record of the account, this backend's
     // device id (from the settings), the record being renamed and its draft.
@@ -345,6 +349,8 @@ impl Settings {
             estimate: None,
             confirm_full: false,
             full_requested: false,
+            confirm_lite: false,
+            lite_error: None,
             devices: Vec::new(),
             device_id: String::new(),
             show_older_devices: false,
@@ -810,6 +816,13 @@ impl Settings {
             return vault;
         }
         let lite = roostr_core::lite::status(cx).is_some();
+        // A browser holding the whole vault can go back to lite: its copy is
+        // dropped and the page reloads, still signed in.
+        let vault = if cfg!(target_family = "wasm") && !lite {
+            self.render_switch_to_lite(vault, cx)
+        } else {
+            vault
+        };
         let status = Store::global(cx).read(cx).status.clone();
         let progress = sync_progress(&status).map(|p| progress_text(&p));
         vault
@@ -872,6 +885,69 @@ impl Settings {
                     p(progress.unwrap_or_else(|| "Fully syncing this device…".into())).mt(px(6.)),
                 )
             })
+    }
+
+    /// "Switch to Lite" and its confirm sheet, under the mode line of a full
+    /// browser replica.
+    fn render_switch_to_lite(&self, vault: Div, cx: &mut Context<Self>) -> Div {
+        if !self.confirm_lite {
+            return vault
+                .child(p("This browser holds your whole vault. Lite keeps only what you open, which is lighter for a big vault.").mt(px(10.)))
+                .child(
+                    div().mt(px(6.)).flex().child(
+                        Btn::action("switch-lite", "Switch to Lite")
+                            .subtle()
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.confirm_lite = true;
+                                this.lite_error = None;
+                                cx.notify();
+                            })),
+                    ),
+                );
+        }
+        let entity = cx.entity().downgrade();
+        vault.child(
+            card(
+                "switch-lite-panel",
+                StyleRefinement::default()
+                    .p(px(12.))
+                    .rounded(px(8.))
+                    .border_color(theme::border())
+                    .bg(theme::bg())
+                    .gap(px(4.)),
+            )
+            .mt(px(8.))
+            .child(p("This browser's copy of your vault is removed and the page reloads in Lite: you stay signed in, and objects download as you open them. Nothing is deleted from your vault or your other devices."))
+            .when_some(self.lite_error.clone(), |d, error| {
+                d.child(div().text_size(px(13.)).text_color(theme::red()).child(error))
+            })
+            .child(
+                div()
+                    .mt(px(6.))
+                    .flex()
+                    .gap(px(8.))
+                    .child(
+                        Btn::action("switch-lite-confirm", "Switch to Lite")
+                            .armed()
+                            .on_click(move |_, _, cx| {
+                                let entity = entity.clone();
+                                lite_ui::switch_to_lite(cx, move |error, cx| {
+                                    let _ = entity.update(cx, |this, cx| {
+                                        this.lite_error = Some(error);
+                                        cx.notify();
+                                    });
+                                });
+                            }),
+                    )
+                    .child(Btn::small("switch-lite-cancel", "Cancel").on_click(cx.listener(
+                        |this, _, _, cx| {
+                            this.confirm_lite = false;
+                            this.lite_error = None;
+                            cx.notify();
+                        },
+                    ))),
+            ),
+        )
     }
 
     /// One line at the top of "Where your vault lives": which mode this
