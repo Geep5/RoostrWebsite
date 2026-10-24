@@ -224,7 +224,7 @@ impl Inner {
             if let Err(error) = result
                 && !self.stopped()
             {
-                self.emit_error(error.to_string());
+                self.emit_error(format!("{error:#}"));
             }
             self.wake_outbox().await;
             if !self.stopped() {
@@ -307,7 +307,7 @@ impl Inner {
         if let Err(error) = result {
             st.history_complete = false;
             drop(st);
-            self.emit_error(error.to_string());
+            self.emit_error(format!("{error:#}"));
         }
     }
 

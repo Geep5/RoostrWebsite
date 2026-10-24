@@ -613,7 +613,9 @@ impl Inner {
         self.host.on_status(status);
     }
 
+    /// A sync error: on the status line and in the log (the console), whole.
     fn emit_error(&self, detail: String) {
+        log::warn!("[sync] error: {detail}");
         let bootstrapped = self.state.lock().bootstrapped;
         self.emit(SyncStatus {
             phase: Phase::Error,
@@ -796,7 +798,7 @@ impl Inner {
                 Ok(_) => {}
                 Err(error) => {
                     if !this.stopped() {
-                        this.emit_error(error.to_string());
+                        this.emit_error(format!("{error:#}"));
                     }
                 }
             }
@@ -888,7 +890,7 @@ impl Inner {
                 st.resuming = false;
             }
             match result {
-                Err(error) if !self.stopped() => self.emit_error(error.to_string()),
+                Err(error) if !self.stopped() => self.emit_error(format!("{error:#}")),
                 _ if !self.stopped() => {
                     self.wake_outbox().await;
                     self.emit_live_status();
