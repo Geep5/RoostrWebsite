@@ -372,6 +372,7 @@ fn keyring_backup_installs_the_accounts_space_keys() {
         json!({
             "viv": {"key": viv, "keyId": 1, "createdAt": 1},
             "kept": {"key": theirs, "keyId": 1, "createdAt": 1},
+            "earlier": {"key": "e".repeat(64), "keyId": 1, "createdAt": 1},
         }),
         1_000,
     ));
@@ -388,11 +389,33 @@ fn keyring_backup_installs_the_accounts_space_keys() {
                 },
             )
             .unwrap();
+        // Merged by a build that did not mark backup keys yet: no owner.
+        a.keyring
+            .set(
+                "earlier",
+                roostr_nostr::spacekeys::SpaceKey {
+                    key: "e".repeat(64),
+                    key_id: 1,
+                    created_at: 1,
+                    owner: None,
+                },
+            )
+            .unwrap();
         a.sync.start().await.unwrap();
         a.sync.await_first_walk().await;
         let installed = eventually(WAIT, async || a.keyring.get("viv").unwrap().is_some()).await;
         assert!(installed, "the backup's space key was installed at start");
         assert_eq!(a.keyring.get("viv").unwrap().unwrap().key, viv);
+        // The account's own space: owned by us, so it is followed before its
+        // member list arrives (unlike a key made here for an unjoined space).
+        let me = Some(keys.pubkey().to_string());
+        assert_eq!(a.keyring.get("viv").unwrap().unwrap().owner, me);
+        assert_eq!(a.keyring.get("earlier").unwrap().unwrap().owner, me);
+        assert_eq!(
+            a.keyring.get("kept").unwrap().unwrap().owner,
+            None,
+            "a newer local key is untouched"
+        );
         assert_eq!(
             a.keyring.get("kept").unwrap().unwrap().key,
             ours,

@@ -93,9 +93,16 @@ impl Inner {
             }
         };
         let mut added = 0;
-        for (space_id, entry) in remote.channels {
+        for (space_id, mut entry) in remote.channels {
             if !roostr_nostr::keys::is_hex32(&entry.key) || self.host.space_gone(&space_id) {
                 continue;
+            }
+            // A space the account owns carries no owner in the backup; here it
+            // names us, which marks the key as the account's own shared space
+            // (followed even before its member list arrives), unlike a key
+            // this device made for a space nobody joined.
+            if entry.owner.as_deref().is_none_or(str::is_empty) {
+                entry.owner = Some(self.pk.clone());
             }
             let held = match self.keyring.get(&space_id) {
                 Ok(held) => held,
@@ -104,7 +111,10 @@ impl Inner {
                     return;
                 }
             };
-            if held.is_some_and(|h| h.key_id >= entry.key_id) {
+            let upgrade = held.as_ref().is_some_and(|h| {
+                h.key_id == entry.key_id && h.key == entry.key && h.owner.is_none()
+            });
+            if !upgrade && held.is_some_and(|h| h.key_id >= entry.key_id) {
                 continue;
             }
             match self.keyring.set(&space_id, entry) {

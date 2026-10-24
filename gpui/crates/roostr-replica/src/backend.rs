@@ -1456,6 +1456,7 @@ impl Inner {
         let mut infos = Vec::new();
         let mut members_by_space: HashMap<String, Vec<String>> = HashMap::new();
         let mut name_by_space: HashMap<String, String> = HashMap::new();
+        let mut members_unknown_spaces: HashSet<String> = HashSet::new();
         let (vanished, ledger) = {
             let st = self.state.lock();
             for (space_id, entry) in &keys {
@@ -1473,8 +1474,19 @@ impl Inner {
                         member_hexes.push(hex);
                     }
                 }
-                if member_hexes.is_empty() && entry.owner.is_none() {
-                    continue;
+                if member_hexes.is_empty() {
+                    // A key made here for a space nobody joined: the personal path.
+                    if entry.owner.is_none() {
+                        continue;
+                    }
+                    // A key from the account's keyring backup (owner = us): the
+                    // space was shared on another device of the account, and its
+                    // member list lives in its stream, where that device
+                    // publishes the space object - follow it to learn them.
+                    // Until then no allowlist, which would shut the members out.
+                    if entry.owner.as_deref() == Some(my_pk.as_str()) {
+                        members_unknown_spaces.insert(space_id.clone());
+                    }
                 }
                 members_by_space.insert(space_id.clone(), member_hexes);
                 name_by_space.insert(
@@ -1571,6 +1583,7 @@ impl Inner {
             {
                 let st = self.state.lock();
                 members_unknown |= st.lite.is_some() && !st.states.contains_key(&info.space_id);
+                members_unknown |= members_unknown_spaces.contains(&info.space_id);
             }
             for w in &info.writers {
                 if !owned_writers.contains(w) {
