@@ -628,29 +628,42 @@ impl Render for ObjectPage {
     }
 }
 
-/// `/app`: the space home — the Install-a-computer card, then a note.
+/// `/app`: the space home — the Install-a-computer card, then the space's
+/// own settings (what its object page shows), never an empty note.
 pub struct HomePage {
     install: Entity<InstallComputer>,
+    /// The current space's settings, rebuilt when the space changes.
+    manage: Option<(String, Entity<SpaceManage>)>,
 }
 
 impl HomePage {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         cx.observe(&Store::global(cx), |_, _, cx| cx.notify())
             .detach();
+        cx.observe(&Navigator::global(cx), |_, _, cx| cx.notify())
+            .detach();
         Self {
             install: cx.new(|cx| InstallComputer::new(window, cx)),
+            manage: None,
         }
     }
 }
 
 impl Render for HomePage {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let loaded = Store::global(cx).read(cx).loaded;
-        div().flex().flex_col().child(self.install.clone()).when(loaded, |d| {
-            d.child(div().my(px(24.)).text_size(px(14.)).text_color(theme::muted()).child(
-                "Nothing open in this space yet. Pick something in the sidebar, find anything with search, or make something new from the New menu.",
-            ))
-        })
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let space = Navigator::global(cx).read(cx).space().to_string();
+        let known = !space.is_empty() && Store::global(cx).read(cx).space(&space).is_some();
+        if !known {
+            self.manage = None;
+        } else if self.manage.as_ref().is_none_or(|(id, _)| *id != space) {
+            let id = space.clone();
+            self.manage = Some((space, cx.new(|cx| SpaceManage::new(id, window, cx))));
+        }
+        div()
+            .flex()
+            .flex_col()
+            .child(self.install.clone())
+            .when_some(self.manage.as_ref(), |d, (_, manage)| d.child(manage.clone()))
     }
 }
 
