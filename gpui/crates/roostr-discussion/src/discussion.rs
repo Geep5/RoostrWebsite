@@ -1787,11 +1787,12 @@ const MENU_AVATAR: AvatarLook = AvatarLook {
     mono: false,
 };
 
-/// An avatar's corner: a squircle-like rounded square (30% of the side, the
-/// app-icon look). GPUI has no continuous corners, so this is the nearest
-/// shape that also clips a picture.
+/// An avatar's corner: a squircle-like rounded square (40% of the side, the
+/// app-icon look - at 30% a solid initials tile still read as a square).
+/// GPUI has no continuous corners, so this is the nearest shape that also
+/// clips a picture.
 fn avatar_radius(size: f32) -> Pixels {
-    px(size * 0.3)
+    px(size * 0.4)
 }
 
 /// A kit avatar: an image icon (a web address or `data:image/` URL, as
