@@ -1022,6 +1022,9 @@ impl Workspace {
                             .mx_auto()
                             .map(|d| {
                                 if wide {
+                                    // Wide pages (queries, sets, collections): the
+                                    // header's inset, so they start under the
+                                    // back/forward arrows.
                                     d.px(px(32.))
                                 } else {
                                     d.max_w(px(920.))

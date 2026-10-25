@@ -409,6 +409,17 @@ impl Render for ObjectPage {
         // Phones drop the 48px rail: one 16px gutter for icon, title, notes
         // and body, a tighter rhythm, smaller icon and title (@media 720).
         let mobile = is_mobile(window);
+        // A data page (query, set, collection, type) on desktop runs flush with
+        // the header's back/forward arrows: the 44/48px rail is for a
+        // document's block handles, which a table doesn't have.
+        let flush = !mobile
+            && matches!(
+                &self.body,
+                Some((_, Body::Data(_))) | Some((_, Body::Type(..)))
+            );
+        if let Some(meta) = &self.meta {
+            meta.update(cx, |meta, cx| meta.set_flush(flush, cx));
+        }
 
         let mut article = div().flex().flex_col();
         if !task {
@@ -492,7 +503,9 @@ impl Render for ObjectPage {
                         if mobile {
                             d.mt(px(8.)).mb(px(2.)).ml(px(16.))
                         } else {
-                            d.mt(px(16.)).mb(px(4.)).ml(px(44.))
+                            d.mt(px(16.))
+                                .mb(px(4.))
+                                .ml(px(if flush { 0. } else { 44. }))
                         }
                     })
                     .flex()
@@ -537,7 +550,15 @@ impl Render for ObjectPage {
             div()
                 .flex()
                 .items_start()
-                .when(!task, |d| d.pl(px(if mobile { 16. } else { 48. })))
+                .when(!task, |d| {
+                    d.pl(px(if mobile {
+                        16.
+                    } else if flush {
+                        0.
+                    } else {
+                        48.
+                    }))
+                })
                 .when(task, |d| {
                     d.child(
                         ui::checkbox("done-check", done)
@@ -579,7 +600,7 @@ impl Render for ObjectPage {
                 ));
             }
         }
-        let dataview = |view: AnyView| div().when(!mobile, |d| d.ml(px(48.))).child(view);
+        let dataview = |view: AnyView| div().when(!mobile && !flush, |d| d.ml(px(48.))).child(view);
         if let Some((_, body)) = &self.body {
             article = match body {
                 Body::Space(v) => article.child(v.clone()),

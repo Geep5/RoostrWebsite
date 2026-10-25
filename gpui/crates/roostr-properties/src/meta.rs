@@ -42,9 +42,19 @@ pub struct ObjectMeta {
     open: Option<Open>,
     suggest: Option<Entity<TypeSuggest>>,
     _subs: Vec<Subscription>,
+    /// No left indent: on wide data pages the badges line up with the page's left edge.
+    flush: bool,
 }
 
 impl ObjectMeta {
+    /// Drop (or restore) the badges' 48px left indent.
+    pub fn set_flush(&mut self, flush: bool, cx: &mut Context<Self>) {
+        if self.flush != flush {
+            self.flush = flush;
+            cx.notify();
+        }
+    }
+
     /// The badges of `object_id` (loads it into the store cache, fetches its backlinks).
     pub fn new(object_id: String, _window: &mut Window, cx: &mut Context<Self>) -> Self {
         let store = Store::global(cx);
@@ -54,6 +64,7 @@ impl ObjectMeta {
             backlinks: vec![],
             open: None,
             suggest: None,
+            flush: false,
             _subs: vec![
                 cx.observe(&store, |_, _, cx| cx.notify()),
                 // Lite: backlinks come from what this device holds; a refresh
@@ -312,7 +323,8 @@ impl Render for ObjectMeta {
             .items_center()
             .gap(px(6.))
             .when(narrow, |d| d.mb(px(10.)).mx(px(16.)))
-            .when(!narrow, |d| d.mt(px(2.)).mb(px(14.)).ml(px(48.)))
+            .when(!narrow, |d| d.mt(px(2.)).mb(px(14.)))
+            .when(!narrow && !self.flush, |d| d.ml(px(48.)))
             .text_size(px(13.));
         row = row.child(match &type_def {
             Some(t) => {
