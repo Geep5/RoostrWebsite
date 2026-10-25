@@ -287,6 +287,7 @@ async fn base_events(
                     changes,
                     checkpoint: None,
                     pending: Vec::new(),
+                    own: Vec::new(),
                 },
                 created_at as i64 * 1000,
                 true,
@@ -308,6 +309,7 @@ async fn base_events(
                     owner: k.owner.as_deref(),
                 }),
                 None,
+                None,
             )
             .await
             .unwrap();
@@ -315,7 +317,7 @@ async fn base_events(
             sealed
                 .parts
                 .into_iter()
-                .chain([sealed.event])
+                .chain([sealed.event.expect("an inline base")])
                 .map(|p| sign(keys, p.kind as u32, created_at, p.tags, p.content))
                 .collect(),
         );

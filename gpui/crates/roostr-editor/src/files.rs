@@ -1,5 +1,5 @@
 //! File objects (`src/lib/files.ts`). A file's bytes live on Blossom,
-//! encrypted (see `blossom.rs`): the File object names the blob
+//! encrypted (see `roostr_core::blossom`): the File object names the blob
 //! (`blob_sha256`, `blob_url`) and holds its key (`blob_key`). Files added
 //! before Blossom name only `file_hash`: their bytes come from this
 //! computer's harness, peer-to-peer. With a daemon, files are added through
@@ -18,12 +18,11 @@ use gpui_kit::{App, ClipboardItem, Image, ImageFormat, Task};
 #[cfg(not(target_family = "wasm"))]
 use gpui_kit::{AppContext as _, PathPromptOptions};
 use roostr_core::Store;
+use roostr_core::blossom;
 use roostr_core::harness::{self, Harness};
 use roostr_core::io;
 use roostr_core::types::{Fields, Value, field_str};
 use serde::Deserialize;
-
-use crate::blossom;
 
 const NOT_RUNNING_TO_VIEW: &str = "Start Roostr on this computer to see this file.";
 

@@ -811,9 +811,9 @@ impl Inner {
     }
 
     /// Starts `session`'s sync - once every object is prepared: sync asks
-    /// which space an object is in (where its writes go, whose orphans this
-    /// device may rebase), which only its state answers. A lite replica
-    /// then fetches its directories.
+    /// which space an object is in (where its writes go, whether this
+    /// device may rebase its own orphans there), which only its state
+    /// answers. A lite replica then fetches its directories.
     async fn start_sync(self: &Arc<Self>, session: &Arc<Session>) {
         if self.state.lock().waiting.is_empty() {
             match session.sync.start().await {
@@ -2983,6 +2983,8 @@ fn state_inputs(
         changes,
         checkpoint: checkpoint.map(|c| c.bytes),
         pending,
+        // State and heads never depend on whose a change is.
+        own: Vec::new(),
     })
 }
 

@@ -9,7 +9,7 @@
 //! one event per 120 ms to the first relay that accepts, records the
 //! events as held and marks the obligation published.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -241,19 +241,38 @@ impl Inner {
     /// down), so what the engine classifies is unchanged.
     pub(super) async fn without_covered(
         &self,
-        mut input: ObjectInputs,
+        input: ObjectInputs,
     ) -> anyhow::Result<ObjectInputs> {
+        Ok(self.without_covered_own(input, &HashMap::new()).await?.0)
+    }
+
+    /// [`Self::without_covered`] for the orphan pass, given this device's
+    /// own changes: also returns the own ids a held STRICT ancestor of the
+    /// current base covers (proven folded: the current base alone is no
+    /// proof, a concurrent sibling may still win without them), and keeps
+    /// the covered changes that may be copies of a held own change not
+    /// covered (same author and timestamp), so the engine's edit-key check
+    /// still sees what an older device's rebased copy of it was folded as.
+    pub(super) async fn without_covered_own(
+        &self,
+        mut input: ObjectInputs,
+        own: &HashMap<String, String>,
+    ) -> anyhow::Result<(ObjectInputs, Vec<String>)> {
         let Some(current) = input
             .bases
             .iter()
             .reduce(|best, base| if base.outranks(best) { base } else { best })
         else {
-            return Ok(input);
+            return Ok((input, Vec::new()));
         };
-        let mut covered: HashSet<String> = HashSet::new();
+        // Covered id -> covered by a strict ancestor.
+        let mut covered: HashMap<String, bool> = HashMap::new();
         let mut link = Some(current);
         while let Some(base) = link {
-            covered.extend(self.base_covered_ids(base).await?.iter().cloned());
+            let ancestor = base.hash != current.hash;
+            for id in self.base_covered_ids(base).await?.iter() {
+                *covered.entry(id.clone()).or_default() |= ancestor;
+            }
             link = if base.epoch > 1 {
                 input
                     .bases
@@ -263,8 +282,26 @@ impl Inner {
                 None
             };
         }
-        input.changes.retain(|change| !covered.contains(&change.id));
-        Ok(input)
+        let author_time = |json: &str| {
+            serde_json::from_str::<roostr_engine::Change>(json)
+                .ok()
+                .map(|c| (c.author, c.timestamp))
+        };
+        let mut proven = Vec::new();
+        let mut copies = HashSet::new();
+        for change in input.changes.iter().filter(|c| own.contains_key(&c.id)) {
+            match covered.get(&change.id) {
+                Some(true) => proven.push(change.id.clone()),
+                Some(false) => {}
+                None => copies.extend(author_time(&change.json)),
+            }
+        }
+        input.changes.retain(|change| {
+            !covered.contains_key(&change.id)
+                || (!copies.is_empty()
+                    && author_time(&change.json).is_some_and(|key| copies.contains(&key)))
+        });
+        Ok((input, proven))
     }
 
     /// A walk completed: drop the obligations the relays already hold, then

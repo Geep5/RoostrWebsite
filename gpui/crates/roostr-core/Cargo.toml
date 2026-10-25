@@ -21,6 +21,11 @@ regex.workspace = true
 fancy-regex.workspace = true
 percent-encoding.workspace = true
 web-time.workspace = true
+# Blossom blobs (`blossom.rs`): AES-256-GCM frames, sha256 names, relay origins.
+aes-gcm = "0.10"
+sha2.workspace = true
+hex = "0.4"
+url = "2"
 
 # Desktop: blocking HTTP on GPUI's background threads, files in the config dir.
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
@@ -34,6 +39,8 @@ gpui-pre-reqwest-client.workspace = true
 chrono = { workspace = true, features = ["wasmbind"] }
 uuid = { workspace = true, features = ["js"] }
 roostr-nostr.workspace = true
+# aes-gcm's key generation links getrandom 0.2, which needs its JS backend in a browser.
+getrandom-02 = { package = "getrandom", version = "0.2", features = ["js"] }
 wasm-bindgen.workspace = true
 wasm-bindgen-futures.workspace = true
 js-sys.workspace = true

@@ -7,16 +7,19 @@
 //!   frame may be shorter; a zero-length file is one empty frame (the tag).
 //!
 //! With a daemon the harness uploads; this device's own replica uploads
-//! here, so discovery, upload, download and the blob cipher live here.
+//! files here (the editor's file views), and the replica reads oversized
+//! state-sync bases with the same cipher (`glonOdin/docs/state-sync.md`
+//! "Oversized bases"), so discovery, upload, download and the blob cipher
+//! live here.
 
 use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex};
 use std::time::Duration;
 
+use crate::http;
 use aes_gcm::aead::{Aead, KeyInit};
 use aes_gcm::{Aes256Gcm, Nonce};
 use anyhow::{anyhow, bail};
-use roostr_core::http;
 use sha2::{Digest, Sha256};
 
 /// Plaintext bytes per frame.

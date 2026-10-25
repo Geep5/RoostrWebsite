@@ -13,13 +13,18 @@ mod proxy;
 mod support;
 
 use std::collections::{HashMap, HashSet};
+use std::io::{BufRead, BufReader, Write};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use proxy::RelayProxy;
 use roostr_core::Backend;
+use roostr_core::blossom;
 use roostr_core::types::field_str;
-use roostr_engine::{Change, ClassificationBase, Op, SealRequest, SealSpace, StateInputs};
+use roostr_engine::{
+    Change, ClassificationBase, Op, SealBlob, SealRequest, SealSpace, StateInputs,
+};
 use roostr_nostr::{Event, EventTemplate, Filter, Keys, kinds};
 use roostr_replica::local::{FileLocalKv, LocalKv};
 use roostr_replica::sync::{RelaySync, SharedSpaceInfo, VANISH_LOG_ID};
@@ -101,6 +106,7 @@ impl Fixture {
                     changes,
                     checkpoint: None,
                     pending: Vec::new(),
+                    own: Vec::new(),
                 },
                 now_ms,
                 true,
@@ -123,13 +129,14 @@ impl Fixture {
                 Some(&keys.secret_hex()),
                 None,
                 None,
+                None,
             )
             .await
             .unwrap();
         sealed
             .parts
             .into_iter()
-            .chain([sealed.event])
+            .chain([sealed.event.expect("an inline base")])
             .map(|p| {
                 keys.sign(EventTemplate {
                     kind: p.kind as u32,
@@ -213,13 +220,20 @@ impl Fixture {
         let sealed = self
             .replica
             .engine
-            .seal_base(base, &space.key_hex, None, Some(seal_space(space)), None)
+            .seal_base(
+                base,
+                &space.key_hex,
+                None,
+                Some(seal_space(space)),
+                None,
+                None,
+            )
             .await
             .unwrap();
         sealed
             .parts
             .into_iter()
-            .chain([sealed.event])
+            .chain([sealed.event.expect("an inline base")])
             .map(|p| {
                 signer.sign(EventTemplate {
                     kind: p.kind as u32,
@@ -626,6 +640,148 @@ fn bases_first_then_live_deltas_and_a_bounded_window() {
     });
 }
 
+/// A one-blob Blossom server: `GET /<sha256>` answers `blob`, anything else
+/// 404. Its origin, and how many requests it answered.
+fn serve_blob(sha256: String, blob: Vec<u8>) -> (String, Arc<AtomicUsize>) {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    let hits = Arc::new(AtomicUsize::new(0));
+    let counter = hits.clone();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { return };
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut request = String::new();
+            if reader.read_line(&mut request).is_err() {
+                continue;
+            }
+            let mut header = String::new();
+            while reader.read_line(&mut header).is_ok_and(|n| n > 2) {
+                header.clear();
+            }
+            counter.fetch_add(1, Ordering::SeqCst);
+            let path = request.split_whitespace().nth(1).unwrap_or_default();
+            let (status, body) = if path == format!("/{sha256}") {
+                ("200 OK", blob.as_slice())
+            } else {
+                ("404 Not Found", &b""[..])
+            };
+            let _ = write!(
+                stream,
+                "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = stream.write_all(body);
+        }
+    });
+    (origin, hits)
+}
+
+#[test]
+fn an_oversized_base_is_read_from_blossom_verified_and_imported() {
+    let _turn = ENGINE_TURN.lock();
+    let relay = TestRelay::start();
+    let keys = Keys::generate();
+    block_on(async {
+        let f = Fixture::new(&keys, vec![relay.url.clone()]).await;
+        let create = f
+            .change(
+                "huge",
+                vec![
+                    create_note(),
+                    set_name("huge"),
+                    Op::FieldSet {
+                        key: "body".into(),
+                        value: Some(json!({"stringValue": "x".repeat(2_000_000)})),
+                    },
+                ],
+                &[],
+                100,
+            )
+            .await;
+        let (base, hash) = f.compact(&[], vec![create], BASE_MS).await;
+        let engine = &f.replica.engine;
+        let secret = keys.secret_hex();
+        // Too big for 64 parts: the core asks for a blob and names its key.
+        let asked = engine
+            .seal_base(&base, &f.conversation, Some(&secret), None, None, None)
+            .await
+            .unwrap();
+        assert!(asked.needs_blob && asked.event.is_none());
+        let key = hex::decode(asked.blob_key.unwrap()).unwrap();
+        let blob = blossom::encrypt_blob(&base, &key).unwrap();
+        let sha = blossom::sha256_hex(&blob);
+        let (origin, gets) = serve_blob(sha.clone(), blob.clone());
+        let url = format!("{origin}/{sha}");
+        let sealed = engine
+            .seal_base(
+                &base,
+                &f.conversation,
+                Some(&secret),
+                None,
+                None,
+                Some(SealBlob {
+                    sha256: &sha,
+                    size: blob.len() as u64,
+                    url: Some(&url),
+                }),
+            )
+            .await
+            .unwrap();
+        assert!(sealed.parts.is_empty());
+        let event = sealed.event.unwrap();
+        assert!(event.tags.contains(&vec![
+            "blob".to_string(),
+            sha.clone(),
+            blob.len().to_string()
+        ]));
+        relay.insert(keys.sign(EventTemplate {
+            kind: event.kind as u32,
+            created_at: BASE_S,
+            tags: event.tags.clone(),
+            content: event.content,
+        }));
+        // The same blob under a pointer naming another base: fetched, refused.
+        let forged = json!({"v": 1, "hash": "ab".repeat(32), "sha256": sha, "size": blob.len(), "key": hex::encode(&key), "url": url});
+        let mut forged_tags = event.tags;
+        forged_tags[0] = vec!["d".into(), "forged".into()];
+        relay.insert(
+            keys.sign(EventTemplate {
+                kind: kinds::BASE,
+                created_at: BASE_S + 1,
+                tags: forged_tags,
+                content: engine
+                    .nip44_encrypt(&f.conversation, &forged.to_string(), None)
+                    .await
+                    .unwrap(),
+            }),
+        );
+
+        let r = &f.replica;
+        r.sync.start().await.unwrap();
+        r.sync.await_first_walk().await;
+        assert_eq!(
+            gets.load(Ordering::SeqCst),
+            2,
+            "both pointers fetched their blob"
+        );
+        assert_eq!(r.sync.stats().bases, 1);
+        let based = r.store.current_bases().await.unwrap();
+        assert_eq!(based.keys().collect::<Vec<_>>(), ["huge"]);
+        assert_eq!(f.base_record(&base).await.hash, hash);
+        let state = r.state("huge").await.unwrap();
+        assert_eq!(name_of(&Some(state.clone())).as_deref(), Some("huge"));
+        assert_eq!(
+            state["fields"]["body"]["stringValue"]
+                .as_str()
+                .unwrap()
+                .len(),
+            2_000_000
+        );
+        r.sync.stop();
+    });
+}
+
 #[test]
 fn a_new_base_rebases_this_devices_orphan_and_publishes_it_with_b() {
     let _turn = ENGINE_TURN.lock();
@@ -778,6 +934,166 @@ fn a_new_base_rebases_this_devices_orphan_and_publishes_it_with_b() {
     });
 }
 
+/// "Own changes until a base proves them; everyone else's leftovers are
+/// discarded": this device's PUBLISHED change that a newer base missed is
+/// still its own and rebased once; another device's change the same base
+/// missed is folded away, never rebased here; the copy's own mark goes once
+/// a held ancestor of the current base folded it.
+#[test]
+fn a_published_own_change_is_kept_until_a_base_proves_it_and_others_leftovers_are_discarded() {
+    let _turn = ENGINE_TURN.lock();
+    let relay = TestRelay::start();
+    let keys = Keys::generate();
+    block_on(async {
+        let f = Fixture::new(&keys, vec![relay.url.clone()]).await;
+        let c1 = f
+            .change("doc", vec![create_note(), set_name("v1")], &[], 100)
+            .await;
+        let c2 = f.change("doc", vec![set_name("v2")], &[&c1], 200).await;
+        let (base1, base1_hash) = f.compact(&[], vec![c1.clone(), c2.clone()], BASE_MS).await;
+        let c4 = f.change("doc", vec![set_name("v4")], &[&c2], 400).await;
+        let mine = f
+            .change("doc", vec![set_note("written here")], &[&c2], 300)
+            .await;
+        // Another device's edit on base 1 that the computer never saw either.
+        let theirs = f
+            .change("doc", vec![set_note("written elsewhere")], &[&c2], 350)
+            .await;
+        let (base2, base2_hash) = f
+            .compact(
+                std::slice::from_ref(&base1),
+                vec![on(&c4, &base1_hash)],
+                BASE_MS + 60_000,
+            )
+            .await;
+
+        for event in f.base_events(&base1, BASE_S).await {
+            relay.insert(event);
+        }
+        relay.insert(f.delta_event(&c4, 1_750_000_000, Some(&base1_hash)).await);
+        relay.insert(
+            f.delta_event(&theirs, 1_750_000_001, Some(&base1_hash))
+                .await,
+        );
+        let r = &f.replica;
+        r.sync.start().await.unwrap();
+        r.sync.await_first_walk().await;
+
+        // This device wrote `mine` on base 1 and published it.
+        let (mut record, bytes) = encode(&r.engine, mine.clone()).await;
+        record.b = Some(base1_hash.clone());
+        r.store
+            .add_local_change(
+                record,
+                PendingPublish {
+                    key: mine.id.clone(),
+                    object_id: "doc".into(),
+                    change_id: mine.id.clone(),
+                    bytes,
+                    space_id: None,
+                    key_id: None,
+                    base: Some(base1_hash.clone()),
+                    events: None,
+                },
+            )
+            .await
+            .unwrap();
+        r.store.mark_published(mine.id.clone()).await.unwrap();
+        assert!(r.store.pending_change_ids().await.unwrap().is_empty());
+        assert!(
+            r.store.own_changes().await.unwrap().contains_key(&mine.id),
+            "published, still own"
+        );
+
+        // Another computer's base 2 folded c4 only.
+        for event in f.base_events(&base2, roostr_nostr::now_s()).await {
+            relay.insert(event);
+        }
+        let rebased = eventually(WAIT, async || r.sync.stats().rebased == 1).await;
+        assert!(rebased, "the own published change was rebased");
+        r.sync.await_idle().await;
+        assert_eq!(r.sync.stats().rebased, 1, "only the own change is rebased");
+        let held = r.store.changes_for("doc".into()).await.unwrap();
+        let marked = |id: &str| held.iter().any(|c| c.id == id && c.rebased);
+        assert!(marked(&mine.id), "the original is folded away");
+        assert!(
+            marked(&theirs.id),
+            "another device's leftover is folded away"
+        );
+        let copy = held
+            .iter()
+            .find(|c| !c.rebased && c.id != c4.id)
+            .expect("the rebased copy")
+            .clone();
+        assert_eq!(
+            held.len(),
+            4,
+            "c4, mine, theirs and one copy: theirs is never rebased"
+        );
+        let own = r.store.own_changes().await.unwrap();
+        assert_eq!(
+            own.keys().collect::<Vec<_>>(),
+            [&copy.id],
+            "the own mark moved to the copy"
+        );
+        let state = r.state("doc").await.unwrap();
+        assert_eq!(state["fields"]["note"]["stringValue"], "written here");
+
+        // Base 3 folds the copy: the current base alone proves nothing.
+        let copy_change: Change = serde_json::from_str(&copy.json).unwrap();
+        let (base3, base3_hash) = f
+            .compact(
+                &[base1.clone(), base2.clone()],
+                vec![on(&copy_change, &base2_hash)],
+                BASE_MS + 120_000,
+            )
+            .await;
+        for event in f.base_events(&base3, roostr_nostr::now_s() + 1).await {
+            relay.insert(event);
+        }
+        let current = |hash: String| async move {
+            r.store
+                .current_base("doc".into())
+                .await
+                .unwrap()
+                .is_some_and(|b| b.hash == hash)
+        };
+        assert!(eventually(WAIT, async || current(base3_hash.clone()).await).await);
+        r.sync.await_idle().await;
+        assert!(
+            r.store.own_changes().await.unwrap().contains_key(&copy.id),
+            "kept"
+        );
+
+        // Base 4: base 3 is a held ancestor now - proven, the mark goes.
+        let after = f
+            .change("doc", vec![set_name("v7")], &[&copy_change], 700)
+            .await;
+        let (base4, _) = f
+            .compact(
+                &[base2.clone(), base3.clone()],
+                vec![on(&after, &base3_hash)],
+                BASE_MS + 180_000,
+            )
+            .await;
+        for event in f.base_events(&base4, roostr_nostr::now_s() + 2).await {
+            relay.insert(event);
+        }
+        let proven = eventually(WAIT, async || {
+            r.store.own_changes().await.unwrap().is_empty()
+        })
+        .await;
+        assert!(proven, "proven folded: the own mark is dropped");
+        let held = r.store.changes_for("doc".into()).await.unwrap();
+        assert!(
+            held.iter().any(|c| c.id == copy.id && c.rebased),
+            "and the copy folded away"
+        );
+        assert_eq!(r.sync.stats().rebased, 1);
+        r.sync.stop();
+    });
+}
+
 #[test]
 fn a_pending_id_makes_this_devices_own_delta_on_an_unknown_base_an_orphan() {
     let _turn = ENGINE_TURN.lock();
@@ -794,6 +1110,7 @@ fn a_pending_id_makes_this_devices_own_delta_on_an_unknown_base_an_orphan() {
             changes: vec![on(&chain.c3, &chain.base1.1)],
             checkpoint: None,
             pending: Vec::new(),
+            own: Vec::new(),
         };
         let classified = engine.classify(&input).await.unwrap();
         assert_eq!(

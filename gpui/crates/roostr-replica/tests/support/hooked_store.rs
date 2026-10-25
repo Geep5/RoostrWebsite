@@ -208,6 +208,9 @@ impl ChangeStore for HookedStore {
     fn pending_change_ids(&self) -> StoreFuture<'_, HashSet<String>> {
         self.inner.pending_change_ids()
     }
+    fn own_changes(&self) -> StoreFuture<'_, HashMap<String, String>> {
+        self.inner.own_changes()
+    }
     fn is_published(&self, key: String) -> StoreFuture<'_, bool> {
         self.inner.is_published(key)
     }

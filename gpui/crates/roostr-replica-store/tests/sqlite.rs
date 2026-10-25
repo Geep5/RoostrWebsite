@@ -2,7 +2,7 @@
 //! store-level cases, plus the browser-only operations of `store.ts`.
 #![cfg(not(target_family = "wasm"))]
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use futures::executor::block_on;
 use roostr_replica_store::*;
@@ -402,6 +402,74 @@ fn local_change_stores_change_and_obligation_together() {
         assert_eq!(store.changes_for("o1".into()).await.unwrap(), vec![change]);
         assert_eq!(store.pending("c9".into()).await.unwrap(), Some(obligation));
         assert!(store.pending_change_ids().await.unwrap().contains("c9"));
+    });
+}
+
+/// "Own changes until a base proves them": the own mark outlives
+/// publication, moves to the rebased copy and goes when folded away.
+#[test]
+fn own_marks_outlive_publication_and_go_when_folded_away() {
+    let store = store();
+    let own = || async { store.own_changes().await.unwrap() };
+    block_on(async {
+        store
+            .add_local_change(record("c1", "o1", 1), pending("c1", "o1", "c1"))
+            .await
+            .unwrap();
+        store
+            .add_local_change(record("c2", "o1", 2), pending("c2", "o1", "c2"))
+            .await
+            .unwrap();
+        store
+            .add_changes(vec![record("theirs", "o1", 3)])
+            .await
+            .unwrap();
+        assert_eq!(
+            own().await,
+            HashMap::from([
+                ("c1".to_owned(), "o1".to_owned()),
+                ("c2".to_owned(), "o1".to_owned())
+            ])
+        );
+
+        store.mark_published("c1".into()).await.unwrap();
+        assert!(!store.pending_change_ids().await.unwrap().contains("c1"));
+        assert!(
+            own().await.contains_key("c1"),
+            "published is not proven folded"
+        );
+
+        store
+            .add_rebased("c1".into(), record("r1", "o1", 4))
+            .await
+            .unwrap();
+        assert_eq!(
+            own().await,
+            HashMap::from([
+                ("r1".to_owned(), "o1".to_owned()),
+                ("c2".to_owned(), "o1".to_owned())
+            ]),
+            "the mark moves to the rebased copy"
+        );
+
+        store
+            .mark_rebased(vec!["c2".into(), "theirs".into()])
+            .await
+            .unwrap();
+        assert_eq!(
+            own().await,
+            HashMap::from([("r1".to_owned(), "o1".to_owned())])
+        );
+        // Rows that merely share the prefix's first letters are no marks.
+        store
+            .set_meta("own".into(), Some("x".into()))
+            .await
+            .unwrap();
+        store
+            .set_meta("owner".into(), Some("x".into()))
+            .await
+            .unwrap();
+        assert_eq!(own().await.len(), 1);
     });
 }
 

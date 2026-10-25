@@ -6488,15 +6488,18 @@ dependencies = [
 name = "roostr-core"
 version = "0.1.0"
 dependencies = [
+ "aes-gcm",
  "anyhow",
  "base64 0.22.1",
  "chrono",
  "dirs 6.0.0",
  "fancy-regex",
  "futures",
+ "getrandom 0.2.17",
  "gpui-kit",
  "gpui-motion-kit",
  "gpui-pre-reqwest-client",
+ "hex",
  "js-sys",
  "log",
  "percent-encoding",
@@ -6505,8 +6508,10 @@ dependencies = [
  "rust-embed",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "ttf-parser",
  "ureq",
+ "url",
  "uuid",
  "wasm-bindgen",
  "wasm-bindgen-futures",
@@ -6533,12 +6538,10 @@ dependencies = [
 name = "roostr-editor"
 version = "0.1.0"
 dependencies = [
- "aes-gcm",
  "anyhow",
  "chrono",
  "dirs 6.0.0",
  "futures",
- "getrandom 0.2.17",
  "gpui-kit",
  "hex",
  "image",
@@ -6557,7 +6560,6 @@ dependencies = [
  "roostr-properties",
  "serde",
  "serde_json",
- "sha2 0.10.9",
  "unicode-segmentation",
  "url",
  "uuid",

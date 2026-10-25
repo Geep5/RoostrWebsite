@@ -387,6 +387,11 @@ impl ChangeStore for SqliteChangeStore {
             insert_changes(tx, std::slice::from_ref(&record))?;
             put_meta(
                 tx,
+                &format!("{}{}", keys::OWN, record.id),
+                &record.object_id,
+            )?;
+            put_meta(
+                tx,
                 &format!("{}{}", keys::PENDING, pending.key),
                 &encode_pending(&pending)?,
             )
@@ -397,8 +402,13 @@ impl ChangeStore for SqliteChangeStore {
         self.write(move |tx| {
             insert_changes(tx, std::slice::from_ref(&record))?;
             tx.prepare_cached("UPDATE changes SET rebased = 1 WHERE id = ?")?
-                .execute([orphan_id])?;
-            Ok(())
+                .execute([&orphan_id])?;
+            delete_meta(tx, &format!("{}{orphan_id}", keys::OWN))?;
+            put_meta(
+                tx,
+                &format!("{}{}", keys::OWN, record.id),
+                &record.object_id,
+            )
         })
     }
 
@@ -406,7 +416,8 @@ impl ChangeStore for SqliteChangeStore {
         self.write(move |tx| {
             let mut update = tx.prepare_cached("UPDATE changes SET rebased = 1 WHERE id = ?")?;
             for id in ids {
-                update.execute([id])?;
+                update.execute([&id])?;
+                delete_meta(tx, &format!("{}{id}", keys::OWN))?;
             }
             Ok(())
         })
@@ -767,6 +778,23 @@ impl ChangeStore for SqliteChangeStore {
                 ids.insert(pending_change_id(&key[keys::PENDING.len()..]).to_owned());
             }
             Ok(ids)
+        })
+    }
+
+    fn own_changes(&self) -> StoreFuture<'_, HashMap<String, String>> {
+        self.run(|connection| {
+            let mut select = connection.prepare_cached(
+                "SELECT key, value FROM meta WHERE key >= 'own:' AND key < 'own;'",
+            )?;
+            let rows = select.query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?;
+            let mut own = HashMap::new();
+            for row in rows {
+                let (key, object_id) = row?;
+                own.insert(key[keys::OWN.len()..].to_owned(), object_id);
+            }
+            Ok(own)
         })
     }
 

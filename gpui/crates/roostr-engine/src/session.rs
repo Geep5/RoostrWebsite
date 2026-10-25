@@ -102,7 +102,7 @@ pub struct IngestResult {
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct IngestItem {
-    /// Wire bytes of the full change, checkpoint or base.
+    /// Wire bytes of the full change, checkpoint or base; empty for a pointer base (`blob`).
     #[serde(with = "base64_bytes")]
     pub bytes: Vec<u8>,
     #[serde(default)]
@@ -120,6 +120,25 @@ pub struct IngestItem {
     /// Set for shared-space events: authorize before import.
     #[serde(default)]
     pub provenance: Option<SharedProvenance>,
+    /// A pointer base: fetch the blob, verify, decrypt, then
+    /// [`Engine::base_open_blob`] gives `bytes` and `base`.
+    #[serde(default)]
+    pub blob: Option<BaseBlob>,
+}
+
+/// The Blossom blob a pointer base names (`docs/state-sync.md` "Oversized bases").
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct BaseBlob {
+    /// base_hash (hex) the decrypted blob must have.
+    pub hash: String,
+    /// sha256 hex of the blob itself: its Blossom name.
+    pub sha256: String,
+    pub size: u64,
+    /// hex AES-256-GCM key (Blossom frame format).
+    pub key: String,
+    /// Where the writer uploaded it; else the vault's Blossom server.
+    #[serde(default)]
+    pub url: Option<String>,
 }
 
 /// A reassembled kind-1079 checkpoint as the session summarises it.

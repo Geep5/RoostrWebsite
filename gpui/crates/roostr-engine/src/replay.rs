@@ -22,6 +22,10 @@ pub struct StateInputs {
     /// Ids of changes this device wrote and never published (any object;
     /// narrowed to this object's changes on the way in).
     pub pending: Vec<String>,
+    /// Ids of changes this device wrote that no held base has proven folded
+    /// yet, published or not (pending ones need not repeat; narrowed like
+    /// `pending`). Only these are ever rebased here.
+    pub own: Vec<String>,
 }
 
 impl StateInputs {
@@ -38,6 +42,7 @@ struct StateRequest<'a> {
     bases: Vec<String>,
     changes: &'a [Change],
     pending: Vec<&'a str>,
+    own: Vec<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     checkpoint: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -55,17 +60,18 @@ impl<'a> StateRequest<'a> {
             .iter()
             .map(|change| change.id.as_str())
             .collect();
-        let pending = input
-            .pending
-            .iter()
-            .map(String::as_str)
-            .filter(|id| held.contains(id))
-            .collect();
+        let held_only = |ids: &'a [String]| -> Vec<&'a str> {
+            ids.iter()
+                .map(String::as_str)
+                .filter(|id| held.contains(id))
+                .collect()
+        };
         StateRequest {
             action,
             bases: input.bases.iter().map(|base| to_base64(base)).collect(),
             changes: &input.changes,
-            pending,
+            pending: held_only(&input.pending),
+            own: held_only(&input.own),
             checkpoint: input
                 .checkpoint
                 .as_deref()
@@ -90,6 +96,13 @@ pub struct Classification {
     pub orphan: Vec<String>,
     pub stale: Vec<String>,
     pub live_heads: Vec<String>,
+    /// Own orphans: what [`Engine::rebase`] rebases.
+    pub rebase: Vec<String>,
+    /// Another device's not-live leftovers: fold them away, never rebase.
+    pub discard: Vec<String>,
+    /// Own changes a held strict ancestor of the current base folded (by id
+    /// or a copy of the edit): drop the own mark, fold them away.
+    pub proven: Vec<String>,
 }
 
 /// The current base a [`Classification`] is relative to.
@@ -152,6 +165,14 @@ pub struct BaseDecoded {
     pub covered_ids: Vec<String>,
     /// The base's ObjectJSON, `heads` = its head ids.
     pub state: Value,
+}
+
+/// `base_open_blob`: a pointer base's decrypted blob as an ingested base.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct BaseBlobOpened {
+    #[serde(with = "base64_bytes")]
+    pub bytes: Vec<u8>,
+    pub base: BaseSummary,
 }
 
 /// `compact_plan`: whether to fold the object's live deltas into a new base.
@@ -256,8 +277,8 @@ impl Engine {
             .await
     }
 
-    /// Rebases `orphans` (hex ids; every orphan when `None`) onto the current
-    /// base. Needs a base.
+    /// Rebases this device's own `orphans` (hex ids; every own orphan when
+    /// `None`) onto the current base. Needs a base.
     pub async fn rebase(
         &self,
         input: &StateInputs,
@@ -285,6 +306,17 @@ impl Engine {
 
     pub async fn base_decode(&self, base: &[u8]) -> Result<BaseDecoded, EngineError> {
         let payload = serde_json::json!({"action": "base_decode", "base": to_base64(base)});
+        self.call_as("sync", &payload, None).await
+    }
+
+    /// A pointer base's blob, verified (sha256) and decrypted by the host:
+    /// it must be a base whose hash is the pointer's `hash`.
+    pub async fn base_open_blob(
+        &self,
+        hash: &str,
+        bytes: &[u8],
+    ) -> Result<BaseBlobOpened, EngineError> {
+        let payload = serde_json::json!({"action": "base_open_blob", "hash": hash, "bytes": to_base64(bytes)});
         self.call_as("sync", &payload, None).await
     }
 

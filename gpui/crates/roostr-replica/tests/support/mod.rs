@@ -180,6 +180,7 @@ impl Replica {
                 changes,
                 checkpoint: input.checkpoint.map(|c| c.bytes),
                 pending: Vec::new(),
+                own: Vec::new(),
             })
             .await
             .unwrap()

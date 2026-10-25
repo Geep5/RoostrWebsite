@@ -19,10 +19,11 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use anyhow::Context;
+use anyhow::{Context, bail};
+use roostr_core::blossom;
 use roostr_engine::{
-    AuthorizeSubject, BaseSummary, Change, CheckpointSummary, EngineError, RelayEvent,
-    SharedProvenance, SpaceAuthority, StateInputs,
+    AuthorizeSubject, BaseBlob, BaseBlobOpened, BaseSummary, Change, CheckpointSummary,
+    EngineError, RelayEvent, SharedProvenance, SpaceAuthority, StateInputs,
 };
 use roostr_nostr::{Event, kinds};
 use roostr_replica_store::{BaseRecord, ChangeRecord, CheckpointRecord, ImportBatch, ObjectInputs};
@@ -86,10 +87,12 @@ fn hold_buffered(states: &mut States, record: &ChangeRecord) {
     }
 }
 
-/// Stored changes (engine JSON) → replay input.
+/// Stored changes (engine JSON) → replay input. `pending` / `own`: this
+/// device's never-published / not-yet-proven-folded change ids.
 pub(super) fn state_inputs(
     input: ObjectInputs,
     pending: Vec<String>,
+    own: Vec<String>,
 ) -> anyhow::Result<StateInputs> {
     let changes = input
         .changes
@@ -107,6 +110,7 @@ pub(super) fn state_inputs(
         changes,
         checkpoint: input.checkpoint.map(|c| c.bytes),
         pending,
+        own,
     })
 }
 
@@ -180,7 +184,10 @@ impl Inner {
                     (_, _, Some(change)) => {
                         format!("change {} of {}", short_id(&change.id), change.object_id)
                     }
-                    _ => "empty payload".to_string(),
+                    _ => match &item.blob {
+                        Some(blob) => format!("pointer base, blob {}", short_id(&blob.sha256)),
+                        None => "empty payload".to_string(),
+                    },
                 },
             };
             roostr_core::sync_trace!(
@@ -208,7 +215,7 @@ impl Inner {
                     .unwrap_or_default(),
             );
         }
-        let Some(item) = r.item else {
+        let Some(mut item) = r.item else {
             let record = {
                 let mut st = self.state.lock();
                 let imported = part_key
@@ -245,6 +252,24 @@ impl Inner {
             }
             return Ok(None);
         };
+        if let Some(blob) = item.blob.take() {
+            match self.open_pointer_base(&blob).await {
+                Ok(opened) => {
+                    item.bytes = opened.bytes;
+                    item.base = Some(opened.base);
+                }
+                Err(error) => {
+                    // Not held: the event is asked for again, the blob fetched again.
+                    log::warn!(
+                        "[sync] pointer base {} (blob {}): {error:#}",
+                        short_id(&event.id),
+                        short_id(&blob.sha256)
+                    );
+                    self.record_replay_fault(event.created_at as i64).await;
+                    return Ok(None);
+                }
+            }
+        }
         let held = {
             let mut st = self.state.lock();
             match &part_key {
@@ -277,6 +302,40 @@ impl Inner {
             held,
             part_key,
         }))
+    }
+
+    /// A pointer base's blob (`docs/state-sync.md` "Oversized bases"): from
+    /// the URL its writer recorded, else the vault's Blossom server; it must
+    /// hash to its name and decrypt under the pointer's key, and the engine
+    /// opens it only as the base the pointer names.
+    async fn open_pointer_base(&self, blob: &BaseBlob) -> anyhow::Result<BaseBlobOpened> {
+        let from_server = async {
+            let relays: Vec<String> = self.relays.iter().map(|r| r.url().to_string()).collect();
+            let server = blossom::blossom_server(&relays).await;
+            blossom::download_blob(&format!("{server}/{}", blob.sha256), &blob.sha256).await
+        };
+        let cipher = match blob.url.as_deref() {
+            Some(url) => match blossom::download_blob(url, &blob.sha256).await {
+                Ok(cipher) => cipher,
+                Err(error) => {
+                    log::info!(
+                        "[sync] base blob url failed ({error:#}); trying the Blossom server"
+                    );
+                    from_server.await?
+                }
+            },
+            None => from_server.await?,
+        };
+        if cipher.len() as u64 != blob.size {
+            bail!(
+                "the base blob is {} bytes, its pointer says {}",
+                cipher.len(),
+                blob.size
+            );
+        }
+        let key = hex::decode(&blob.key).context("a blob key is hex")?;
+        let plain = blossom::decrypt_blob(&cipher, &key)?;
+        Ok(self.engine.base_open_blob(&blob.hash, &plain).await?)
     }
 
     /// Shared authority: existing scope and privileges come from what this
@@ -319,7 +378,7 @@ impl Inner {
             }
             let held = states.get_mut(id).expect("inserted above");
             if held.state.is_none() {
-                let input = state_inputs(held.inputs.clone(), Vec::new())?;
+                let input = state_inputs(held.inputs.clone(), Vec::new(), Vec::new())?;
                 held.state = Some(self.engine.replay_from_base(&input).await?);
             }
         }
@@ -443,14 +502,19 @@ impl Inner {
         Ok(())
     }
 
-    /// Rebase every orphan of these objects onto its current base, store
-    /// each with its orphan marked, and publish it carrying `b`. Callers
-    /// hold the import lock. An engine refusal is reported, never a fault.
-    pub(super) async fn rebase_orphans(
+    /// "Own changes until a base proves them; everyone else's leftovers are
+    /// discarded" (docs/state-sync.md "Orphans and rebase") over these
+    /// objects: another device's not-live changes and this device's own
+    /// changes a held ancestor proved folded are folded away (marked
+    /// rebased, own mark dropped); this device's own orphans are rebased
+    /// onto the current base, stored with the orphan marked and published
+    /// carrying `b`. Callers hold the import lock. An engine refusal is
+    /// reported, never a fault.
+    pub(super) async fn resolve_orphans(
         self: &Arc<Self>,
         object_ids: impl IntoIterator<Item = String>,
     ) -> anyhow::Result<()> {
-        let mut pending: Option<HashSet<String>> = None;
+        let mut marks: Option<(HashSet<String>, HashMap<String, String>)> = None;
         let mut done = HashSet::new();
         for object_id in object_ids {
             if !done.insert(object_id.clone()) {
@@ -460,37 +524,81 @@ impl Inner {
                 let st = self.state.lock();
                 st.stopped || !st.based_objects.contains(&object_id)
             };
-            if skip || !self.may_rebase(&object_id) {
+            if skip {
                 continue;
             }
-            if pending.is_none() {
-                pending = Some(self.store.pending_change_ids().await?);
+            if marks.is_none() {
+                marks = Some((
+                    self.store.pending_change_ids().await?,
+                    self.store.own_changes().await?,
+                ));
             }
-            let input = self
-                .without_covered(self.store.object_inputs(object_id.clone()).await?)
+            let (pending, own) = marks.as_mut().expect("read above");
+            let (input, mut fold) = self
+                .without_covered_own(self.store.object_inputs(object_id.clone()).await?, own)
                 .await?;
             if input.bases.is_empty() {
                 continue;
             }
-            let ids: Vec<String> = pending.iter().flatten().cloned().collect();
-            let inputs = state_inputs(input, ids)?;
+            let held_in = |ids: &dyn Fn(&str) -> bool| -> Vec<String> {
+                input
+                    .changes
+                    .iter()
+                    .filter(|c| ids(&c.id))
+                    .map(|c| c.id.clone())
+                    .collect()
+            };
+            let pending_ids = held_in(&|id| pending.contains(id));
+            let own_ids = held_in(&|id| own.contains_key(id));
+            let inputs = state_inputs(input, pending_ids, own_ids)?;
+            let refused = |error: EngineError, what: &str| -> Result<(), EngineError> {
+                match error {
+                    EngineError::Domain(_) => {
+                        self.emit_error(format!(
+                            "{what} of {object_id} refused: {}",
+                            short(error, 120)
+                        ));
+                        Ok(())
+                    }
+                    // Beyond this engine's request memory (the web engine's is
+                    // bounded): the import that reached here is stored and must
+                    // not count as failed; the next pass tries again.
+                    EngineError::Runtime(_) | EngineError::RequestTooLarge(_) => {
+                        log::warn!("[sync] {what} of {object_id} skipped: {error}");
+                        Ok(())
+                    }
+                    error => Err(error),
+                }
+            };
+            let classified = match self.engine.classify(&inputs).await {
+                Ok(classified) => classified,
+                Err(error) => {
+                    refused(error, "orphan check")?;
+                    continue;
+                }
+            };
+            fold.extend(classified.discard);
+            fold.extend(classified.proven);
+            if !fold.is_empty() {
+                roostr_core::sync_trace!(
+                    "{object_id}: {} change(s) folded away (leftovers, proven own)",
+                    fold.len()
+                );
+                for id in &fold {
+                    own.remove(id);
+                }
+                self.store.mark_rebased(fold).await?;
+                self.state.lock().pending_objects.insert(object_id.clone());
+            }
+            if classified.rebase.is_empty() || !self.may_rebase(&object_id) {
+                continue;
+            }
             let rebased = match self.engine.rebase(&inputs, None).await {
                 Ok(rebased) => rebased,
-                Err(error @ EngineError::Domain(_)) => {
-                    self.emit_error(format!(
-                        "rebase of {object_id} refused: {}",
-                        short(error, 120)
-                    ));
+                Err(error) => {
+                    refused(error, "rebase")?;
                     continue;
                 }
-                // Beyond this engine's request memory (the web engine's is
-                // bounded): another device rebases these orphans; the import
-                // that reached here is stored and must not count as failed.
-                Err(error @ (EngineError::Runtime(_) | EngineError::RequestTooLarge(_))) => {
-                    log::warn!("[sync] rebase of {object_id} skipped: {error}");
-                    continue;
-                }
-                Err(error) => return Err(error.into()),
             };
             for rc in rebased.changes {
                 // Stored as relay imports are: the decoded protobuf plus its base.
@@ -517,9 +625,9 @@ impl Inner {
                         },
                     )
                     .await?;
-                if let Some(pending) = pending.as_mut() {
-                    pending.insert(id.clone());
-                }
+                own.remove(&rc.orphan);
+                own.insert(id.clone(), object_id.clone());
+                pending.insert(id.clone());
                 {
                     let mut st = self.state.lock();
                     st.stats.rebased += 1;
@@ -676,10 +784,10 @@ impl Inner {
         }
         self.flush(&mut pending, imported).await?;
         self.state.lock().imported_parts.extend(parts);
-        // A new base can orphan held deltas, and a delta can arrive orphaned.
-        self.rebase_orphans(touched)
+        // A new base can orphan or prove held deltas, and a delta can arrive orphaned.
+        self.resolve_orphans(touched)
             .await
-            .context("rebase orphans")?;
+            .context("resolve orphans")?;
         if immediate_notify {
             self.flush_object_notify();
         } else {

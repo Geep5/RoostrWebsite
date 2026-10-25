@@ -291,6 +291,7 @@ async fn a_svelte_vault_is_imported_once_and_its_pending_change_published() {
                 changes: vec![synced.clone()],
                 checkpoint: None,
                 pending: Vec::new(),
+                own: Vec::new(),
             },
             BASE_MS,
             true,

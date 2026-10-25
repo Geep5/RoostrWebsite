@@ -297,18 +297,20 @@ impl Inner {
             None
         };
 
-        // This device's unpublished writes whose object moved to a newer
-        // base meanwhile rebase now.
-        let owed: Vec<String> = self
+        // This device's writes - unpublished, or published and not yet
+        // proven folded - whose object moved to a newer base meanwhile
+        // rebase (or turn out folded) now.
+        let mut owed: Vec<String> = self
             .store
             .pending_publishes()
             .await?
             .into_iter()
             .map(|p| p.object_id)
             .collect();
+        owed.extend(self.store.own_changes().await?.into_values());
         {
             let _import = self.import_lock.lock().await;
-            self.rebase_orphans(owed).await?;
+            self.resolve_orphans(owed).await?;
         }
         let covered = match followed {
             // What the walk covered for sure: the followed objects since then.

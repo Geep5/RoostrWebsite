@@ -57,19 +57,20 @@ pub use error::EngineError;
 pub use mutation::{Applied, MutationPlan, MutationRequest, MutationResponse};
 pub use query::{CorpusLoad, QueryResult, QueryUpdate};
 pub use replay::{
-    BaseCurrent, BaseDecoded, BaseSummary, Classification, ClassificationBase, CompactPlan,
-    Rebased, RebasedChange, StateInputs,
+    BaseBlobOpened, BaseCurrent, BaseDecoded, BaseSummary, Classification, ClassificationBase,
+    CompactPlan, Rebased, RebasedChange, StateInputs,
 };
 pub use serving::{Serving, ServingInputs};
 pub use session::{
-    CheckpointSummary, EnqueueResult, IngestItem, IngestResult, OutboxItem, OutboxNext,
+    BaseBlob, CheckpointSummary, EnqueueResult, IngestItem, IngestResult, OutboxItem, OutboxNext,
     OutboxPending, RelayEvent, SessionOpen, SessionSpace, SessionState, SettleResult,
 };
 pub use values::{pack_core_value_maps, unpack_core_value_maps};
 #[cfg(target_family = "wasm")]
 pub use web::WebSource;
 pub use wire::{
-    Bech32, SealRequest, SealSpace, Sealed, SealedBase, SealedBaseEvent, SealedPart, Verified,
+    Bech32, SealBlob, SealRequest, SealSpace, Sealed, SealedBase, SealedBaseEvent, SealedBlob,
+    SealedPart, Verified,
 };
 
 use serde::de::DeserializeOwned;

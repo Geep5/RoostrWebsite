@@ -3,7 +3,6 @@
 //! TableBlock, FileBlock, RelationBlock) and `File.svelte`.
 
 mod block_menu;
-mod blossom;
 mod codelint;
 mod doc;
 mod editor;

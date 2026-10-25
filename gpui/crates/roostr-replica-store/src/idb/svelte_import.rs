@@ -760,6 +760,8 @@ async fn write_meta(
                         &format!("{}{}", keys::PENDING, item.key),
                         &encode_pending(item)?,
                     )?;
+                    // Written on this device: kept until a base proves it folded.
+                    put(&format!("{}{}", keys::OWN, item.change_id), &item.object_id)?;
                     pending += 1;
                 }
             }

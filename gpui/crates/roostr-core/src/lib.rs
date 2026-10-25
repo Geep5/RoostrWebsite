@@ -5,6 +5,7 @@
 pub mod account;
 pub mod api;
 pub mod backend;
+pub mod blossom;
 pub mod color;
 pub mod create;
 #[cfg(not(target_family = "wasm"))]

@@ -1020,8 +1020,8 @@ impl Inner {
             .map(|sp| sp.info.clone())
     }
 
-    /// A shared object is rebased only by an identity that may write its
-    /// space; anything else is this vault's own.
+    /// This device's own orphans of a shared object are rebased only while
+    /// its identity may write the space; anything else is this vault's own.
     fn may_rebase(&self, object_id: &str) -> bool {
         let space_id = self.host.space_of(object_id);
         let st = self.state.lock();

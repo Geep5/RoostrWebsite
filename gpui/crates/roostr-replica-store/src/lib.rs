@@ -92,8 +92,9 @@ pub enum StoreError {
 /// One stored change: exact wire bytes plus the engine's decoded JSON text
 /// (`codec decode` shape, kept verbatim). `b` is the base hash its event
 /// named (`["b", hash]`; `None` = pre-migration or written with no base);
-/// `rebased` marks an orphan this device rebased: kept as history, never
-/// replayed again.
+/// `rebased` marks a change folded away here - an orphan this device
+/// rebased, another device's leftover, an own change proven folded: kept
+/// as history, never replayed again.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChangeRecord {
     pub id: String,
@@ -336,6 +337,9 @@ pub(crate) mod keys {
     pub const BASE_STREAMS: &str = "base-streams";
     pub const PENDING: &str = "pending:";
     pub const PUBLISHED: &str = "published:";
+    /// `own:<changeId>` → object id: written on this device, kept until a
+    /// held base proves it folded (docs/state-sync.md "Orphans and rebase").
+    pub const OWN: &str = "own:";
 }
 
 /// Persistence of a replica host. All methods are idempotent where the
@@ -349,15 +353,21 @@ pub trait ChangeStore: MaybeSend + MaybeSync {
     /// Atomically writes one page of relay imports ([`ImportBatch`]).
     /// Returns how many of its changes were new.
     fn import(&self, batch: ImportBatch) -> StoreFuture<'_, usize>;
-    /// Atomically stores a change this device wrote and its publication obligation.
+    /// Atomically stores a change this device wrote, its publication
+    /// obligation and its own mark (kept after publication, until a held
+    /// base proves it folded).
     fn add_local_change(
         &self,
         record: ChangeRecord,
         pending: PendingPublish,
     ) -> StoreFuture<'_, ()>;
-    /// Atomically stores a rebased change and marks `orphan_id` rebased.
+    /// Atomically stores a rebased change, marks `orphan_id` rebased and
+    /// moves the own mark from the orphan to the rebased change (only own
+    /// orphans are rebased).
     fn add_rebased(&self, orphan_id: String, record: ChangeRecord) -> StoreFuture<'_, ()>;
-    /// Marks orphans rebased: kept as history, never replayed again.
+    /// Folds changes away: marked rebased (kept as history, never replayed
+    /// again) and their own marks dropped - another device's leftovers and
+    /// own changes proven folded.
     fn mark_rebased(&self, ids: Vec<String>) -> StoreFuture<'_, ()>;
     /// Every stored change of the object, rebased included, in insertion order.
     fn changes_for(&self, object_id: String) -> StoreFuture<'_, Vec<ChangeRecord>>;
@@ -448,6 +458,9 @@ pub trait ChangeStore: MaybeSend + MaybeSync {
     fn save_pending(&self, item: PendingPublish) -> StoreFuture<'_, ()>;
     /// Change ids with any pending obligation.
     fn pending_change_ids(&self) -> StoreFuture<'_, HashSet<String>>;
+    /// Changes written on this device that no held base has proven folded
+    /// yet (published or not): change id -> object id.
+    fn own_changes(&self) -> StoreFuture<'_, HashMap<String, String>>;
     fn is_published(&self, key: String) -> StoreFuture<'_, bool>;
     /// Marks published and removes any pending obligation of the key.
     fn mark_published(&self, key: String) -> StoreFuture<'_, ()>;

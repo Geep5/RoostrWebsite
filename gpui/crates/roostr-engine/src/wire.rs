@@ -66,6 +66,19 @@ struct SealBasePayload<'a> {
     space: Option<SealSpace<'a>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     nonce: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    blob: Option<SealBlob<'a>>,
+}
+
+/// The Blossom blob an oversized base was uploaded as: sealing with it
+/// makes the 31078 a pointer (`docs/state-sync.md` "Oversized bases").
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct SealBlob<'a> {
+    /// sha256 hex of the blob (the ciphertext).
+    pub sha256: &'a str,
+    pub size: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<&'a str>,
 }
 
 /// Sealed parts, each to be signed as one event; `gid` is "" when unsplit.
@@ -82,7 +95,9 @@ pub struct SealedPart {
 }
 
 /// A sealed base: the addressable kind-31078 event plus its kind-1080 parts,
-/// which the host publishes BEFORE the 31078.
+/// which the host publishes BEFORE the 31078. A base too big for parts
+/// sealed without a blob has no event: `needs_blob`, and the `blob_key` to
+/// encrypt its bytes under before uploading them and sealing again.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SealedBase {
@@ -92,8 +107,25 @@ pub struct SealedBase {
     /// The addressable `d` tag.
     pub d: String,
     pub gid: String,
-    pub event: SealedBaseEvent,
+    #[serde(default)]
+    pub event: Option<SealedBaseEvent>,
+    #[serde(default)]
     pub parts: Vec<SealedBaseEvent>,
+    #[serde(default)]
+    pub needs_blob: bool,
+    #[serde(default)]
+    pub blob_key: Option<String>,
+    /// A pointer base: the blob it names.
+    #[serde(default)]
+    pub blob: Option<SealedBlob>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct SealedBlob {
+    pub sha256: String,
+    pub size: u64,
+    /// hex AES-256-GCM key of the blob (Blossom frame format).
+    pub key: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -190,7 +222,8 @@ impl Engine {
         self.call_as("wire", &payload, None).await
     }
 
-    /// Seals a base (Checkpoint protobuf, epoch >= 1) as its 31078 event and 1080 parts.
+    /// Seals a base (Checkpoint protobuf, epoch >= 1) as its 31078 event and
+    /// 1080 parts, or, with `blob`, as a pointer 31078 naming that blob.
     pub async fn seal_base(
         &self,
         base: &[u8],
@@ -198,6 +231,7 @@ impl Engine {
         secret: Option<&str>,
         space: Option<SealSpace<'_>>,
         nonce: Option<&str>,
+        blob: Option<SealBlob<'_>>,
     ) -> Result<SealedBase, EngineError> {
         let payload = SealBasePayload {
             action: "seal_base",
@@ -206,6 +240,7 @@ impl Engine {
             secret,
             space,
             nonce,
+            blob,
         };
         self.call_as("wire", &payload, None).await
     }

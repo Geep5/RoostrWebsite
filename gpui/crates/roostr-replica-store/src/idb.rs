@@ -950,9 +950,14 @@ impl ChangeStore for IdbChangeStore {
         guarded("write", async move {
             let tx = this.write(&[CHANGES, META])?;
             Self::insert_changes(&os(&tx, CHANGES)?, std::slice::from_ref(&record)).await?;
+            let meta = os(&tx, META)?;
+            meta.put_with_key(
+                &record.object_id.as_str().into(),
+                &format!("{}{}", keys::OWN, record.id).into(),
+            )
+            .map_err(js_error)?;
             let key = format!("{}{}", keys::PENDING, pending.key);
-            os(&tx, META)?
-                .put_with_key(&encode_pending(&pending)?.into(), &key.into())
+            meta.put_with_key(&encode_pending(&pending)?.into(), &key.into())
                 .map_err(js_error)?;
             done(&tx).await
         })
@@ -961,10 +966,18 @@ impl ChangeStore for IdbChangeStore {
     fn add_rebased(&self, orphan_id: String, record: ChangeRecord) -> StoreFuture<'_, ()> {
         let this = self.clone();
         guarded("write", async move {
-            let tx = this.write(&[CHANGES])?;
+            let tx = this.write(&[CHANGES, META])?;
             let changes = os(&tx, CHANGES)?;
             Self::insert_changes(&changes, std::slice::from_ref(&record)).await?;
             mark(&changes, &orphan_id).await?;
+            let meta = os(&tx, META)?;
+            meta.delete(&format!("{}{orphan_id}", keys::OWN).into())
+                .map_err(js_error)?;
+            meta.put_with_key(
+                &record.object_id.as_str().into(),
+                &format!("{}{}", keys::OWN, record.id).into(),
+            )
+            .map_err(js_error)?;
             done(&tx).await
         })
     }
@@ -975,11 +988,14 @@ impl ChangeStore for IdbChangeStore {
             if ids.is_empty() {
                 return Ok(());
             }
-            let tx = this.write(&[CHANGES])?;
+            let tx = this.write(&[CHANGES, META])?;
             let changes = os(&tx, CHANGES)?;
+            let meta = os(&tx, META)?;
             let rows = all(ids.iter().map(|id| changes.get(&id.as_str().into()))).await?;
             for (id, row) in ids.iter().zip(rows) {
                 mark_row(&changes, id, row)?;
+                meta.delete(&format!("{}{id}", keys::OWN).into())
+                    .map_err(js_error)?;
             }
             done(&tx).await
         })
@@ -1477,6 +1493,35 @@ impl ChangeStore for IdbChangeStore {
                 .iter()
                 .filter_map(JsValue::as_string)
                 .map(|key| pending_change_id(&key[keys::PENDING.len()..]).to_owned())
+                .collect())
+        })
+    }
+
+    fn own_changes(&self) -> StoreFuture<'_, HashMap<String, String>> {
+        let this = self.clone();
+        guarded("read", async move {
+            let store = os(&this.read(&[META])?, META)?;
+            let range = IdbKeyRange::bound(&"own:".into(), &"own;".into()).map_err(js_error)?;
+            // Keys and values of one range, both in key order.
+            let mut got = all([
+                store.get_all_keys_with_key(&range),
+                store.get_all_with_key(&range),
+            ])
+            .await?
+            .into_iter();
+            let (keys_of, values) = (
+                array(got.next().unwrap_or_default()),
+                array(got.next().unwrap_or_default()),
+            );
+            Ok(keys_of
+                .iter()
+                .zip(values.iter())
+                .filter_map(|(key, object_id)| {
+                    Some((
+                        key.as_string()?[keys::OWN.len()..].to_owned(),
+                        object_id.as_string()?,
+                    ))
+                })
                 .collect())
         })
     }
