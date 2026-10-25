@@ -293,8 +293,10 @@ impl ConversationDrawer {
             .flex_none()
             .items_center()
             .gap(px(10.))
+            .h(px(theme::HEADER_H))
             .px(px(14.))
-            .py(px(12.))
+            .pt(px(18.))
+            .pb(px(8.))
             .children(children)
             .child(
                 div()

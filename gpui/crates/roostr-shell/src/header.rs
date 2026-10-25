@@ -234,6 +234,7 @@ impl Workspace {
             .flex()
             .items_center()
             .gap(px(8.))
+            .h(px(theme::HEADER_H))
             .pt(px(18.))
             .px(px(16.))
             .pb(px(8.))

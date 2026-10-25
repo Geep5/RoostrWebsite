@@ -10,6 +10,11 @@ use std::rc::Rc;
 use gpui_kit::component::{Theme, ThemeConfig, ThemeMode};
 use gpui_kit::{App, Hsla, Pixels, px, rgb, rgba};
 
+/// The page header and the Chat / Properties column headers: one height, so
+/// the dividers under them line up (18 top + a 30px row + 8 bottom + the 1px
+/// divider).
+pub const HEADER_H: f32 = 57.;
+
 /// Pane/card background, body, sticky headers.
 pub fn bg() -> Hsla {
     rgb(0x1e1e20).into()
