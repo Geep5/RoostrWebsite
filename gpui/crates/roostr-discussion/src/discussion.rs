@@ -351,7 +351,7 @@ impl Discussion {
             let renamed = self
                 .origins
                 .iter()
-                .any(|(id, label)| origin_label(id, store) != *label);
+                .any(|(id, label)| origin_label(id, &self.object_id, store) != *label);
             if renamed {
                 self.sync_list(cx);
             }
@@ -472,7 +472,12 @@ impl Discussion {
             .messages
             .iter()
             .filter(|m| !m.origin.is_empty())
-            .map(|m| (m.origin.clone(), origin_label(&m.origin, store)))
+            .map(|m| {
+                (
+                    m.origin.clone(),
+                    origin_label(&m.origin, &self.object_id, store),
+                )
+            })
             .collect();
         let fingerprints: Vec<u64> = self
             .messages
@@ -1718,9 +1723,13 @@ fn when(ts: i64) -> String {
     }
 }
 
-/// The name an origin object's tag shows: none for no origin or an object
-/// the store doesn't list (deleted, or never known here).
-fn origin_label(id: &str, store: &Store) -> Option<String> {
+/// The tag a message's origin shows: that object's name, or none when the
+/// object is gone or is this chat's own object (a repeat posting in its own
+/// chat would only link to the page already open).
+fn origin_label(id: &str, here: &str, store: &Store) -> Option<String> {
+    if id == here {
+        return None;
+    }
     store.summary(id).map(|s| {
         if s.name.is_empty() {
             "Untitled".to_string()
@@ -2097,7 +2106,7 @@ impl Discussion {
         };
         // Each message's lines read after the previous message's. The object
         // it came from leads the body as that object's tag; a deleted one, none.
-        let origin = origin_label(&m.origin, store);
+        let origin = origin_label(&m.origin, &self.object_id, store);
         let text = render_markdown(
             ("md", ix),
             &m.text,
