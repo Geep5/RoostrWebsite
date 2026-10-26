@@ -9,6 +9,7 @@ mod install;
 mod keys;
 mod local;
 mod profile;
+mod section_nav;
 mod settings;
 mod space_manage;
 mod widgets;

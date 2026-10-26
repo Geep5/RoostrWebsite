@@ -32,6 +32,7 @@ use serde_json::{Value as Json, json};
 use crate::export::{ExportFormat, export_all};
 use crate::local::{self, AgentAuth, PlanStatus, with_status};
 use crate::profile;
+use crate::section_nav::{self, SectionNav};
 use crate::widgets::{
     Btn, FieldStyle, Flash, Select, Span, field, h3, hint, rich, spinner, switch,
 };
@@ -46,6 +47,8 @@ const FLASH: Duration = Duration::from_millis(1500);
 /// The mobile sheet rising into place on open (a soft `ease`).
 const SHEET_ENTER: motion::Tween = motion::Tween::ease(260);
 const BUILD_STAMP: &str = env!("ROOSTR_BUILD_STAMP");
+/// The scroll area's children before the first section (the error line).
+const FIRST_SECTION: usize = 1;
 
 /// Relays offered as toggles: ours on by default, public ones off.
 const KNOWN_RELAYS: &[(&str, &str, &str)] = &[
@@ -92,6 +95,8 @@ pub struct Settings {
     /// The settings scroll area's height the import field was last kept in
     /// view at, while it has focus (see [`keep_in_view`]).
     import_in_view: Rc<Cell<Option<Pixels>>>,
+    /// The section navigation beside (phone: above) the scroll area.
+    nav: SectionNav,
 
     // Relays
     relays: Vec<String>,
@@ -317,6 +322,7 @@ impl Settings {
             import_draft,
             import_error: SharedString::default(),
             import_in_view: Rc::default(),
+            nav: SectionNav::default(),
             relays: Vec::new(),
             new_relay,
             save_state: "",
@@ -656,6 +662,12 @@ impl Settings {
             });
         })
         .detach();
+    }
+
+    /// The section navigation's pick: glide the column to section `ix`.
+    pub(crate) fn go_to_section(&mut self, ix: usize, cx: &mut Context<Self>) {
+        self.nav.pick(ix, FIRST_SECTION, &self.scroll);
+        cx.notify();
     }
 
     // ------------------------------------------------------------- identity
@@ -2355,52 +2367,94 @@ impl Render for Settings {
             agent = agent.child(error_p(self.login_error.clone()));
         }
 
-        let content = vec![
-            header.into_any_element(),
-            div()
-                .when(!self.settings_error.is_empty(), |d| {
-                    d.child(error_p(self.settings_error.clone()))
-                })
-                .into_any_element(),
-            profile.into_any_element(),
-            chat.into_any_element(),
-            identity.into_any_element(),
-            relays.into_any_element(),
-            // The iOS app is replica-only: there is no daemon to switch to.
-            div()
-                .when(!cfg!(target_os = "ios"), |d| d.child(vault))
-                .into_any_element(),
-            desk.into_any_element(),
-            dictionary.into_any_element(),
-            export.into_any_element(),
-            plan_section.into_any_element(),
-            agent.into_any_element(),
-            div()
-                .mt(px(14.))
-                .mx(px(2.))
-                .text_size(px(11.))
-                .text_color(theme::muted())
-                .opacity(0.7)
-                .text_center()
-                .child(format!("Build {BUILD_STAMP}"))
-                .into_any_element(),
+        // The sections in order, each under the title the navigation lists.
+        let mut sections: Vec<(&'static str, Div)> = vec![
+            ("Profile", profile),
+            ("Chat color", chat),
+            ("Nostr identity", identity),
+            ("Relays", relays),
         ];
+        // The iOS app is replica-only: there is no daemon to switch to.
+        if !cfg!(target_os = "ios") {
+            sections.push(("Where your vault lives", vault));
+        }
+        sections.extend([
+            ("Desktop sync check", desk),
+            ("Dictionary", dictionary),
+            ("Export", export),
+            ("Claude plan", plan_section),
+            ("Agent", agent),
+        ]);
+        let titles: Vec<&'static str> = sections.iter().map(|(title, _)| *title).collect();
+        let active = self.nav.frame(
+            FIRST_SECTION,
+            titles.len(),
+            &self.scroll,
+            narrow,
+            window,
+            cx,
+        );
+
+        // The scrolling column: the error line, the sections from
+        // [`FIRST_SECTION`] on, the build stamp.
+        let column = div()
+            .id("settings-scroll")
+            .debug_selector(|| "settings-scroll".into())
+            .flex_1()
+            .min_w_0()
+            .min_h_0()
+            .overflow_y_scroll()
+            .track_scroll(&self.scroll)
+            .map(|d| {
+                if narrow {
+                    d.px(px(22.))
+                } else {
+                    d.pl(px(8.)).pr(px(22.))
+                }
+            })
+            .pb(px(22.))
+            .child(div().when(!self.settings_error.is_empty(), |d| {
+                d.child(error_p(self.settings_error.clone()))
+            }))
+            .children(sections.into_iter().map(|(title, card)| {
+                card.debug_selector(move || {
+                    format!("settings-section-{}", section_nav::slug(title))
+                })
+            }))
+            .child(
+                div()
+                    .mt(px(14.))
+                    .mx(px(2.))
+                    .text_size(px(11.))
+                    .text_color(theme::muted())
+                    .opacity(0.7)
+                    .text_center()
+                    .child(format!("Build {BUILD_STAMP}")),
+            );
+        let header = div().flex_none().px(px(22.)).child(header);
 
         if !narrow {
+            // The header across the top; below it the section panel and
+            // the scrolling column side by side.
             return div()
                 .id("settings")
                 .track_focus(&self.focus)
                 .key_context("Settings")
                 .w_full()
                 .max_h(roostr_core::layout::viewport(window).height * 0.8)
-                .overflow_y_scroll()
-                .track_scroll(&self.scroll)
-                .pt(px(18.))
-                .px(px(22.))
-                .pb(px(22.))
+                .flex()
+                .flex_col()
                 .text_color(theme::fg())
                 .text_size(px(13.))
-                .children(content)
+                .child(header.pt(px(18.)))
+                .child(
+                    div()
+                        .flex()
+                        .flex_1()
+                        .min_h_0()
+                        .child(self.nav.panel(&titles, active, cx))
+                        .child(column),
+                )
                 .into_any_element();
         }
 
@@ -2461,17 +2515,11 @@ impl Render for Settings {
                     )
                     .child(self.sheet_grip(cx)),
             )
-            .child(
-                div()
-                    .id("settings-scroll")
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .track_scroll(&self.scroll)
-                    .px(px(22.))
-                    .pb(px(22.))
-                    .children(content),
-            );
+            // Pinned above the column with the grab zone: the header and
+            // the section chips.
+            .child(header)
+            .child(self.nav.chips(&titles, active, cx))
+            .child(column);
         let sheet = sheet.into_any_element();
         // The dialog lends its backdrop, focus and Escape; the sheet places
         // itself against the bottom edge of the area the app is laid out in
@@ -2603,7 +2651,8 @@ fn keep_in_view(
     .inset_0()
 }
 
-/// Open Settings as a modal over the window (580px); at ≤720px, a bottom
+/// Open Settings as a modal over the window (the 580px column plus the
+/// section panel, never wider than the window allows); at ≤720px, a bottom
 /// sheet (see the narrow branch of its render).
 pub fn open_settings(window: &mut Window, cx: &mut App) {
     let settings = cx.new(|cx| Settings::new(window, cx));
@@ -2623,8 +2672,12 @@ pub fn open_settings(window: &mut Window, cx: &mut App) {
                 .border_0()
                 .bg(transparent_black())
         } else {
+            // The column keeps its 536px of content: the panel takes the
+            // place of its 14px trimmed left padding and adds the rest.
+            let wide = px(580.) + section_nav::PANEL_W - px(14.);
+            let room = roostr_core::layout::viewport(window).width - px(32.);
             dialog
-                .w(px(580.))
+                .w(wide.min(room))
                 .bg(theme::panel())
                 .border_color(theme::border())
                 .rounded(theme::radius::modal())
