@@ -1,5 +1,5 @@
 //! The search modal (`lib/components/SearchModal.svelte`): space-scoped
-//! full-text search grouped by type (fewest matches first), type chips,
+//! full-text search grouped by type (most matches first), type chips,
 //! matching types, recents for an empty query, and `Create object "<q>"`.
 //! At a phone width it is a bottom sheet (its @media 720 rules) that a
 //! downward pull drags away. The result list is a gpui-kit [`Command`]
@@ -373,9 +373,9 @@ impl SearchModal {
             }
         }
         groups.sort_by(|a, b| {
-            a.rows
+            b.rows
                 .len()
-                .cmp(&b.rows.len())
+                .cmp(&a.rows.len())
                 .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
         });
         groups
@@ -738,7 +738,7 @@ impl Render for SearchModal {
         let ordered_len = type_matches.len() + groups.iter().map(|g| g.rows.len()).sum::<usize>();
         let can_create = !q.is_empty();
 
-        // Chips: every space type while empty; else the result types with counts, fewest first.
+        // Chips: every space type while empty; else the result types with counts, most first.
         let chips: Vec<(String, String, Option<usize>)> = {
             let store = Store::global(cx).read(cx);
             if q.is_empty() {
@@ -771,7 +771,7 @@ impl Render for SearchModal {
                     .map(|(k, n)| (k.clone(), Self::type_name(&k, cx), n))
                     .collect();
                 all.sort_by(|a, b| {
-                    a.2.cmp(&b.2)
+                    b.2.cmp(&a.2)
                         .then_with(|| a.1.to_lowercase().cmp(&b.1.to_lowercase()))
                 });
                 all.into_iter()
