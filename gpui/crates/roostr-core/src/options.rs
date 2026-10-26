@@ -18,9 +18,9 @@ use crate::theme;
 use crate::types::{Fields, RelationDef, RelationOption, Value};
 
 /// One palette entry: a stored option colour `name` and the gpui-kit colour
-/// it paints with. The tag pill is the kit's own `Tag::color` look (dark
-/// theme): fill 950 at 50%, border 800 at 50%, text 300; `hex` is the vivid
-/// 500 tone (swatches, badge icons).
+/// it paints with. Tags are outline tags: no fill, a 1px ring in the colour's
+/// 500 tone at 60%, text 300 (dark theme); `hex` is the vivid 500 tone
+/// (swatches, badge icons).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TagColor {
     pub name: &'static str,
@@ -32,10 +32,10 @@ impl TagColor {
         self.kit.scale(500)
     }
     pub fn bg(&self) -> Hsla {
-        self.kit.scale(950).opacity(0.5)
+        gpui_kit::transparent_black()
     }
     pub fn border(&self) -> Hsla {
-        self.kit.scale(800).opacity(0.5)
+        self.kit.scale(500).opacity(0.6)
     }
     pub fn text(&self) -> Hsla {
         self.kit.scale(300)
@@ -106,18 +106,24 @@ pub fn tag_colors(name: &str) -> Option<TagPaint> {
     })
 }
 
-/// The pill of an option with no (known) colour: neutral fill and border, `fg` text.
+/// The tag of an option with no (known) colour: an outline in the neutral
+/// ring, `fg` text.
 pub fn unknown_tag_paint(fg: Hsla) -> TagPaint {
     TagPaint {
-        bg: unknown_tag_bg(),
+        bg: gpui_kit::transparent_black(),
         fg,
-        border: unknown_tag_bg(),
+        border: Hsla {
+            h: 0.,
+            s: 0.,
+            l: 1.,
+            a: 0.22,
+        },
     }
 }
 
-/// The kit `Tag::color` look (dark theme) for any colour, e.g. a person's chat
-/// colour: its hue and saturation at the kit's 950 (fill, 50%), 800 (border,
-/// 50%) and 300 (text) lightness.
+/// The outline tag look for any colour, e.g. a person's chat colour: no
+/// fill, its hue and saturation at the 500 tone's lightness for the ring
+/// (60%) and 300's for the text.
 pub fn tint_paint(color: Hsla) -> TagPaint {
     let at = |l: f32, a: f32| Hsla {
         h: color.h,
@@ -126,8 +132,8 @@ pub fn tint_paint(color: Hsla) -> TagPaint {
         a,
     };
     TagPaint {
-        bg: at(0.16, 0.5),
-        border: at(0.32, 0.5),
+        bg: gpui_kit::transparent_black(),
+        border: at(0.55, 0.6),
         fg: at(0.8, 1.),
     }
 }
