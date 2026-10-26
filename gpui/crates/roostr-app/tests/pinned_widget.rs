@@ -154,4 +154,26 @@ fn a_pinned_query_widget_reloads_when_other_objects_sync_in(cx: &mut TestAppCont
         *backend.widget_queries.lock() > loaded,
         "the widget asked its query again"
     );
+
+    // More rows than the old 4-row preview: every one is listed, none behind "+N more".
+    for n in 3..=7 {
+        backend.rows.lock().push(row(&format!("agent-{n}")));
+    }
+    tx.unbounded_send(Ok(BackendEvent::Committed("agent-7".into())))
+        .unwrap();
+    settle(cx);
+    for selector in [
+        "w-row-agent-1",
+        "w-row-agent-2",
+        "w-row-agent-3",
+        "w-row-agent-4",
+        "w-row-agent-5",
+        "w-row-agent-6",
+        "w-row-agent-7",
+    ] {
+        assert!(
+            cx.debug_bounds(selector).is_some(),
+            "the widget lists {selector}"
+        );
+    }
 }

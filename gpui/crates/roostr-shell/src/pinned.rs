@@ -22,7 +22,8 @@ use serde_json::{Value as Json, json};
 
 use crate::rail::mix;
 
-const LIMIT: usize = 4;
+/// Rows a list widget fetches: all of them, short of a query matching thousands.
+const LIST_FETCH: usize = 500;
 const GALLERY_LIMIT: usize = 8;
 const DOW: [&str; 7] = ["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"];
 /// A kanban group's count rolling to a new value.
@@ -264,7 +265,8 @@ fn query_body(o: &Object, cx: &App) -> Option<Json> {
         .collect();
         let map = body.as_object_mut().expect("object body");
         map.insert("sorts".into(), json!(sorts));
-        map.insert("limit".into(), json!(50));
+        // Every row shows (no "+N more"); a cap only against a query matching thousands.
+        map.insert("limit".into(), json!(LIST_FETCH));
         map.insert("fields".into(), json!(shown));
         return Some(body);
     }
@@ -273,7 +275,10 @@ fn query_body(o: &Object, cx: &App) -> Option<Json> {
     if targets.is_empty() {
         return None;
     }
-    Some(json!({ "filters": [{ "key": "id", "condition": "in", "value": targets }], "limit": 20 }))
+    let limit = targets.len();
+    Some(
+        json!({ "filters": [{ "key": "id", "condition": "in", "value": targets }], "limit": limit }),
+    )
 }
 
 struct Cell {
@@ -784,32 +789,17 @@ impl Render for PinnedWidget {
         }
 
         let mut body = body;
-        for r in self.rows.iter().take(LIMIT) {
+        for r in &self.rows {
             body = body.child(
                 line(
                     crate::eid("w-row", &r.id),
                     r.id == current_id,
                     div()
+                        .debug_selector(|| format!("w-row-{}", r.id))
                         .child(div().flex_none().text_size(px(11.)).child(row_icon(r)))
                         .child(div().min_w_0().truncate().child(row_name(r))),
                 )
                 .on_click(open(r.id.clone())),
-            );
-        }
-        if self.rows.len() > LIMIT {
-            body = body.child(
-                crate::fill_button("w-more", transparent_black(), cx)
-                    .h_auto()
-                    .px(px(8.))
-                    .py(px(2.))
-                    .justify_start()
-                    .child(
-                        div()
-                            .w_full()
-                            .text_size(px(11.))
-                            .child(format!("+{} more", self.rows.len() - LIMIT)),
-                    )
-                    .on_click(open(set_id)),
             );
         }
         body
