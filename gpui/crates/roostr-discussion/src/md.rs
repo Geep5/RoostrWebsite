@@ -200,20 +200,10 @@ fn build_line(inline: &Inline, md: &MdTheme, names: &[(String, String)], cx: &Ap
                 && let Some((name, icon)) = mention_at(&text[i..], names)
             {
                 line.push(&text[copied..i], &run);
-                // The composer's @agent tag: an outline tag in the person's
-                // chat colour; inside a coloured bubble (their own message)
-                // it takes the bubble's ink so it stays readable.
-                let paint = match md.tint {
-                    Some(_) => roostr_core::options::TagPaint {
-                        bg: gpui_kit::transparent_black(),
-                        fg: md.ink,
-                        border: md.ink.opacity(0.5),
-                    },
-                    None => {
-                        let chat = Store::global(cx).read(cx).chat_color.clone();
-                        tint_paint(roostr_core::color::hex(&chat).unwrap_or(theme::accent()))
-                    }
-                };
+                // The composer's @agent tag: the kit tag look in the person's
+                // chat colour, its box painted behind the text.
+                let chat = Store::global(cx).read(cx).chat_color.clone();
+                let paint = tint_paint(roostr_core::color::hex(&chat).unwrap_or(theme::accent()));
                 let pill = TextRun {
                     color: paint.fg,
                     font: Font {

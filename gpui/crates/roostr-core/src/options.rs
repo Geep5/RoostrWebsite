@@ -115,10 +115,9 @@ pub fn unknown_tag_paint(fg: Hsla) -> TagPaint {
     }
 }
 
-/// The chat's outline tag (mentions, object chips, composer tags) for any
-/// colour, e.g. a person's chat colour: no fill, a ring at its hue and
-/// saturation at the 500 tone's lightness (60%), text at 300's. Option tags
-/// (tables, properties) keep the filled [`tag_colors`] look.
+/// The kit `Tag::color` look (dark theme) for any colour, e.g. a person's chat
+/// colour: its hue and saturation at the kit's 950 (fill, 50%), 800 (border,
+/// 50%) and 300 (text) lightness.
 pub fn tint_paint(color: Hsla) -> TagPaint {
     let at = |l: f32, a: f32| Hsla {
         h: color.h,
@@ -127,8 +126,8 @@ pub fn tint_paint(color: Hsla) -> TagPaint {
         a,
     };
     TagPaint {
-        bg: gpui_kit::transparent_black(),
-        border: at(0.55, 0.6),
+        bg: at(0.16, 0.5),
+        border: at(0.32, 0.5),
         fg: at(0.8, 1.),
     }
 }
