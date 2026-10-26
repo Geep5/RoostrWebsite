@@ -244,6 +244,14 @@ fn switch_to_lite_keeps_unsent_changes_and_otherwise_starts_lite() {
             roostr_replica::identity::load(&*kv).is_some(),
             "still signed in"
         );
+        // The same running app (the iPhone, no page reload) opens again lite
+        // and empty: nothing of the dropped copy lingers in memory.
+        let listed = backend.objects().await.unwrap();
+        assert!(
+            listed.iter().all(|o| o.id != page_id),
+            "the dropped copy is gone in place"
+        );
+        assert!(backend.status().lite.is_some(), "reopened lite");
     });
 }
 

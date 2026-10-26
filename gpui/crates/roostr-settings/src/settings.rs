@@ -816,9 +816,9 @@ impl Settings {
             return vault;
         }
         let lite = roostr_core::lite::status(cx).is_some();
-        // A browser holding the whole vault can go back to lite: its copy is
-        // dropped and the page reloads, still signed in.
-        let vault = if cfg!(target_family = "wasm") && !lite {
+        // A browser or the iPhone app holding the whole vault can go back to
+        // lite: its copy is dropped and it opens again, still signed in.
+        let vault = if cfg!(any(target_family = "wasm", target_os = "ios")) && !lite {
             self.render_switch_to_lite(vault, cx)
         } else {
             vault
@@ -888,11 +888,11 @@ impl Settings {
     }
 
     /// "Switch to Lite" and its confirm sheet, under the mode line of a full
-    /// browser replica.
+    /// replica in a browser or the iPhone app.
     fn render_switch_to_lite(&self, vault: Div, cx: &mut Context<Self>) -> Div {
         if !self.confirm_lite {
             return vault
-                .child(p("This browser holds your whole vault. Lite keeps only what you open, which is lighter for a big vault.").mt(px(10.)))
+                .child(p("This device holds your whole vault. Lite keeps only what you open, which is lighter for a big vault.").mt(px(10.)))
                 .child(
                     div().mt(px(6.)).flex().child(
                         Btn::action("switch-lite", "Switch to Lite")
@@ -917,7 +917,7 @@ impl Settings {
                     .gap(px(4.)),
             )
             .mt(px(8.))
-            .child(p("This browser's copy of your vault is removed and the page reloads in Lite: you stay signed in, and objects download as you open them. Nothing is deleted from your vault or your other devices."))
+            .child(p("This device's copy of your vault is removed and Roostr opens again in Lite: you stay signed in, and objects download as you open them. Nothing is deleted from your vault or your other devices."))
             .when_some(self.lite_error.clone(), |d, error| {
                 d.child(div().text_size(px(13.)).text_color(theme::red()).child(error))
             })
