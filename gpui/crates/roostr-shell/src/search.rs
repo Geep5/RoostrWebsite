@@ -64,6 +64,8 @@ pub(crate) struct SearchModal {
     seq: u64,
     pending: Option<Task<()>>,
     scroll: ScrollHandle,
+    /// The type chips' row: a vertical mouse wheel scrolls it sideways.
+    chips_scroll: ScrollHandle,
     /// The result list (rows, hover, click).
     command: Entity<CommandState>,
     /// Each selectable row's path in the list, in keyboard order
@@ -237,6 +239,7 @@ impl SearchModal {
             seq: 0,
             pending: None,
             scroll: ScrollHandle::new(),
+            chips_scroll: ScrollHandle::new(),
             command: cx.new(|cx| CommandState::new(window, cx)),
             paths: Vec::new(),
             sheet_drag: None,
@@ -1215,9 +1218,36 @@ impl Render for SearchModal {
                     .when(!chips.is_empty(), |d| {
                         let mut row = div()
                             .id("search-chips")
+                            .debug_selector(|| "search-chips".into())
                             .flex()
                             .flex_none()
                             .overflow_x_scroll()
+                            .track_scroll(&self.chips_scroll)
+                            // The vendored GPUI leaves a vertical wheel over a
+                            // sideways-only scroller to the scrollers around it
+                            // (a browser's overflow); nothing around the chips
+                            // scrolls, so on desktop the wheel turns sideways
+                            // here. Mobile pans the chips with sideways swipes.
+                            .when(!mobile, |d| {
+                                let handle = self.chips_scroll.clone();
+                                d.on_scroll_wheel(cx.listener(
+                                    move |_, e: &ScrollWheelEvent, window, cx| {
+                                        let delta = wheel_scroll_delta(e, window.line_height());
+                                        let max = handle.max_offset().x;
+                                        if !delta.x.is_zero() || delta.y.is_zero() || max <= px(0.)
+                                        {
+                                            return;
+                                        }
+                                        let offset = handle.offset();
+                                        let x = (offset.x + delta.y).clamp(-max, px(0.));
+                                        if x != offset.x {
+                                            handle.set_offset(point(x, offset.y));
+                                            cx.notify();
+                                        }
+                                        cx.stop_propagation();
+                                    },
+                                ))
+                            })
                             .px(px(14.))
                             .border_b_1()
                             .border_color(theme::border())
@@ -1255,6 +1285,10 @@ impl Render for SearchModal {
                                     .accessibility_label(label.clone())
                                     .child(
                                         div()
+                                            .debug_selector({
+                                                let key = key.clone();
+                                                move || format!("chip-{key}")
+                                            })
                                             .flex()
                                             .gap(px(4.))
                                             .whitespace_nowrap()
