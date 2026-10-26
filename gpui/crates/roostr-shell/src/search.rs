@@ -1234,8 +1234,10 @@ impl Render for SearchModal {
                                     move |_, e: &ScrollWheelEvent, window, cx| {
                                         let delta = wheel_scroll_delta(e, window.line_height());
                                         let max = handle.max_offset().x;
-                                        if !delta.x.is_zero() || delta.y.is_zero() || max <= px(0.)
-                                        {
+                                        // A mostly-vertical wheel: some mice send a sliver of
+                                        // sideways with every notch. A sideways swipe (mostly x)
+                                        // keeps scrolling the row natively.
+                                        if delta.y.abs() <= delta.x.abs() || max <= px(0.) {
                                             return;
                                         }
                                         let offset = handle.offset();
