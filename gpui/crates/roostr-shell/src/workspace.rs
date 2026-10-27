@@ -1154,18 +1154,18 @@ impl Workspace {
                     }),
             )
             .child(self.main_column(wide, cx))
-            // The right pane's columns: Chat, then Properties.
-            .child(self.render_pane_column(
-                PaneTab::Chat,
-                layout.chat,
-                chat_col,
-                views.as_ref(),
-                cx,
-            ))
+            // The right pane's columns: Properties, then Chat.
             .child(self.render_pane_column(
                 PaneTab::Properties,
                 layout.properties,
                 props_col,
+                views.as_ref(),
+                cx,
+            ))
+            .child(self.render_pane_column(
+                PaneTab::Chat,
+                layout.chat,
+                chat_col,
                 views.as_ref(),
                 cx,
             ))
@@ -1193,8 +1193,8 @@ impl Workspace {
             })
             .children(
                 [
-                    (PaneTab::Chat, layout.chat, chat_col + props_col),
-                    (PaneTab::Properties, layout.properties, props_col),
+                    (PaneTab::Properties, layout.properties, props_col + chat_col),
+                    (PaneTab::Chat, layout.chat, chat_col),
                 ]
                 .into_iter()
                 .filter(|(_, column, _)| column.is_open())

@@ -1,5 +1,5 @@
-//! The right pane on a desktop: two columns beside the page, Chat then
-//! Properties, each with its own collapse button and width. A collapsed
+//! The right pane on a desktop: two columns beside the page, Properties then
+//! Chat, each with its own collapse button and width. A collapsed
 //! column is a strip with its name that expands it again; Escape collapses
 //! the column expanded last; a window too narrow for both shows one and a
 //! strip. The columns' state and widths outlive the app (a new app on the
@@ -177,11 +177,11 @@ fn chat_and_properties_are_columns_that_fold_into_each_other_and_persist(
     unsafe { std::env::set_var("ROOSTR_UI_STATE", ui_state.path().join("ui-state.json")) };
 
     let cx = open(first, 1600.);
-    // Both columns by default, Chat then Properties, right of the page.
+    // Both columns by default, Properties then Chat, right of the page.
     assert_eq!(columns(cx), ("col", "col"));
     let chat = cx.debug_bounds("pane-col-Chat").unwrap();
     let props = cx.debug_bounds("pane-col-Properties").unwrap();
-    assert!(chat.right() <= props.left(), "Chat sits left of Properties");
+    assert!(props.right() <= chat.left(), "Properties sits left of Chat");
     assert!(shown(cx, "chat-messages"), "the chat");
     assert!(!shown(cx, "pane-tab-Chat"), "no tab switch on a desktop");
     assert!(!shown(cx, "pane-folded-Chat") && !shown(cx, "pane-folded-Properties"));

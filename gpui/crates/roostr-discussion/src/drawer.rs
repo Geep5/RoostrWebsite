@@ -373,7 +373,7 @@ impl ConversationDrawer {
             let pane = PaneState::global(cx).read(cx);
             let other = tab.other();
             (
-                tab == PaneTab::Chat || !(self.chat && pane.chat_open),
+                tab == PaneTab::Properties || !pane.is_open(PaneTab::Properties),
                 pane.has(other) && !pane.is_open(other),
             )
         };
