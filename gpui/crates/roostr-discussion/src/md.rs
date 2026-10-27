@@ -201,12 +201,12 @@ fn build_line(inline: &Inline, md: &MdTheme, names: &[(String, String)], cx: &Ap
             {
                 line.push(&text[copied..i], &run);
                 // An @agent tag in that agent's own chat colour.
-                let space = roostr_core::nav::Navigator::global(cx).read(cx).space().to_string();
-                let paint = roostr_core::options::agent_tag_paint(
-                    Store::global(cx).read(cx),
-                    name,
-                    &space,
-                );
+                let space = roostr_core::nav::Navigator::global(cx)
+                    .read(cx)
+                    .space()
+                    .to_string();
+                let paint =
+                    roostr_core::options::agent_tag_paint(Store::global(cx).read(cx), name, &space);
                 let pill = TextRun {
                     color: paint.fg,
                     font: Font {
@@ -565,6 +565,9 @@ fn render_block(
             .text_size(px(12.5))
             .line_height(relative(1.5))
             .bg(theme::hover())
+            // The box is the theme's, not the bubble's: its text too, or a
+            // tinted bubble's dark ink vanishes on a dark theme's box.
+            .text_color(theme::fg())
             .border_1()
             .border_color(theme::border())
             .rounded(theme::radius::md())
