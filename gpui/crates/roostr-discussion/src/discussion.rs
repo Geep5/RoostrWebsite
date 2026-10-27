@@ -356,8 +356,17 @@ impl Discussion {
             _ => true,
         };
         if changed {
+            let guests = |o: &Option<Arc<Object>>| o.as_ref().map(|o| guest_agents(&o.fields));
+            let agents_changed = guests(&self.object) != guests(&object);
             self.object = object;
             self.derive(cx);
+            // Agents added or removed on the object: the @-options and the
+            // composer's default tag follow at once, no reload.
+            if agents_changed {
+                self.tag_options = None;
+                self.tag_loading = None;
+                self.seed_default_agent(Vec::new(), cx);
+            }
         } else {
             let store = Store::global(cx);
             let store = store.read(cx);
