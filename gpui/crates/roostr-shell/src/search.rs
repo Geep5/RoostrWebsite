@@ -99,6 +99,27 @@ const SHEET_CLOSE: f32 = 110.;
 /// like an iOS sheet, not a spring, since no gesture let go of it.
 const SHEET_ENTER: motion::Tween = motion::Tween::bezier(260, [0.2, 0.8, 0.2, 1.]);
 
+/// How well a title answers the (lowercased) query, as the store ranks rows
+/// (core/query.odin `text_rank`): 0 the whole title, 1 its start, 2 the start
+/// of a word in it, 3 anywhere in it, 4 not in it.
+fn title_rank(name: Option<&str>, q: &str) -> u8 {
+    let name = name.unwrap_or("").trim().to_lowercase();
+    if q.is_empty() || !name.contains(q) {
+        return 4;
+    }
+    if name == q {
+        return 0;
+    }
+    if name.starts_with(q) {
+        return 1;
+    }
+    let bytes = name.as_bytes();
+    let word_start = name
+        .match_indices(q)
+        .any(|(at, _)| at == 0 || !bytes[at - 1].is_ascii_alphanumeric());
+    if word_start { 2 } else { 3 }
+}
+
 /// Case-insensitive first match of `q` in `text` (`highlight`'s split).
 fn find_ci(text: &str, q: &str) -> Option<Range<usize>> {
     if q.is_empty() {
@@ -375,10 +396,20 @@ impl SearchModal {
                 }),
             }
         }
+        // The type holding the best title match leads (the store ranks rows
+        // the same way: core/query.odin `text_rank`), then most matches.
+        let q = self.query.trim().to_lowercase();
+        let best = |g: &Group| {
+            g.rows
+                .iter()
+                .map(|r| title_rank(r.name.as_deref(), &q))
+                .min()
+                .unwrap_or(4)
+        };
         groups.sort_by(|a, b| {
-            b.rows
-                .len()
-                .cmp(&a.rows.len())
+            best(a)
+                .cmp(&best(b))
+                .then_with(|| b.rows.len().cmp(&a.rows.len()))
                 .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
         });
         groups

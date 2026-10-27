@@ -1,10 +1,10 @@
 {
   "abiVersion": 2,
-  "compiler": "/opt/homebrew/bin/odin version dev-2026-07:819fdc7a8",
+  "compiler": "/opt/homebrew/bin/odin version dev-2026-08:8412dc37a",
   "target": "js_wasm32",
   "artifact": "engine.wasm",
-  "sha256": "c530de665bba9f0bec397ed051993bcd9c864cb2f908d9d1464df837c33b4bc3",
-  "sourceFingerprint": "31162c6d50f864af543332cfb1e3c09cd190529cafaf5909bf010c2cc05911a5",
+  "sha256": "a1cedb3f702df4d26c9363ac51772dca8030a44fc0e66468ba497b2cce9c9665",
+  "sourceFingerprint": "fa670519e6ab8bf984cf45e4506a135dbd54510587b3bf895768c2622ea9b673",
   "sourceFiles": {
     "abi/abi.odin": "34d035764a9dabadcd1a6ad474a36c27ba2a3a39d32273375af93e2d316b3507",
     "core/agent_message.odin": "b044ff123c05f19a4110961b02d02a0f289b27d88bfa729e398c72a4a39d1b23",
@@ -23,7 +23,7 @@
     "core/nip44.odin": "71412d79e95596ecf93c1ffb11909824bb6b44c1bd3fea3ca9c351a46fed9e82",
     "core/pins.odin": "f1fa8a1ac7828f157b531f5c61e7cfa78e2863dba8108c2d4335bd0e88cd9b6d",
     "core/proto.odin": "8299a29d819654d184417aaa730214870f797ed9f4720376c1bcfa3957490c3b",
-    "core/query.odin": "4324a047cb12c8a02830ccdf132d73f057624eb8b3a7f9d837cf11af7eb27719",
+    "core/query.odin": "49b29c5be5c5905c21e8ef92a627f8e73a84c62179cf060628f97aa8c7584d1e",
     "core/repeat.odin": "13511f1ce31357bfe4ae34c531ff81fae3996c9bb4bc82f595f75c48a4db168d",
     "core/replay.odin": "4b37e9f51e80d9699b93b3ec054828871cfeb612b45aee0aaab1de1ecd425300",
     "core/serving.odin": "7615af9c0a5a2deeb57be2d5eba7de172dda28927b6f47cc269eb7f63196a709",
