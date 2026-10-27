@@ -5,11 +5,14 @@
 //!
 //! - `cover`: a link to the cover's File object; `cover_y`: its vertical
 //!   focus, 0 (top edge shown) ..= 1 (bottom), 0.5 when absent.
-//! - `cover_request` (written here, any device): `{at, action, prompt}`; the
-//!   computer serving the space's OpenAI credential deletes it as it takes it.
-//! - `cover_generation` (written by that computer): the session's status,
-//!   prompt(s) and painted tries. The app deletes it, and vanishes the tries
-//!   nobody used, when the person closes the generate panel.
+//! - `cover_request` (written here, any device): `{at, action: "generate"}`;
+//!   the computer serving the space's OpenAI credential deletes it as it
+//!   takes it.
+//! - `cover_generation` (written by that computer): the run in progress
+//!   (`writing`, `painting`), shown as a spinner. A finished run makes its
+//!   image the page's `cover` and deletes this field; a failed one stays
+//!   (`failed`, with OpenAI's message) until the next Generate or the person
+//!   dismisses it.
 
 use anyhow::Result;
 use gpui_kit::{App, AppContext as _, Entity, EventEmitter, Global, Task};
@@ -30,9 +33,6 @@ pub const DEFAULT_Y: f32 = 0.5;
 /// the serving computer answers with the same words when it finds none.
 pub const NEEDS_KEY: &str =
     "Add an OpenAI key to this space's OpenAI credential to generate covers";
-
-/// The generate panel's cost note.
-pub const COST_NOTE: &str = "High quality · about $0.20 per image on this space's OpenAI key";
 
 /// Every page with the object header has a cover slot; a chat object's page
 /// is its discussion.
@@ -65,20 +65,11 @@ pub fn space_of(object: &Object) -> String {
 /// `cover_generation.status`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Status {
-    /// The art director is writing the prompt.
+    /// The art director is writing the idea.
     Writing,
     /// The image is being painted.
     Painting,
-    Done,
     Failed,
-}
-
-/// One painted image of the session.
-#[derive(Clone, PartialEq, Debug)]
-pub struct Try {
-    pub file: String,
-    pub prompt: String,
-    pub at: i64,
 }
 
 /// `cover_generation`, as the serving computer last wrote it.
@@ -89,8 +80,6 @@ pub struct Generation {
     pub status: Option<Status>,
     /// The OpenAI credential used (or needed).
     pub credential: String,
-    pub prompt: String,
-    pub tries: Vec<Try>,
     pub error: String,
     pub needs_key: bool,
 }
@@ -102,43 +91,31 @@ impl Generation {
     }
 }
 
+/// Whether a cover is being made for the page: asked and not yet answered,
+/// or its run is writing or painting.
+pub fn generating(fields: &Fields) -> bool {
+    let run = generation(fields);
+    pending_request(fields).is_some_and(|at| run.as_ref().is_none_or(|g| g.at != at))
+        || run.is_some_and(|g| g.running())
+}
+
 fn entry_str(entries: &Fields, key: &str) -> String {
     field_str(entries, key).to_string()
 }
 
-fn entry_int(entries: &Fields, key: &str) -> i64 {
-    entries.get(key).and_then(Value::as_int).unwrap_or_default()
-}
-
-/// The page's generate session, if one is open.
+/// The page's generate run, if one is on it.
 pub fn generation(fields: &Fields) -> Option<Generation> {
     let entries = fields.get(GENERATION)?.entries()?;
     let status = match field_str(entries, "status") {
         "writing" => Some(Status::Writing),
         "painting" => Some(Status::Painting),
-        "done" => Some(Status::Done),
         "failed" => Some(Status::Failed),
         _ => None,
     };
-    let tries = entries
-        .get("tries")
-        .map(Value::items)
-        .unwrap_or_default()
-        .iter()
-        .filter_map(Value::entries)
-        .map(|t| Try {
-            file: entry_str(t, "file"),
-            prompt: entry_str(t, "prompt"),
-            at: entry_int(t, "at"),
-        })
-        .filter(|t| !t.file.is_empty())
-        .collect();
     Some(Generation {
-        at: entry_int(entries, "at"),
+        at: entries.get("at").and_then(Value::as_int).unwrap_or_default(),
         status,
         credential: entry_str(entries, "credential"),
-        prompt: entry_str(entries, "prompt"),
-        tries,
         error: entry_str(entries, "error"),
         needs_key: entries.get("needs_key").and_then(|v| v.bool_value) == Some(true),
     })
@@ -147,46 +124,30 @@ pub fn generation(fields: &Fields) -> Option<Generation> {
 /// The `at` of the page's pending `cover_request`, if any.
 pub fn pending_request(fields: &Fields) -> Option<i64> {
     let entries = fields.get(REQUEST)?.entries()?;
-    Some(entry_int(entries, "at"))
+    Some(entries.get("at").and_then(Value::as_int).unwrap_or_default())
 }
 
-/// `cover_request.action`.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Action {
-    /// Write the idea, then paint it - or paint the person's own prompt.
-    Generate,
-    /// Paint the same prompt again.
-    Reroll,
-    /// Write a different idea, then paint it.
-    NewIdea,
-}
-
-impl Action {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Generate => "generate",
-            Self::Reroll => "reroll",
-            Self::NewIdea => "new_idea",
-        }
-    }
-}
-
-/// Ask the space's OpenAI computer for a cover (`cover_request`). `prompt`:
-/// Generate - the person's own prompt, "" to have the idea written; Reroll -
-/// the prompt to paint again; New idea - ignored.
-pub fn request(object_id: &str, action: Action, prompt: &str, cx: &mut App) -> Task<Result<()>> {
-    let mut entries = Fields::from([
+/// Ask the space's OpenAI computer for a new cover (`cover_request`); the
+/// failure of an earlier try goes with it.
+pub fn request(object: &Object, cx: &mut App) -> Task<Result<()>> {
+    let entries = Fields::from([
         (
             "at".to_string(),
             Value::int(chrono::Utc::now().timestamp_millis()),
         ),
-        ("action".to_string(), Value::string(action.as_str())),
+        ("action".to_string(), Value::string("generate")),
     ]);
-    if action != Action::NewIdea {
-        entries.insert("prompt".into(), Value::string(prompt));
-    }
-    let set = api::note::set_field(object_id, REQUEST, Value::map(entries), cx);
-    cx.background_spawn(async move { set.await.map(|_| ()) })
+    let set = api::note::set_field(&object.id, REQUEST, Value::map(entries), cx);
+    let failed = object
+        .fields
+        .contains_key(GENERATION)
+        .then(|| api::note::delete_field(&object.id, GENERATION, cx));
+    cx.background_spawn(async move {
+        if let Some(failed) = failed {
+            failed.await?;
+        }
+        set.await.map(|_| ())
+    })
 }
 
 /// Make File `file_id` the page's cover, focused in the middle.
@@ -217,19 +178,8 @@ pub fn remove(object_id: &str, cx: &mut App) -> Task<Result<()>> {
     })
 }
 
-/// Close the page's generate session: vanish every painted try but `kept`
-/// and the page's cover, then delete `cover_generation` and any pending
-/// `cover_request`.
-pub fn end_session(object: &Object, kept: Option<&str>, cx: &mut App) -> Task<Result<()>> {
-    let cover = cover_file(&object.fields);
-    let unused: Vec<String> = generation(&object.fields)
-        .map(|g| g.tries)
-        .unwrap_or_default()
-        .into_iter()
-        .map(|t| t.file)
-        .filter(|f| Some(f.as_str()) != kept && Some(f) != cover.as_ref())
-        .collect();
-    let vanish = (!unused.is_empty()).then(|| api::note::vanish(&unused, cx));
+/// Dismiss the page's failed run (or stop waiting for one): its fields go.
+pub fn dismiss(object: &Object, cx: &mut App) -> Task<Result<()>> {
     let generation = object
         .fields
         .contains_key(GENERATION)
@@ -239,7 +189,7 @@ pub fn end_session(object: &Object, kept: Option<&str>, cx: &mut App) -> Task<Re
         .contains_key(REQUEST)
         .then(|| api::note::delete_field(&object.id, REQUEST, cx));
     cx.background_spawn(async move {
-        for task in [vanish, generation, request].into_iter().flatten() {
+        for task in [generation, request].into_iter().flatten() {
             task.await?;
         }
         Ok(())
@@ -361,33 +311,30 @@ mod tests {
     }
 
     #[test]
-    fn a_generation_reads_its_status_prompt_and_tries() {
-        let f = fields(json!({ "cover_generation": { "mapValue": { "entries": {
+    fn a_generation_reads_its_status_and_error_and_says_when_a_cover_is_coming() {
+        let failed = fields(json!({ "cover_generation": { "mapValue": { "entries": {
             "at": { "intValue": 7 },
             "status": { "stringValue": "failed" },
             "credential": { "stringValue": "openai-sp" },
-            "prompt": { "stringValue": "A fox" },
-            "tries": { "valuesValue": { "items": [
-                { "mapValue": { "entries": { "file": { "stringValue": "f1" }, "prompt": { "stringValue": "A fox" }, "at": { "intValue": 5 } } } },
-            ] } },
             "error": { "stringValue": NEEDS_KEY },
             "needs_key": { "boolValue": true },
         } } } }));
-        let g = generation(&f).unwrap();
+        let g = generation(&failed).unwrap();
         assert_eq!(g.at, 7);
         assert_eq!(g.status, Some(Status::Failed));
         assert!(!g.running());
         assert_eq!(g.credential, "openai-sp");
-        assert_eq!(
-            g.tries,
-            vec![Try {
-                file: "f1".into(),
-                prompt: "A fox".into(),
-                at: 5
-            }]
-        );
         assert!(g.needs_key);
         assert_eq!(g.error, NEEDS_KEY);
+        assert!(!generating(&failed));
+        // Asked, unanswered: coming. Answered by a run that paints: coming.
+        let asked = fields(json!({ "cover_request": { "mapValue": { "entries": { "at": { "intValue": 8 } } } } }));
+        assert!(generating(&asked));
+        let painting = fields(json!({ "cover_generation": { "mapValue": { "entries": {
+            "at": { "intValue": 8 }, "status": { "stringValue": "painting" },
+        } } } }));
+        assert!(generating(&painting));
+        assert!(!generating(&Fields::new()));
     }
 
     #[test]

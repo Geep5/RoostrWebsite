@@ -79,7 +79,7 @@ pub struct ObjectPage {
     pending_title_fix: Option<String>,
     /// Whether the title was last set read-only (built-in tools).
     title_read_only: bool,
-    /// The cover banner, its actions and the generate panel.
+    /// The cover banner, its actions and generating.
     cover: cover::CoverUi,
     _subscriptions: Vec<Subscription>,
 }
@@ -112,7 +112,6 @@ impl ObjectPage {
                         let id = this.id.clone();
                         store.update(cx, |store, cx| store.reload_object(&id, cx));
                     }
-                    this.cover_store_event(event, cx);
                     this.sync(window, cx);
                 },
             ),
@@ -148,9 +147,9 @@ impl ObjectPage {
             cx.subscribe_in(
                 &CoverAsks::global(cx),
                 window,
-                |this, _, ask: &CoverAsk, window, cx| {
+                |this, _, ask: &CoverAsk, _, cx| {
                     if ask.object_id == this.id {
-                        this.on_cover_ask(ask.action, window, cx);
+                        this.on_cover_ask(ask.action, cx);
                     }
                 },
             ),
@@ -281,7 +280,7 @@ impl ObjectPage {
             }
             (_, false) => self.pane = None,
         }
-        self.sync_cover(&object, window, cx);
+        self.sync_cover(&object, cx);
         if self.is_active(cx) {
             self.publish_pane(cx);
         }

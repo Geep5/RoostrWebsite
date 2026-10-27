@@ -50,8 +50,8 @@ pub(crate) static BLOCKS: &[Block] = &[
     Ul(&[
         "Any page but a chat can have a **cover**: a wide picture above its icon and title. Hover the icon and title and choose **Add cover** (on a phone: ⋯ → Add cover), then choose an image or paste one (in the browser: paste one). It is added to the space like any file.",
         "Hover the cover for **Change cover**, **Reposition** (drag the picture up or down, then Save position), **Remove** and **Generate**; on a phone they are in the ⋯ menu. A cover is two properties of the page, **Cover** and **Cover position**, so it syncs like everything else.",
-        "**Generate** asks OpenAI for a cover that fits the page: first an idea is written from the page's title, type, text and properties, then it is painted. Edit the idea before pressing Generate to have your own words painted instead; **Reroll** paints the same idea again, **New idea** asks for a different one. Every try shows as a thumbnail: pick one and press **Use this**. Closing the panel deletes the tries you didn't use.",
-        "Generating uses the space's **OpenAI** credential and runs on its Served by computer. Each image is high quality and costs about $0.20 on that key. The request, its progress (“Writing the idea…”, “Painting…”) and any error from OpenAI show in the panel on the page.",
+        "**Generate** asks OpenAI for a cover that fits the page: an idea is written from the page's title, type, text and properties, then painted. The cover spins while it works and the new image replaces it when it's ready; press Generate again for another one.",
+        "Generating uses the space's **OpenAI** credential and runs on its Served by computer. Each image is high quality and costs about $0.20 on that key. If it fails, OpenAI's reason shows under the title.",
     ]),
     H2(Some("spaces"), "Spaces"),
     Ul(&[
@@ -119,7 +119,7 @@ pub(crate) static BLOCKS: &[Block] = &[
         "Only you can sign in: press **Connect** and the sign-in window opens on the computer you are using; Roostr then hands the login to the Served by computer. If a site won't take a login made on another computer, the credential's Error says so - sign in on its Served by computer instead. Agents can prepare a credential but never sign in for you.",
         "**Check now** (on the Status, or the Status cell in a table) works from any device, phone included: the Served by computer tests the login and the Status says _Checking on …_ until it answers - also after you finish a sign-in that still says _Waiting for sign-in_. No answer within a minute means Roostr isn't running there.",
         "An agent can use a login only if it is in the agent's Credentials. Pasted keys and saved logins are on the credential, readable by everyone in its space; sign in from any of your computers.",
-        "Every space has one **OpenAI** credential, blank until you paste your own API key into it - Roostr never ships a key. It pays for generated covers; the work runs on its Served by computer, and a missing or refused key shows on its Error and in the generate panel.",
+        "Every space has one **OpenAI** credential, blank until you paste your own API key into it - Roostr never ships a key. It pays for generated covers; the work runs on its Served by computer, and a missing or refused key shows on its Error and under the page's title when you press Generate.",
     ]),
     H2(Some("practices"), "Best practices"),
     H3("Designing"),

@@ -1,11 +1,10 @@
 //! Page covers: Add cover (hovering the icon and title) adds a pasted image
 //! the usual way and sets `cover` + `cover_y`; the banner sits above the
 //! title with the icon overlapping its bottom edge; Reposition drags the
-//! focus and saves `cover_y`; Remove deletes both. The generate panel shows
-//! the needs-key state before asking anything, the serving computer's
-//! progress and errors, its tries as thumbnails, and Use this / close end
-//! the session as the covers contract says. A phone has the same actions
-//! in its ⋯ menu.
+//! focus and saves `cover_y`; Remove deletes both. Generate asks once and
+//! spins the banner until the serving computer's image replaces the cover;
+//! a failure shows its reason, and closing it deletes the run. A phone has
+//! the same actions in its ⋯ menu.
 #![cfg(not(target_family = "wasm"))]
 
 use std::cell::RefCell;
@@ -344,14 +343,6 @@ fn generation(entries: Json) -> Value {
     serde_json::from_value(json!({ "mapValue": { "entries": entries } })).unwrap()
 }
 
-fn try_entry(file: &str, prompt: &str) -> Json {
-    json!({ "mapValue": { "entries": {
-        "file": { "stringValue": file },
-        "prompt": { "stringValue": prompt },
-        "at": { "intValue": 1 },
-    } } })
-}
-
 /// The serving computer takes the pending ask and answers with `entries`.
 fn answer(
     backend: &Vault,
@@ -485,42 +476,13 @@ fn on_a_desktop_page(cx: &mut TestAppContext) {
     );
     assert!(!shown(cx, "object-cover"));
 
-    // Generate, from Add cover: the credential has no key, so nothing can be asked.
+    // Generate, from Add cover: one ask, no panel; the banner spins while it runs.
     hover(cx, "object-title");
     tap(cx, "cover-add");
     tap(cx, "cover-chooser-generate");
-    assert!(shown(cx, "cover-panel") && !shown(cx, "cover-chooser"));
-    assert!(shown(cx, "cover-needs-key") && shown(cx, "cover-open-credential"));
-    assert!(shown(cx, "cover-cost"));
-    tap(cx, "cover-ask-generate");
-    assert_eq!(asked(&backend), None, "no ask without a key");
-
-    // A key pasted into the credential lifts it; Generate asks for an idea.
-    backend.edit(CREDENTIAL, |f| {
-        f.insert("key_api_key".into(), Value::string("sk-test"));
-    });
-    tx.unbounded_send(Ok(BackendEvent::Committed(CREDENTIAL.into())))
-        .unwrap();
-    settle(cx);
-    assert!(!shown(cx, "cover-needs-key"));
-    tap(cx, "cover-ask-generate");
-    assert_eq!(
-        asked(&backend),
-        Some(("generate".into(), Some(String::new())))
-    );
-    assert!(shown(cx, "cover-progress-waiting"));
-
-    // Progress as the serving computer reports it.
-    answer(
-        &backend,
-        &tx,
-        cx,
-        json!({
-            "at": { "intValue": 1 }, "action": { "stringValue": "generate" },
-            "status": { "stringValue": "writing" }, "credential": { "stringValue": CREDENTIAL },
-        }),
-    );
-    assert!(shown(cx, "cover-progress-writing") && !shown(cx, "cover-progress-waiting"));
+    assert!(!shown(cx, "cover-chooser"));
+    assert_eq!(asked(&backend), Some(("generate".into(), None)));
+    assert!(shown(cx, "object-cover") && shown(cx, "cover-generating"));
     answer(
         &backend,
         &tx,
@@ -528,155 +490,40 @@ fn on_a_desktop_page(cx: &mut TestAppContext) {
         json!({
             "at": { "intValue": 1 }, "action": { "stringValue": "generate" },
             "status": { "stringValue": "painting" }, "credential": { "stringValue": CREDENTIAL },
-            "prompt": { "stringValue": "A red fox at dawn" },
         }),
     );
-    assert!(shown(cx, "cover-progress-painting") && !shown(cx, "cover-progress-writing"));
-    answer(
-        &backend,
-        &tx,
-        cx,
-        json!({
-            "at": { "intValue": 1 }, "action": { "stringValue": "generate" },
-            "status": { "stringValue": "done" }, "credential": { "stringValue": CREDENTIAL },
-            "prompt": { "stringValue": "A red fox at dawn" },
-            "prompts": { "valuesValue": { "items": [{ "stringValue": "A red fox at dawn" }] } },
-            "tries": { "valuesValue": { "items": [try_entry("try-1", "A red fox at dawn")] } },
-        }),
-    );
-    assert!(!shown(cx, "cover-progress-painting"));
-    assert!(shown(cx, "cover-try-0") && shown(cx, "cover-preview"));
+    assert!(shown(cx, "cover-generating"));
 
-    // Reroll paints the prompt in the box (the art director's, untouched).
-    tap(cx, "cover-ask-reroll");
-    assert_eq!(
-        asked(&backend),
-        Some(("reroll".into(), Some("A red fox at dawn".into())))
-    );
-    answer(
-        &backend,
-        &tx,
-        cx,
-        json!({
-            "at": { "intValue": 2 }, "action": { "stringValue": "reroll" },
-            "status": { "stringValue": "done" }, "credential": { "stringValue": CREDENTIAL },
-            "prompt": { "stringValue": "A red fox at dawn" },
-            "tries": { "valuesValue": { "items": [
-                try_entry("try-1", "A red fox at dawn"),
-                try_entry("try-2", "A red fox at dawn"),
-            ] } },
-        }),
-    );
-    assert!(shown(cx, "cover-try-1"));
-
-    // An untouched box asks for a fresh idea; an edited one is painted as written.
-    tap(cx, "cover-ask-generate");
-    assert_eq!(
-        asked(&backend),
-        Some(("generate".into(), Some(String::new())))
-    );
-    answer(
-        &backend,
-        &tx,
-        cx,
-        json!({
-            "at": { "intValue": 3 }, "action": { "stringValue": "generate" },
-            "status": { "stringValue": "failed" }, "credential": { "stringValue": CREDENTIAL },
-            "prompt": { "stringValue": "A red fox at dawn" },
-            "error": { "stringValue": "Your request was rejected by the safety system." },
-            "tries": { "valuesValue": { "items": [
-                try_entry("try-1", "A red fox at dawn"),
-                try_entry("try-2", "A red fox at dawn"),
-            ] } },
-        }),
-    );
-    assert!(shown(cx, "cover-error") && !shown(cx, "cover-needs-key"));
-    tap(cx, "cover-prompt");
-    cx.simulate_keystrokes("cmd-a");
-    cx.simulate_input("A blue whale");
-    settle(cx);
-    tap(cx, "cover-ask-generate");
-    assert_eq!(
-        asked(&backend),
-        Some(("generate".into(), Some("A blue whale".into())))
-    );
-    tap(cx, "cover-ask-new-idea");
-    assert_eq!(
-        asked(&backend),
-        Some(("generate".into(), Some("A blue whale".into()))),
-        "nothing more is asked while one is pending"
-    );
-
-    // A refused key: the computer's words and the way to the credential.
-    answer(
-        &backend,
-        &tx,
-        cx,
-        json!({
-            "at": { "intValue": 4 }, "action": { "stringValue": "generate" },
-            "status": { "stringValue": "failed" }, "credential": { "stringValue": CREDENTIAL },
-            "prompt": { "stringValue": "A blue whale" },
-            "error": { "stringValue": NEEDS_KEY }, "needs_key": { "boolValue": true },
-            "tries": { "valuesValue": { "items": [
-                try_entry("try-1", "A red fox at dawn"),
-                try_entry("try-2", "A red fox at dawn"),
-            ] } },
-        }),
-    );
-    assert!(shown(cx, "cover-needs-key") && !shown(cx, "cover-error"));
-    backend.take_log();
-
-    // Use this: the chosen try is the cover, the other one vanishes, the session goes.
-    tap(cx, "cover-try-0");
-    tap(cx, "cover-use");
-    assert_eq!(
-        backend.take_log(),
-        vec![
-            set(
-                "cover",
-                json!({ "linkValue": { "targetId": "try-1", "relationKey": "cover" } })
-            ),
-            set("cover_y", json!({ "floatValue": 0.5 })),
-            ("vanish".into(), json!(["try-2"]), Json::Null),
-            deleted("cover_generation"),
-        ]
-    );
-    assert!(!shown(cx, "cover-panel"));
-    assert!(shown(cx, "object-cover"));
-
-    // A session found on the page opens the panel; closing it vanishes its
-    // tries (never the page's cover) and deletes the session and its ask.
+    // Done: the computer makes the image the cover and ends the run; the spinner goes.
     backend.edit(PAGE, |f| {
-        f.insert(
-            "cover_generation".into(),
-            generation(json!({
-                "at": { "intValue": 5 }, "status": { "stringValue": "done" },
-                "prompt": { "stringValue": "Dunes" },
-                "tries": { "valuesValue": { "items": [
-                    try_entry("try-1", "A red fox at dawn"),
-                    try_entry("try-3", "Dunes"),
-                ] } },
-            })),
-        );
-        f.insert(
-            "cover_request".into(),
-            generation(json!({ "at": { "intValue": 6 }, "action": { "stringValue": "new_idea" } })),
-        );
+        f.remove("cover_generation");
+        f.insert("cover".into(), Value::link("file-1", "cover"));
     });
     tx.unbounded_send(Ok(BackendEvent::Committed(PAGE.into())))
         .unwrap();
     settle(cx);
-    assert!(shown(cx, "cover-panel") && shown(cx, "cover-progress-waiting"));
-    tap(cx, "cover-panel-close");
-    assert_eq!(
-        backend.take_log(),
-        vec![
-            ("vanish".into(), json!(["try-3"]), Json::Null),
-            deleted("cover_generation"),
-            deleted("cover_request"),
-        ]
+    assert!(shown(cx, "object-cover") && !shown(cx, "cover-generating"));
+    backend.take_log();
+
+    // A failure says why, with the way to the credential when the key is the trouble.
+    hover(cx, "object-cover");
+    tap(cx, "cover-generate");
+    answer(
+        &backend,
+        &tx,
+        cx,
+        json!({
+            "at": { "intValue": 2 }, "action": { "stringValue": "generate" },
+            "status": { "stringValue": "failed" }, "credential": { "stringValue": CREDENTIAL },
+            "error": { "stringValue": NEEDS_KEY }, "needs_key": { "boolValue": true },
+        }),
     );
-    assert!(!shown(cx, "cover-panel"));
+    assert!(!shown(cx, "cover-generating"));
+    assert!(shown(cx, "cover-error") && shown(cx, "cover-open-credential"));
+    backend.take_log();
+    tap(cx, "cover-failed-close");
+    assert_eq!(backend.take_log(), vec![deleted("cover_generation")]);
+    assert!(!shown(cx, "cover-failed"));
 }
 
 fn in_a_phones_more_menu(cx: &mut TestAppContext) {
@@ -718,5 +565,6 @@ fn in_a_phones_more_menu(cx: &mut TestAppContext) {
     );
     tap(cx, "m-more");
     tap(cx, "more-cover-generate");
-    assert!(shown(cx, "cover-panel") && shown(cx, "cover-needs-key"));
+    assert_eq!(asked(&backend), Some(("generate".into(), None)));
+    assert!(shown(cx, "cover-generating"));
 }

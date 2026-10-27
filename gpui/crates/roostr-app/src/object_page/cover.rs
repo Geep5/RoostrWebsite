@@ -1,24 +1,23 @@
 //! A page's cover ([`roostr_core::cover`]): the banner above the icon and
 //! title (the icon overlaps its bottom edge), its actions - desktop: on
 //! hover; phone: the ⋯ menu - Reposition, the image chooser behind Add
-//! cover / Change cover, and the generate panel that renders the page's
-//! `cover_generation` session.
+//! cover / Change cover, and Generate: a spinner on the banner until the
+//! new image replaces the cover.
 
 use std::cell::Cell;
-use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui_kit::component::Icon;
 use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
-use gpui_kit::component::input::{Textarea, TextareaState};
+use gpui_kit::component::spinner::Spinner;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use roostr_core::cover::{self, Action, CoverAction, Generation, OpenAiCredential, Status};
+use roostr_core::cover::{self, CoverAction};
 use roostr_core::create::{AddFile, add_failure_text};
 use roostr_core::nav::{Route, navigate};
 use roostr_core::types::Object;
-use roostr_core::{Glyph, StoreEvent, theme, ui};
+use roostr_core::{Glyph, theme, ui};
 use roostr_editor::PickedFile;
 
 use super::ObjectPage;
@@ -31,27 +30,19 @@ const BANNER_H_PHONE: f32 = 140.;
 pub(super) const ICON_OVERLAP: f32 = 44.;
 pub(super) const ICON_OVERLAP_PHONE: f32 = 30.;
 
-const WRITING: &str = "Writing the idea…";
-const PAINTING: &str = "Painting… (~30 s)";
-const WAITING: &str = "Waiting for the computer that serves this space's OpenAI credential…";
-
 /// The cover's state on one page.
 #[derive(Default)]
 pub(super) struct CoverUi {
     /// The banner's File and its image (`None` while loading or unreadable).
     banner: Option<(String, Option<Arc<Image>>)>,
-    /// Generated tries' images by File id (`None` while loading or unreadable).
-    thumbs: HashMap<String, Option<Arc<Image>>>,
     /// The pointer is over the icon and title (desktop: shows Add cover).
     head_hovered: bool,
     /// The pointer is over the banner (desktop: shows its actions).
     banner_hovered: bool,
     reposition: Option<Reposition>,
     chooser: Option<Chooser>,
-    panel: Option<Panel>,
-    /// The session the person closed, until its fields are gone: a session
-    /// that is still (or again) on the page opens the panel by itself.
-    dismissed: Option<i64>,
+    /// Asking for a cover failed before any computer saw it.
+    ask_error: String,
     /// Where the banner was painted and its image's size, for dragging.
     geometry: Rc<Cell<Geometry>>,
 }
@@ -86,33 +77,6 @@ struct Chooser {
     adding: bool,
     error: String,
 }
-
-/// The generate panel.
-struct Panel {
-    prompt: Entity<TextareaState>,
-    /// What the box was last filled with: the person edited it when it
-    /// holds anything else.
-    synced: String,
-    /// The session prompt last shown.
-    shown_prompt: String,
-    /// The try previewed (and used by Use this).
-    selected: Option<String>,
-    /// How many tries the session had last time: a new one is selected.
-    seen_tries: usize,
-    key: KeyState,
-    error: String,
-}
-
-/// The space's OpenAI credential, as far as the panel knows.
-#[derive(Clone, PartialEq)]
-enum KeyState {
-    Checking,
-    /// No OpenAI credential in the space.
-    Missing,
-    /// The credential, and whether its key is filled in.
-    Found(OpenAiCredential),
-}
-
 /// The banner image positioned like CSS `object-fit: cover` with
 /// `object-position: 50% (y * 100)%`.
 fn cover_bounds(bounds: Bounds<Pixels>, image: Size<f32>, y: f32) -> Bounds<Pixels> {
@@ -126,13 +90,6 @@ fn cover_bounds(bounds: Bounds<Pixels>, image: Size<f32>, y: f32) -> Bounds<Pixe
         ),
         size,
     }
-}
-
-/// The session's `at`: the newest of its answer and its pending ask.
-fn session_at(object: &Object) -> Option<i64> {
-    let generation = cover::generation(&object.fields).map(|g| g.at);
-    let request = cover::pending_request(&object.fields);
-    generation.into_iter().chain(request).max()
 }
 
 /// A button laid over the cover image: light, so it reads on any picture.
@@ -163,13 +120,8 @@ fn tagged(id: &'static str, button: impl IntoElement) -> Div {
 }
 
 impl ObjectPage {
-    /// Bring the cover in line with the page: its image, the panel's session.
-    pub(super) fn sync_cover(
-        &mut self,
-        object: &Object,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    /// Bring the banner in line with the page's cover.
+    pub(super) fn sync_cover(&mut self, object: &Object, cx: &mut Context<Self>) {
         let file = cover::can_have_cover(object)
             .then(|| cover::cover_file(&object.fields))
             .flatten();
@@ -194,80 +146,15 @@ impl ObjectPage {
                 .detach();
             }
         }
-        let session = cover::can_have_cover(object)
-            .then(|| session_at(object))
-            .flatten();
-        if session.is_none() {
-            self.cover.dismissed = None;
-        } else if self.cover.panel.is_none() && session != self.cover.dismissed {
-            self.open_generate(window, cx);
-        }
-        let Some(panel) = &mut self.cover.panel else {
-            return;
-        };
-        let generation = cover::generation(&object.fields).unwrap_or_default();
-        // A new prompt from the art director fills the box unless the person is editing it.
-        if generation.prompt != panel.shown_prompt {
-            let text = panel.prompt.read(cx).value().to_string();
-            if text == panel.synced || text == generation.prompt {
-                panel.prompt.update(cx, |p, cx| {
-                    p.set_value(generation.prompt.clone(), window, cx)
-                });
-                panel.synced = generation.prompt.clone();
-            }
-            panel.shown_prompt = generation.prompt.clone();
-        }
-        if generation.tries.len() != panel.seen_tries {
-            panel.seen_tries = generation.tries.len();
-            panel.selected = generation.tries.last().map(|t| t.file.clone());
-        }
-        let missing: Vec<String> = generation
-            .tries
-            .iter()
-            .map(|t| t.file.clone())
-            .filter(|f| !self.cover.thumbs.contains_key(f))
-            .collect();
-        for file in missing {
-            self.cover.thumbs.insert(file.clone(), None);
-            let load = roostr_editor::file_image(&file, cx);
-            cx.spawn(async move |this, cx| {
-                let image = load.await.ok();
-                let _ = this.update(cx, |this, cx| {
-                    this.cover.thumbs.insert(file, image);
-                    cx.notify();
-                });
-            })
-            .detach();
-        }
-    }
-
-    /// A key pasted into the credential (or a refresh) can lift the needs-key state.
-    pub(super) fn cover_store_event(&mut self, event: &StoreEvent, cx: &mut Context<Self>) {
-        let Some(panel) = &self.cover.panel else {
-            return;
-        };
-        let recheck = match (event, &panel.key) {
-            (StoreEvent::Refreshed, _) => true,
-            (StoreEvent::Committed(id), KeyState::Found(c)) => *id == c.id,
-            _ => false,
-        };
-        if recheck {
-            self.check_key(cx);
-        }
     }
 
     /// What the phone's ⋯ menu asked of this page's cover.
-    pub(super) fn on_cover_ask(
-        &mut self,
-        action: CoverAction,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    pub(super) fn on_cover_ask(&mut self, action: CoverAction, cx: &mut Context<Self>) {
         match action {
             CoverAction::Choose => self.open_chooser(cx),
             CoverAction::Reposition => self.start_reposition(cx),
             CoverAction::Remove => self.remove_cover(cx),
-            CoverAction::Generate => self.open_generate(window, cx),
+            CoverAction::Generate => self.generate(cx),
         }
     }
 
@@ -383,93 +270,19 @@ impl ObjectPage {
         cx.notify();
     }
 
-    fn open_generate(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.cover.chooser = None;
-        if self.cover.panel.is_some() {
-            return;
-        }
-        let prompt = self
-            .object(cx)
-            .and_then(|o| cover::generation(&o.fields))
-            .map(|g| g.prompt)
-            .unwrap_or_default();
-        let state = cx.new(|cx| {
-            TextareaState::new(window, cx)
-                .auto_grow(2, 8)
-                .placeholder("Leave empty and the idea is written from this page")
-        });
-        state.update(cx, |s, cx| s.set_value(prompt.clone(), window, cx));
-        self.cover.panel = Some(Panel {
-            prompt: state,
-            synced: prompt.clone(),
-            shown_prompt: prompt,
-            selected: None,
-            seen_tries: 0,
-            key: KeyState::Checking,
-            error: String::new(),
-        });
-        self.check_key(cx);
-        if let Some(object) = self.object(cx) {
-            self.sync_cover(&object, window, cx);
-        }
-        cx.notify();
-    }
-
-    /// Look up the space's OpenAI credential and whether it has a key.
-    fn check_key(&mut self, cx: &mut Context<Self>) {
+    /// Ask for a new cover; the banner spins until it replaces the old one.
+    fn generate(&mut self, cx: &mut Context<Self>) {
         let Some(object) = self.object(cx) else {
             return;
         };
-        let lookup = cover::openai_credential(&cover::space_of(&object), cx);
-        cx.spawn(async move |this, cx| {
-            let found = lookup.await;
-            let _ = this.update(cx, |this, cx| {
-                if let Some(panel) = &mut this.cover.panel {
-                    match found {
-                        Ok(Some(c)) => panel.key = KeyState::Found(c),
-                        Ok(None) => panel.key = KeyState::Missing,
-                        Err(e) => panel.error = format!("{e:#}"),
-                    }
-                    cx.notify();
-                }
-            });
-        })
-        .detach();
-    }
-
-    /// Close the panel: the tries nobody used vanish, the session's fields go.
-    fn close_generate(&mut self, kept: Option<String>, cx: &mut Context<Self>) {
-        self.cover.panel = None;
-        if let Some(object) = self.object(cx) {
-            self.cover.dismissed = session_at(&object);
-            if let Some(file) = &kept {
-                cover::set_cover(&object.id, file, cx).detach_and_log_err(cx);
-            }
-            cover::end_session(&object, kept.as_deref(), cx).detach_and_log_err(cx);
-        }
-        cx.notify();
-    }
-
-    fn ask_cover(&mut self, action: Action, cx: &mut Context<Self>) {
-        let Some(panel) = &mut self.cover.panel else {
-            return;
-        };
-        let text = panel.prompt.read(cx).value().trim().to_string();
-        let prompt = match action {
-            // The art director writes the idea unless the person wrote their own.
-            Action::Generate if text != panel.synced.trim() => text,
-            Action::Generate | Action::NewIdea => String::new(),
-            Action::Reroll => text,
-        };
-        panel.error.clear();
-        let ask = cover::request(&self.id, action, &prompt, cx);
+        self.cover.chooser = None;
+        self.cover.ask_error.clear();
+        let ask = cover::request(&object, cx);
         cx.spawn(async move |this, cx| {
             if let Err(e) = ask.await {
                 let _ = this.update(cx, |this, cx| {
-                    if let Some(panel) = &mut this.cover.panel {
-                        panel.error = format!("{e:#}");
-                        cx.notify();
-                    }
+                    this.cover.ask_error = format!("{e:#}");
+                    cx.notify();
                 });
             }
         })
@@ -477,21 +290,11 @@ impl ObjectPage {
         cx.notify();
     }
 
-    fn select_try(
-        &mut self,
-        file: String,
-        prompt: String,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(panel) = &mut self.cover.panel else {
-            return;
-        };
-        panel.selected = Some(file);
-        panel
-            .prompt
-            .update(cx, |p, cx| p.set_value(prompt.clone(), window, cx));
-        panel.synced = prompt;
+    fn dismiss_failure(&mut self, cx: &mut Context<Self>) {
+        self.cover.ask_error.clear();
+        if let Some(object) = self.object(cx) {
+            cover::dismiss(&object, cx).detach_and_log_err(cx);
+        }
         cx.notify();
     }
 
@@ -504,8 +307,11 @@ impl ObjectPage {
         mobile: bool,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        let (_, image) = self.cover.banner.as_ref()?;
-        let image = image.clone();
+        let generating = cover::generating(&object.fields);
+        if self.cover.banner.is_none() && !generating {
+            return None;
+        }
+        let image = self.cover.banner.as_ref().and_then(|(_, i)| i.clone());
         let repositioning = self.cover.reposition.as_ref();
         let y = repositioning.map_or_else(|| cover::cover_y(&object.fields), |r| r.y);
         let dragging = repositioning.is_some_and(|r| r.drag.is_some());
@@ -539,7 +345,10 @@ impl ObjectPage {
         )
         .absolute()
         .inset_0();
-        let actions = (!mobile && self.cover.banner_hovered && self.cover.reposition.is_none())
+        let actions = (!mobile
+            && !generating
+            && self.cover.banner_hovered
+            && self.cover.reposition.is_none())
             .then(|| {
                 div()
                     .absolute()
@@ -554,9 +363,8 @@ impl ObjectPage {
                     ))
                     .child(tagged(
                         "cover-generate",
-                        pill("cover-generate", "Generate", cx).on_click(
-                            cx.listener(|this, _, window, cx| this.open_generate(window, cx)),
-                        ),
+                        pill("cover-generate", "Generate", cx)
+                            .on_click(cx.listener(|this, _, _, cx| this.generate(cx))),
                     ))
                     .child(tagged(
                         "cover-reposition",
@@ -569,6 +377,17 @@ impl ObjectPage {
                             .on_click(cx.listener(|this, _, _, cx| this.remove_cover(cx))),
                     ))
             });
+        let spinner = generating.then(|| {
+            div()
+                .debug_selector(|| "cover-generating".into())
+                .absolute()
+                .inset_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(hsla(0., 0., 0., 0.25))
+                .child(Spinner::new().color(theme::white()))
+        });
         let reposition = self.cover.reposition.is_some().then(|| {
             div()
                 .absolute()
@@ -671,6 +490,7 @@ impl ObjectPage {
             })
             .child(painter)
             .children(actions)
+            .children(spinner)
             .children(reposition);
         Some(banner.into_any_element())
     }
@@ -728,7 +548,7 @@ impl ObjectPage {
         })
     }
 
-    /// The chooser and the generate panel, under the title.
+    /// The chooser, and why the last Generate failed, under the title.
     pub(super) fn render_cover_cards(
         &mut self,
         object: &Object,
@@ -741,7 +561,7 @@ impl ObjectPage {
             .gap(px(8.))
             .when(mobile, |d| d.px(px(16.)))
             .children(self.render_chooser(object, cx))
-            .children(self.render_panel(object, cx))
+            .children(self.render_failure(object, cx))
     }
 
     fn render_chooser(&self, object: &Object, cx: &mut Context<Self>) -> Option<Div> {
@@ -788,12 +608,10 @@ impl ObjectPage {
                         .child(tagged(
                             "cover-chooser-generate",
                             ui::disabled(
-                                ui::outline_button("cover-chooser-generate", "Generate…"),
+                                ui::outline_button("cover-chooser-generate", "Generate"),
                                 disabled,
                             )
-                            .on_click(
-                                cx.listener(|this, _, window, cx| this.open_generate(window, cx)),
-                            ),
+                            .on_click(cx.listener(|this, _, _, cx| this.generate(cx))),
                         )),
                 )
                 .when(chooser.adding, |d| d.child(small_note("Adding the image…")))
@@ -803,208 +621,44 @@ impl ObjectPage {
         )
     }
 
-    fn render_panel(&self, object: &Object, cx: &mut Context<Self>) -> Option<Div> {
-        let panel = self.cover.panel.as_ref()?;
-        let generation: Option<Generation> = cover::generation(&object.fields);
-        let pending = cover::pending_request(&object.fields);
-        let running = generation.as_ref().is_some_and(Generation::running);
-        // The ask is waiting for its computer until a generation answers it.
-        let waiting = pending.is_some_and(|at| {
-            generation
-                .as_ref()
-                .is_none_or(|g| g.at != at || !g.running())
-        });
-        let busy = running || waiting;
-        let reported = generation
-            .as_ref()
-            .filter(|g| g.status == Some(Status::Failed));
-        let (needs_key, credential) = match (&panel.key, reported.filter(|g| g.needs_key)) {
-            (_, Some(g)) => (true, Some(g.credential.clone()).filter(|c| !c.is_empty())),
-            (KeyState::Missing, None) => (true, None),
-            (KeyState::Found(c), None) if !c.has_key => (true, Some(c.id.clone())),
-            _ => (false, None),
-        };
-        let ready = matches!(&panel.key, KeyState::Found(c) if c.has_key);
-        let can_ask = ready && !busy;
-        let prompt_text = panel.prompt.read(cx).value().trim().to_string();
-        let tries = generation
-            .as_ref()
-            .map(|g| g.tries.clone())
-            .unwrap_or_default();
-        let selected = panel
-            .selected
-            .clone()
-            .filter(|f| tries.iter().any(|t| t.file == *f));
-        let progress = if running {
-            generation.as_ref().and_then(|g| match g.status {
-                Some(Status::Writing) => Some(("cover-progress-writing", WRITING)),
-                Some(Status::Painting) => Some(("cover-progress-painting", PAINTING)),
-                _ => None,
-            })
-        } else if waiting {
-            Some(("cover-progress-waiting", WAITING))
-        } else {
-            None
-        };
-        let preview = selected
-            .as_ref()
-            .and_then(|f| self.cover.thumbs.get(f).cloned().flatten());
-        let thumbs = tries.iter().enumerate().map(|(i, t)| {
-            let image = self.cover.thumbs.get(&t.file).cloned().flatten();
-            let chosen = selected.as_deref() == Some(t.file.as_str());
-            let (file, prompt) = (t.file.clone(), t.prompt.clone());
-            div()
-                .id(("cover-try", i))
-                .debug_selector(move || format!("cover-try-{i}"))
-                .w(px(96.))
-                .h(px(54.))
-                .flex_none()
-                .rounded(px(6.))
-                .overflow_hidden()
-                .border_2()
-                .border_color(if chosen {
-                    theme::accent()
+    /// A failed Generate: OpenAI's (or the app's) words, the credential when
+    /// the key is the trouble, and a close button.
+    fn render_failure(&self, object: &Object, cx: &mut Context<Self>) -> Option<Div> {
+        let failed = cover::generation(&object.fields)
+            .filter(|g| g.status == Some(cover::Status::Failed));
+        let error = if self.cover.ask_error.is_empty() {
+            failed.as_ref().map(|g| {
+                if g.error.is_empty() {
+                    "The cover couldn't be made.".to_string()
                 } else {
-                    transparent_black()
-                })
-                .bg(theme::hover())
-                .cursor_pointer()
-                .when_some(image, |d, image| {
-                    d.child(
-                        img(ImageSource::Image(image))
-                            .size_full()
-                            .object_fit(ObjectFit::Cover),
-                    )
-                })
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    this.select_try(file.clone(), prompt.clone(), window, cx)
-                }))
-        });
-        let failed = reported
-            .filter(|g| !g.needs_key && !g.error.is_empty())
-            .map(|g| g.error.clone());
-        let key_text = reported
-            .filter(|g| g.needs_key && !g.error.is_empty())
-            .map_or_else(|| cover::NEEDS_KEY.to_string(), |g| g.error.clone());
+                    g.error.clone()
+                }
+            })?
+        } else {
+            self.cover.ask_error.clone()
+        };
+        let credential = failed
+            .filter(|g| g.needs_key && !g.credential.is_empty())
+            .map(|g| g.credential);
         Some(
-            card("cover-panel")
+            card("cover-failed")
                 .child(card_title(
-                    "Generate a cover",
-                    "cover-panel-close",
-                    cx.listener(|this, _, _, cx| this.close_generate(None, cx)),
+                    "Couldn't make a cover",
+                    "cover-failed-close",
+                    cx.listener(|this, _, _, cx| this.dismiss_failure(cx)),
                 ))
-                .when(needs_key, |d| {
-                    d.child(
-                        div()
-                            .debug_selector(|| "cover-needs-key".into())
-                            .flex()
-                            .flex_col()
-                            .items_start()
-                            .gap(px(6.))
-                            .child(small_note(key_text).text_color(theme::fg()))
-                            .when_some(credential, |d, id| {
-                                d.child(tagged(
-                                    "cover-open-credential",
-                                    ui::outline_button(
-                                        "cover-open-credential",
-                                        "Open the OpenAI credential",
-                                    )
-                                    .on_click(
-                                        move |_, _, cx| navigate(Route::Object(id.clone()), cx),
-                                    ),
-                                ))
-                            }),
-                    )
-                })
-                .children(
-                    progress.map(|(id, text)| small_note(text).debug_selector(move || id.into())),
-                )
-                .children(failed.map(|e| {
-                    small_note(e)
+                .child(
+                    small_note(error)
                         .debug_selector(|| "cover-error".into())
-                        .text_color(theme::red())
-                }))
-                .when(!panel.error.is_empty(), |d| {
-                    d.child(small_note(panel.error.clone()).text_color(theme::red()))
-                })
-                .child(
-                    div()
-                        .debug_selector(|| "cover-prompt".into())
-                        .child(Textarea::new(&panel.prompt).text_size(px(13.))),
+                        .text_color(theme::red()),
                 )
-                .when_some(preview, |d, image| {
-                    d.child(
-                        div()
-                            .debug_selector(|| "cover-preview".into())
-                            .w_full()
-                            .h(px(140.))
-                            .rounded(px(8.))
-                            .overflow_hidden()
-                            .child(
-                                img(ImageSource::Image(image))
-                                    .size_full()
-                                    .object_fit(ObjectFit::Cover),
-                            ),
-                    )
-                })
-                .when(!tries.is_empty(), |d| {
-                    d.child(div().flex().flex_wrap().gap(px(6.)).children(thumbs))
-                })
-                .child(
-                    div()
-                        .flex()
-                        .flex_wrap()
-                        .gap(px(8.))
-                        .child(tagged(
-                            "cover-ask-generate",
-                            ui::disabled(
-                                ui::outline_button("cover-ask-generate", "Generate"),
-                                !can_ask,
-                            )
-                            .on_click(
-                                cx.listener(|this, _, _, cx| this.ask_cover(Action::Generate, cx)),
-                            ),
-                        ))
-                        .child(tagged(
-                            "cover-ask-reroll",
-                            ui::disabled(
-                                ui::outline_button("cover-ask-reroll", "Reroll"),
-                                !can_ask || prompt_text.is_empty(),
-                            )
-                            .on_click(
-                                cx.listener(|this, _, _, cx| this.ask_cover(Action::Reroll, cx)),
-                            ),
-                        ))
-                        .child(tagged(
-                            "cover-ask-new-idea",
-                            ui::disabled(
-                                ui::outline_button("cover-ask-new-idea", "New idea"),
-                                !can_ask || generation.is_none(),
-                            )
-                            .on_click(
-                                cx.listener(|this, _, _, cx| this.ask_cover(Action::NewIdea, cx)),
-                            ),
-                        ))
-                        .child(tagged(
-                            "cover-use",
-                            ui::disabled(
-                                ui::primary_button("cover-use", "Use this"),
-                                selected.is_none(),
-                            )
-                            .on_click(cx.listener(
-                                move |this, _, _, cx| {
-                                    let kept =
-                                        this.cover.panel.as_ref().and_then(|p| p.selected.clone());
-                                    this.close_generate(kept, cx)
-                                },
-                            )),
-                        )),
-                )
-                .child(
-                    small_note(cover::COST_NOTE)
-                        .debug_selector(|| "cover-cost".into())
-                        .text_size(px(11.)),
-                ),
+                .when_some(credential, |d, id| {
+                    d.child(tagged(
+                        "cover-open-credential",
+                        ui::outline_button("cover-open-credential", "Open the OpenAI credential")
+                            .on_click(move |_, _, cx| navigate(Route::Object(id.clone()), cx)),
+                    ))
+                }),
         )
     }
 }
