@@ -77,7 +77,11 @@ pub fn brighten(color: Hsla, f: f32) -> Hsla {
 /// row), `.tooltip("Mark done")`, `.disabled(..)`, or `.with_size(Size::Medium)`
 /// (16px) / `.small()` (14px) / `.xsmall()` (12px) for denser rows.
 pub fn checkbox(id: impl Into<ElementId>, checked: bool) -> Checkbox {
-    Checkbox::new(id).checked(checked).with_size(Size::Large)
+    // The hand cursor where a pointer hovers (web, desktop): it reads as clickable.
+    Checkbox::new(id)
+        .checked(checked)
+        .with_size(Size::Large)
+        .cursor_pointer()
 }
 
 /// A display-only [`checkbox`]: full colour, no click handler, out of the tab
