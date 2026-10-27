@@ -132,6 +132,22 @@ pub fn tint_paint(color: Hsla) -> TagPaint {
     }
 }
 
+/// An `@Agent` tag in that agent's own chat colour (the one its replies use),
+/// neutral grey when it has none. `name` is matched against the agents of
+/// `space` first, then any space.
+pub fn agent_tag_paint(store: &Store, name: &str, space: &str) -> TagPaint {
+    let color = store
+        .agents
+        .iter()
+        .filter(|a| a.name == name)
+        .max_by_key(|a| a.channel == space)
+        .and_then(|a| crate::color::hex(&a.chat_color));
+    match color {
+        Some(c) => tint_paint(c),
+        None => unknown_tag_paint(theme::fg()),
+    }
+}
+
 /// The pill background of an option with no (known) color: `rgba(255,255,255,0.09)`.
 pub fn unknown_tag_bg() -> Hsla {
     Hsla {

@@ -200,10 +200,13 @@ fn build_line(inline: &Inline, md: &MdTheme, names: &[(String, String)], cx: &Ap
                 && let Some((name, icon)) = mention_at(&text[i..], names)
             {
                 line.push(&text[copied..i], &run);
-                // The composer's @agent tag: the kit tag look in the person's
-                // chat colour, its box painted behind the text.
-                let chat = Store::global(cx).read(cx).chat_color.clone();
-                let paint = tint_paint(roostr_core::color::hex(&chat).unwrap_or(theme::accent()));
+                // An @agent tag in that agent's own chat colour.
+                let space = roostr_core::nav::Navigator::global(cx).read(cx).space().to_string();
+                let paint = roostr_core::options::agent_tag_paint(
+                    Store::global(cx).read(cx),
+                    name,
+                    &space,
+                );
                 let pill = TextRun {
                     color: paint.fg,
                     font: Font {

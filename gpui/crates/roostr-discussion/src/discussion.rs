@@ -2793,10 +2793,6 @@ impl Discussion {
             .iter()
             .map(|t| (t.id.clone(), (t.icon.clone(), t.type_key.clone())))
             .collect();
-        // @agent tags take the kit tag look in the person's chat colour.
-        let mention_paint = roostr_core::options::tint_paint(
-            roostr_core::color::hex(&chat_color).unwrap_or(theme::accent()),
-        );
         let token_view =
             move |token: &InlineTokenContext, _: &mut Window, cx: &mut App| -> AnyElement {
                 let id = token.token().id().to_string();
@@ -2824,7 +2820,11 @@ impl Discussion {
                     .cloned()
                     .filter(|i| !i.is_empty())
                     .unwrap_or_else(|| "🤖".into());
-                pill(line, mention_paint, icon, name).into_any_element()
+                // The agent's own chat colour.
+                let space = roostr_core::nav::Navigator::global(cx).read(cx).space().to_string();
+                let paint =
+                    roostr_core::options::agent_tag_paint(Store::global(cx).read(cx), &name, &space);
+                pill(line, paint, icon, name).into_any_element()
             };
         div()
             .relative()
