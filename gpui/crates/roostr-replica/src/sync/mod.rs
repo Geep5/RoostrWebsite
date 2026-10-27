@@ -91,6 +91,12 @@ const UNBASED_SWEPT: &str = "unbased-swept";
 const LIVE_COLD_START_LOOKBACK_S: i64 = 300;
 /// Deafness watchdog period.
 const WATCHDOG_PERIOD: Duration = Duration::from_secs(60);
+/// A change group a whole-stream reconcile could not complete is retired
+/// once its newest part is this old: the rest was deleted (compaction), not
+/// still being published. The engine's group expiry.
+const CHANGE_GROUP_GRACE_S: i64 = 300;
+/// Objects whose orphans a pass resolves per hold of the import lock.
+const ORPHAN_BATCH: usize = 16;
 
 /// A keyring the sync layer can share across tasks.
 pub trait Keyring: SpaceKeyring + MaybeSend + MaybeSync {}
@@ -259,6 +265,8 @@ pub(crate) struct Inner {
     session_lock: futures::lock::Mutex<()>,
     /// One NIP-77 negotiation at a time per relay, by relay index.
     negotiations: Vec<futures::lock::Mutex<()>>,
+    /// One history `REQ` page at a time per relay, by relay index.
+    fetches: Vec<futures::lock::Mutex<()>>,
     live_tx: futures::channel::mpsc::UnboundedSender<live::LiveMsg>,
     live_rx: Mutex<Option<futures::channel::mpsc::UnboundedReceiver<live::LiveMsg>>>,
 }
@@ -340,6 +348,10 @@ impl RelaySync {
             .iter()
             .map(|_| futures::lock::Mutex::new(()))
             .collect();
+        let fetches = relays
+            .iter()
+            .map(|_| futures::lock::Mutex::new(()))
+            .collect();
         let (live_tx, live_rx) = futures::channel::mpsc::unbounded();
         Self {
             inner: Arc::new(Inner {
@@ -398,6 +410,7 @@ impl RelaySync {
                 backfill_lock: futures::lock::Mutex::new(()),
                 session_lock: futures::lock::Mutex::new(()),
                 negotiations,
+                fetches,
                 live_tx,
                 live_rx: Mutex::new(Some(live_rx)),
             }),

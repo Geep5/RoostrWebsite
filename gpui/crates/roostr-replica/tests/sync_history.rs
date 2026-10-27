@@ -251,15 +251,19 @@ fn a_complete_chunk_repair_releases_the_durable_cursor_floor() {
     block_on(async {
         let w = World::new(Engine::native().unwrap()).await;
         let doc = create_doc(&w).await;
-        let parts = w.chunk_events(&doc, &w.owner, 100).await;
+        // Its parts are still being published: a whole-stream reconcile
+        // keeps the group (one compacted away long ago is retired, below).
+        let at = (now_ms() / 1000 - 10) as u64;
+        let parts = w.chunk_events(&doc, &w.owner, at).await;
         relay.insert(parts[0].clone());
         let d = Device::new(&w.owner, vec![relay.url.clone()], memory_store().await);
-        d.store.set_cursor(200, None).await.unwrap();
+        let cursor = at as i64 + 100;
+        d.store.set_cursor(cursor, None).await.unwrap();
         d.store.set_bootstrapped().await.unwrap();
         // The reconcile covers the whole stream, older than the cursor too.
         d.start(&w).await;
         assert_eq!(d.last_pass(), Some((false, true)));
-        assert_eq!(d.cursor().await, 99, "held below the open group's part");
+        assert_eq!(d.cursor().await, at as i64 - 1, "held below the open group's part");
         assert_eq!(d.replay_groups().await, 1);
 
         // The repair walks pages (a relay without NIP-77) from event zero.
@@ -267,7 +271,7 @@ fn a_complete_chunk_repair_releases_the_durable_cursor_floor() {
         relay.insert(parts[1].clone());
         d.another_pass().await;
         assert_eq!(d.last_pass(), Some((true, true)));
-        assert_eq!(d.cursor().await, 200, "the floor is released");
+        assert_eq!(d.cursor().await, cursor, "the floor is released");
         assert_eq!(d.replay_groups().await, 0);
         assert_eq!(d.changes("doc").await, 1);
         let walks = history_walks(&relay);
@@ -305,6 +309,93 @@ fn an_ordinary_live_chunk_success_restores_the_cursor_without_another_scan() {
         assert!(restored, "assembling the group restores the cursor");
         assert_eq!(d.changes("doc").await, 1);
         assert_eq!(d.host.passes.lock().len(), 1, "no further history scan");
+        d.sync.stop();
+    });
+}
+
+/// A chunked change another device compacted into a base: one part reached
+/// this device, the rest were deleted (NIP-09). A whole-stream reconcile
+/// shows no relay holds them, so the group is retired once its newest part
+/// is past the publishing grace: the pass completes and the cursor is not
+/// held below it forever - neither on this pass nor on the next, which
+/// fetches the unheld part again.
+#[test]
+fn a_change_group_whose_parts_were_compacted_away_is_retired() {
+    let _turn = ENGINE_TURN.lock();
+    let relay = TestRelay::start();
+    block_on(async {
+        let w = World::new(Engine::native().unwrap()).await;
+        let doc = create_doc(&w).await;
+        let parts = w.chunk_events(&doc, &w.owner, 100).await;
+        relay.insert(parts[0].clone());
+        let d = Device::new(&w.owner, vec![relay.url.clone()], memory_store().await);
+        d.store.set_cursor(200, None).await.unwrap();
+        d.store.set_bootstrapped().await.unwrap();
+        d.start(&w).await;
+        assert_eq!(d.last_pass(), Some((true, true)), "history is complete");
+        assert_eq!(d.replay_groups().await, 0);
+        assert_eq!(d.cursor().await, 200, "no floor below the gone change");
+        assert_eq!(open_groups(&w.engine).await, 0);
+        // The fetched part settled the pass's count though it imported nothing.
+        let counted = d
+            .host
+            .statuses
+            .lock()
+            .iter()
+            .rev()
+            .find(|s| s.expected.is_some())
+            .cloned()
+            .expect("the pass counted");
+        assert_eq!((counted.received, counted.expected), (Some(1), Some(1)));
+
+        d.another_pass().await;
+        assert_eq!(d.last_pass(), Some((true, true)), "and stays complete");
+        assert_eq!(d.replay_groups().await, 0);
+        d.sync.stop();
+    });
+}
+
+/// Another device's compaction deletes events while this device's pass is
+/// between its reconcile and the fetch: the relay no longer holds or lists
+/// them, so they are settled - the pass completes (the watchdog has nothing
+/// to redo), its progress reaches what it expected, and the ended pass
+/// stops counting on the status line.
+#[test]
+fn events_deleted_between_the_reconcile_and_the_fetch_settle_the_pass() {
+    let _turn = ENGINE_TURN.lock();
+    let relay = TestRelay::start();
+    block_on(async {
+        let w = World::new(Engine::native().unwrap()).await;
+        let mut ids = Vec::new();
+        for (i, name) in ["kept-a", "folded", "kept-b"].into_iter().enumerate() {
+            let event = personal_event(&w, &page(&w, name).await, 1_000 + i as u64).await;
+            ids.push(event.id.clone());
+            relay.insert(event);
+        }
+        relay.world().vanish_on_fetch.insert(ids[1].clone());
+        let d = Device::new(&w.owner, vec![relay.url.clone()], memory_store().await);
+        d.start(&w).await;
+        assert_eq!(
+            d.last_pass(),
+            Some((true, true)),
+            "a deleted event is settled, not missing"
+        );
+        assert_eq!(d.changes("kept-a").await, 1);
+        assert_eq!(d.changes("kept-b").await, 1);
+        assert_eq!(d.changes("folded").await, 0);
+        let statuses = d.host.statuses.lock().clone();
+        let counted = statuses
+            .iter()
+            .rev()
+            .find(|s| s.expected.is_some())
+            .expect("the pass counted");
+        assert_eq!(counted.expected, Some(3));
+        assert_eq!(counted.received, Some(3), "every expected event settled");
+        assert_eq!(
+            statuses.last().unwrap().received,
+            None,
+            "the ended pass stops counting"
+        );
         d.sync.stop();
     });
 }

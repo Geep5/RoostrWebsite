@@ -416,11 +416,17 @@ fn chunk_parts_are_held_only_once_their_group_imports() {
             ("channel", json!({"stringValue": "space"})),
             ("body", json!({"stringValue": "x".repeat(45_000)})),
         ];
+        // Still being published (recent): a whole-stream reconcile keeps the
+        // group open rather than retiring it as compacted away.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
         let parts = seal(
             &r.engine,
             &keys,
             note(&keys, "big", &extra),
-            3000,
+            now - 10,
             Some(&space),
         )
         .await;

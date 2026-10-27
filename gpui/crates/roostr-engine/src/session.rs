@@ -308,9 +308,20 @@ impl Engine {
 
     /// A complete scan from `since` (unix s) could not resolve the remaining
     /// groups: drop those obligations instead of re-scanning forever.
-    pub async fn retire(&self, since: i64) -> Result<SettleResult, EngineError> {
-        self.call_as("sync", &json!({"action": "retire", "since": since}), None)
-            .await
+    /// Checkpoint and base groups always; change groups only with
+    /// `changes_before` (unix s) - the scan reconciled every stream whole, so
+    /// the relays hold no other part - and only those whose newest part is
+    /// older (one still being published stays).
+    pub async fn retire(
+        &self,
+        since: i64,
+        changes_before: Option<i64>,
+    ) -> Result<SettleResult, EngineError> {
+        let mut payload = json!({"action": "retire", "since": since});
+        if let Some(before) = changes_before {
+            payload["changesBefore"] = json!(before);
+        }
+        self.call_as("sync", &payload, None).await
     }
 
     pub async fn session_state(&self) -> Result<SessionState, EngineError> {

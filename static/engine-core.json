@@ -1,15 +1,15 @@
 {
   "abiVersion": 2,
-  "compiler": "/opt/homebrew/bin/odin version dev-2026-08:8412dc37a",
+  "compiler": "/opt/homebrew/bin/odin version dev-2026-07:819fdc7a8",
   "target": "js_wasm32",
   "artifact": "engine.wasm",
-  "sha256": "236f159595d62e50f8a3757c3b0dd4742f19d9da5a896b0be9d0994a635226ca",
-  "sourceFingerprint": "f80b9487443bc178fea6257ba225317cfeaac6b9a90e95bc338728025080a4b3",
+  "sha256": "c530de665bba9f0bec397ed051993bcd9c864cb2f908d9d1464df837c33b4bc3",
+  "sourceFingerprint": "31162c6d50f864af543332cfb1e3c09cd190529cafaf5909bf010c2cc05911a5",
   "sourceFiles": {
     "abi/abi.odin": "34d035764a9dabadcd1a6ad474a36c27ba2a3a39d32273375af93e2d316b3507",
     "core/agent_message.odin": "b044ff123c05f19a4110961b02d02a0f289b27d88bfa729e398c72a4a39d1b23",
     "core/agent_serving.odin": "aa87a7027f2582434c3039ccb2c30f24258344dc91141164f0939382ef5ac114",
-    "core/authority.odin": "11f2093dd580bd7d1f639cbc43be1639c59f78bd4f9b2d337240f735bb58e786",
+    "core/authority.odin": "9bc28778753061c291f4e6dedddd5bf5747daf0a96e7fe40788de4c491024efb",
     "core/bech32.odin": "5c99ff01ca2bdda79a0e4e0b775744150093583d00f07f9b0668ab27963d1c8c",
     "core/codec_json.odin": "b16b7cccfbcbfd37cfeafd06e41fbba70c9b37cbb366c4d11ae96d906dd613c4",
     "core/conversation.odin": "3524f98b9be8fd2410c7e235ce97a544169ed3bee338e3de145a7b17269620d3",
@@ -29,7 +29,7 @@
     "core/serving.odin": "7615af9c0a5a2deeb57be2d5eba7de172dda28927b6f47cc269eb7f63196a709",
     "core/state_sync.odin": "2c87d9c41fe8a90b6101d6e2587778f2d9e270395dde2266e17ae48eed51eab5",
     "core/sync_outbox.odin": "abd48dec96d4f7702bb126de712a037297e1a8aa3aa892183e3d1435054eed22",
-    "core/sync_session.odin": "6ffe8aebd19b187e349b55e0ced72083b8096f50a07ffb388b97df6895b1987e",
+    "core/sync_session.odin": "9b9738665c880bd5a0cdc96f84332b3ca1d600ea828072ce53680acc1b4c1e43",
     "core/wire.odin": "3df5391eb8d7e8a944ef559731839127f0a0ab8a810b278d94805784dc00f27d",
     "wasm/main.odin": "007614b554da7e706c3f2740338357df67ba9f83bfe40c89d2021e0343359474",
     "build-wasm.mjs": "b36dd50b296743e3075a7292edf26c3e9cf465734bfde5bd3dd30af3a55ef0fd"

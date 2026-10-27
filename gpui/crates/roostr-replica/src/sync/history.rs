@@ -23,12 +23,12 @@ use parking_lot::Mutex;
 use roostr_nostr::negentropy::NegentropyStorage;
 use roostr_nostr::relay::NEG_TIMEOUT;
 use roostr_nostr::{Event, Filter, RelayError, kinds};
-use roostr_replica_store::HeldQuery;
+use roostr_replica_store::{HeldItem, HeldQuery};
 
 use super::{
-    BASE_HASH_BATCH, BASE_LOOKBACK_S, CHECKPOINT_FETCH_BATCH, FETCH_BATCH, Inner,
-    MIN_PAGE_SPACING_MS, PAGE_LIMIT, PAGE_SPACING_MS, PAGE_TIMEOUT, UNBASED_SWEPT, VANISH_LOG_ID,
-    now_ms, short,
+    BASE_HASH_BATCH, BASE_LOOKBACK_S, CHANGE_GROUP_GRACE_S, CHECKPOINT_FETCH_BATCH, FETCH_BATCH,
+    Inner, MIN_PAGE_SPACING_MS, ORPHAN_BATCH, PAGE_LIMIT, PAGE_SPACING_MS, PAGE_TIMEOUT,
+    UNBASED_SWEPT, VANISH_LOG_ID, now_ms, now_s, short,
 };
 
 /// One relay stream filter, with the store scope of its held events.
@@ -128,10 +128,15 @@ impl Inner {
         let _guard = self.backfill_lock.lock().await;
         self.state.lock().pass = Some((0, 0));
         let result = self.walk_history(since, resume_until).await;
-        let result = match result {
+        if result.is_ok() && !self.stopped() {
+            self.emit_live_status(); // the pass's final count, unthrottled
+        }
+        // Ended: the status line stops counting, whoever called.
+        self.state.lock().pass = None;
+        match result {
             Ok(complete) => {
                 if !self.stopped() {
-                    self.emit_live_status(); // the pass's final count, unthrottled
+                    self.emit_live_status();
                 }
                 Ok(complete)
             }
@@ -140,9 +145,7 @@ impl Inner {
                 let _ = self.persist_cursor().await;
                 Err(error)
             }
-        };
-        self.state.lock().pass = None;
-        result
+        }
     }
 
     async fn walk_history(
@@ -308,9 +311,13 @@ impl Inner {
             .map(|p| p.object_id)
             .collect();
         owed.extend(self.store.own_changes().await?.into_values());
-        {
+        owed.sort();
+        owed.dedup();
+        // A few objects per hold of the import lock: live events (a change
+        // to the open object) land between them, not after all of them.
+        for objects in owed.chunks(ORPHAN_BATCH) {
             let _import = self.import_lock.lock().await;
-            self.resolve_orphans(owed).await?;
+            self.resolve_orphans(objects.iter().cloned()).await?;
         }
         let covered = match followed {
             // What the walk covered for sure: the followed objects since then.
@@ -329,9 +336,17 @@ impl Inner {
             complete && !st.stopped && st.replay_fault_generation == checkpoint
         };
         if clean && self.session_open() {
+            // Every stream reconciled whole (no paged walk, no lite
+            // follow-up): a change group still open has no other part on
+            // any relay - compaction folded it - unless it is being
+            // published right now.
+            let reconciled = followed.is_none() && !pass.walked.load(Ordering::Relaxed);
             let result = self
                 .engine
-                .retire(if covered <= 1 { 0 } else { covered })
+                .retire(
+                    if covered <= 1 { 0 } else { covered },
+                    reconciled.then(|| now_s() - CHANGE_GROUP_GRACE_S),
+                )
                 .await?;
             if let Some(groups) = result.replay_groups {
                 self.state.lock().replay_groups = groups.into_iter().collect();
@@ -432,7 +447,7 @@ impl Inner {
         if gids.is_empty() {
             return Ok(());
         }
-        let fetches = self.relays.iter().map(|relay| {
+        let fetches = self.relays.iter().enumerate().map(|(index, relay)| {
             let gids = &gids;
             async move {
                 for chunk in gids.chunks(CHECKPOINT_FETCH_BATCH) {
@@ -443,7 +458,7 @@ impl Inner {
                     let filter = Filter::new()
                         .kinds([kinds::BASE_PART])
                         .tag('c', chunk.iter().cloned());
-                    match self.query_page(relay, filter).await {
+                    match self.query_page(index, filter).await {
                         Ok(page) => self.import_page(pass, page).await?,
                         Err(error) => {
                             pass.complete.store(false, Ordering::Relaxed);
@@ -489,7 +504,7 @@ impl Inner {
             let mut page_filter = filter.clone().limit(PAGE_LIMIT);
             page_filter.since = Some(since.max(filter.since.unwrap_or(0) as i64).max(0) as u64);
             page_filter.until = until.map(|u| u.max(0) as u64);
-            let page = match self.query_page(relay, page_filter).await {
+            let page = match self.query_page(index, page_filter).await {
                 Ok(page) => page,
                 Err(error) => {
                     pass.complete.store(false, Ordering::Relaxed);
@@ -499,6 +514,7 @@ impl Inner {
             };
             let len = page.len() as u64;
             let oldest = page.iter().map(|e| e.created_at as i64).min();
+            self.note_received(page.len());
             self.import_page(pass, page).await?;
             self.emit_progress();
             if len < PAGE_LIMIT {
@@ -529,13 +545,16 @@ impl Inner {
     }
 
     /// `REQ` until a real EOSE: a timeout or CLOSED is an error, never a
-    /// short page.
+    /// short page. One at a time per relay: concurrent pages of large events
+    /// outgrow a relay's outbound budget for one connection, and a reader
+    /// that falls behind it is disconnected (every query in flight fails).
     pub(super) async fn query_page(
         &self,
-        relay: &roostr_nostr::Relay,
+        index: usize,
         filter: Filter,
     ) -> Result<Vec<Event>, RelayError> {
-        let result = relay.query(vec![filter], PAGE_TIMEOUT).await;
+        let _fetching = self.fetches[index].lock().await;
+        let result = self.relays[index].query(vec![filter], PAGE_TIMEOUT).await;
         if result.is_ok() {
             self.state.lock().relay_reached = true;
         }
@@ -597,52 +616,9 @@ impl Inner {
                 },
             )
             .await?;
-        let need = {
-            // One negotiation at a time per relay (relays cap NEG sessions).
-            let _negotiating = self.negotiations[index].lock().await;
-            if self
-                .state
-                .lock()
-                .negentropy_unsupported
-                .contains(relay.url())
-            {
-                return Ok(Outcome::Unsupported);
-            }
-            let storage = match NegentropyStorage::from_hex(
-                held.iter()
-                    .map(|h| (h.created_at.max(0) as u64, h.id.as_str())),
-            ) {
-                Ok(storage) => storage,
-                Err(error) => {
-                    self.emit_backfill(Some(format!("held set: {error}")));
-                    return Ok(Outcome::Incomplete);
-                }
-            };
-            match relay.reconcile(&sf.filter, storage, NEG_TIMEOUT).await {
-                Ok(reconciled) => {
-                    self.state.lock().relay_reached = true;
-                    reconciled.need
-                }
-                Err(error) => {
-                    if !matches!(error.error, RelayError::Transport(_)) {
-                        self.state.lock().relay_reached = true;
-                    }
-                    if error.relay_refused() {
-                        // Don't ask this relay again this session.
-                        self.state
-                            .lock()
-                            .negentropy_unsupported
-                            .insert(relay.url().to_string());
-                        return Ok(Outcome::Unsupported);
-                    }
-                    if !error.answered {
-                        // No socket, or failed before any answer: walk this filter.
-                        return Ok(Outcome::Unsupported);
-                    }
-                    self.emit_backfill(Some(format!("{}: {}", relay.url(), short(&error, 100))));
-                    return Ok(Outcome::Incomplete);
-                }
-            }
+        let need = match self.negotiate(index, sf, &held).await {
+            Ok(need) => need,
+            Err(outcome) => return Ok(outcome),
         };
         let need: Vec<String> = {
             let mut claimed = pass.claimed.lock();
@@ -660,7 +636,7 @@ impl Inner {
         } else {
             FETCH_BATCH
         };
-        let mut missing = 0usize;
+        let mut missing: HashSet<String> = HashSet::new();
         let chunks: Vec<&[String]> = need.chunks(batch).collect();
         for (i, ids) in chunks.iter().enumerate() {
             if self.stopped() {
@@ -670,7 +646,7 @@ impl Inner {
             let filter = Filter::new()
                 .ids(ids.iter().cloned())
                 .limit(ids.len() as u64);
-            let page = match self.query_page(relay, filter).await {
+            let page = match self.query_page(index, filter).await {
                 Ok(page) => page,
                 Err(error) => {
                     self.emit_backfill(Some(format!("{}: {}", relay.url(), short(error, 100))));
@@ -682,22 +658,103 @@ impl Inner {
                 .into_iter()
                 .filter(|e| wanted.remove(e.id.as_str()))
                 .collect();
-            // A needed id the relay doesn't return is asked again next run.
-            missing += wanted.len();
+            missing.extend(wanted.into_iter().map(str::to_string));
+            self.note_received(page.len());
             self.import_page(pass, page).await?;
             self.emit_progress();
             if i + 1 < chunks.len() {
                 roostr_nostr::sleep(pace(started)).await;
             }
         }
-        if missing > 0 {
+        if missing.is_empty() {
+            return Ok(Outcome::Complete);
+        }
+        // A needed id the relay no longer returns was deleted meanwhile -
+        // another device compacted it into a base (NIP-09) - and is settled
+        // when the relay no longer lists it either. Only one it still lists
+        // but did not return is asked for again next run.
+        let listed: HashSet<String> = match self.negotiate(index, sf, &held).await {
+            Ok(need) => need.into_iter().collect(),
+            Err(outcome) => return Ok(outcome),
+        };
+        let held_back = missing.iter().filter(|id| listed.contains(*id)).count();
+        self.note_received(missing.len() - held_back);
+        roostr_core::sync_trace!(
+            "{}: {} reconciled event(s) deleted before the fetch, {held_back} withheld",
+            relay.url(),
+            missing.len() - held_back
+        );
+        if held_back > 0 {
             self.emit_backfill(Some(format!(
-                "{}: {missing} reconciled events not returned",
+                "{}: {held_back} reconciled events not returned",
                 relay.url()
             )));
             return Ok(Outcome::Incomplete);
         }
         Ok(Outcome::Complete)
+    }
+
+    /// NIP-77 against `held`: the ids `sf`'s stream on relay `index` holds
+    /// and `held` lacks, or how the cover ends without them.
+    async fn negotiate(
+        &self,
+        index: usize,
+        sf: &StreamFilter,
+        held: &[HeldItem],
+    ) -> Result<Vec<String>, Outcome> {
+        let relay = &self.relays[index];
+        // One negotiation at a time per relay (relays cap NEG sessions).
+        let _negotiating = self.negotiations[index].lock().await;
+        if self
+            .state
+            .lock()
+            .negentropy_unsupported
+            .contains(relay.url())
+        {
+            return Err(Outcome::Unsupported);
+        }
+        let storage = match NegentropyStorage::from_hex(
+            held.iter()
+                .map(|h| (h.created_at.max(0) as u64, h.id.as_str())),
+        ) {
+            Ok(storage) => storage,
+            Err(error) => {
+                self.emit_backfill(Some(format!("held set: {error}")));
+                return Err(Outcome::Incomplete);
+            }
+        };
+        match relay.reconcile(&sf.filter, storage, NEG_TIMEOUT).await {
+            Ok(reconciled) => {
+                self.state.lock().relay_reached = true;
+                Ok(reconciled.need)
+            }
+            Err(error) => {
+                if !matches!(error.error, RelayError::Transport(_)) {
+                    self.state.lock().relay_reached = true;
+                }
+                if error.relay_refused() {
+                    // Don't ask this relay again this session.
+                    self.state
+                        .lock()
+                        .negentropy_unsupported
+                        .insert(relay.url().to_string());
+                    return Err(Outcome::Unsupported);
+                }
+                if !error.answered {
+                    // No socket, or failed before any answer: walk this filter.
+                    return Err(Outcome::Unsupported);
+                }
+                self.emit_backfill(Some(format!("{}: {}", relay.url(), short(&error, 100))));
+                Err(Outcome::Incomplete)
+            }
+        }
+    }
+
+    /// `n` events of the pass in flight settled: fetched, or gone for good.
+    fn note_received(&self, n: usize) {
+        if let Some((received, _)) = self.state.lock().pass.as_mut() {
+            *received += n as u64;
+        }
     }
 
     /// Each bounded stream's history below its window that no held base

@@ -34,6 +34,9 @@ pub struct World {
     pub id_fetches: Vec<Vec<String>>,
     /// Every other one-filter `REQ` (walks, `#c` part fetches).
     pub walks: Vec<Filter>,
+    /// Ids deleted the moment a `REQ {ids}` asks for them: another device's
+    /// compaction (NIP-09) landing between a reconcile and its fetch.
+    pub vanish_on_fetch: HashSet<String>,
 }
 
 pub struct TestRelay {
@@ -189,7 +192,11 @@ fn handle(
             w.reqs += 1;
             if let [filter] = filters.as_slice() {
                 match &filter.ids {
-                    Some(ids) => w.id_fetches.push(ids.clone()),
+                    Some(ids) => {
+                        w.id_fetches.push(ids.clone());
+                        let gone = std::mem::take(&mut w.vanish_on_fetch);
+                        w.events.retain(|e| !gone.contains(&e.id));
+                    }
                     None => w.walks.push(filter.clone()),
                 }
             }

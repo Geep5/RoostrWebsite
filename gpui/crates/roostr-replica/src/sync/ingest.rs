@@ -778,9 +778,6 @@ impl Inner {
                 parts.push(key.clone());
             }
             touched.push(item.object_id.clone());
-            if let Some((received, _)) = self.state.lock().pass.as_mut() {
-                *received += 1;
-            }
         }
         self.flush(&mut pending, imported).await?;
         self.state.lock().imported_parts.extend(parts);
