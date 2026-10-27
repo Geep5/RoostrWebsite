@@ -33,6 +33,7 @@ use roostr_core::ui::secondary_binding;
 
 pub use editor::Editor;
 pub use file_view::FileView;
+pub use files::{CAN_PICK_FILES, PickedFile, file_image, pasted_image, pick_file};
 
 actions!(
     roostr_editor,

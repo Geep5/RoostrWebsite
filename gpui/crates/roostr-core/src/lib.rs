@@ -7,6 +7,7 @@ pub mod api;
 pub mod backend;
 pub mod blossom;
 pub mod color;
+pub mod cover;
 pub mod create;
 #[cfg(not(target_family = "wasm"))]
 pub mod daemon;
@@ -74,6 +75,7 @@ pub fn init(backend: Arc<dyn Backend>, harness: Option<Arc<harness::Harness>>, c
     PaneState::init(cx);
     Store::init(backend, cx);
     profile::init(cx);
+    cover::CoverAsks::init(cx);
 }
 
 /// Remote images (`img("https://…")`: favicons, icons, avatars) load through GPUI's HTTP client.

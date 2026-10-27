@@ -2,12 +2,15 @@
 //! home (`routes/app/+page.svelte`): icon, title, featured properties, notes,
 //! the body for the object's kind, and the right "Chat & properties" pane.
 
+mod cover;
+
 use std::sync::Arc;
 
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Enter, InputEvent, Textarea, TextareaState};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+use roostr_core::cover::{CoverAsk, CoverAsks};
 use roostr_core::layout::is_mobile;
 use roostr_core::nav::{NavEvent, Navigator, Route};
 use roostr_core::objects::{is_image_icon, object_icon};
@@ -76,6 +79,8 @@ pub struct ObjectPage {
     pending_title_fix: Option<String>,
     /// Whether the title was last set read-only (built-in tools).
     title_read_only: bool,
+    /// The cover banner, its actions and the generate panel.
+    cover: cover::CoverUi,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -107,6 +112,7 @@ impl ObjectPage {
                         let id = this.id.clone();
                         store.update(cx, |store, cx| store.reload_object(&id, cx));
                     }
+                    this.cover_store_event(event, cx);
                     this.sync(window, cx);
                 },
             ),
@@ -139,6 +145,15 @@ impl ObjectPage {
                     }
                 },
             ),
+            cx.subscribe_in(
+                &CoverAsks::global(cx),
+                window,
+                |this, _, ask: &CoverAsk, window, cx| {
+                    if ask.object_id == this.id {
+                        this.on_cover_ask(ask.action, window, cx);
+                    }
+                },
+            ),
         ];
         let mut this = Self {
             id,
@@ -151,6 +166,7 @@ impl ObjectPage {
             pane: None,
             opened: false,
             title_read_only: false,
+            cover: cover::CoverUi::default(),
             _subscriptions: subscriptions,
             pending_title_fix: None,
         };
@@ -265,6 +281,7 @@ impl ObjectPage {
             }
             (_, false) => self.pane = None,
         }
+        self.sync_cover(&object, window, cx);
         if self.is_active(cx) {
             self.publish_pane(cx);
         }
@@ -420,9 +437,20 @@ impl Render for ObjectPage {
             meta.update(cx, |meta, cx| meta.set_flush(flush, cx));
         }
 
+        // The cover spans the page's column, above the icon and title.
+        let banner = self.render_cover_banner(&object, mobile, cx);
+        let covered = banner.is_some();
         // Desktop: the header's 16px side padding, so the page's content
         // starts right under the back arrow.
         let mut article = div().flex().flex_col().when(flush, |d| d.px(px(16.)));
+        // The icon and title: hovering them offers Add cover (desktop).
+        let mut head = div()
+            .id("page-head")
+            .relative()
+            .flex()
+            .flex_col()
+            .on_hover(self.cover_head_hover(cx))
+            .when(covered && task, |d| d.mt(px(12.)));
         if !task {
             let picker = self.show_emoji.then(|| {
                 let page = cx.entity().downgrade();
@@ -497,14 +525,22 @@ impl Render for ObjectPage {
                     }))
                     .into_any_element()
             };
-            article = article.child(
+            head = head.child(
                 div()
+                    .debug_selector(|| "object-icon".into())
                     .relative()
                     .map(|d| {
+                        // Under a cover the icon overlaps its bottom edge.
                         if mobile {
-                            d.mt(px(8.)).mb(px(2.)).ml(px(16.))
+                            d.mt(px(if covered {
+                                -cover::ICON_OVERLAP_PHONE
+                            } else {
+                                8.
+                            }))
+                            .mb(px(2.))
+                            .ml(px(16.))
                         } else {
-                            d.mt(px(16.))
+                            d.mt(px(if covered { -cover::ICON_OVERLAP } else { 16. }))
                                 .mb(px(4.))
                                 .ml(px(if flush { 0. } else { 44. }))
                         }
@@ -547,7 +583,7 @@ impl Render for ObjectPage {
                     .line_height(relative(1.25))
                     .p_0(),
             );
-        article = article.child(
+        head = head.child(
             div()
                 .flex()
                 .items_start()
@@ -576,6 +612,10 @@ impl Render for ObjectPage {
                 })
                 .child(title),
         );
+        let add_cover = self.render_add_cover(&object, mobile, cx);
+        article = article
+            .child(head.children(add_cover))
+            .child(self.render_cover_cards(&object, mobile, cx));
         if let Some(meta) = &self.meta {
             article = article.child(meta.clone());
         }
@@ -629,7 +669,15 @@ impl Render for ObjectPage {
                 view.update(cx, |v, cx| v.page_mouse_down(e, window, cx));
             });
         }
-        article.into_any_element()
+        match banner {
+            Some(banner) => div()
+                .flex()
+                .flex_col()
+                .child(banner)
+                .child(article)
+                .into_any_element(),
+            None => article.into_any_element(),
+        }
     }
 }
 

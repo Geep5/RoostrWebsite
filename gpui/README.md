@@ -96,7 +96,7 @@ The mode choice is `<config dir>/Roostr/mode` (`localStorage`
 | `roostr-settings` | Settings, space page, install-computer card, identity gate, export |
 | `roostr-site` | Landing, guide, privacy and join pages |
 | `roostr-shell` | Space rail, sidebar, tab strip, header, search, New menu, pinned widgets; at a window 720pt wide or less (a phone in portrait), the mobile shell instead: Spaces list → space home → object, as the web app showed on phones |
-| `roostr-app` | What both front ends run: feature init, the page per route, the object page |
+| `roostr-app` | What both front ends run: feature init, the page per route, the object page with its cover (`object_page/cover.rs`: banner, Add/Change cover, Reposition, the generate panel over `roostr_core::cover`'s `cover` / `cover_y` / `cover_request` / `cover_generation` fields) |
 | `roostr` | The desktop app: window, menus |
 | `roostr-web` | roostr.space (wasm): entry point, the website pages before any vault, replica or pairing gate, address-bar routing, `www/` page template and loader |
 | `roostr-ios` | The iPhone/iPad app (a static library the RoostrIOS Xcode host links): UIKit platform, Keychain/UserDefaults storage, reminders, lifecycle and network resume, deep links |

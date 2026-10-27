@@ -14,6 +14,7 @@ use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
 use gpui_kit::component::{ElementExt as _, Icon, IconNamed as _, WindowExt as _};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+use roostr_core::cover::{self, CoverAction};
 use roostr_core::nav::{Navigator, Route, navigate, open_tab};
 use roostr_core::objects::{is_image_icon, object_icon, type_glyph};
 use roostr_core::store::Store;
@@ -47,6 +48,8 @@ struct MoreModel {
     mobile: bool,
     /// Why the object can't be deleted (empty: it can).
     blocker: String,
+    /// The phone's cover actions: `Some(has a cover)` on a page that can have one.
+    cover: Option<bool>,
     kind: MoreKind,
 }
 
@@ -451,10 +454,16 @@ impl Workspace {
         } else {
             return None;
         };
+        // A phone has no hover: its cover actions live here.
+        let cover = store
+            .object(&id)
+            .filter(|o| mobile && cover::can_have_cover(o))
+            .map(|o| cover::cover_file(&o.fields).is_some());
         Some(MoreModel {
             id,
             mobile,
             blocker,
+            cover,
             kind,
         })
     }
@@ -832,6 +841,10 @@ fn more_items(
             })
     };
     let menu = menu.when_some(lead, |menu, lead| menu.item(lead));
+    let menu = match m.cover {
+        Some(has_cover) => cover_items(menu.separator(), &id, has_cover, workspace).separator(),
+        None => menu,
+    };
     match &m.kind {
         MoreKind::Property => menu.separator().item(if m.blocker.is_empty() {
             let ws = workspace.clone();
@@ -926,6 +939,72 @@ fn more_items(
         }
         MoreKind::Space => menu.item(copy_id),
     }
+}
+
+/// The phone's cover actions for the open page (desktop shows them on hover).
+fn cover_items(
+    mut menu: PopupMenu,
+    id: &str,
+    has_cover: bool,
+    workspace: &WeakEntity<Workspace>,
+) -> PopupMenu {
+    let items: &[(&str, &str, Glyph, CoverAction)] = if has_cover {
+        &[
+            (
+                "more-cover-change",
+                "Change cover",
+                Glyph::Pencil,
+                CoverAction::Choose,
+            ),
+            (
+                "more-cover-reposition",
+                "Reposition",
+                Glyph::SlidersHorizontal,
+                CoverAction::Reposition,
+            ),
+            (
+                "more-cover-remove",
+                "Remove cover",
+                Glyph::Trash,
+                CoverAction::Remove,
+            ),
+            (
+                "more-cover-generate",
+                "Generate cover",
+                Glyph::Palette,
+                CoverAction::Generate,
+            ),
+        ]
+    } else {
+        &[
+            (
+                "more-cover-add",
+                "Add cover",
+                Glyph::Plus,
+                CoverAction::Choose,
+            ),
+            (
+                "more-cover-generate",
+                "Generate cover",
+                Glyph::Palette,
+                CoverAction::Generate,
+            ),
+        ]
+    };
+    for &(selector, label, glyph, action) in items {
+        let (ws, target) = (workspace.clone(), id.to_string());
+        menu = menu.item(
+            PopupMenuItem::element(move |_, _| {
+                div().debug_selector(move || selector.into()).child(label)
+            })
+            .icon(Icon::new(glyph))
+            .on_click(move |_, _, cx| {
+                close_more(&ws, cx);
+                cover::ask(&target, action, cx);
+            }),
+        );
+    }
+    menu
 }
 
 /// The space's types an object can change to, matching `filter`.

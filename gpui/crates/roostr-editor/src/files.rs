@@ -344,6 +344,21 @@ pub fn file_block_blob(
     })
 }
 
+/// A File object's bytes as an image (a page's cover, a generated try):
+/// its fields, then its bytes the usual way.
+pub fn file_image(file_id: &str, cx: &App) -> Task<Result<Arc<Image>>> {
+    let fetch = Store::global(cx).read(cx).fetch_object(file_id, cx);
+    let relays = relays(cx);
+    let harness = harness::harness(cx);
+    io::spawn(cx, async move {
+        let fields = fetch.await?.fields;
+        let (bytes, mime) = fetch_file_blob(&fields, &relays, harness.as_deref()).await?;
+        let format =
+            ImageFormat::from_mime_type(&mime).ok_or_else(|| anyhow!("{mime} is not an image"))?;
+        Ok(Arc::new(Image::from_bytes(format, bytes)))
+    })
+}
+
 /// The identity's relays (Blossom server discovery).
 pub fn relays(cx: &App) -> Vec<String> {
     Store::global(cx)
