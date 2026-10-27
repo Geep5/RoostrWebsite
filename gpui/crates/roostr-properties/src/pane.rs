@@ -1305,6 +1305,12 @@ impl PropertiesPane {
             }
         };
         let display = self.display(object, rel, store);
+        let row_emoji = roostr_core::objects::relation_emoji(
+            store,
+            rel,
+            crate::value::object_ids(v).first().map(String::as_str),
+            object.field_str("channel"),
+        );
         let _object_id = object.id.clone();
 
         // ── The value ──
@@ -1854,7 +1860,7 @@ impl PropertiesPane {
                             .items_center()
                             .gap(px(7.))
                             .text_color(theme::muted())
-                            .child(match rel.icon_emoji.as_deref().filter(|e| !e.is_empty()) {
+                            .child(match row_emoji {
                                 Some(e) => div()
                                     .flex_none()
                                     .w(px(14.))

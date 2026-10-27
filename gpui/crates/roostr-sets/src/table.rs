@@ -1235,9 +1235,11 @@ impl SetTable {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let label = Self::col_name(&c.key, relations);
-        let icon = common::find_rel(relations, &c.key)
-            .and_then(|r| r.icon_emoji.clone())
-            .filter(|e| !e.is_empty());
+        let icon = common::find_rel(relations, &c.key).and_then(|r| {
+            let store = Store::global(cx).read(cx);
+            let space = r.space.clone().unwrap_or_default();
+            roostr_core::objects::relation_emoji(store, r, None, &space)
+        });
         let arrow = if sort.0 == c.key {
             if sort.1 { "↓" } else { "↑" }
         } else {

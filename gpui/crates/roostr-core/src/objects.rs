@@ -65,6 +65,35 @@ pub fn object_icon(store: &Store, icon: &str, type_key: &str, space: &str) -> St
     if icon.is_empty() { "•".into() } else { icon }
 }
 
+/// The emoji a property shows beside its name: its own, else - for an object
+/// property - the icon of what it links: the type it is limited to, or, with
+/// no limit, the first object it links (`linked`). None: the format's glyph.
+pub fn relation_emoji(
+    store: &Store,
+    rel: &crate::RelationDef,
+    linked: Option<&str>,
+    space: &str,
+) -> Option<String> {
+    if let Some(own) = rel.icon_emoji.as_deref().filter(|e| !e.is_empty()) {
+        return Some(own.to_string());
+    }
+    if rel.format != "object" {
+        return None;
+    }
+    let limited = rel
+        .object_types
+        .iter()
+        .flatten()
+        .find_map(|id| store.types.iter().find(|t| &t.id == id))
+        .map(|t| type_icon(store, &t.key, space));
+    let icon = limited.or_else(|| {
+        let s = store.summary(linked?)?;
+        Some(object_icon(store, &s.icon, &s.type_key, space))
+    })?;
+    (!icon.is_empty() && icon != "•" && !icon.starts_with("data:") && !icon.contains("://"))
+        .then_some(icon)
+}
+
 /// A type key as a name, for kinds with no type object (`kindName`):
 /// "relation" is "Property", "channel" is "Space", "vanish_log" is "Vanish log".
 pub fn kind_name(type_key: &str) -> String {
