@@ -195,6 +195,9 @@ pub struct Discussion {
     retry_error: String,
     retrying: Vec<String>,
     pending_send: Option<AgentMessage>,
+    /// A chat line just sent, shown at once (marked "Sending…") until the
+    /// object carries the real one or the write fails.
+    outgoing: Option<ChatMessage>,
 
     tag_options: Option<Vec<ObjectAgentOption>>,
     tag_loading: Option<Task<()>>,
@@ -301,6 +304,7 @@ impl Discussion {
             retry_error: String::new(),
             retrying: Vec::new(),
             pending_send: None,
+            outgoing: None,
             tag_options: None,
             tag_loading: None,
             mention: None,
@@ -364,11 +368,23 @@ impl Discussion {
             return;
         };
         let thread = self.thread_id.as_str();
-        let messages = if thread == DISCUSSION {
+        let mut messages = if thread == DISCUSSION {
             object_chat_messages(&object)
         } else {
             chat_messages(&object, thread)
         };
+        // The line being sent shows until the object has it (same author and
+        // text, written no earlier than it).
+        if let Some(out) = &self.outgoing {
+            let landed = messages
+                .iter()
+                .any(|m| m.author == out.author && m.text == out.text && m.ts >= out.ts - 5_000);
+            if landed {
+                self.outgoing = None;
+            } else {
+                messages.push(out.clone());
+            }
+        }
         roostr_core::sync_trace!(
             "chat view {} thread {thread}: shows {} message(s){}",
             self.object_id,
@@ -1544,17 +1560,38 @@ impl Discussion {
             self.thread_id.clone()
         };
         let task = roostr_core::api::chat::post(&self.object_id, &text, &reply, &thread, cx);
+        // Show it now: the write (and an agent's wake) can take a moment.
+        self.outgoing = Some(ChatMessage {
+            id: format!("sending-{}", uuid::Uuid::new_v4()),
+            author: self.me.clone(),
+            ts: chrono::Utc::now().timestamp_millis(),
+            text: text.clone(),
+            origin: String::new(),
+            mailbox: None,
+        });
+        let draft = self.draft.clone();
+        let tagged = self.tagged.clone();
+        self.clear_composer(window, cx);
+        self.composer.update(cx, |s, cx| s.set_readonly(false, cx));
+        self.derive(cx);
         cx.spawn_in(window, async move |this, cx| {
             let result = task.await;
             let _ = this.update_in(cx, |this, window, cx| match result {
                 Ok(_) => {
-                    // Cleared only once the change is committed: a failed write
-                    // must not swallow the message.
-                    this.clear_composer(window, cx);
                     this.finish_send(Ok(()), window, cx);
                     this.seed_default_agent(mentions, cx);
                 }
-                Err(error) => this.finish_send(Err(error), window, cx),
+                Err(error) => {
+                    // Not sent: the line leaves the chat and goes back into
+                    // the composer (unless something new was typed there).
+                    this.outgoing = None;
+                    if this.draft.is_empty() {
+                        this.tagged = tagged;
+                        this.set_draft(draft, None, window, cx);
+                    }
+                    this.derive(cx);
+                    this.finish_send(Err(error), window, cx);
+                }
             });
         })
         .detach();
@@ -2124,11 +2161,12 @@ impl Discussion {
                     .into_any_element()
             });
         }
+        let sending = self.outgoing.as_ref().is_some_and(|o| o.id == m.id);
         meta = meta.child(
             div()
                 .text_size(px(11.))
                 .text_color(theme::muted())
-                .child(when(m.ts)),
+                .child(if sending { "Sending…".to_string() } else { when(m.ts) }),
         );
         header = header.child(meta);
 
