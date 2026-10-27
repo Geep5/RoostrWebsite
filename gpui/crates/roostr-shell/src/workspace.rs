@@ -536,8 +536,14 @@ impl Workspace {
         if !force && self.delete_blocker.0 == id {
             return;
         }
-        self.delete_blocker = (id.clone(), String::new());
+        // A refresh of the same object keeps its last answer until the new
+        // one lands: clearing it first made the More menu flip between
+        // "can't delete" and "Move to bin" on every store refresh.
+        if self.delete_blocker.0 != id {
+            self.delete_blocker = (id.clone(), String::new());
+        }
         if !is_def {
+            self.delete_blocker.1.clear();
             return;
         }
         let fetch = Store::global(cx).read(cx).fetch_object(&id, cx);
