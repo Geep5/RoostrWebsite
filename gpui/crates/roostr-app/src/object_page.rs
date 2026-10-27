@@ -332,12 +332,14 @@ impl ObjectPage {
     }
 }
 
-/// (`hasDiscussion`, `hasPane`) from the object page's rules.
+/// (`hasDiscussion`, `hasPane`) from the object page's rules. Every page
+/// but a chat object (whose page IS its discussion) has a pane; types,
+/// properties and templates have Properties without a Chat.
 fn pane_flags(object: &Object) -> (bool, bool) {
     let t = object.type_key.as_str();
     let has_mailbox = object.mailbox.as_ref().is_some_and(|m| !m.is_empty());
     let has_discussion = has_mailbox || !matches!(t, "chat" | "type" | "template" | "relation");
-    let has_pane = has_discussion || !matches!(t, "chat" | "type" | "relation");
+    let has_pane = has_discussion || t != "chat";
     (has_discussion, has_pane)
 }
 
