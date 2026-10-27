@@ -3,7 +3,7 @@
 # target/release/Roostr.app (open it, drag it to Applications or the Dock).
 #
 #   scripts/bundle-mac.sh              # build and bundle
-#   scripts/bundle-mac.sh --install    # also copy it to ~/Applications
+#   scripts/bundle-mac.sh --install    # and move it to ~/Applications (the only copy)
 #
 # The icon is crates/roostr/assets/Roostr.icns: static/logo.png on Apple's
 # icon grid (824px rounded square, 100px margin, on 1024).
@@ -45,6 +45,7 @@ echo "Built $APP"
 if [[ "${1:-}" == "--install" ]]; then
 	mkdir -p "$HOME/Applications"
 	rm -rf "$HOME/Applications/Roostr.app"
-	cp -R "$APP" "$HOME/Applications/Roostr.app"
+	# Moved, not copied: one Roostr.app on the Mac, so Spotlight and the Dock open this one.
+	mv "$APP" "$HOME/Applications/Roostr.app"
 	echo "Installed $HOME/Applications/Roostr.app"
 fi
