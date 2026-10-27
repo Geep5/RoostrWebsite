@@ -1847,7 +1847,9 @@ impl PropertiesPane {
                             .w(relative(0.4))
                             .max_w(px(120.))
                             .min_w_0()
-                            .min_h(px(22.))
+                            // One line tall, whatever the value's height: the
+                            // icon and the name sit together beside its first line.
+                            .h(px(22.))
                             .flex()
                             .items_center()
                             .gap(px(7.))
