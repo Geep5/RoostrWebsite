@@ -1751,11 +1751,12 @@ pub(crate) fn scroll_at(
         clamp(at.y, area.top(), area.bottom()),
     );
     window.dispatch_event(
-        PlatformInput::ScrollWheel(ScrollWheelEvent {
+        PlatformInput::Scroll(ScrollEvent {
             position: aim,
             delta: ScrollDelta::Pixels(point(px(0.), px(dy))),
             modifiers: Modifiers::default(),
             touch_phase: TouchPhase::Moved,
+            source: ScrollSource::Pointer,
         }),
         cx,
     );

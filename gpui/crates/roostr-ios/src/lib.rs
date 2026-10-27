@@ -173,7 +173,9 @@ fn start(backend: ReplicaBackend, signals: Signals, cx: &mut App) {
         let mut backgrounded = false;
         while let Some(phase) = lifecycle.next().await {
             match phase {
-                AppLifecyclePhase::Background => backgrounded = true,
+                AppLifecyclePhase::Background | AppLifecyclePhase::Disconnected => {
+                    backgrounded = true
+                }
                 AppLifecyclePhase::Active if backgrounded => {
                     backgrounded = false;
                     resume.resume();

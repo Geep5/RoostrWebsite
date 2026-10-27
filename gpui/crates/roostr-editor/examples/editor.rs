@@ -230,15 +230,18 @@ fn drive(line: &str, window: &mut Window, cx: &mut App) {
         Some("scroll") => mouse(
             window,
             cx,
-            PlatformInput::ScrollWheel(ScrollWheelEvent {
+            PlatformInput::Scroll(ScrollEvent {
                 position: at(1),
                 delta: ScrollDelta::Pixels(point(px(0.), px(num(3)))),
                 modifiers: Modifiers::default(),
                 touch_phase: TouchPhase::Moved,
+                source: ScrollSource::Pointer,
             }),
         ),
         Some("key") => {
-            if let Ok(k) = Keystroke::parse(parts.get(1).unwrap_or(&"")) {
+            if let Ok(k) =
+                Keystroke::parse_with_os(parts.get(1).unwrap_or(&""), cx.platform_info().os)
+            {
                 window.dispatch_keystroke(k, cx);
             }
         }
@@ -249,7 +252,7 @@ fn drive(line: &str, window: &mut Window, cx: &mut App) {
                 } else {
                     ch.to_lowercase().to_string()
                 };
-                if let Ok(mut k) = Keystroke::parse(&key) {
+                if let Ok(mut k) = Keystroke::parse_with_os(&key, cx.platform_info().os) {
                     k.modifiers.shift = ch.is_uppercase();
                     k.key_char = Some(ch.to_string());
                     window.dispatch_keystroke(k, cx);

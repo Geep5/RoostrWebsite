@@ -13,22 +13,26 @@ use super::events::*;
 use super::text_input::TextInputView;
 use super::{CallbackSlot, IosDisplay, platform::IosPlatformState};
 use gpui::{
-    AnyWindowHandle, Bounds, Capslock, DevicePixels, DispatchEventResult, DisplayId, Edges,
-    GpuSpecs, Modifiers, Pixels, PlatformAtlas, PlatformDisplay, PlatformInput,
-    PlatformInputHandler, PlatformWindow, Point, PromptButton, PromptLevel, RequestFrameOptions,
-    Scene, Size, TextInputConfiguration, TextInputStateChange, TouchEvent, TouchId, TouchPhase,
-    WindowAppearance, WindowBackgroundAppearance, WindowBounds, WindowControlArea, WindowInsets,
-    WindowParams, WindowVisibility, px, size,
+    AnyWindowHandle, BackGestureEvent, BackGesturePhase, Bounds, Capslock, Corners, DevicePixels,
+    DispatchEventResult, DisplayId, Edges, GpuSpecs, Modifiers, Pixels, PlatformAtlas,
+    PlatformDisplay, PlatformInput, PlatformInputHandler, PlatformWindow, Point, PromptButton,
+    PromptLevel, RequestFrameOptions, Scene, Size, TextInputConfiguration, TextInputStateChange,
+    TouchEvent, TouchId, TouchPhase, WindowAppearance, WindowBackgroundAppearance, WindowBounds,
+    WindowControlArea, WindowInsets, WindowParams, WindowVisibility, px, size,
 };
-use gpui_apple::metal_renderer::{Context as MetalContext, MetalRenderer};
+use gpui_apple::{
+    main_thread_marker,
+    metal_renderer::{Context as MetalContext, MetalRenderer},
+};
 use objc2::rc::Retained;
 use objc2::runtime::{AnyClass, AnyObject, ProtocolObject, Sel};
-use objc2::sel;
-use objc2::{ClassType, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send};
+use objc2::{
+    ClassType, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel,
+};
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use objc2_foundation::{
-    NSNotification, NSNotificationCenter, NSNumber, NSObjectNSDelayedPerforming, NSObjectProtocol,
-    NSSet, NSValue,
+    NSArray, NSNotification, NSNotificationCenter, NSNumber, NSObjectNSDelayedPerforming,
+    NSObjectProtocol, NSSet, NSValue,
 };
 use objc2_quartz_core::CAMetalLayer;
 use objc2_ui_kit::{
@@ -36,12 +40,15 @@ use objc2_ui_kit::{
     UIKeyboardWillChangeFrameNotification, UIKeyboardWillHideNotification, UIStatusBarStyle,
 };
 use objc2_ui_kit::{
-    UIEditMenuConfiguration, UIEditMenuInteraction, UIEditMenuInteractionAnimating,
-    UIEditMenuInteractionDelegate,
+    UICornerConfiguration, UICornerRadius, UIEvent, UIGestureRecognizer,
+    UIGestureRecognizerDelegate, UIPanGestureRecognizer, UIRectCorner, UIRectEdge, UIScreen,
+    UIScreenEdgePanGestureRecognizer, UIScrollTypeMask, UITouch, UITraitCollection,
+    UITraitEnvironment, UIUserInterfaceLayoutDirection, UIUserInterfaceStyle, UIView,
+    UIViewAutoresizing, UIViewController, UIWindow, UIWindowScene,
 };
 use objc2_ui_kit::{
-    UIEvent, UIScreen, UITouch, UITraitCollection, UITraitEnvironment, UIUserInterfaceStyle,
-    UIView, UIViewAutoresizing, UIViewController, UIWindow, UIWindowScene,
+    UIEditMenuConfiguration, UIEditMenuInteraction, UIEditMenuInteractionAnimating,
+    UIEditMenuInteractionDelegate,
 };
 use parking_lot::Mutex;
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle, UiKitDisplayHandle, UiKitWindowHandle};
@@ -272,6 +279,18 @@ define_class!(
             self.ivars()
                 .with_window(|window| window.text_press_held(generation));
         }
+
+        #[unsafe(method(handleScroll:))]
+        fn handle_scroll(&self, recognizer: &UIPanGestureRecognizer) {
+            self.ivars()
+                .with_window(|window| window.handle_scroll(recognizer));
+        }
+
+        #[unsafe(method(handleBackGesture:))]
+        fn handle_back_gesture(&self, recognizer: &UIScreenEdgePanGestureRecognizer) {
+            self.ivars()
+                .with_window(|window| window.handle_back_gesture(recognizer));
+        }
     }
 
     unsafe impl UIEditMenuInteractionDelegate for MetalView {
@@ -295,6 +314,16 @@ define_class!(
         ) {
             self.ivars()
                 .with_window(|window| window.edit_menu_shown.set(false));
+        }
+    }
+
+    unsafe impl UIGestureRecognizerDelegate for MetalView {
+        // Only the back-gesture recognizer uses this view as its delegate.
+        #[unsafe(method(gestureRecognizerShouldBegin:))]
+        fn gesture_recognizer_should_begin(&self, recognizer: &UIGestureRecognizer) -> bool {
+            self.ivars()
+                .with_window(|window| window.begin_back_gesture(recognizer))
+                .unwrap_or(false)
         }
     }
 );
@@ -377,6 +406,8 @@ pub(crate) struct IosWindowState {
     appearance_changed_callback: CallbackSlot<Box<dyn FnMut()>>,
     insets_changed_callback: CallbackSlot<Box<dyn FnMut(WindowInsets)>>,
     keyboard_dismiss_touch: Cell<Option<KeyboardDismissTouch>>,
+    /// Where the back gesture an element claimed started, while it runs.
+    back_gesture_start: Cell<Option<Point<Pixels>>>,
     keyboard_height: Cell<f32>,
     /// roostr: the first finger of the current gesture while it can still be
     /// a tap (it has not moved past GPUI's touch slop).
@@ -412,7 +443,7 @@ impl IosWindow {
         let screen_bounds = screen.bounds();
         let scale_factor = screen.scale();
 
-        let main_thread = MainThreadMarker::new().expect("UIKit requires the main thread");
+        let main_thread = main_thread_marker().expect("UIKit requires the main thread");
         // Create UIWindow
         let window_scene = platform.application.window_scene();
         let window_scene = window_scene.as_deref();
@@ -452,6 +483,59 @@ impl IosWindow {
             Some(ProtocolObject::from_ref(&*view)),
         );
         view.addInteraction(ProtocolObject::from_ref(&*edit_menu));
+
+        // UIKit has no public API for the display's corner radius, but since
+        // iOS 26 a view filling the window with a container-concentric corner
+        // configuration resolves its radii to the display's. This only sets the
+        // layer's corner radius; without `masksToBounds` the Metal drawable is
+        // not clipped.
+        if reports_corner_radii(&view) {
+            view.setCornerConfiguration(&UICornerConfiguration::configurationWithRadius(
+                &UICornerRadius::containerConcentricRadius(),
+            ));
+        }
+
+        // Trackpad and mouse-wheel scrolling reaches UIKit apps only through a
+        // pan recognizer that accepts scroll types. With no allowed touch types
+        // it never claims finger touches, so those keep reaching `touchesBegan`
+        // and GPUI's own recognizer.
+        let scroll_target: &AnyObject = &view;
+        // SAFETY: `MetalView` implements `handleScroll:` and owns the recognizer.
+        let scroll_recognizer = unsafe {
+            UIPanGestureRecognizer::initWithTarget_action(
+                UIPanGestureRecognizer::alloc(main_thread),
+                Some(scroll_target),
+                Some(sel!(handleScroll:)),
+            )
+        };
+        scroll_recognizer.setAllowedScrollTypesMask(UIScrollTypeMask::All);
+        scroll_recognizer.setAllowedTouchTypes(&NSArray::new());
+        scroll_recognizer.setCancelsTouchesInView(false);
+        view.addGestureRecognizer(&scroll_recognizer);
+
+        // The leading-edge swipe is iOS's back gesture. The delegate lets it
+        // begin only when an element claims it; it then cancels the touches it
+        // took over, so GPUI's own recognizer abandons any pan it had started.
+        let back_target: &AnyObject = &view;
+        // SAFETY: `MetalView` implements `handleBackGesture:` and owns the recognizer.
+        let back_recognizer = unsafe {
+            UIScreenEdgePanGestureRecognizer::initWithTarget_action(
+                UIScreenEdgePanGestureRecognizer::alloc(main_thread),
+                Some(back_target),
+                Some(sel!(handleBackGesture:)),
+            )
+        };
+        back_recognizer.setEdges(
+            if view.effectiveUserInterfaceLayoutDirection()
+                == UIUserInterfaceLayoutDirection::RightToLeft
+            {
+                UIRectEdge::Right
+            } else {
+                UIRectEdge::Left
+            },
+        );
+        back_recognizer.setDelegate(Some(ProtocolObject::from_ref(&*view)));
+        view.addGestureRecognizer(&back_recognizer);
 
         let view_controller = ViewController::new(main_thread);
         view_controller.setView(Some(&view));
@@ -508,6 +592,7 @@ impl IosWindow {
             appearance_changed_callback: CallbackSlot::default(),
             insets_changed_callback: CallbackSlot::default(),
             keyboard_dismiss_touch: Cell::new(None),
+            back_gesture_start: Cell::new(None),
             keyboard_height: Cell::new(0.),
             tap_candidate: Cell::new(None),
             touches_down: Cell::new(0),
@@ -915,7 +1000,8 @@ impl IosWindowState {
     /// roostr: runs an edit menu command, or its hardware-keyboard shortcut,
     /// as the key binding GPUI apps give it on the desktop (`secondary-v` and
     /// so on), so a paste goes where ⌘V's would: the editor turns a link
-    /// into a bookmark or a link, copied blocks into blocks.
+    /// into a bookmark or a link, copied blocks into blocks. `secondary` is
+    /// Control off a Mac, iOS included.
     fn perform(&self, command: EditCommand) {
         let key = match command {
             EditCommand::Cut => "x",
@@ -924,7 +1010,7 @@ impl IosWindowState {
             EditCommand::SelectAll => "a",
         };
         let keystroke = gpui::Keystroke {
-            modifiers: Modifiers::secondary_key(),
+            modifiers: Modifiers::control(),
             key: key.into(),
             key_char: None,
         };
@@ -969,6 +1055,55 @@ impl IosWindowState {
                 modifiers: self.modifiers.get(),
             }))
         });
+    }
+
+    /// Delivers one step of a trackpad or mouse-wheel scroll gesture.
+    fn handle_scroll(&self, recognizer: &UIPanGestureRecognizer) {
+        let Some(event) = scroll_event(recognizer, &self.view) else {
+            return;
+        };
+        self.mouse_position.set(event.position);
+        self.modifiers.set(event.modifiers);
+        self.input_callback
+            .with(|callback| callback(PlatformInput::Scroll(event)));
+    }
+
+    /// Offers a starting back gesture to GPUI, returning whether an element
+    /// claimed it.
+    fn begin_back_gesture(&self, recognizer: &UIGestureRecognizer) -> bool {
+        let location = recognizer.locationInView(Some(&self.view));
+        let start_position = Point::new(px(location.x as f32), px(location.y as f32));
+        let claimed = self
+            .input_callback
+            .with(|callback| {
+                callback(PlatformInput::BackGesture(BackGestureEvent {
+                    phase: BackGesturePhase::Started,
+                    start_position,
+                    progress: 0.,
+                }))
+            })
+            .is_some_and(|result| result.default_prevented);
+        self.back_gesture_start
+            .set(claimed.then_some(start_position));
+        claimed
+    }
+
+    /// Delivers a step of a claimed back gesture.
+    fn handle_back_gesture(&self, recognizer: &UIScreenEdgePanGestureRecognizer) {
+        let Some(start_position) = self.back_gesture_start.get() else {
+            return;
+        };
+        let Some(event) = back_event(recognizer, &self.view, start_position) else {
+            return;
+        };
+        if matches!(
+            event.phase,
+            BackGesturePhase::Committed | BackGesturePhase::Cancelled
+        ) {
+            self.back_gesture_start.set(None);
+        }
+        self.input_callback
+            .with(|callback| callback(PlatformInput::BackGesture(event)));
     }
 
     fn handle_keyboard_dismiss_touch(&self, event: &TouchEvent) {
@@ -1051,6 +1186,20 @@ impl IosWindowState {
                 bottom: px(self.keyboard_height.get()),
                 ..Default::default()
             },
+            corner_radii: self.display_corner_radii(),
+        }
+    }
+
+    fn display_corner_radii(&self) -> Corners<Pixels> {
+        if !reports_corner_radii(&self.view) {
+            return Corners::default();
+        }
+        let radius = |corner| px(self.view.effectiveRadiusForCorner(corner) as f32);
+        Corners {
+            top_left: radius(UIRectCorner::TopLeft),
+            top_right: radius(UIRectCorner::TopRight),
+            bottom_right: radius(UIRectCorner::BottomRight),
+            bottom_left: radius(UIRectCorner::BottomLeft),
         }
     }
 
@@ -1157,6 +1306,11 @@ impl IosWindowState {
     }
 }
 
+/// Whether UIKit can resolve corner configurations, which arrived in iOS 26.
+fn reports_corner_radii(view: &UIView) -> bool {
+    view.respondsToSelector(sel!(effectiveRadiusForCorner:))
+}
+
 impl Drop for IosWindow {
     fn drop(&mut self) {
         if let Some(platform) = self.platform.upgrade() {
@@ -1250,9 +1404,9 @@ impl PlatformWindow for IosWindow {
     }
 
     fn set_input_handler(&mut self, input_handler: PlatformInputHandler) {
-        // roostr: gpui-pre 0.3.9's handler carries no focus id; the text
-        // input view notices a different document by its contents instead
-        // (`reconcileTextInput`).
+        // roostr: gpui-pre 0.3.9's handler carried no focus id (0.3.10's
+        // does); the text input view notices a different document by its
+        // contents instead (`reconcileTextInput`).
         self.input_handler.set(input_handler);
         self.text_input_view.refresh_keyboard();
     }

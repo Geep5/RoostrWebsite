@@ -28,8 +28,8 @@ The browser build needs the nightly the `Dockerfile` pins (on wasm, gpui builds
 E0554). Pin it for this folder only, so your default toolchain stays as it is:
 
 ```sh
-rustup toolchain install nightly-2026-06-04 --profile minimal --target wasm32-unknown-unknown
-rustup override set nightly-2026-06-04 --path gpui
+rustup toolchain install nightly-2026-10-24 --profile minimal --target wasm32-unknown-unknown
+rustup override set nightly-2026-10-24 --path gpui
 gpui/scripts/build-web.sh     # → gpui/web-dist/ (first build a few minutes)
 ```
 

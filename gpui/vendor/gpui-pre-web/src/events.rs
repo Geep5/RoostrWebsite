@@ -4,8 +4,8 @@ use gpui::{
     Capslock, ClipboardEntry, ClipboardItem, ClipboardString, DispatchEventResult, GestureTuning,
     Image, ImageFormat, KeyDownEvent, KeyUpEvent, Keystroke, Modifiers, ModifiersChangedEvent,
     MouseButton, MouseDownEvent, MouseExitEvent, MouseMoveEvent, MouseUpEvent, NavigationDirection,
-    Pixels, PlatformInput, Point, ScrollDelta, ScrollWheelEvent, TouchEvent, TouchId, TouchPhase,
-    point, px,
+    Pixels, PlatformInput, Point, ScrollDelta, ScrollEvent, ScrollSource, TouchEvent, TouchId,
+    TouchPhase, point, px,
 };
 use wasm_bindgen::prelude::*;
 
@@ -686,11 +686,12 @@ impl WebWindowInner {
                 current_state.modifiers = modifiers;
             }
 
-            this.dispatch_input(PlatformInput::ScrollWheel(ScrollWheelEvent {
+            this.dispatch_input(PlatformInput::Scroll(ScrollEvent {
                 position,
                 delta,
                 modifiers,
                 touch_phase: TouchPhase::Moved,
+                source: ScrollSource::Pointer,
             }));
         })
     }
@@ -1328,13 +1329,14 @@ fn modifiers_from_wheel_event(event: &web_sys::MouseEvent, _is_mac: bool) -> Mod
 /// roostr: the modifiers GPUI sees for a keyboard or pointer event whose
 /// DOM modifiers are `dom` (Command as `platform`).
 ///
-/// GPUI resolves a binding's `secondary-` (copy, cut, select all, undo,
-/// bold, ...) when it parses it, by the target it was compiled for: Control
-/// on wasm. In a Mac browser - an iPad's too, whose Safari reports a Mac -
-/// the person's secondary key is Command, so there Command and Control
-/// trade places: Command-C is `secondary-c`, as in the desktop app, where it
-/// did nothing before. Control-C then reads as `cmd-c`, which a browser
-/// keymap leaves unbound.
+/// GPUI Kit picks its bindings (copy, cut, select all, undo, ...) by the
+/// target it was compiled for: Control on wasm. In a Mac browser - an
+/// iPad's and an iPhone's too - the person's secondary key is Command, so
+/// there Command and Control trade places: Command-C is `ctrl-c`, what the
+/// kit's inputs and the app's own bindings take for `secondary-c`, as in
+/// the desktop app. Control-C then reads as `cmd-c`, which a browser keymap
+/// leaves unbound. [`platform_info`] keeps GPUI's runtime idea of the
+/// secondary key (`Modifiers::secondary`, `KeyBinding::load`) in step.
 fn command_as_secondary(dom: Modifiers, is_mac: bool) -> Modifiers {
     if !is_mac {
         return dom;
@@ -1367,21 +1369,59 @@ fn capslock_from_keyboard_event(event: &web_sys::KeyboardEvent) -> Capslock {
 }
 
 pub(crate) fn is_mac_platform(browser_window: &web_sys::Window) -> bool {
-    let navigator = browser_window.navigator();
+    // iOS hardware keyboards also use Option for text composition.
+    matches!(
+        host_os(browser_window),
+        gpui::OperatingSystem::Mac | gpui::OperatingSystem::Ios
+    )
+}
 
+/// roostr: the host as GPUI sees it. A Mac browser reports no Mac
+/// (`OperatingSystem::Unknown`): Command already arrives as Control there
+/// ([`command_as_secondary`]), so GPUI and the kit must take Control for the
+/// secondary key, as they do on every other wasm host. Reporting a Mac would
+/// make `Modifiers::secondary(cx)` and the kit's `is_mac()` bindings
+/// (`cmd-enter`) read the swapped Control key instead.
+pub(crate) fn platform_info(browser_window: &web_sys::Window) -> gpui::PlatformInfo {
+    let os = match host_os(browser_window) {
+        gpui::OperatingSystem::Mac => gpui::OperatingSystem::Unknown,
+        os => os,
+    };
+    gpui::PlatformInfo {
+        os,
+        target: gpui::PlatformTarget::Web,
+    }
+}
+
+fn host_os(browser_window: &web_sys::Window) -> gpui::OperatingSystem {
+    let navigator = browser_window.navigator();
+    let user_agent = navigator.user_agent().unwrap_or_default();
     #[allow(deprecated)]
     // navigator.platform() is deprecated but navigator.userAgentData is not widely available yet
-    if let Ok(platform) = navigator.platform() {
-        if platform.contains("Mac") {
-            return true;
-        }
+    let platform = navigator.platform().unwrap_or_default();
+    if user_agent.contains("Android") {
+        gpui::OperatingSystem::Android
+    } else if user_agent.contains("iPhone")
+        || user_agent.contains("iPad")
+        || user_agent.contains("iPod")
+        || (platform.contains("Mac") && navigator.max_touch_points() > 1)
+    {
+        // iPadOS can advertise a desktop Mac user agent.
+        gpui::OperatingSystem::Ios
+    } else if platform.contains("Mac") || user_agent.contains("Mac") {
+        gpui::OperatingSystem::Mac
+    } else if platform.contains("Win") || user_agent.contains("Windows") {
+        gpui::OperatingSystem::Windows
+    } else if platform.contains("FreeBSD") || user_agent.contains("FreeBSD") {
+        gpui::OperatingSystem::FreeBsd
+    } else if platform.contains("Linux")
+        || user_agent.contains("Linux")
+        || user_agent.contains("CrOS")
+    {
+        gpui::OperatingSystem::Linux
+    } else {
+        gpui::OperatingSystem::Unknown
     }
-
-    if let Ok(user_agent) = navigator.user_agent() {
-        return user_agent.contains("Mac");
-    }
-
-    false
 }
 
 fn is_modifier_only_key(key: &str) -> bool {

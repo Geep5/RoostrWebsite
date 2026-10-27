@@ -778,6 +778,27 @@ pub fn modal_frame(width: Pixels) -> Div {
         .overflow_hidden()
 }
 
+// ------------------------------------------------------------------ keys
+
+/// A key binding whose keystrokes may name `secondary-`: Command on a Mac,
+/// Control elsewhere - in a browser too, where a Mac's Command arrives as
+/// Control (vendor/gpui-pre-web). GPUI resolves `secondary-` by the host
+/// (`KeyBinding::load`); `KeyBinding::new` takes explicit modifiers only.
+pub fn secondary_binding<A: Action>(
+    keystrokes: &str,
+    action: A,
+    context: Option<&str>,
+    cx: &App,
+) -> KeyBinding {
+    let context = context.map(|context| {
+        KeyBindingContextPredicate::parse(context)
+            .expect("a valid key context")
+            .into()
+    });
+    KeyBinding::load(keystrokes, Box::new(action), context, false, None, cx)
+        .expect("valid keystrokes")
+}
+
 // ------------------------------------------------------------------ tooltip
 
 /// The `[data-tip]` tooltip as the kit [`Tooltip`](KitTooltip), so plain
@@ -804,24 +825,24 @@ pub fn tooltip(
 /// (⌘ is Ctrl off macOS). `None` without a modifier glyph in the parentheses.
 pub fn split_shortcut(text: &str) -> Option<(&str, Keystroke)> {
     let (label, hint) = text.strip_suffix(')')?.rsplit_once(" (")?;
-    let mut modifiers = Vec::new();
+    let mut modifiers = Modifiers::default();
     let mut key = String::new();
     for c in hint.chars() {
         match c {
-            '⌘' => modifiers.push(if cfg!(target_os = "macos") {
-                "cmd"
-            } else {
-                "ctrl"
-            }),
-            '⌃' => modifiers.push("ctrl"),
-            '⌥' => modifiers.push("alt"),
-            '⇧' => modifiers.push("shift"),
+            '⌘' if cfg!(target_os = "macos") => modifiers.platform = true,
+            '⌘' | '⌃' => modifiers.control = true,
+            '⌥' => modifiers.alt = true,
+            '⇧' => modifiers.shift = true,
             c => key.extend(c.to_lowercase()),
         }
     }
-    if modifiers.is_empty() || key.is_empty() {
+    if !modifiers.modified() || key.is_empty() {
         return None;
     }
-    let stroke = Keystroke::parse(&format!("{}-{key}", modifiers.join("-"))).ok()?;
+    let stroke = Keystroke {
+        modifiers,
+        key,
+        key_char: None,
+    };
     Some((label, stroke))
 }

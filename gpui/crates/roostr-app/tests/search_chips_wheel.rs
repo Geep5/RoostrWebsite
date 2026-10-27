@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::{
-    Modifiers, Pixels, Point, ScrollDelta, ScrollWheelEvent, TestAppContext, TouchPhase,
+    Modifiers, Pixels, Point, ScrollDelta, ScrollEvent, ScrollSource, TestAppContext, TouchPhase,
     VisualTestContext, point,
 };
 use gpui_kit::{px, size};
@@ -154,11 +154,12 @@ fn wheel(cx: &mut VisualTestContext, at: Point<Pixels>, dy: f32) {
         (TouchPhase::Moved, dy),
         (TouchPhase::Ended, 0.),
     ] {
-        cx.simulate_event(ScrollWheelEvent {
+        cx.simulate_event(ScrollEvent {
             position: at,
             delta: ScrollDelta::Pixels(point(px(0.), px(dy))),
             modifiers: Modifiers::none(),
             touch_phase: phase,
+            source: ScrollSource::Pointer,
         });
         cx.run_until_parked();
     }

@@ -508,7 +508,7 @@ impl Workspace {
             |bounds, window, _| window.insert_hitbox(bounds, HitboxBehavior::Normal),
             move |_, hitbox, window, _| {
                 let this = this.clone();
-                window.on_mouse_event(move |e: &ScrollWheelEvent, phase, window, cx| {
+                window.on_mouse_event(move |e: &ScrollEvent, phase, window, cx| {
                     if phase != DispatchPhase::Capture {
                         return;
                     }
@@ -529,7 +529,7 @@ impl Workspace {
     /// One step of a touch pan: true when it is the back swipe's.
     fn back_pan(
         &mut self,
-        e: &ScrollWheelEvent,
+        e: &ScrollEvent,
         here: bool,
         window: &Window,
         cx: &mut Context<Self>,
@@ -832,7 +832,7 @@ impl Workspace {
             move |_, hitbox, window, _| {
                 let pull = pull.clone();
                 let scroll = scroll.clone();
-                window.on_mouse_event(move |e: &ScrollWheelEvent, phase, window, cx| {
+                window.on_mouse_event(move |e: &ScrollEvent, phase, window, cx| {
                     // Capture: the offset before this step scrolls the list.
                     if phase != DispatchPhase::Capture {
                         return;

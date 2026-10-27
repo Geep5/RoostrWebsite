@@ -6,7 +6,7 @@
 #
 # Nightly: on wasm, gpui-pre-web builds parking_lot with its `nightly` feature.
 FROM rust:1-bookworm AS build
-ARG RUST_TOOLCHAIN=nightly-2026-06-04
+ARG RUST_TOOLCHAIN=nightly-2026-10-24
 RUN rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --target wasm32-unknown-unknown \
 	&& rustup default "$RUST_TOOLCHAIN"
 # brotli for the precompressed copies Caddy serves.

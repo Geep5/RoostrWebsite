@@ -6,7 +6,8 @@
 #   wasm32-unknown-unknown, so the browser build did not compile. They are
 #   web_time's Instant (std's on native targets). The same change in
 #   ../gpui-ce-motion; both are in UPSTREAM.patch, for 1bye/gpui-motion.
-# Examples are left out.
+# Examples are left out. The published crate pins gpui-kit =0.7.3; this copy
+# pins =0.8.1 (`roostr:` below), which it builds against unchanged.
 
 [package]
 edition = "2024"
@@ -46,7 +47,8 @@ features = [
 default-features = false
 
 [dependencies.gpui-kit]
-version = "=0.7.3"
+# roostr: the gpui-kit the workspace uses (published: =0.7.3).
+version = "=0.8.1"
 default-features = false
 
 # roostr: the motion clock type (see above).

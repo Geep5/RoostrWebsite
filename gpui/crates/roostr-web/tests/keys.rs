@@ -1,7 +1,9 @@
 //! In a Mac browser Command is GPUI's `secondary` key, as on the desktop:
 //! Command-C copies the chat's selected text, Command-A selects all, and so
-//! on (vendor/gpui-pre-web's `keystroke_modifiers`). GPUI parses `secondary`
-//! as Control on wasm, so a Mac's Command-C used to match no binding.
+//! on (vendor/gpui-pre-web's `keystroke_modifiers`). GPUI Kit binds Control
+//! on wasm, and the web platform reports a Mac browser as no Mac, so GPUI
+//! resolves `secondary` (`KeyBinding::load`) as Control there too; a Mac's
+//! Command-C would otherwise match no binding.
 //!
 //! Run with `wasm-bindgen-test-runner` as the wasm32 test runner (Node is
 //! enough): `cargo test --target wasm32-unknown-unknown -p roostr-web`.
@@ -9,10 +11,12 @@
 #![cfg(target_family = "wasm")]
 
 use gpui_kit::web::keystroke_modifiers;
-use gpui_kit::{KeyBinding, Keystroke, Modifiers, actions};
+use gpui_kit::{Keystroke, Modifiers, OperatingSystem};
 use wasm_bindgen_test::*;
 
-actions!(keys_test, [Shortcut]);
+/// The OS GPUI is told a browser runs on, for resolving `secondary`: a Mac
+/// browser reports `Unknown` (vendor/gpui-pre-web's `platform_info`).
+const BROWSER_OS: OperatingSystem = OperatingSystem::Unknown;
 
 fn command() -> Modifiers {
     Modifiers {
@@ -35,7 +39,8 @@ fn fires(binding: &str, held: Modifiers, key: &str, mac: bool) -> bool {
         key: key.to_string(),
         key_char: None,
     };
-    KeyBinding::new(binding, Shortcut, None).match_keystrokes(&[keystroke]) == Some(false)
+    let binding = Keystroke::parse_with_os(binding, BROWSER_OS).unwrap();
+    binding.modifiers == keystroke.modifiers && binding.key == keystroke.key
 }
 
 #[wasm_bindgen_test]
@@ -71,11 +76,15 @@ fn command_v_stays_the_browsers_paste() {
 }
 
 #[wasm_bindgen_test]
-fn parsed_secondary_is_control_on_wasm() {
-    // What makes the Mac swap necessary; if GPUI ever resolves `secondary`
-    // per browser, `keystroke_modifiers` must go.
+fn secondary_is_control_for_a_browser() {
+    // What makes the Mac swap necessary: the kit binds Control on wasm, and
+    // GPUI resolves `secondary` as Command only for a Mac, which the web
+    // platform does not report. If either follows the browser's OS,
+    // `keystroke_modifiers` must go.
     assert_eq!(
-        Keystroke::parse("secondary-c").unwrap().modifiers,
+        Keystroke::parse_with_os("secondary-c", BROWSER_OS)
+            .unwrap()
+            .modifiers,
         control()
     );
 }

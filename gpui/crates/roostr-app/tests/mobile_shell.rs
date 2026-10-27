@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::{
-    LongPressEvent, Modifiers, ScrollDelta, ScrollWheelEvent, TestAppContext, TouchPhase,
+    LongPressEvent, Modifiers, ScrollDelta, ScrollEvent, ScrollSource, TestAppContext, TouchPhase,
     VisualTestContext,
 };
 use gpui_kit::{Pixels, Point, point, px, size};
@@ -144,11 +144,12 @@ fn route(cx: &mut VisualTestContext) -> Route {
 }
 
 fn pan(cx: &mut VisualTestContext, at: Point<Pixels>, phase: TouchPhase, dy: f32) {
-    cx.simulate_event(ScrollWheelEvent {
+    cx.simulate_event(ScrollEvent {
         position: at,
         delta: ScrollDelta::Pixels(point(px(0.), px(dy))),
         modifiers: Modifiers::none(),
         touch_phase: phase,
+        source: ScrollSource::Pointer,
     });
     cx.run_until_parked();
 }

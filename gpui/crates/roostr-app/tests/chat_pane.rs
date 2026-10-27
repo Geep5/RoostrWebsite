@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::{
-    Modifiers, MouseButton, ScrollDelta, ScrollWheelEvent, TestAppContext, TouchPhase,
+    Modifiers, MouseButton, ScrollDelta, ScrollEvent, ScrollSource, TestAppContext, TouchPhase,
     VisualTestContext,
 };
 use gpui_kit::base::TextSelection;
@@ -120,11 +120,12 @@ impl Backend for Vault {
 }
 
 fn wheel(cx: &mut VisualTestContext, at: Point<Pixels>, phase: TouchPhase, dy: f32) {
-    cx.simulate_event(ScrollWheelEvent {
+    cx.simulate_event(ScrollEvent {
         position: at,
         delta: ScrollDelta::Pixels(point(px(0.), px(dy))),
         modifiers: Modifiers::none(),
         touch_phase: phase,
+        source: ScrollSource::Pointer,
     });
     cx.run_until_parked();
 }

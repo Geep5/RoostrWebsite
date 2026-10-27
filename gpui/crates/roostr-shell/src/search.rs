@@ -1039,7 +1039,7 @@ impl Render for SearchModal {
                 |_, _, _| {},
                 move |bounds, _, window, _| {
                     let this = this.clone();
-                    window.on_mouse_event(move |e: &ScrollWheelEvent, phase, window, cx| {
+                    window.on_mouse_event(move |e: &ScrollEvent, phase, window, cx| {
                         // Capture: before the results scroll by this step.
                         if phase != DispatchPhase::Capture {
                             return;
@@ -1261,25 +1261,23 @@ impl Render for SearchModal {
                             // here. Mobile pans the chips with sideways swipes.
                             .when(!mobile, |d| {
                                 let handle = self.chips_scroll.clone();
-                                d.on_scroll_wheel(cx.listener(
-                                    move |_, e: &ScrollWheelEvent, window, cx| {
-                                        let delta = wheel_scroll_delta(e, window.line_height());
-                                        let max = handle.max_offset().x;
-                                        // A mostly-vertical wheel: some mice send a sliver of
-                                        // sideways with every notch. A sideways swipe (mostly x)
-                                        // keeps scrolling the row natively.
-                                        if delta.y.abs() <= delta.x.abs() || max <= px(0.) {
-                                            return;
-                                        }
-                                        let offset = handle.offset();
-                                        let x = (offset.x + delta.y).clamp(-max, px(0.));
-                                        if x != offset.x {
-                                            handle.set_offset(point(x, offset.y));
-                                            cx.notify();
-                                        }
-                                        cx.stop_propagation();
-                                    },
-                                ))
+                                d.on_scroll(cx.listener(move |_, e: &ScrollEvent, window, cx| {
+                                    let delta = wheel_scroll_delta(e, window.line_height());
+                                    let max = handle.max_offset().x;
+                                    // A mostly-vertical wheel: some mice send a sliver of
+                                    // sideways with every notch. A sideways swipe (mostly x)
+                                    // keeps scrolling the row natively.
+                                    if delta.y.abs() <= delta.x.abs() || max <= px(0.) {
+                                        return;
+                                    }
+                                    let offset = handle.offset();
+                                    let x = (offset.x + delta.y).clamp(-max, px(0.));
+                                    if x != offset.x {
+                                        handle.set_offset(point(x, offset.y));
+                                        cx.notify();
+                                    }
+                                    cx.stop_propagation();
+                                }))
                             })
                             .px(px(14.))
                             .border_b_1()

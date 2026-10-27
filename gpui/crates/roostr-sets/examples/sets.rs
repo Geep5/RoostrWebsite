@@ -263,7 +263,9 @@ fn drive(line: &str, window: &mut Window, cx: &mut App) {
             );
         }
         Some("key") => {
-            if let Ok(k) = Keystroke::parse(parts.get(1).unwrap_or(&"")) {
+            if let Ok(k) =
+                Keystroke::parse_with_os(parts.get(1).unwrap_or(&""), cx.platform_info().os)
+            {
                 window.dispatch_keystroke(k, cx);
             }
         }
@@ -279,7 +281,7 @@ fn drive(line: &str, window: &mut Window, cx: &mut App) {
                 } else {
                     ch.to_string()
                 };
-                if let Ok(mut k) = Keystroke::parse(&key) {
+                if let Ok(mut k) = Keystroke::parse_with_os(&key, cx.platform_info().os) {
                     k.key_char = Some(ch.to_string());
                     window.dispatch_keystroke(k, cx);
                 }

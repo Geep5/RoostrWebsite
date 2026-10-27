@@ -2,7 +2,7 @@
 
 A native port of this repository's Svelte UI — the `/app` workspace and the
 website pages (`/`, `/guide`, `/privacy`, `/j`) — built on
-[GPUI Kit](https://gpui-kit.com) 0.7.3. It runs in one of two modes, the
+[GPUI Kit](https://gpui-kit.com) 0.8.1. It runs in one of two modes, the
 Svelte app's two:
 
 - **Daemon** (the desktop default, the web app's local mode): the glon-odin
@@ -254,17 +254,19 @@ images, a custom icon or avatar) - GPUI's web platform has no file picker;
 dropping files from the desktop. Exports and file downloads are browser
 downloads; "open" shows a file in a new tab.
 
-GPUI's web platform is `vendor/gpui-pre-web`, gpui-pre-web 0.3.9 patched in
+GPUI's web platform is `vendor/gpui-pre-web`, gpui-pre-web 0.3.10 patched in
 through `[patch.crates-io]`, its changes marked `roostr:`. Once the last
 finger lifts, the pointer moves off the canvas, so hover (and a `[data-tip]`
 tooltip) ends with the touch instead of staying on the control last tapped.
 In a Mac browser (an iPad's too) Command is the `secondary` key, as on the
-desktop: GPUI parses `secondary-c` as Control on wasm, so Command and Control
-trade places in keyboard and pointer events there (`keystroke_modifiers`;
-not the wheel, where Control is a trackpad pinch). Command-C, -X, -A, -Z,
+desktop: GPUI Kit binds Control on wasm, so Command and Control trade places
+in keyboard and pointer events there (`keystroke_modifiers`; not the wheel,
+where Control is a trackpad pinch), and GPUI is told such a browser runs on
+no Mac, so it resolves `secondary` as Control too. Command-C, -X, -A, -Z,
 -B... act as on the desktop; Command-V stays the browser's paste, whose
 `paste` event hands the text to the focused field without a permission
-prompt. A browser keymap binds `secondary-`, never `cmd-`
+prompt. A browser keymap binds `secondary-` (`ui::secondary_binding`, as
+GPUI parses it only by the host), never `cmd-`
 (`cargo test --target wasm32-unknown-unknown -p roostr-web` with
 `wasm-bindgen-test-runner` checks the mapping).
 
@@ -348,9 +350,8 @@ cargo clippy -p roostr-ios --target aarch64-apple-ios-sim
 ```
 
 GPUI's UIKit platform is `vendor/gpui-pre-ios`, a vendored gpui-pre-ios
-0.3.9: that snapshot is newer than the gpui-pre 0.3.9 core it pins and
-does not build against it, and it gains a document picker for
-`prompt_for_paths`. It names its window as the active one (the published
+0.3.10 (patched in through `[patch.crates-io]`, as gpui-pre-platform names
+it on iOS) that gains a document picker for `prompt_for_paths`. It names its window as the active one (the published
 crate's `active_window` was always none, so what acts on the active
 window - an alert, closing a dialog - did nothing). It also takes over a
 window scene UIKit restores with another app's scene delegate: an update
@@ -380,7 +381,7 @@ one axis (twice as far) scrolls on that axis alone, so a swipe down that
 drifts sideways leaves the table where it is, while a diagonal one moves
 both. The graph canvas alone pans on both axes (`Window::pan_touch_freely`;
 its wheel listener gets the wheel unrailed). This lives in GPUI's core,
-`vendor/gpui-pre` (gpui-pre 0.3.9 patched in through `[patch.crates-io]`,
+`vendor/gpui-pre` (gpui-pre 0.3.10 patched in through `[patch.crates-io]`,
 changes marked `roostr:`): its recognizer already locked each pan, but a
 scroller that scrolls on one axis only took the other axis as its own, under
 a swipe, a wheel and a trackpad alike.

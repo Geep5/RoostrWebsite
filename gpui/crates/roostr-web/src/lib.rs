@@ -91,8 +91,8 @@ pub fn run(base: String) -> Result<(), JsValue> {
         // `secondary`: Command in a Mac browser (vendor/gpui-pre-web), Control
         // elsewhere.
         cx.bind_keys([
-            KeyBinding::new("secondary-,", OpenSettings, None),
-            KeyBinding::new("secondary-n", NewObject, None),
+            roostr_core::ui::secondary_binding("secondary-,", OpenSettings, None, cx),
+            roostr_core::ui::secondary_binding("secondary-n", NewObject, None, cx),
         ]);
         let base = base.trim_end_matches('/').to_string();
         load_emoji_font(&base, cx);

@@ -24,6 +24,7 @@ mod toggles;
 mod write_queue;
 
 use gpui_kit::{App, KeyBinding, PromptLevel, actions};
+use roostr_core::ui::secondary_binding;
 
 pub use editor::Editor;
 pub use file_view::FileView;
@@ -111,17 +112,17 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("shift-home", SelectLineStart, c),
         KeyBinding::new("shift-end", SelectLineEnd, c),
         KeyBinding::new("escape", Escape, c),
-        KeyBinding::new("secondary-a", SelectAll, c),
-        KeyBinding::new("secondary-b", Bold, c),
-        KeyBinding::new("secondary-i", Italic, c),
-        KeyBinding::new("secondary-u", Underline, c),
-        KeyBinding::new("secondary-e", InlineCode, c),
-        KeyBinding::new("secondary-z", Undo, c),
-        KeyBinding::new("secondary-shift-z", Redo, c),
+        secondary_binding("secondary-a", SelectAll, c, cx),
+        secondary_binding("secondary-b", Bold, c, cx),
+        secondary_binding("secondary-i", Italic, c, cx),
+        secondary_binding("secondary-u", Underline, c, cx),
+        secondary_binding("secondary-e", InlineCode, c, cx),
+        secondary_binding("secondary-z", Undo, c, cx),
+        secondary_binding("secondary-shift-z", Redo, c, cx),
         KeyBinding::new("ctrl-y", Redo, c),
-        KeyBinding::new("secondary-c", Copy, c),
-        KeyBinding::new("secondary-x", Cut, c),
-        KeyBinding::new("secondary-v", Paste, c),
+        secondary_binding("secondary-c", Copy, c, cx),
+        secondary_binding("secondary-x", Cut, c, cx),
+        secondary_binding("secondary-v", Paste, c, cx),
     ]);
     #[cfg(target_os = "macos")]
     cx.bind_keys([

@@ -4,7 +4,7 @@
 use std::time::{Duration, Instant};
 
 use gpui::{
-    Axis, Modifiers, ScrollDelta, ScrollWheelEvent, TouchPhase, WheelRails, point, px,
+    Axis, Modifiers, ScrollDelta, ScrollEvent, TouchPhase, WheelRails, point, px,
     wheel_scroll_delta,
 };
 
@@ -101,13 +101,13 @@ fn momentum_after_the_fingers_lift_keeps_the_rail() {
 
 #[test]
 fn shift_turns_a_mouse_wheel_sideways_but_not_a_trackpad() {
-    let wheel = |delta, shift| ScrollWheelEvent {
+    let wheel = |delta, shift| ScrollEvent {
         delta,
         modifiers: Modifiers {
             shift,
             ..Modifiers::default()
         },
-        ..ScrollWheelEvent::default()
+        ..ScrollEvent::default()
     };
     let line = px(20.);
     let notch = ScrollDelta::Lines(point(0., -3.));

@@ -1,15 +1,16 @@
 use super::{CallbackSlot, platform::IosPlatformState, window::IosWindowState};
 use gpui::{AnyWindowHandle, AppLifecyclePhase, WindowVisibility};
+use gpui_apple::main_thread_marker;
 use objc2::{
-    ClassType, DefinedClass, MainThreadMarker, MainThreadOnly, Message, define_class, extern_class,
-    extern_methods, msg_send,
+    ClassType, DefinedClass, MainThreadOnly, Message, define_class, extern_class, extern_methods,
+    msg_send,
     rc::{Allocated, Retained},
     runtime::{AnyObject, ProtocolObject},
     sel,
 };
 use objc2_foundation::{
     NSDictionary, NSNotification, NSNotificationCenter, NSObject, NSObjectProtocol, NSRunLoop,
-    NSRunLoopCommonModes, NSSet, NSString,
+    NSRunLoopCommonModes, NSSet, NSString, NSUserActivity, NSUserActivityTypeBrowsingWeb,
 };
 use objc2_quartz_core::CADisplayLink;
 use objc2_ui_kit::{
@@ -47,7 +48,7 @@ pub(super) fn current_platform() -> Option<Rc<IosPlatformState>> {
 }
 
 pub(super) fn run(platform: &Rc<IosPlatformState>, on_finish_launching: Box<dyn FnOnce()>) {
-    let main_thread = MainThreadMarker::new().expect("UIKit requires the main thread");
+    let main_thread = main_thread_marker().expect("UIKit requires the main thread");
     CURRENT_PLATFORM.with_borrow_mut(|current| {
         assert!(
             current.upgrade().is_none(),
@@ -157,7 +158,7 @@ impl IosApplicationState {
             AppLifecyclePhase::Inactive => {
                 self.with_windows(|window| window.notify_active_status_change(false));
             }
-            AppLifecyclePhase::Background => {
+            AppLifecyclePhase::Background | AppLifecyclePhase::Disconnected => {
                 self.with_windows(|window| window.notify_active_status_change(false));
                 // An activation observer may have closed a window; revisit the registry.
                 self.with_windows(|window| {
@@ -177,6 +178,17 @@ impl IosApplicationState {
             .filter_map(|context| context.URL().absoluteString().map(|url| url.to_string()))
             .collect();
         self.open_urls.with(|callback| callback(urls));
+    }
+
+    fn continue_user_activity(&self, activity: &NSUserActivity) {
+        if &*activity.activityType() != unsafe { NSUserActivityTypeBrowsingWeb } {
+            return;
+        }
+        let Some(url) = activity.webpageURL().and_then(|url| url.absoluteString()) else {
+            return;
+        };
+        self.open_urls
+            .with(|callback| callback(vec![url.to_string()]));
     }
 }
 
@@ -198,6 +210,10 @@ impl SceneConnectionOptions {
         #[unsafe(method(URLContexts))]
         #[unsafe(method_family = none)]
         fn url_contexts(&self) -> Option<Retained<NSSet<UIOpenURLContext>>>;
+
+        #[unsafe(method(userActivities))]
+        #[unsafe(method_family = none)]
+        fn user_activities(&self) -> Option<Retained<NSSet<NSUserActivity>>>;
     );
 }
 
@@ -348,7 +364,7 @@ define_class!(
             options: &SceneConnectionOptions,
         ) {
             if let Some(scene) = scene.downcast_ref::<UIWindowScene>() {
-                self.connect(scene, options.url_contexts());
+                self.connect(scene, Some(options));
             }
         }
 
@@ -357,9 +373,7 @@ define_class!(
             if let Some(platform) = self.platform_for_scene(scene) {
                 platform.application.stop_display_link();
                 platform.application.scene.borrow_mut().take();
-                // roostr: gpui-pre 0.3.9 has no `Disconnected` phase; a
-                // disconnected scene is backgrounded.
-                platform.application.notify_app_lifecycle(AppLifecyclePhase::Background);
+                platform.application.notify_app_lifecycle(AppLifecyclePhase::Disconnected);
             }
         }
 
@@ -399,15 +413,18 @@ define_class!(
                 platform.application.open_urls(contexts);
             }
         }
+
+        #[unsafe(method(scene:continueUserActivity:))]
+        fn continue_user_activity(&self, scene: &UIScene, activity: &NSUserActivity) {
+            if let Some(platform) = self.platform_for_scene(scene) {
+                platform.application.continue_user_activity(activity);
+            }
+        }
     }
 );
 
 impl SceneDelegate {
-    fn connect(
-        &self,
-        scene: &UIWindowScene,
-        url_contexts: Option<Retained<NSSet<UIOpenURLContext>>>,
-    ) {
+    fn connect(&self, scene: &UIWindowScene, options: Option<&SceneConnectionOptions>) {
         let Some(platform) = self.ivars().upgrade() else {
             return;
         };
@@ -420,8 +437,15 @@ impl SceneDelegate {
         application.finish_launching();
         // UIKit can reconnect a scene without restarting the Rust application.
         application.with_windows(|window| window.attach_to_scene(scene));
-        if let Some(contexts) = url_contexts {
-            application.open_urls(&contexts);
+        if let Some(options) = options {
+            if let Some(contexts) = options.url_contexts() {
+                application.open_urls(&contexts);
+            }
+            if let Some(activities) = options.user_activities() {
+                for activity in activities.iter() {
+                    application.continue_user_activity(&activity);
+                }
+            }
         }
 
         application.stop_display_link();
@@ -449,6 +473,38 @@ impl SceneDelegate {
 mod tests {
     use super::*;
     use std::{cell::Cell, rc::Rc};
+
+    #[test]
+    fn browsing_activity_delivers_url_without_losing_query_or_fragment() {
+        use objc2::AnyThread;
+        use objc2_foundation::NSURL;
+
+        let state = IosApplicationState::default();
+        let received = Rc::new(RefCell::new(Vec::new()));
+        state.open_urls.set(Box::new({
+            let received = received.clone();
+            move |urls| received.borrow_mut().extend(urls)
+        }));
+        let url_string = "https://example.com/thread/123?source=link#selection";
+        let url = NSURL::URLWithString(&NSString::from_str(url_string)).expect("test URL is valid");
+        let activity = NSUserActivity::initWithActivityType(NSUserActivity::alloc(), unsafe {
+            NSUserActivityTypeBrowsingWeb
+        });
+        state.continue_user_activity(&activity);
+        assert!(received.borrow().is_empty());
+
+        activity.setWebpageURL(Some(&url));
+        state.continue_user_activity(&activity);
+        assert_eq!(*received.borrow(), vec![url_string.to_string()]);
+
+        let unrelated = NSUserActivity::initWithActivityType(
+            NSUserActivity::alloc(),
+            &NSString::from_str("com.example.edit"),
+        );
+        unrelated.setWebpageURL(Some(&url));
+        state.continue_user_activity(&unrelated);
+        assert_eq!(*received.borrow(), vec![url_string.to_string()]);
+    }
 
     #[test]
     fn launch_callback_runs_once_and_can_register_callbacks() {
@@ -526,9 +582,9 @@ mod tests {
                 state.notify_app_lifecycle(AppLifecyclePhase::Inactive);
             }
         }));
-        state.notify_app_lifecycle(AppLifecyclePhase::Background);
+        state.notify_app_lifecycle(AppLifecyclePhase::Disconnected);
         state.notify_app_lifecycle(AppLifecyclePhase::Foreground);
-        assert_eq!(*events.borrow(), [AppLifecyclePhase::Background]);
+        assert_eq!(*events.borrow(), [AppLifecyclePhase::Disconnected]);
     }
 
     #[test]

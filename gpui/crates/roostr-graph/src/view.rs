@@ -1090,7 +1090,7 @@ impl Render for GraphView {
                         }
                     });
                     let (v4, h4) = (view.clone(), hitbox.clone());
-                    window.on_mouse_event(move |e: &ScrollWheelEvent, phase, window, cx| {
+                    window.on_mouse_event(move |e: &ScrollEvent, phase, window, cx| {
                         if phase == DispatchPhase::Bubble && h4.is_hovered(window) {
                             if roostr_core::layout::is_touch() {
                                 // The canvas pans on both axes; a touch pan

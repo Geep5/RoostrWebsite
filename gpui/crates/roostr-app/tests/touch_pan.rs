@@ -15,8 +15,8 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use gpui::{
-    Modifiers, ScrollDelta, ScrollHandle, ScrollWheelEvent, TestAppContext, TouchEvent, TouchId,
-    TouchPhase, VisualTestContext,
+    Modifiers, ScrollDelta, ScrollEvent, ScrollHandle, ScrollSource, TestAppContext, TouchEvent,
+    TouchId, TouchPhase, VisualTestContext,
 };
 use gpui_kit::{
     Context, Entity, InteractiveElement as _, IntoElement, ParentElement as _, Pixels, Point,
@@ -49,13 +49,17 @@ impl Render for Page {
                         .track_scroll(&self.strip)
                         .child(div().w(px(4000.)).h(px(500.))),
                 )
-                .child(div().id("canvas").w_full().h(px(200.)).on_scroll_wheel(
-                    move |e, window, cx| {
-                        window.pan_touch_freely();
-                        panned.set(panned.get() + e.delta.pixel_delta(px(20.)));
-                        cx.stop_propagation();
-                    },
-                ))
+                .child(
+                    div()
+                        .id("canvas")
+                        .w_full()
+                        .h(px(200.))
+                        .on_scroll(move |e, window, cx| {
+                            window.pan_touch_freely();
+                            panned.set(panned.get() + e.delta.pixel_delta(px(20.)));
+                            cx.stop_propagation();
+                        }),
+                )
                 .child(div().h(px(8000.))),
         )
     }
@@ -122,11 +126,12 @@ fn a_swipe_sideways_over_the_strip_scrolls_only_the_strip(cx: &mut TestAppContex
 }
 
 fn wheel(cx: &mut VisualTestContext, delta: ScrollDelta, modifiers: Modifiers) {
-    cx.simulate_event(ScrollWheelEvent {
+    cx.simulate_event(ScrollEvent {
         position: point(px(300.), px(250.)),
         delta,
         modifiers,
         touch_phase: TouchPhase::Moved,
+        source: ScrollSource::Pointer,
     });
 }
 
@@ -191,11 +196,12 @@ fn a_trackpad_swipe_sideways_scrolls_only_the_strip(cx: &mut TestAppContext) {
 fn a_wheel_over_the_canvas_is_not_railed(cx: &mut TestAppContext) {
     let (view, cx) = open(cx);
     for _ in 0..10 {
-        cx.simulate_event(ScrollWheelEvent {
+        cx.simulate_event(ScrollEvent {
             position: point(px(300.), px(600.)),
             delta: ScrollDelta::Pixels(point(px(-2.), px(-7.))),
             modifiers: Modifiers::none(),
             touch_phase: TouchPhase::Moved,
+            source: ScrollSource::Pointer,
         });
         cx.executor().advance_clock(Duration::from_millis(16));
     }

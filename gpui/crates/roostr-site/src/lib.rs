@@ -79,9 +79,9 @@ pub fn init(cx: &mut App) {
         #[cfg(not(target_family = "wasm"))]
         KeyBinding::new("cmd-down", ScrollEnd, Some(CONTEXT)),
         #[cfg(target_family = "wasm")]
-        KeyBinding::new("secondary-up", ScrollHome, Some(CONTEXT)),
+        roostr_core::ui::secondary_binding("secondary-up", ScrollHome, Some(CONTEXT), cx),
         #[cfg(target_family = "wasm")]
-        KeyBinding::new("secondary-down", ScrollEnd, Some(CONTEXT)),
+        roostr_core::ui::secondary_binding("secondary-down", ScrollEnd, Some(CONTEXT), cx),
     ]);
 }
 

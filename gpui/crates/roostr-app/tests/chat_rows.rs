@@ -10,7 +10,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::{
-    Modifiers, ScrollDelta, ScrollWheelEvent, TestAppContext, TouchPhase, VisualTestContext,
+    Modifiers, ScrollDelta, ScrollEvent, ScrollSource, TestAppContext, TouchPhase,
+    VisualTestContext,
 };
 use gpui_kit::{AppContext as _, Pixels, Point, point, px, size};
 use roostr_core::io::{BoxFuture, BoxStream};
@@ -150,11 +151,12 @@ fn wheel(cx: &mut VisualTestContext, at: Point<Pixels>, dy: f32) {
         (TouchPhase::Moved, dy),
         (TouchPhase::Ended, 0.),
     ] {
-        cx.simulate_event(ScrollWheelEvent {
+        cx.simulate_event(ScrollEvent {
             position: at,
             delta: ScrollDelta::Pixels(point(px(0.), px(dy))),
             modifiers: Modifiers::none(),
             touch_phase: phase,
+            source: ScrollSource::Pointer,
         });
         cx.run_until_parked();
     }

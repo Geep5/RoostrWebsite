@@ -23,7 +23,7 @@ roostr-nostr = { path = "crates/roostr-nostr" }
 roostr-engine = { path = "crates/roostr-engine" }
 roostr-replica-store = { path = "crates/roostr-replica-store" }
 roostr-replica = { path = "crates/roostr-replica" }
-gpui-kit = "0.7.3"
+gpui-kit = "0.8.1"
 # Interruptible tweens, springs and presence on gpui-kit; see
 # roostr_core::motion and vendor/gpui-motion-kit.
 gpui-motion-kit = "0.5.0"
@@ -44,7 +44,7 @@ base64 = "0.22"
 regex = "1"
 fancy-regex = "0.16"
 percent-encoding = "2"
-gpui-pre-reqwest-client = "0.3.9"
+gpui-pre-reqwest-client = "0.3.10"
 web-time = "1"
 # Browser build (wasm32-unknown-unknown). wasm-bindgen must match the
 # `wasm-bindgen` CLI that scripts/build-web.sh runs (it reads Cargo.lock).
@@ -77,13 +77,16 @@ codegen-units = 1
 strip = true
 
 # The iOS app's emoji fallback and color rasterization (iOS-only changes; see
-# vendor/gpui-pre-apple/Cargo.toml), the browser's touch hover (see
+# vendor/gpui-pre-apple/Cargo.toml), the iOS platform's additions (see
+# vendor/gpui-pre-ios/Cargo.toml; gpui-pre-platform names it on iOS, so the
+# vendored copy replaces it there too), the browser's touch hover (see
 # vendor/gpui-pre-web/Cargo.toml), gpui-motion's clock on wasm (see
 # vendor/gpui-motion-kit/Cargo.toml), and touch pans that keep to one axis
 # (see vendor/gpui-pre/Cargo.toml).
 [patch.crates-io]
 gpui-pre = { path = "vendor/gpui-pre" }
 gpui-pre-apple = { path = "vendor/gpui-pre-apple" }
+gpui-pre-ios = { path = "vendor/gpui-pre-ios" }
 gpui-pre-web = { path = "vendor/gpui-pre-web" }
 gpui-motion-kit = { path = "vendor/gpui-motion-kit" }
 gpui-ce-motion = { path = "vendor/gpui-ce-motion" }
