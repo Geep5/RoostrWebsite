@@ -244,6 +244,32 @@ fn a_cell_editor_at_the_page_columns_edge_opens_where_it_can_be_used(cx: &mut Te
     );
     cx.update(|_, cx| navigate(Route::Object("q1".into()), cx));
     settle(cx);
+    // The side columns are open: the table is wider than the page column. With
+    // the pointer over it and no text field focused (as after a click outside
+    // one), → scrolls it sideways, ← back.
+    cx.update(|window, cx| window.blur(cx));
+    let cell = cx.debug_bounds(CELL).expect("the Main games cell");
+    let before = cell.left();
+    // Its visible part: the cell runs past the table's clipped edge.
+    cx.simulate_mouse_move(
+        point(cell.origin.x + px(8.), cell.center().y),
+        None,
+        Modifiers::none(),
+    );
+    cx.simulate_keystrokes("right");
+    settle(cx);
+    let scrolled = cx.debug_bounds(CELL).unwrap().left();
+    assert!(
+        scrolled < before,
+        "→ scrolled the table: {before:?} → {scrolled:?}"
+    );
+    cx.simulate_keystrokes("left");
+    settle(cx);
+    assert_eq!(
+        cx.debug_bounds(CELL).unwrap().left(),
+        before,
+        "← scrolled it back"
+    );
     // The first press on the page opens its side columns (done above, by the
     // pill), which narrow the page column to where the user saw it: the table
     // clipped at Main games. A press on the cell beside its pill opens its editor.
@@ -279,6 +305,21 @@ fn a_cell_editor_at_the_page_columns_edge_opens_where_it_can_be_used(cx: &mut Te
     // The second game is offered and added after TYR.
     cx.simulate_input("tan");
     cx.run_until_parked();
+    // Typing in the link search: → at the end of the text belongs to the
+    // field, never scrolls the table under the pointer.
+    let cell = cx.debug_bounds(CELL).unwrap();
+    cx.simulate_mouse_move(
+        point(cell.origin.x + px(8.), cell.center().y),
+        None,
+        Modifiers::none(),
+    );
+    cx.simulate_keystrokes("right");
+    settle(cx);
+    assert_eq!(
+        cx.debug_bounds(CELL).unwrap().left(),
+        cell.left(),
+        "→ while typing left the table where it was"
+    );
     let at = cx
         .debug_bounds("cand-g2")
         .expect("Tanks is offered")

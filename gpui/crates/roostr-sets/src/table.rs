@@ -79,6 +79,8 @@ const ROW_FIELDS: &[&str] = &[
 /// The Served by column edits `served_by`.
 const SERVING_KEY: &str = "served_by";
 const PLUS_W: f32 = 32.;
+/// How far ← / → scroll a hovered table: about one column.
+const ARROW_STEP: f32 = 160.;
 
 #[derive(Clone, Debug)]
 struct ServingInfo {
@@ -202,20 +204,43 @@ impl SetTable {
         cx: &mut Context<Self>,
     ) -> Self {
         let new_input = cx.new(|cx| InputState::new(window, cx).placeholder("Enter name"));
-        let subs = vec![cx.subscribe_in(
-            &new_input,
-            window,
-            |this, input, event: &InputEvent, window, cx| match event {
-                InputEvent::PressEnter { .. } => this.commit_new(false, window, cx),
-                InputEvent::Blur => {
-                    let empty = input.read(cx).value().trim().is_empty();
-                    if this.pending_new {
-                        this.commit_new(empty, window, cx);
+        let subs = vec![
+            cx.subscribe_in(
+                &new_input,
+                window,
+                |this, input, event: &InputEvent, window, cx| match event {
+                    InputEvent::PressEnter { .. } => this.commit_new(false, window, cx),
+                    InputEvent::Blur => {
+                        let empty = input.read(cx).value().trim().is_empty();
+                        if this.pending_new {
+                            this.commit_new(empty, window, cx);
+                        }
                     }
+                    _ => {}
+                },
+            ),
+            // ← → scroll the table under the pointer sideways - never while
+            // typing: a text field ("Input") or the page editor holds focus
+            // even when it ignores the press (→ at the end of the text).
+            cx.observe_keystrokes(|this, event, window, cx| {
+                let typing = event
+                    .context_stack
+                    .iter()
+                    .any(|c| c.contains("Input") || c.contains("RoostrEditor"));
+                if typing || event.action.is_some() || event.keystroke.modifiers.modified() {
+                    return;
                 }
-                _ => {}
-            },
-        )];
+                let step = match event.keystroke.key.as_str() {
+                    "left" => ARROW_STEP,
+                    "right" => -ARROW_STEP,
+                    _ => return,
+                };
+                if !this.scroll_bounds.get().contains(&window.mouse_position()) {
+                    return;
+                }
+                this.scroll_x_by(px(step), cx);
+            }),
+        ];
         let mut this = Self {
             object_id,
             collection,
@@ -258,6 +283,17 @@ impl SetTable {
         };
         this.load(false, cx);
         this
+    }
+
+    /// Scroll the table sideways by `dx` (positive = toward its start), within its width.
+    fn scroll_x_by(&mut self, dx: Pixels, cx: &mut Context<Self>) {
+        let offset = self.scroll.offset();
+        let max = self.scroll.max_offset().x;
+        let x = (offset.x + dx).min(px(0.)).max(-max);
+        if x != offset.x {
+            self.scroll.set_offset(point(x, offset.y));
+            cx.notify();
+        }
     }
 
     pub(crate) fn set_input(&mut self, input: ViewInput, cx: &mut Context<Self>) {
