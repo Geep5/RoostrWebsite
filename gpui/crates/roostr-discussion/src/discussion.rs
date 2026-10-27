@@ -863,12 +863,14 @@ impl Discussion {
         endpoint_name(store, endpoint)
     }
 
-    /// Emoji avatar for an author, when it has one.
+    /// Emoji avatar for an author, when it has one. An agent always has one:
+    /// its own icon, else its type's (🤖), as everywhere else it is shown.
     fn avatar_emoji(&self, author: &str, store: &Store) -> String {
-        if let Some(agent) = store.agent(author)
-            && !agent.icon.is_empty()
-        {
-            return agent.icon.clone();
+        if let Some(agent) = store.agent(author) {
+            if !agent.icon.is_empty() {
+                return agent.icon.clone();
+            }
+            return object_icon(store, "", "agent", &agent.channel);
         }
         if let Some(object) = &self.object
             && author == object.id
