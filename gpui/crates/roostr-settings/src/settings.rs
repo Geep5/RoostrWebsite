@@ -176,12 +176,6 @@ fn input(window: &mut Window, cx: &mut Context<Settings>, placeholder: &str) -> 
     cx.new(|cx| InputState::new(window, cx).placeholder(placeholder))
 }
 
-fn to_hex(color: Hsla) -> String {
-    let rgba = Rgba::from(color);
-    let c = |v: f32| (v.clamp(0., 1.) * 255.).round() as u8;
-    format!("#{:02X}{:02X}{:02X}", c(rgba.r), c(rgba.g), c(rgba.b))
-}
-
 impl Settings {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let cached = nostr_profile::cached(cx);
@@ -281,7 +275,7 @@ impl Settings {
                 window,
                 |this, _, event: &ColorPickerEvent, window, cx| {
                     if let ColorPickerEvent::Change(Some(color)) = event {
-                        this.save_chat_color(to_hex(*color), window, cx);
+                        this.save_chat_color(roostr_core::color::to_hex(*color), window, cx);
                     }
                 },
             ),

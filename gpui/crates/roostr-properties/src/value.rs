@@ -20,6 +20,7 @@ use roostr_core::objects::object_icon;
 use roostr_core::types::is_system_type;
 use roostr_core::ui::{TagPill, checkbox, checkbox_display};
 use roostr_core::{Fields, Glyph, RelationDef, Store, Value, api, lite_ui, theme};
+use gpui_kit::component::color_picker::{ColorPicker, ColorPickerEvent, ColorPickerState};
 
 use crate::calendar::{CalendarEvent, CalendarPicker};
 use crate::option_picker::{OptionEvent, OptionPicker};
@@ -194,6 +195,8 @@ struct ValueEditor {
     /// The stored text last put in the boxes (an external change replaces an unfocused box).
     synced: Option<String>,
     hex_error: String,
+    /// The `chat_color` swatch: the kit colour picker Settings uses, made on first use.
+    swatch: Option<Entity<ColorPickerState>>,
     date_open: bool,
     placeholder: &'static str,
     calendar: Option<Entity<CalendarPicker>>,
@@ -257,6 +260,7 @@ impl ValueEditor {
             area: None,
             synced: None,
             hex_error: String::new(),
+            swatch: None,
             date_open: false,
             placeholder: "",
             calendar: None,
@@ -1308,9 +1312,38 @@ impl Render for ValueEditor {
             "object" => self.render_object(window, cx),
             _ if self.rel.key == "chat_color" => {
                 let text = text_of(self.value.as_ref());
-                let swatch = normalize_hex(&text).unwrap_or_else(|| "#3A3A3E".into());
+                let stored = normalize_hex(&text);
                 let bad = !self.hex_error.is_empty();
                 let error = self.hex_error.clone();
+                // The same picker as Settings → Chat color, kept in step with the value.
+                let color = stored
+                    .as_deref()
+                    .and_then(roostr_core::color::hex)
+                    .unwrap_or(rgb(0x3a3a3e).into());
+                let swatch = match &self.swatch {
+                    Some(s) => s.clone(),
+                    None => {
+                        let s = cx.new(|cx| ColorPickerState::new(window, cx).default_value(color));
+                        let sub = cx.subscribe_in(
+                            &s,
+                            window,
+                            |this, _, event: &ColorPickerEvent, window, cx| {
+                                if let ColorPickerEvent::Change(Some(color)) = event {
+                                    let hex = roostr_core::color::to_hex(*color);
+                                    this.text.update(cx, |t, cx| t.set_value(hex.clone(), window, cx));
+                                    this.synced = Some(hex.clone());
+                                    this.save_hex(&hex, window, cx);
+                                }
+                            },
+                        );
+                        self._subs.push(sub);
+                        self.swatch = Some(s.clone());
+                        s
+                    }
+                };
+                if swatch.read(cx).value() != Some(color) {
+                    swatch.update(cx, |s, cx| s.set_value(color, window, cx));
+                }
                 div()
                     .flex()
                     .items_center()
@@ -1319,18 +1352,17 @@ impl Render for ValueEditor {
                     .child(
                         div()
                             .flex_none()
-                            .w(px(26.))
-                            .h(px(22.))
+                            .w(px(34.))
+                            .h(px(26.))
+                            .p(px(2.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(theme::radius::xs())
+                            .bg(theme::panel())
                             .border_1()
                             .border_color(theme::border())
-                            .rounded(theme::radius::xs())
-                            .p(px(2.))
-                            .child(
-                                div()
-                                    .size_full()
-                                    .rounded(px(2.))
-                                    .bg(roostr_core::color::hex(&swatch).unwrap_or(theme::hover())),
-                            ),
+                            .child(ColorPicker::new(&swatch).accessibility_label("Chat color picker")),
                     )
                     .child(
                         div()

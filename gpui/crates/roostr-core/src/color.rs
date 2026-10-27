@@ -8,6 +8,13 @@ pub const DEFAULT_CHAT_COLOR: &str = "#EDCF7F";
 pub const INK: &str = "#1B1B1B";
 pub const WHITE: &str = "#FFFFFF";
 
+/// A colour as upper-case `#RRGGBB` (what a colour picker's choice is saved as).
+pub fn to_hex(color: Hsla) -> String {
+    let rgba = Rgba::from(color);
+    let c = |v: f32| (v.clamp(0., 1.) * 255.).round() as u8;
+    format!("#{:02X}{:02X}{:02X}", c(rgba.r), c(rgba.g), c(rgba.b))
+}
+
 /// A #RGB or #RRGGBB hex, normalized to upper-case #RRGGBB; `None` when invalid.
 pub fn normalize_hex(raw: &str) -> Option<String> {
     let s = raw.trim();
