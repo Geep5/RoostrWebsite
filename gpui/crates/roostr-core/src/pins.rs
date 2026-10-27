@@ -227,6 +227,18 @@ pub fn move_pin(
     let before = pin_key(before_id, cx);
     let after = pin_key(after_id, cx);
     let dragged = dragged.to_string();
+    // Show the new order now: the sidebar reads the space's pinned ids, and
+    // the write plus the store refresh behind it take a moment. The refresh
+    // brings the stored order back if the write fails.
+    let space_id = space.id.clone();
+    let mut reordered = ids;
+    reordered.insert((at.max(0) as usize).min(reordered.len()), dragged.clone());
+    Store::global(cx).update(cx, |store, cx| {
+        if let Some(s) = store.channels.iter_mut().find(|s| s.id == space_id) {
+            s.pinned_ids = reordered;
+            cx.notify();
+        }
+    });
     cx.spawn(async move |cx| {
         let (before, after) = (before.await, after.await);
         let key = key_between(&before, has_after.then_some(after.as_str()));
