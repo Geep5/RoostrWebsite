@@ -19,7 +19,7 @@ use roostr_core::color::normalize_hex;
 use roostr_core::objects::object_icon;
 use roostr_core::types::is_system_type;
 use roostr_core::ui::{TagPill, checkbox, checkbox_display};
-use roostr_core::{Fields, Glyph, RelationDef, Store, Value, api, theme};
+use roostr_core::{Fields, Glyph, RelationDef, Store, Value, api, lite_ui, theme};
 
 use crate::calendar::{CalendarEvent, CalendarPicker};
 use crate::option_picker::{OptionEvent, OptionPicker};
@@ -311,6 +311,9 @@ impl ValueEditor {
                 && !self.read_only
             {
                 self.object_open = true;
+                if !self.space.is_empty() {
+                    lite_ui::ensure_space(&self.space, cx);
+                }
                 let q = self.object_query.clone();
                 window.defer(cx, move |window, cx| {
                     q.update(cx, |s, cx| s.focus(window, cx))
@@ -696,6 +699,11 @@ impl ValueEditor {
         self.agent_name = None;
         if self.object_open {
             self.object_query.update(cx, |s, cx| s.focus(window, cx));
+            // A Lite copy holds only what was opened: the picker downloads
+            // the space so it can offer every candidate in it.
+            if !self.space.is_empty() {
+                lite_ui::ensure_space(&self.space, cx);
+            }
         }
         cx.notify();
     }
@@ -1084,6 +1092,10 @@ impl ValueEditor {
                             ),
                     ),
             );
+        }
+        // Lite, while the space downloads (or before): the list may be partial.
+        if let Some(notice) = lite_ui::space_notice("picker-space", &self.space, cx) {
+            menu = menu.child(notice);
         }
         if candidates.is_empty() {
             menu = menu.child(
