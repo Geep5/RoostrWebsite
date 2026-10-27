@@ -8,7 +8,6 @@ use std::rc::Rc;
 
 use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
 use gpui_kit::component::dialog::{Dialog, DialogEntrance};
-use gpui_kit::component::input::{InputEvent, TextareaState};
 use gpui_kit::component::label::Label;
 use gpui_kit::component::tag::Tag;
 use gpui_kit::component::{
@@ -21,7 +20,7 @@ use roostr_core::types::style;
 use roostr_core::{Fields, Glyph, Object, Route, Store, Value, api, motion, nav, theme};
 use serde_json::json;
 
-use crate::widgets::{note, rule, text_area};
+use crate::widgets::{note, rule};
 
 /// The gallery card's chrome around its scrolling body: 18 + 22 padding and
 /// the 2×1 border.
@@ -48,11 +47,9 @@ enum Line {
     Para(String),
 }
 
-/// Type object page body: definition, layout, templates.
+/// Type object page body: layout, templates.
 pub struct TypePanel {
     object_id: String,
-    definition: Entity<TextareaState>,
-    synced: Option<String>,
     templates: Vec<Template>,
     /// The gallery body's last laid-out height, to centre the dialog.
     gallery_height: Rc<Cell<Pixels>>,
@@ -64,26 +61,12 @@ pub struct TypePanel {
 
 impl TypePanel {
     /// The panel for the type object `object_id`.
-    pub fn new(object_id: String, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(object_id: String, _window: &mut Window, cx: &mut Context<Self>) -> Self {
         let store = Store::global(cx);
         store.update(cx, |s, cx| s.ensure_object(&object_id, cx));
-        let definition = cx.new(|cx| {
-            TextareaState::new(window, cx)
-                .auto_grow(2, 20)
-                .placeholder("What is this type for? Agents read this.")
-        });
-        let subs = vec![
-            cx.observe(&store, |_, _, cx| cx.notify()),
-            cx.subscribe(&definition, |this: &mut Self, _, ev: &InputEvent, cx| {
-                if matches!(ev, InputEvent::Blur) {
-                    this.save_definition(cx);
-                }
-            }),
-        ];
+        let subs = vec![cx.observe(&store, |_, _, cx| cx.notify())];
         let mut this = Self {
             object_id,
-            definition,
-            synced: None,
             templates: vec![],
             gallery_height: Rc::new(Cell::new(px(300.))),
             action_press: false,
@@ -96,19 +79,6 @@ impl TypePanel {
 
     fn object(&self, cx: &App) -> Option<std::sync::Arc<Object>> {
         Store::global(cx).read(cx).object(&self.object_id)
-    }
-
-    fn save_definition(&mut self, cx: &mut Context<Self>) {
-        let Some(object) = self.object(cx) else {
-            return;
-        };
-        let draft = self.definition.read(cx).value().trim().to_string();
-        if draft == object.field_str("description") {
-            return;
-        }
-        self.synced = Some(draft.clone());
-        api::note::set_field(&self.object_id, "description", Value::string(draft), cx)
-            .detach_and_log_err(cx);
     }
 
     fn set_layout(&mut self, id: &str, cx: &mut Context<Self>) {
@@ -690,14 +660,6 @@ impl Render for TypePanel {
         let Some(object) = self.object(cx) else {
             return div();
         };
-        let description = object.field_str("description").to_string();
-        if self.synced.as_deref() != Some(description.as_str())
-            && !self.definition.focus_handle(cx).is_focused(window)
-        {
-            self.definition
-                .update(cx, |s, cx| s.set_value(description.clone(), window, cx));
-            self.synced = Some(description);
-        }
         let layout = match object.field_str("layout") {
             "" => "page",
             l => l,
@@ -752,29 +714,9 @@ impl Render for TypePanel {
             .flex_col()
             .gap(px(24.))
             .mt(px(16.))
-            // `.type-panel`: `margin: 16px 0 0 48px`, `16px 16px 0` at ≤720px.
+            // `.type-panel`: `16px 16px 0` at ≤720px; flush with the page on desktop.
             .when(narrow, |d| d.mx(px(16.)))
-            .when(!narrow, |d| d.ml(px(48.)))
             .text_color(theme::fg())
-            .child(
-                // The textarea itself (no wrapper); it blurs on any outside
-                // click (the web's onblur save).
-                text_area(
-                    &self.definition,
-                    window,
-                    cx,
-                    theme::hover(),
-                    theme::radius::md(),
-                    (8., 10.),
-                )
-                .mb(px(10.))
-                .text_size(px(13.5))
-                .on_mouse_down_out(cx.listener(|this, _, window, cx| {
-                    if this.definition.focus_handle(cx).is_focused(window) {
-                        window.blur(cx);
-                    }
-                })),
-            )
             .child(
                 div()
                     .flex()
