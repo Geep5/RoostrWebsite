@@ -862,6 +862,7 @@ impl ValueEditor {
         let store = Store::global(cx).read(cx);
         let ids = object_ids(self.value.as_ref());
         let read_only = self.read_only;
+        let object_paint = roostr_core::options::object_pill_paint(theme::fg());
         let mut row = div()
             .relative()
             .flex()
@@ -909,8 +910,8 @@ impl ValueEditor {
             let target = shown.clone();
             let remove = id.clone();
             row = row.child(
-                Tag::custom(theme::bg(), theme::fg(), theme::border())
-                    .outline()
+                // Filled like the table's object pills; option tags are outlines.
+                Tag::custom(object_paint.bg, object_paint.fg, object_paint.border)
                     .rounded_full()
                     .gap(px(2.))
                     .pl(px(8.))
@@ -1473,6 +1474,7 @@ impl ValueEditor {
     fn render_object_static(&self, cx: &App) -> Div {
         let store = Store::global(cx).read(cx);
         let ids = object_ids(self.value.as_ref());
+        let object_paint = roostr_core::options::object_pill_paint(theme::fg());
         div()
             .flex()
             .flex_wrap()
@@ -1485,8 +1487,7 @@ impl ValueEditor {
                     .filter(|n| !n.is_empty())
                     .or_else(|| store.agent(&shown).map(|a| a.name.clone()))
                     .unwrap_or_else(|| prefix(id, 8));
-                Tag::custom(theme::bg(), theme::fg(), theme::border())
-                    .outline()
+                Tag::custom(object_paint.bg, object_paint.fg, object_paint.border)
                     .rounded_full()
                     .px(px(8.))
                     .py(px(1.))

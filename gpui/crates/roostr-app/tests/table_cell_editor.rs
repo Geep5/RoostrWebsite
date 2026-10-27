@@ -122,7 +122,12 @@ impl Backend for Vault {
             .objects
             .lock()
             .iter()
-            .filter(|o| (text.contains("\"setId\":\"q1\"") && o.type_key == "game_publisher") || (!text.contains("setId") && text.contains(&format!("\"{}\"", o.type_key)) && o.type_key != "query"))
+            .filter(|o| {
+                (text.contains("\"setId\":\"q1\"") && o.type_key == "game_publisher")
+                    || (!text.contains("setId")
+                        && text.contains(&format!("\"{}\"", o.type_key))
+                        && o.type_key != "query")
+            })
             .map(|o| QueryRow {
                 id: o.id.clone(),
                 type_key: o.type_key.clone(),
@@ -212,27 +217,72 @@ fn a_cell_editor_at_the_page_columns_edge_opens_where_it_can_be_used(cx: &mut Te
     settle(cx);
     cx.update(|_, cx| navigate(Route::Object("q1".into()), cx));
     settle(cx);
-    // The first press opens the page's side columns, which narrow the page
-    // column to where the user saw it: the table clipped at Main games.
+    // A linked game shows as its own pill (emoji and name), not a comma list.
+    assert!(
+        cx.debug_bounds("pill-pub-1-main_games-g1").is_some(),
+        "TYR is a pill in the Main games cell"
+    );
+    // Clicking the pill opens the game, not the cell's editor (the first
+    // press on the page opens its side columns, as below).
+    for _ in 0..2 {
+        let Some(pill) = cx.debug_bounds("pill-pub-1-main_games-g1") else {
+            break;
+        };
+        cx.simulate_click(pill.center(), Modifiers::none());
+        settle(cx);
+        assert!(
+            cx.debug_bounds("link-object").is_none(),
+            "no cell editor from a pill"
+        );
+    }
+    assert_eq!(
+        cx.update(|_, cx| roostr_core::nav::Navigator::global(cx)
+            .read(cx)
+            .route()
+            .clone()),
+        Route::Object("g1".into())
+    );
+    cx.update(|_, cx| navigate(Route::Object("q1".into()), cx));
+    settle(cx);
+    // The first press on the page opens its side columns (done above, by the
+    // pill), which narrow the page column to where the user saw it: the table
+    // clipped at Main games. A press on the cell beside its pill opens its editor.
     click_left(cx, CELL);
     settle(cx);
-    click_left(cx, CELL);
+    if cx.debug_bounds("link-object").is_none() {
+        click_left(cx, CELL);
+    }
     // A cell that already links something opens on its chips: + adds another.
-    let add = cx.debug_bounds("link-object").expect("the cell's editor").center();
+    let add = cx
+        .debug_bounds("link-object")
+        .expect("the cell's editor")
+        .center();
     cx.simulate_click(add, Modifiers::none());
     cx.run_until_parked();
     let menu = cx.debug_bounds("obj-menu").expect("the cell's link picker");
     let cell = cx.debug_bounds(CELL).unwrap();
     let title = cx.debug_bounds("object-title").unwrap();
     // The cell sits at the clipped edge; its picker opens inside the page column.
-    assert!(menu.right() > cell.left(), "{menu:?} reaches the cell {cell:?}");
-    assert!(menu.left() < cell.left(), "{menu:?} pulled left of {cell:?}");
-    assert!(menu.left() >= title.left(), "{menu:?} inside the column {title:?}");
+    assert!(
+        menu.right() > cell.left(),
+        "{menu:?} reaches the cell {cell:?}"
+    );
+    assert!(
+        menu.left() < cell.left(),
+        "{menu:?} pulled left of {cell:?}"
+    );
+    assert!(
+        menu.left() >= title.left(),
+        "{menu:?} inside the column {title:?}"
+    );
 
     // The second game is offered and added after TYR.
     cx.simulate_input("tan");
     cx.run_until_parked();
-    let at = cx.debug_bounds("cand-g2").expect("Tanks is offered").center();
+    let at = cx
+        .debug_bounds("cand-g2")
+        .expect("Tanks is offered")
+        .center();
     cx.simulate_click(at, Modifiers::none());
     cx.run_until_parked();
     assert_eq!(main_games(&backend), ["g1", "g2"]);

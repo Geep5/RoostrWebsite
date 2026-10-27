@@ -1520,6 +1520,32 @@ impl SetTable {
                         cell = cell.child(tag_pill(t, &color, false, theme::fg()));
                     }
                 }
+                "object" => {
+                    let ids = r.fields.get(c).map(common::link_ids).unwrap_or_default();
+                    if !ids.is_empty() {
+                        cell = cell.min_h(px(37.));
+                    }
+                    let store = Store::global(cx).read(cx);
+                    let space = current_space_id(cx);
+                    for id in &ids {
+                        let selector = format!("pill-{}-{c}-{id}", r.id);
+                        let target = id.clone();
+                        // A pill opens its object; the cell around it opens the editor.
+                        cell = cell.child(
+                            div()
+                                .id(SharedString::from(selector.clone()))
+                                .flex_none()
+                                .cursor_pointer()
+                                .debug_selector(move || selector.clone())
+                                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                                .on_click(move |_, _, cx| {
+                                    cx.stop_propagation();
+                                    common::open_object(&target, cx);
+                                })
+                                .child(common::object_pill(store, id, &space)),
+                        );
+                    }
+                }
                 "checkbox" => {
                     // Display only: the press reaches the cell, which toggles it.
                     let on = r.fields.get(c).and_then(|v| v.bool_value) == Some(true);

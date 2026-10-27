@@ -98,16 +98,27 @@ pub struct TagPaint {
     pub border: Hsla,
 }
 
+/// A tag/status option's pill: an outline in the option's colour - linked
+/// objects are the filled pills ([`object_pill_paint`]), so the two read apart.
 pub fn tag_colors(name: &str) -> Option<TagPaint> {
     tag_color(name).map(|c| TagPaint {
-        bg: c.bg(),
+        bg: gpui_kit::transparent_black(),
         fg: c.text(),
-        border: c.border(),
+        border: c.text().opacity(0.55),
     })
 }
 
-/// The pill of an option with no (known) colour: neutral fill and border, `fg` text.
+/// An option with no (known) colour: a neutral outline, `fg` text.
 pub fn unknown_tag_paint(fg: Hsla) -> TagPaint {
+    TagPaint {
+        bg: gpui_kit::transparent_black(),
+        fg,
+        border: fg.opacity(0.35),
+    }
+}
+
+/// A linked object's pill (its emoji and name): neutral fill, `fg` text.
+pub fn object_pill_paint(fg: Hsla) -> TagPaint {
     TagPaint {
         bg: unknown_tag_bg(),
         fg,
@@ -144,7 +155,7 @@ pub fn agent_tag_paint(store: &Store, name: &str, space: &str) -> TagPaint {
         .and_then(|a| crate::color::hex(&a.chat_color));
     match color {
         Some(c) => tint_paint(c),
-        None => unknown_tag_paint(theme::fg()),
+        None => object_pill_paint(theme::fg()),
     }
 }
 

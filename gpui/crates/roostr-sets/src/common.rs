@@ -16,7 +16,7 @@ use gpui_kit::*;
 use roostr_core::filters::{engine_filters_of, serving_filters_of, space_filter_of};
 use roostr_core::nav::{self, Route};
 use roostr_core::objects::{kind_name, object_icon};
-use roostr_core::options::{tag_colors, unknown_tag_paint};
+use roostr_core::options::{object_pill_paint, tag_colors, unknown_tag_paint};
 use roostr_core::relations::{current_space_id, object_space_id, space_relations};
 use roostr_core::{Object, QueryRow, RelationDef, Store, Value, api, field_str, motion, theme};
 use serde_json::{Value as Json, json};
@@ -214,9 +214,8 @@ pub(crate) fn type_name(type_key: &str, cx: &App) -> String {
         .unwrap_or_else(|| kind_name(type_key))
 }
 
-/// Object ids a value names, as display names (`cell` for object values).
-pub(crate) fn link_names(v: &Value, cx: &App) -> String {
-    let store = Store::global(cx).read(cx);
+/// Object ids a value links: a list, a bare link, or a bare id.
+pub(crate) fn link_ids(v: &Value) -> Vec<String> {
     let ids: Vec<String> = if v.values_value.is_some() {
         v.items()
             .iter()
@@ -237,17 +236,42 @@ pub(crate) fn link_names(v: &Value, cx: &App) -> String {
                 .unwrap_or_default(),
         ]
     };
-    ids.iter()
-        .filter(|id| !id.is_empty())
-        .map(|id| {
-            store
-                .summary(id)
-                .map(|s| s.name.clone())
-                .filter(|n| !n.is_empty())
-                .unwrap_or_else(|| id.chars().take(8).collect())
-        })
+    ids.into_iter().filter(|id| !id.is_empty()).collect()
+}
+
+/// A linked object's display name: its name, else the id's first 8.
+fn link_name(store: &Store, id: &str) -> String {
+    store
+        .summary(id)
+        .map(|s| s.name.clone())
+        .filter(|n| !n.is_empty())
+        .unwrap_or_else(|| id.chars().take(8).collect())
+}
+
+/// Object ids a value names, as display names (`cell` for object values).
+pub(crate) fn link_names(v: &Value, cx: &App) -> String {
+    let store = Store::global(cx).read(cx);
+    link_ids(v)
+        .iter()
+        .map(|id| link_name(store, id))
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+/// A linked object as a filled pill: its emoji (else its type's) and name.
+/// Option tags are outlines ([`tag_pill`]), so the two read apart.
+pub(crate) fn object_pill(store: &Store, id: &str, space: &str) -> gpui_kit::component::tag::Tag {
+    let (icon, type_key) = store
+        .summary(id)
+        .map(|s| (s.icon.clone(), s.type_key.clone()))
+        .unwrap_or_default();
+    let icon = object_icon(store, &icon, &type_key, space);
+    roostr_core::ui::tag(object_pill_paint(theme::fg()), px(20.), px(12.))
+        .gap(px(4.))
+        .when(!icon.is_empty(), |t| {
+            t.child(div().flex_none().text_size(px(11.)).child(icon))
+        })
+        .child(link_name(store, id))
 }
 
 /// String items of a list value (or a lone string).
@@ -274,8 +298,8 @@ pub(crate) fn find_rel<'a>(relations: &'a [RelationDef], key: &str) -> Option<&'
 
 // ── Styled primitives ────────────────────────────────────────────
 
-/// Anytype tagItem.isSmall: filled pill, the option's own colours. An
-/// unknown colour gets the neutral fill and `ink`, the text colour around it.
+/// A tag/status option: an outline pill in the option's own colour. An
+/// unknown colour gets a neutral outline and `ink`, the text colour around it.
 pub(crate) fn tag_pill(
     text: impl Into<SharedString>,
     color: &str,
