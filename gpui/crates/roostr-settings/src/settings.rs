@@ -1025,6 +1025,8 @@ impl Settings {
             .child(pill(format!("{mode} mode"), mode_color))
             .child(
                 div()
+                    .flex_1()
+                    .min_w_0()
                     .text_size(px(13.))
                     .text_color(state_color)
                     .child(format!("{state}{}", pending.unwrap_or_default())),
@@ -1643,6 +1645,7 @@ impl Render for Settings {
             .child(
                 div()
                     .flex()
+                    .flex_wrap()
                     .items_center()
                     .gap(px(12.))
                     .child(avatar)
@@ -1672,6 +1675,7 @@ impl Render for Settings {
             .child(
                 div()
                     .flex()
+                    .flex_wrap()
                     .items_center()
                     .gap(px(12.))
                     .child(
@@ -2087,6 +2091,7 @@ impl Render for Settings {
             .child(
                 div()
                     .flex()
+                    .flex_wrap()
                     .items_center()
                     .gap(px(10.))
                     .child(
@@ -2319,7 +2324,7 @@ impl Render for Settings {
                     theme::muted(),
                     window,
                 )));
-                let mut provider = div().flex().items_center().gap(px(10.)).py(px(6.)).child(
+                let mut provider = div().flex().flex_wrap().items_center().gap(px(10.)).py(px(6.)).child(
                     div()
                         .flex_none()
                         .w(px(130.))
@@ -2330,6 +2335,7 @@ impl Render for Settings {
                     provider = provider
                         .child(
                             div()
+                                .min_w_0()
                                 .font_family(theme::fonts::MONO)
                                 .text_size(px(12.))
                                 .text_color(theme::muted())

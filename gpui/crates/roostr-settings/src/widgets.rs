@@ -28,9 +28,11 @@ pub fn h3(text: impl Into<SharedString>) -> Div {
         .child(SharedString::from(text.to_uppercase()))
 }
 
-/// Muted 12px helper text (`.hint`, line-height 1.5).
+/// Muted 12px helper text (`.hint`, line-height 1.5). It may shrink and wrap
+/// inside a row, so a long hint never runs past a narrow sheet's edge.
 pub fn hint(text: impl Into<SharedString>) -> Div {
     div()
+        .min_w_0()
         .text_size(px(12.))
         .line_height(px(18.))
         .text_color(theme::muted())
