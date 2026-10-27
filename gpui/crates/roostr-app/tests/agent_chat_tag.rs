@@ -193,6 +193,16 @@ fn an_agents_chat_on_a_phone_opens_addressed_to_it(cx: &mut TestAppContext) {
         cx.update(|_, cx| Navigator::global(cx).read(cx).route().clone()),
         Route::Chat("chat-1".into())
     );
+    assert!(
+        cx.debug_bounds("agent-typing").is_none(),
+        "nobody typing yet"
+    );
     send(cx, "standup");
     assert_eq!(posts(&backend)[2..], [post("chat-1", "@Scout standup")]);
+    // A line to an agent assumes its reply: it shows typing straight away,
+    // from this device alone (no harness here reports anything).
+    assert!(
+        cx.debug_bounds("agent-typing").is_some(),
+        "Scout shows typing"
+    );
 }

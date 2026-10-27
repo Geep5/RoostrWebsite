@@ -136,6 +136,8 @@ struct ListLayout {
 }
 
 const PRESENCE_POLL: Duration = Duration::from_millis(2500);
+/// How long a sent @-mention shows its agent typing without a reply.
+const EXPECT_REPLY: Duration = Duration::from_secs(10 * 60);
 const AGENT_TOKEN: &str = "agent:";
 const OBJECT_TOKEN: &str = "object:";
 
@@ -216,6 +218,11 @@ pub struct Discussion {
     object_menu: Entity<CommandState>,
 
     presence: Vec<AgentPresence>,
+    /// The agent this device just @-mentioned and the send time: shown typing
+    /// until it posts here, its harness reports an error, or [`EXPECT_REPLY`]
+    /// passes. Client-side only - it reads no state from the agent's computer.
+    expecting: Option<(AgentPresence, i64)>,
+    expect_timer: Option<Task<()>>,
     presence_error: String,
     poll: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
@@ -318,6 +325,8 @@ impl Discussion {
             mention_menu,
             object_menu,
             presence: Vec::new(),
+            expecting: None,
+            expect_timer: None,
             presence_error: String::new(),
             poll: None,
             _subscriptions: subscriptions,
@@ -750,7 +759,54 @@ impl Discussion {
     }
 
     fn agent_working(&self) -> Option<&AgentPresence> {
-        self.presence_here().find(|p| p.state == "working")
+        self.presence_here()
+            .find(|p| p.state == "working")
+            .or_else(|| self.expected_reply())
+    }
+
+    /// The agent this device @-mentioned, while its reply is still owed.
+    fn expected_reply(&self) -> Option<&AgentPresence> {
+        let (agent, since) = self.expecting.as_ref()?;
+        let now = chrono::Utc::now().timestamp_millis();
+        let replied = self
+            .messages
+            .iter()
+            .any(|m| m.author == agent.id && m.ts >= *since);
+        let failed = self
+            .presence
+            .iter()
+            .any(|p| p.id == agent.id && p.state == "error" && p.ts >= *since);
+        let expired = now - since >= EXPECT_REPLY.as_millis() as i64;
+        (!replied && !failed && !expired).then_some(agent)
+    }
+
+    /// Show `option`'s agent typing from now (its reply is assumed) and
+    /// repaint when that assumption runs out.
+    fn expect_reply(&mut self, option: &ObjectAgentOption, cx: &mut Context<Self>) {
+        let id = option.endpoint.agent_id.clone();
+        let icon = Store::global(cx)
+            .read(cx)
+            .agent(&id)
+            .map(|a| a.icon.clone())
+            .unwrap_or_else(|| option.icon.clone());
+        let agent = AgentPresence {
+            id,
+            name: option.agent_name.clone(),
+            icon,
+            state: "working".into(),
+            ..AgentPresence::default()
+        };
+        self.expecting = Some((agent, chrono::Utc::now().timestamp_millis()));
+        self.expect_timer = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(EXPECT_REPLY).await;
+            let _ = this.update(cx, |this, cx| {
+                this.expecting = None;
+                this.remeasure_footer(cx);
+                cx.notify();
+            });
+        }));
+        self.remeasure_footer(cx);
+        cx.notify();
     }
 
     fn agent_error(&self) -> Option<&AgentPresence> {
@@ -1581,6 +1637,10 @@ impl Discussion {
             let _ = this.update_in(cx, |this, window, cx| match result {
                 Ok(_) => {
                     this.finish_send(Ok(()), window, cx);
+                    // The agent tagged last answers: show it typing until it does.
+                    if let Some(agent) = mentions.last() {
+                        this.expect_reply(agent, cx);
+                    }
                     this.seed_default_agent(mentions, cx);
                 }
                 Err(error) => {
@@ -2518,6 +2578,7 @@ impl Discussion {
             footer = footer.child(
                 div()
                     .id("working")
+                    .debug_selector(|| "agent-typing".into())
                     .flex()
                     .items_center()
                     .gap(px(8.))
