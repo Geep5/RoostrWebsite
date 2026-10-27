@@ -40,6 +40,7 @@ pub struct PropertyValue {
     seeds: Fields,
     auto_open: bool,
     read_only: bool,
+    inline_menus: bool,
     on_save: Option<SaveFn>,
 }
 
@@ -54,6 +55,7 @@ impl PropertyValue {
             seeds: Fields::new(),
             auto_open: false,
             read_only: false,
+            inline_menus: false,
             on_save: None,
         }
     }
@@ -81,6 +83,15 @@ impl PropertyValue {
     /// Show the value without editing affordances.
     pub fn read_only(mut self, read_only: bool) -> Self {
         self.read_only = read_only;
+        self
+    }
+
+    /// Open the link picker and the calendar in the editor's own flow rather
+    /// than floating above the page: an editor that is itself a popover (a
+    /// table cell's) closes on a press outside its bounds, which a floating
+    /// menu is - picking from it closed the editor before anything was saved.
+    pub fn inline_menus(mut self, inline: bool) -> Self {
+        self.inline_menus = inline;
         self
     }
 
@@ -186,6 +197,8 @@ struct ValueEditor {
     space: String,
     seeds: Fields,
     read_only: bool,
+    /// Menus open in the editor's flow ([`PropertyValue::inline_menus`]).
+    inline_menus: bool,
     on_save: Option<SaveFn>,
     mounted: bool,
     /// Single-line text box (text, number, url/email/phone, hex).
@@ -254,6 +267,7 @@ impl ValueEditor {
             space: String::new(),
             seeds: Fields::new(),
             read_only: false,
+            inline_menus: false,
             on_save: None,
             mounted: false,
             text,
@@ -302,6 +316,7 @@ impl ValueEditor {
         self.space = props.space.to_string();
         self.seeds = props.seeds;
         self.read_only = props.read_only;
+        self.inline_menus = props.inline_menus;
         self.on_save = props.on_save;
         if rel_changed {
             self.synced = None;
@@ -966,6 +981,15 @@ impl ValueEditor {
         );
         if self.object_open {
             let menu = self.render_object_menu(window, cx);
+            if self.inline_menus {
+                return div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(6.))
+                    .child(row)
+                    .child(menu)
+                    .into_any_element();
+            }
             row = row.child(below("object-menu", 6., menu));
         }
         row.into_any_element()
@@ -1258,18 +1282,19 @@ impl Render for ValueEditor {
                     .when_some(
                         self.calendar.clone().filter(|_| self.date_open),
                         |d, cal| {
-                            d.child(below(
-                                "date-calendar",
-                                6.,
-                                div()
-                                    .occlude()
-                                    .on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                                        this.date_open = false;
-                                        this.calendar = None;
-                                        cx.notify();
-                                    }))
-                                    .child(cal),
-                            ))
+                            let cal = div()
+                                .occlude()
+                                .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                                    this.date_open = false;
+                                    this.calendar = None;
+                                    cx.notify();
+                                }))
+                                .child(cal);
+                            if self.inline_menus {
+                                d.flex_col().items_start().gap(px(6.)).child(cal)
+                            } else {
+                                d.child(below("date-calendar", 6., cal))
+                            }
                         },
                     )
                     .into_any_element()

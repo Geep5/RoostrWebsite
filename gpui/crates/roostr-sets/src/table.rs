@@ -1490,6 +1490,10 @@ impl SetTable {
             let rels = relations.to_vec();
             let mut cell = base()
                 .id(SharedString::from(format!("cell-{}-{}", r.id, c)))
+                .debug_selector({
+                    let selector = format!("cell-{}-{}", r.id, c);
+                    move || selector.clone()
+                })
                 .cursor_pointer()
                 .hover(|s| s.bg(theme::hl_light()))
                 .on_mouse_down(
@@ -1639,6 +1643,7 @@ impl SetTable {
                     .space(field_str(&row.fields, "channel").to_string())
                     .seeds(seeds)
                     .auto_open(true)
+                    .inline_menus(true)
                     .on_save(move |v, _, cx| {
                         let v = v.clone();
                         let rels = rels.clone();
@@ -2060,12 +2065,21 @@ impl Render for SetTable {
             });
 
         if let Some(pop) = self.cell_pop(&relations, window, cx) {
-            // Anchored at the cell's bottom-left (+4px).
+            // Anchored at the cell's bottom-left (+4px), pulled left so it
+            // stays inside the table's visible width: the page column clips
+            // anything past it (into the chat pane), which snapping to the
+            // window can't see - a cell at the column's edge got an editor
+            // nobody could see or click.
+            let clip = self.scroll_bounds.get();
+            let pop_w = self.pop_bounds.get().size.width.max(px(260.));
             let cell = self.cell_edit.as_ref().and_then(|(rid, key)| {
                 let ri = self.rows.iter().position(|r| r.id == *rid)?;
                 let rb = *self.row_bounds.borrow().get(ri)?;
                 let ci = cols.iter().position(|c| c.key == *key)?;
-                let left = rb.left() + px(name_width + widths[..ci].iter().sum::<f32>());
+                let mut left = rb.left() + px(name_width + widths[..ci].iter().sum::<f32>());
+                if clip.size.width > px(0.) {
+                    left = left.min(clip.right() - pop_w).max(clip.left());
+                }
                 Some(point(left, rb.bottom() + px(4.)))
             });
             if let (Some(pos), Some((rid, key))) = (cell, self.cell_edit.as_ref()) {
