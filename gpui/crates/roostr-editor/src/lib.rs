@@ -2,6 +2,11 @@
 //! app's `Editor.svelte` (with BlockNode, BlockMenu, SlashMenu, LinkPicker,
 //! TableBlock, FileBlock, RelationBlock) and `File.svelte`.
 
+/// The desktop block gutter (drag handle rail) left of every block. The
+/// object page shifts a document left by it, so the text lines up under
+/// the header's arrows and the handles hang in the margin.
+pub const GUTTER_W: f32 = 48.;
+
 mod block_menu;
 mod codelint;
 mod doc;

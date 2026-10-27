@@ -342,7 +342,7 @@ fn pane_flags(object: &Object) -> (bool, bool) {
 }
 
 /// `.tpl-note` as a quiet kit info [`Alert`](gpui_kit::component::alert::Alert):
-/// no fill or border, 12px muted, margin 0 0 8 48 (16 on a phone).
+/// no fill or border, 12px muted, margin 0 0 8 0 (16 on a phone).
 fn note(
     id: &'static str,
     text: impl Into<SharedString>,
@@ -352,7 +352,7 @@ fn note(
     gpui_kit::component::alert::Alert::info(id, text.into())
         .with_size(Size::XSmall)
         .w_auto()
-        .ml(px(if mobile { 16. } else { 48. }))
+        .ml(px(if mobile { 16. } else { 0. }))
         .mb(px(8.))
         .p_0()
         .bg(transparent_black())
@@ -409,19 +409,18 @@ impl Render for ObjectPage {
         // Phones drop the 48px rail: one 16px gutter for icon, title, notes
         // and body, a tighter rhythm, smaller icon and title (@media 720).
         let mobile = is_mobile(window);
-        // A data page (query, set, collection, type) on desktop runs flush with
-        // the header's back/forward arrows: the 44/48px rail is for a
-        // document's block handles, which a table doesn't have.
-        let flush = !mobile
-            && matches!(
-                &self.body,
-                Some((_, Body::Data(_))) | Some((_, Body::Type(..)))
-            );
+        // On desktop every page runs flush with the header's back/forward
+        // arrows: icon, title, badges and content start under them. A
+        // document's block handles hang in the margin to the left instead
+        // of taking a 48px rail inside the page.
+        let flush = !mobile;
         if let Some(meta) = &self.meta {
             meta.update(cx, |meta, cx| meta.set_flush(flush, cx));
         }
 
-        let mut article = div().flex().flex_col();
+        // Desktop: the header's 16px side padding, so the page's content
+        // starts right under the back arrow.
+        let mut article = div().flex().flex_col().when(flush, |d| d.px(px(16.)));
         if !task {
             let picker = self.show_emoji.then(|| {
                 let page = cx.entity().downgrade();
@@ -611,7 +610,11 @@ impl Render for ObjectPage {
                     .child(dataview(data.clone().into())),
                 Body::Relation(v) => article.child(v.clone()),
                 Body::Data(v) => article.child(dataview(v.clone().into())),
-                Body::Document(v) => article.child(v.clone()),
+                Body::Document(v) => article.child(
+                    div()
+                        .when(flush, |d| d.ml(px(-roostr_editor::GUTTER_W)))
+                        .child(v.clone()),
+                ),
             };
         }
         // The table's rubber band arms anywhere on the page (web selection provider).

@@ -90,7 +90,7 @@ impl Editor {
     /// `.gutter`: the 48px drag rail; at ≤720px it collapses to the shared
     /// 16px gutter (BlockNode.svelte `@media (max-width: 720px)`).
     pub(crate) fn gutter_w(&self) -> Pixels {
-        if self.narrow { px(16.) } else { px(48.) }
+        if self.narrow { px(16.) } else { px(crate::GUTTER_W) }
     }
 
     /// `.handle`'s `right`: 6px, 2px in the 16px gutter (6px there pushed
