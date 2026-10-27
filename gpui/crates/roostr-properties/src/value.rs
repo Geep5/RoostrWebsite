@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::color_picker::{ColorPicker, ColorPickerEvent, ColorPickerState};
 use gpui_kit::component::input::{Escape, InputEvent, InputState, MoveDown, MoveUp, TextareaState};
 use gpui_kit::component::list::ListItem;
 use gpui_kit::component::tag::Tag;
@@ -20,7 +21,6 @@ use roostr_core::objects::object_icon;
 use roostr_core::types::is_system_type;
 use roostr_core::ui::{TagPill, checkbox, checkbox_display};
 use roostr_core::{Fields, Glyph, RelationDef, Store, Value, api, lite_ui, theme};
-use gpui_kit::component::color_picker::{ColorPicker, ColorPickerEvent, ColorPickerState};
 
 use crate::calendar::{CalendarEvent, CalendarPicker};
 use crate::option_picker::{OptionEvent, OptionPicker};
@@ -694,7 +694,7 @@ impl ValueEditor {
             Fields::from([("channel".to_string(), Value::string(channel))])
         };
         let type_key = self.create_type(cx);
-        let task = api::note::create(&name, Some(&type_key), Some(fields), cx);
+        let task = roostr_core::create::from_type(&name, &type_key, fields, cx);
         cx.spawn_in(window, async move |this, cx| {
             let result = task.await;
             let _ = this.update_in(cx, |this, window, cx| {
@@ -1355,7 +1355,8 @@ impl Render for ValueEditor {
                             |this, _, event: &ColorPickerEvent, window, cx| {
                                 if let ColorPickerEvent::Change(Some(color)) = event {
                                     let hex = roostr_core::color::to_hex(*color);
-                                    this.text.update(cx, |t, cx| t.set_value(hex.clone(), window, cx));
+                                    this.text
+                                        .update(cx, |t, cx| t.set_value(hex.clone(), window, cx));
                                     this.synced = Some(hex.clone());
                                     this.save_hex(&hex, window, cx);
                                 }
@@ -1387,7 +1388,9 @@ impl Render for ValueEditor {
                             .bg(theme::panel())
                             .border_1()
                             .border_color(theme::border())
-                            .child(ColorPicker::new(&swatch).accessibility_label("Chat color picker")),
+                            .child(
+                                ColorPicker::new(&swatch).accessibility_label("Chat color picker"),
+                            ),
                     )
                     .child(
                         div()

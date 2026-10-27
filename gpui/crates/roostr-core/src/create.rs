@@ -180,7 +180,14 @@ fn fetch(id: &str, cx: &AsyncApp) -> Task<Result<Object>> {
 pub fn apply_template(object_id: &str, template_id: &str, cx: &mut App) -> Task<Result<()>> {
     let object_id = object_id.to_string();
     let template_id = template_id.to_string();
+    // A Lite copy holds only what this device opened: the template may not be
+    // here yet (a type's New on roostr.space then made a bare object).
+    let held =
+        crate::lite::lite(cx).map(|lite| io::spawn(cx, lite.fetch(vec![template_id.clone()])));
     cx.spawn(async move |cx| {
+        if let Some(held) = held {
+            held.await?;
+        }
         let (tpl, target) = (fetch(&template_id, cx), fetch(&object_id, cx));
         let (tpl, target) = (tpl.await?, target.await?);
         // Everything reachable from __discussion__ is conversation, not content.
@@ -348,22 +355,38 @@ pub fn create_typed(
         "machine" => create_machine(cx),
         "credential" => create_credential(channel_id, name, cx),
         "file" => create_file(channel_id, cx),
-        _ => cx.spawn(async move |cx| {
-            let id = cx
-                .update(|cx| {
-                    api::note::create(&name, Some(&key), Some(channel_field(&channel_id)), cx)
-                })
-                .await?;
-            let tpl_id =
-                cx.update(|cx| default_template_of(Store::global(cx).read(cx), &key, &channel_id));
-            if !tpl_id.is_empty() {
-                // A deleted default template is a no-op.
-                let _ = cx.update(|cx| apply_template(&id, &tpl_id, cx)).await;
-            }
-            open(&id, cx);
-            Ok(id)
-        }),
+        _ => {
+            let task = from_type(&name, &key, channel_field(&channel_id), cx);
+            cx.spawn(async move |cx| {
+                let id = task.await?;
+                open(&id, cx);
+                Ok(id)
+            })
+        }
     }
+}
+
+/// A new object of `type_key` with `fields` (its `channel` among them),
+/// started from the type's default template in that space - every way the
+/// app makes an object of a type goes through here, so a template's agent,
+/// properties and body always come along. Resolves to its id.
+pub fn from_type(name: &str, type_key: &str, fields: Fields, cx: &mut App) -> Task<Result<String>> {
+    let channel_id = fields
+        .get("channel")
+        .and_then(|v| v.string_value.clone())
+        .unwrap_or_default();
+    let tpl_id = default_template_of(Store::global(cx).read(cx), type_key, &channel_id);
+    let create = api::note::create(name, Some(type_key), Some(fields), cx);
+    cx.spawn(async move |cx| {
+        let id = create.await?;
+        if !tpl_id.is_empty() {
+            // The object exists either way; a deleted default template is a no-op.
+            if let Err(error) = cx.update(|cx| apply_template(&id, &tpl_id, cx)).await {
+                log::warn!("template {tpl_id} not applied to {id}: {error:#}");
+            }
+        }
+        Ok(id)
+    })
 }
 
 /// A computer object is a machine's self-publication: adopt this device's

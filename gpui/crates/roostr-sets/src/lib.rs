@@ -462,7 +462,7 @@ impl DataView {
             if !ch.is_empty() {
                 fields.insert("channel".into(), Value::string(&ch));
             }
-            let create = cx.update(|cx| api::note::create("", Some(&type_key), Some(fields), cx));
+            let create = cx.update(|cx| roostr_core::create::from_type("", &type_key, fields, cx));
             let Ok(id) = create.await else { return };
             let mut next = members;
             next.push(id.clone());

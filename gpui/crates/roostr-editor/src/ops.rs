@@ -892,7 +892,8 @@ impl Editor {
             f.insert("channel".into(), roostr_core::types::Value::string(ch));
             f
         });
-        let create = api::note::create(&name, Some(&type_key), fields, cx);
+        let create =
+            roostr_core::create::from_type(&name, &type_key, fields.unwrap_or_default(), cx);
         cx.spawn(async move |this, cx| {
             let new_id = match create.await {
                 Ok(id) => id,
@@ -1386,7 +1387,7 @@ impl Editor {
                 f
             });
             let Ok(create) = this.update(cx, |_, cx| {
-                api::note::create(&name, Some(&type_key), fields, cx)
+                roostr_core::create::from_type(&name, &type_key, fields.unwrap_or_default(), cx)
             }) else {
                 return;
             };
