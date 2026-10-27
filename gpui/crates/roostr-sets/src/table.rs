@@ -64,9 +64,11 @@ fn special_emoji(key: &str) -> Option<&'static str> {
 }
 /// Rows per page.
 const PAGE: usize = 100;
-/// What every row draws whatever the columns.
+/// What every row draws whatever the columns - and its space (`channel`):
+/// a cell's editor offers and creates linked objects in the row's space.
 const ROW_FIELDS: &[&str] = &[
     "name",
+    "channel",
     "iconEmoji",
     "done",
     "status",

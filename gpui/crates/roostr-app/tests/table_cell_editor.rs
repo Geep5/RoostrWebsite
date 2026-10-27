@@ -52,11 +52,17 @@ fn object(id: &str, type_key: &str, pairs: &[(&str, Value)]) -> Object {
 
 impl Default for Vault {
     fn default() -> Self {
+        // A game named like Tanks in another space: never offered here.
+        let mut elsewhere = object("g9", "game", &[("name", Value::string("Tanks Elsewhere"))]);
+        elsewhere
+            .fields
+            .insert("channel".into(), Value::string("sp-2"));
         let objects = vec![
             object("type-game", "type", &[("name", Value::string("Game")), ("key", Value::string("game"))]),
             object("type-pub", "type", &[("name", Value::string("Game Publisher")), ("key", Value::string("game_publisher"))]),
             object("g1", "game", &[("name", Value::string("TYR"))]),
             object("g2", "game", &[("name", Value::string("Tanks"))]),
+            elsewhere,
             object(PUBLISHER, "game_publisher", &[("name", Value::string("Stoke")), ("main_games", Value::values(vec![Value::link("g1", "main_games")]))]),
             object("q1", "query", &[("name", Value::string("Publishers")), ("setOf", Value::values(vec![Value::string("game_publisher")])),
                 ("viewRelations", serde_json::from_value(json!({"valuesValue":{"items":[{"mapValue":{"entries":{"key":{"stringValue":"main_games"},"width":{"intValue":150}}}}]}})).unwrap())]),
@@ -86,7 +92,7 @@ impl Backend for Vault {
                 id: o.id.clone(),
                 type_key: o.type_key.clone(),
                 name: o.field_str("name").into(),
-                channel_id: SPACE.into(),
+                channel_id: o.field_str("channel").into(),
                 updated_at: 1_000,
                 ..ObjectSummary::default()
             })
@@ -132,7 +138,16 @@ impl Backend for Vault {
                 id: o.id.clone(),
                 type_key: o.type_key.clone(),
                 name: Some(o.field_str("name").into()),
-                fields: o.fields.clone(),
+                // Like the store: a query that names its fields gets only those.
+                fields: match body["fields"].as_array() {
+                    Some(keys) => o
+                        .fields
+                        .iter()
+                        .filter(|(k, _)| keys.iter().any(|f| f == k.as_str()))
+                        .map(|(k, v)| (k.clone(), v.clone()))
+                        .collect(),
+                    None => o.fields.clone(),
+                },
                 ..QueryRow::default()
             })
             .collect();
@@ -319,6 +334,12 @@ fn a_cell_editor_at_the_page_columns_edge_opens_where_it_can_be_used(cx: &mut Te
         cx.debug_bounds(CELL).unwrap().left(),
         cell.left(),
         "→ while typing left the table where it was"
+    );
+    // The cell's picker offers the row's own space only: the same-named game
+    // in another space is not a candidate (the row came without its channel).
+    assert!(
+        cx.debug_bounds("cand-g9").is_none(),
+        "a game from another space is offered"
     );
     let at = cx
         .debug_bounds("cand-g2")

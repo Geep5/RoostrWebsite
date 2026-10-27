@@ -598,8 +598,8 @@ impl ValueEditor {
                         && (!is_system_type(&s.type_key) || allowed.contains(&s.type_key))
                 })
                 .filter(|s| allowed.is_empty() || allowed.contains(&s.type_key))
-                // What an agent links belongs to one space: the picker offers that space's own.
-                .filter(|s| space.is_empty() || allowed.is_empty() || s.channel_id == space)
+                // An object links within its own space: the picker offers that space's own.
+                .filter(|s| space.is_empty() || s.channel_id.is_empty() || s.channel_id == space)
                 .map(|s| Candidate {
                     id: s.id.clone(),
                     name: s.name.clone(),
