@@ -32,6 +32,7 @@ Start the daemon (and, for computer features, the harness) from the sibling
 cd gpui
 cargo run --release -p roostr            # opens the workspace
 cargo run --release -p roostr -- /guide  # or any web path: /app/object/<id>, /app/graph, /
+scripts/bundle-mac.sh --install         # Roostr.app with the Roostr icon, copied to ~/Applications
 ```
 
 The app authenticates as the vault's own user with the daemon's service token
