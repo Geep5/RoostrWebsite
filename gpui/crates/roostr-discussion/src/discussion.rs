@@ -432,7 +432,44 @@ impl Discussion {
         self.update_polling(cx);
         if !self.seeded {
             self.seeded = true;
-            self.seed_default_agent(Vec::new(), cx);
+            if self.draft.is_empty() {
+                self.seed_default_agent(Vec::new(), cx);
+            } else {
+                // A draft kept from before (reload, reopened chat): its
+                // `@Agent` names become tags again once the agents are known.
+                self.ensure_tag_options(cx);
+                self.retag_draft(cx);
+            }
+        }
+    }
+
+    /// Tag every agent of this object whose `@Name` is written out in the
+    /// draft (ending it or followed by a non-word character), as a pick
+    /// would - for drafts restored from storage, which keep only text.
+    fn retag_draft(&mut self, cx: &mut Context<Self>) {
+        let Some(options) = self.tag_options.clone() else {
+            return;
+        };
+        let mut added = false;
+        for option in options {
+            if option.agent_name.is_empty() || self.tagged.iter().any(|t| t.key() == option.key()) {
+                continue;
+            }
+            let label = format!("@{}", option.agent_name);
+            let written = self.draft.match_indices(&label).any(|(at, _)| {
+                self.draft[at + label.len()..]
+                    .chars()
+                    .next()
+                    .is_none_or(|c| !is_word_char(c))
+            });
+            if written {
+                self.tagged.push(option);
+                added = true;
+            }
+        }
+        if added {
+            self.repill = true;
+            cx.notify();
         }
     }
 
@@ -1063,6 +1100,7 @@ impl Discussion {
             let _ = this.update(cx, |this, cx| {
                 this.tag_options = Some(options);
                 this.tag_loading = None;
+                this.retag_draft(cx);
                 this.update_mention(cx);
                 cx.notify();
             });
@@ -1546,6 +1584,7 @@ impl Discussion {
         self.tagged.clear();
         self.tagged_objects.clear();
         self.set_draft(draft, None, window, cx);
+        self.retag_draft(cx);
         self.derive(cx);
     }
 
