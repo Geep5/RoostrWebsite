@@ -332,7 +332,8 @@ impl PropertiesPane {
         let store = Store::global(cx).read(cx);
         let space = object_space_id(store, &object.fields);
 
-        // Columns of the views this object belongs to count as its properties.
+        // Columns and filters of the views this object belongs to count as its
+        // properties: a query filtering on Priority shows Priority on its objects.
         let views = api::query_all(
             json!({ "filters": [{ "key": "typeKey", "condition": "in", "value": ["query", "set", "collection"] }, { "key": "channel", "condition": "equal", "value": space }] }),
             cx,
@@ -374,6 +375,18 @@ impl PropertiesPane {
                             })
                             .unwrap_or_default();
                         if !k.is_empty() {
+                            keys.insert(k);
+                        }
+                    }
+                    // A filter's property (only real properties make rows: `serving`
+                    // and the like match none).
+                    for rule in items("viewFilters") {
+                        if let Some(k) = rule
+                            .entries()
+                            .and_then(|e| e.get("key"))
+                            .and_then(|k| k.string_value.clone())
+                            .filter(|k| !k.is_empty())
+                        {
                             keys.insert(k);
                         }
                     }

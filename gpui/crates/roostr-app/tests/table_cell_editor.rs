@@ -65,7 +65,9 @@ impl Default for Vault {
             elsewhere,
             object(PUBLISHER, "game_publisher", &[("name", Value::string("Stoke")), ("main_games", Value::values(vec![Value::link("g1", "main_games")]))]),
             object("q1", "query", &[("name", Value::string("Publishers")), ("setOf", Value::values(vec![Value::string("game_publisher")])),
-                ("viewRelations", serde_json::from_value(json!({"valuesValue":{"items":[{"mapValue":{"entries":{"key":{"stringValue":"main_games"},"width":{"intValue":150}}}}]}})).unwrap())]),
+                ("viewRelations", serde_json::from_value(json!({"valuesValue":{"items":[{"mapValue":{"entries":{"key":{"stringValue":"main_games"},"width":{"intValue":150}}}}]}})).unwrap()),
+                // Filtered on Priority without showing it as a column.
+                ("viewFilters", serde_json::from_value(json!({"valuesValue":{"items":[{"mapValue":{"entries":{"key":{"stringValue":"priority"},"condition":{"stringValue":"equal"},"value":{"valuesValue":{"items":[{"stringValue":"High"}]}}}}}]}})).unwrap())]),
         ];
         Self {
             objects: Mutex::new(objects),
@@ -111,15 +113,25 @@ impl Backend for Vault {
         }]))
     }
     fn relations(&self) -> BoxFuture<anyhow::Result<Vec<RelationDef>>> {
-        ready(Ok(vec![RelationDef {
-            id: "rel-tasks".into(),
-            key: "main_games".into(),
-            format: "object".into(),
-            name: "Main Games".into(),
-            object_types: None,
-            space: Some(SPACE.into()),
-            ..RelationDef::default()
-        }]))
+        ready(Ok(vec![
+            RelationDef {
+                id: "rel-tasks".into(),
+                key: "main_games".into(),
+                format: "object".into(),
+                name: "Main Games".into(),
+                object_types: None,
+                space: Some(SPACE.into()),
+                ..RelationDef::default()
+            },
+            RelationDef {
+                id: "rel-priority".into(),
+                key: "priority".into(),
+                format: "shorttext".into(),
+                name: "Priority".into(),
+                space: Some(SPACE.into()),
+                ..RelationDef::default()
+            },
+        ]))
     }
     /// The type definitions; nothing else is listed here.
     fn query(&self, body: &Json) -> BoxFuture<anyhow::Result<QueryResult>> {
@@ -133,6 +145,8 @@ impl Backend for Vault {
                     || (!text.contains("setId")
                         && text.contains(&format!("\"{}\"", o.type_key))
                         && o.type_key != "query")
+                    // The property pane's "views this object is in" lookup.
+                    || (text.contains("\"collection\"") && o.type_key == "query")
             })
             .map(|o| QueryRow {
                 id: o.id.clone(),
@@ -348,4 +362,17 @@ fn a_cell_editor_at_the_page_columns_edge_opens_where_it_can_be_used(cx: &mut Te
     cx.simulate_click(at, Modifiers::none());
     cx.run_until_parked();
     assert_eq!(main_games(&backend), ["g1", "g2"]);
+
+    // A publisher's own page: the query over its type filters on Priority,
+    // so Priority shows among its properties though it is empty and no column.
+    cx.update(|_, cx| navigate(Route::Object(PUBLISHER.into()), cx));
+    settle(cx);
+    assert!(
+        cx.debug_bounds("prop-row-main_games").is_some(),
+        "the property pane is open on the publisher"
+    );
+    assert!(
+        cx.debug_bounds("prop-row-priority").is_some(),
+        "a property the query filters on is offered on its objects"
+    );
 }
