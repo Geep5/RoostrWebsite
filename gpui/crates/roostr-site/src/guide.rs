@@ -50,7 +50,7 @@ pub(crate) static BLOCKS: &[Block] = &[
     Ul(&[
         "Any page but a chat can have a **cover**: a wide picture above its icon and title. Hover the icon and title and choose **Add cover** (on a phone: ⋯ → Add cover), then choose an image or paste one (in the browser: paste one). It is added to the space like any file.",
         "Hover the cover for **Change cover**, **Reposition** (drag the picture up or down, then Save position), **Remove** and **Generate**; on a phone they are in the ⋯ menu. A cover is two properties of the page, **Cover** and **Cover position**, so it syncs like everything else.",
-        "**Generate** asks OpenAI for a cover that fits the page: an idea is written from the page's title, type, text and properties, then painted. The cover spins while it works and the new image replaces it when it's ready; press Generate again for another one.",
+        "**Generate** opens a small box: describe the cover and press Generate (or Enter) to have OpenAI paint exactly that, or press **Choose for me** to have an idea written from the page's title, type, text and properties and painted as a calm, minimal photograph. The cover spins while it works and the new image replaces it when it's ready.",
         "Generating uses the space's **OpenAI** credential and runs on its Served by computer. Each image is high quality and costs about $0.20 on that key. If it fails, OpenAI's reason shows under the title.",
     ]),
     H2(Some("spaces"), "Spaces"),

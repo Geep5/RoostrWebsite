@@ -10,6 +10,7 @@ use std::sync::Arc;
 
 use gpui_kit::component::Icon;
 use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
+use gpui_kit::component::input::{InputEvent, Textarea, TextareaState};
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -41,6 +42,8 @@ pub(super) struct CoverUi {
     banner_hovered: bool,
     reposition: Option<Reposition>,
     chooser: Option<Chooser>,
+    /// Generate's prompt box, while open.
+    prompt: Option<PromptBox>,
     /// Asking for a cover failed before any computer saw it.
     ask_error: String,
     /// Where the banner was painted and its image's size, for dragging.
@@ -77,6 +80,13 @@ struct Chooser {
     adding: bool,
     error: String,
 }
+
+/// Generate's prompt box: the person's words for the cover.
+struct PromptBox {
+    input: Entity<TextareaState>,
+    _submit: Subscription,
+}
+
 /// The banner image positioned like CSS `object-fit: cover` with
 /// `object-position: 50% (y * 100)%`.
 fn cover_bounds(bounds: Bounds<Pixels>, image: Size<f32>, y: f32) -> Bounds<Pixels> {
@@ -149,12 +159,17 @@ impl ObjectPage {
     }
 
     /// What the phone's ⋯ menu asked of this page's cover.
-    pub(super) fn on_cover_ask(&mut self, action: CoverAction, cx: &mut Context<Self>) {
+    pub(super) fn on_cover_ask(
+        &mut self,
+        action: CoverAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         match action {
             CoverAction::Choose => self.open_chooser(cx),
             CoverAction::Reposition => self.start_reposition(cx),
             CoverAction::Remove => self.remove_cover(cx),
-            CoverAction::Generate => self.generate(cx),
+            CoverAction::Generate => self.open_prompt(window, cx),
         }
     }
 
@@ -270,14 +285,52 @@ impl ObjectPage {
         cx.notify();
     }
 
-    /// Ask for a new cover; the banner spins until it replaces the old one.
+    /// Open the prompt box: the person writes what the cover should show.
+    fn open_prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.cover.chooser = None;
+        if self.cover.prompt.is_some() {
+            return;
+        }
+        let input = cx.new(|cx| {
+            TextareaState::new(window, cx)
+                .auto_grow(2, 6)
+                .submit_on_enter(true)
+                .placeholder("Describe the cover…")
+        });
+        let submit = cx.subscribe_in(&input, window, |this, _, event: &InputEvent, _, cx| {
+            if let InputEvent::PressEnter { shift: false, .. } = event {
+                this.generate(cx);
+            }
+        });
+        input.update(cx, |s, cx| s.focus(window, cx));
+        self.cover.prompt = Some(PromptBox {
+            input,
+            _submit: submit,
+        });
+        cx.notify();
+    }
+
+    /// Paint the prompt box's words as the new cover; the banner spins until
+    /// the image replaces the old one.
     fn generate(&mut self, cx: &mut Context<Self>) {
+        let Some(prompt) = &self.cover.prompt else {
+            return;
+        };
+        let text = prompt.input.read(cx).value().trim().to_string();
+        if !text.is_empty() {
+            self.ask_cover(&text, cx);
+        }
+    }
+
+    /// Ask for a cover - `prompt` painted as written, "" chosen from the
+    /// page - and close the prompt box.
+    fn ask_cover(&mut self, prompt: &str, cx: &mut Context<Self>) {
         let Some(object) = self.object(cx) else {
             return;
         };
-        self.cover.chooser = None;
+        self.cover.prompt = None;
         self.cover.ask_error.clear();
-        let ask = cover::request(&object, cx);
+        let ask = cover::request(&object, prompt, cx);
         cx.spawn(async move |this, cx| {
             if let Err(e) = ask.await {
                 let _ = this.update(cx, |this, cx| {
@@ -363,8 +416,9 @@ impl ObjectPage {
                     ))
                     .child(tagged(
                         "cover-generate",
-                        pill("cover-generate", "Generate", cx)
-                            .on_click(cx.listener(|this, _, _, cx| this.generate(cx))),
+                        pill("cover-generate", "Generate", cx).on_click(
+                            cx.listener(|this, _, window, cx| this.open_prompt(window, cx)),
+                        ),
                     ))
                     .child(tagged(
                         "cover-reposition",
@@ -548,7 +602,8 @@ impl ObjectPage {
         })
     }
 
-    /// The chooser, and why the last Generate failed, under the title.
+    /// The chooser, Generate's prompt box, and why the last Generate failed,
+    /// under the title.
     pub(super) fn render_cover_cards(
         &mut self,
         object: &Object,
@@ -561,7 +616,43 @@ impl ObjectPage {
             .gap(px(8.))
             .when(mobile, |d| d.px(px(16.)))
             .children(self.render_chooser(object, cx))
+            .children(self.render_prompt(cx))
             .children(self.render_failure(object, cx))
+    }
+
+    fn render_prompt(&self, cx: &mut Context<Self>) -> Option<Div> {
+        let prompt = self.cover.prompt.as_ref()?;
+        let empty = prompt.input.read(cx).value().trim().is_empty();
+        Some(
+            card("cover-prompt")
+                .child(card_title(
+                    "Generate a cover",
+                    "cover-prompt-close",
+                    cx.listener(|this, _, _, cx| {
+                        this.cover.prompt = None;
+                        cx.notify();
+                    }),
+                ))
+                .child(Textarea::new(&prompt.input).text_size(px(13.)))
+                .child(
+                    div()
+                        .flex()
+                        .gap(px(8.))
+                        .child(tagged(
+                            "cover-prompt-generate",
+                            ui::disabled(
+                                ui::primary_button("cover-prompt-generate", "Generate"),
+                                empty,
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| this.generate(cx))),
+                        ))
+                        .child(tagged(
+                            "cover-prompt-choose",
+                            ui::outline_button("cover-prompt-choose", "Choose for me")
+                                .on_click(cx.listener(|this, _, _, cx| this.ask_cover("", cx))),
+                        )),
+                ),
+        )
     }
 
     fn render_chooser(&self, object: &Object, cx: &mut Context<Self>) -> Option<Div> {
@@ -611,7 +702,9 @@ impl ObjectPage {
                                 ui::outline_button("cover-chooser-generate", "Generate"),
                                 disabled,
                             )
-                            .on_click(cx.listener(|this, _, _, cx| this.generate(cx))),
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.open_prompt(window, cx)),
+                            ),
                         )),
                 )
                 .when(chooser.adding, |d| d.child(small_note("Adding the image…")))

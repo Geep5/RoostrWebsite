@@ -1,8 +1,9 @@
 //! Page covers: Add cover (hovering the icon and title) adds a pasted image
 //! the usual way and sets `cover` + `cover_y`; the banner sits above the
 //! title with the icon overlapping its bottom edge; Reposition drags the
-//! focus and saves `cover_y`; Remove deletes both. Generate asks once and
-//! spins the banner until the serving computer's image replaces the cover;
+//! focus and saves `cover_y`; Remove deletes both. Generate opens a prompt
+//! box: its words (or none, "Choose for me") are asked for once and the
+//! banner spins until the serving computer's image replaces the cover;
 //! a failure shows its reason, and closing it deletes the run. A phone has
 //! the same actions in its ⋯ menu.
 #![cfg(not(target_family = "wasm"))]
@@ -359,21 +360,15 @@ fn answer(
     settle(cx);
 }
 
-/// The pending `cover_request`'s (action, prompt).
-fn asked(backend: &Vault) -> Option<(String, Option<String>)> {
+/// The pending `cover_request`'s prompt.
+fn asked(backend: &Vault) -> Option<String> {
     let objects = backend.objects.lock();
     let entries = objects[PAGE]
         .fields
         .get("cover_request")?
         .entries()?
         .clone();
-    Some((
-        entries["action"].as_str().unwrap().to_string(),
-        entries
-            .get("prompt")
-            .and_then(|p| p.as_str())
-            .map(str::to_string),
-    ))
+    Some(entries["prompt"].as_str().unwrap_or_default().to_string())
 }
 
 #[gpui::test]
@@ -476,19 +471,27 @@ fn on_a_desktop_page(cx: &mut TestAppContext) {
     );
     assert!(!shown(cx, "object-cover"));
 
-    // Generate, from Add cover: one ask, no panel; the banner spins while it runs.
+    // Generate, from Add cover: a prompt box; nothing is asked until it has words.
     hover(cx, "object-title");
     tap(cx, "cover-add");
     tap(cx, "cover-chooser-generate");
-    assert!(!shown(cx, "cover-chooser"));
-    assert_eq!(asked(&backend), Some(("generate".into(), None)));
+    assert!(!shown(cx, "cover-chooser") && shown(cx, "cover-prompt"));
+    tap(cx, "cover-prompt-generate");
+    assert_eq!(asked(&backend), None, "an empty prompt asks nothing");
+    cx.simulate_input("A misty pine forest");
+    settle(cx);
+    // Enter sends it: the box closes and the banner spins while it paints.
+    cx.simulate_keystrokes("enter");
+    settle(cx);
+    assert_eq!(asked(&backend).as_deref(), Some("A misty pine forest"));
+    assert!(!shown(cx, "cover-prompt"));
     assert!(shown(cx, "object-cover") && shown(cx, "cover-generating"));
     answer(
         &backend,
         &tx,
         cx,
         json!({
-            "at": { "intValue": 1 }, "action": { "stringValue": "generate" },
+            "at": { "intValue": 1 },
             "status": { "stringValue": "painting" }, "credential": { "stringValue": CREDENTIAL },
         }),
     );
@@ -508,12 +511,16 @@ fn on_a_desktop_page(cx: &mut TestAppContext) {
     // A failure says why, with the way to the credential when the key is the trouble.
     hover(cx, "object-cover");
     tap(cx, "cover-generate");
+    cx.simulate_input("A red barn");
+    settle(cx);
+    tap(cx, "cover-prompt-generate");
+    assert_eq!(asked(&backend).as_deref(), Some("A red barn"));
     answer(
         &backend,
         &tx,
         cx,
         json!({
-            "at": { "intValue": 2 }, "action": { "stringValue": "generate" },
+            "at": { "intValue": 2 },
             "status": { "stringValue": "failed" }, "credential": { "stringValue": CREDENTIAL },
             "error": { "stringValue": NEEDS_KEY }, "needs_key": { "boolValue": true },
         }),
@@ -565,6 +572,9 @@ fn in_a_phones_more_menu(cx: &mut TestAppContext) {
     );
     tap(cx, "m-more");
     tap(cx, "more-cover-generate");
-    assert_eq!(asked(&backend), Some(("generate".into(), None)));
+    assert!(shown(cx, "cover-prompt"));
+    // Choose for me asks with no prompt: the computer picks the idea.
+    tap(cx, "cover-prompt-choose");
+    assert_eq!(asked(&backend).as_deref(), Some(""));
     assert!(shown(cx, "cover-generating"));
 }

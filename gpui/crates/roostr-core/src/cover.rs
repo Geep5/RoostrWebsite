@@ -5,9 +5,11 @@
 //!
 //! - `cover`: a link to the cover's File object; `cover_y`: its vertical
 //!   focus, 0 (top edge shown) ..= 1 (bottom), 0.5 when absent.
-//! - `cover_request` (written here, any device): `{at, action: "generate"}`;
-//!   the computer serving the space's OpenAI credential deletes it as it
-//!   takes it.
+//! - `cover_request` (written here, any device): `{at, prompt}` - the
+//!   person's own words, painted as written; an empty prompt ("Choose for
+//!   me") has the art director write an idea from the page first. The
+//!   computer serving the space's OpenAI credential deletes it as it takes
+//!   it.
 //! - `cover_generation` (written by that computer): the run in progress
 //!   (`writing`, `painting`), shown as a spinner. A finished run makes its
 //!   image the page's `cover` and deletes this field; a failed one stays
@@ -65,7 +67,7 @@ pub fn space_of(object: &Object) -> String {
 /// `cover_generation.status`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Status {
-    /// The art director is writing the idea.
+    /// "Choose for me": the art director is writing the idea.
     Writing,
     /// The image is being painted.
     Painting,
@@ -127,15 +129,16 @@ pub fn pending_request(fields: &Fields) -> Option<i64> {
     Some(entries.get("at").and_then(Value::as_int).unwrap_or_default())
 }
 
-/// Ask the space's OpenAI computer for a new cover (`cover_request`); the
-/// failure of an earlier try goes with it.
-pub fn request(object: &Object, cx: &mut App) -> Task<Result<()>> {
+/// Ask the space's OpenAI computer for the page's new cover
+/// (`cover_request`): `prompt` painted as written, or "" to have the idea
+/// chosen from the page. The failure of an earlier try goes with it.
+pub fn request(object: &Object, prompt: &str, cx: &mut App) -> Task<Result<()>> {
     let entries = Fields::from([
         (
             "at".to_string(),
             Value::int(chrono::Utc::now().timestamp_millis()),
         ),
-        ("action".to_string(), Value::string("generate")),
+        ("prompt".to_string(), Value::string(prompt.trim())),
     ]);
     let set = api::note::set_field(&object.id, REQUEST, Value::map(entries), cx);
     let failed = object
