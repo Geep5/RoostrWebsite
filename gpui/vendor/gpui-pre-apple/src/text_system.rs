@@ -441,22 +441,29 @@ impl AppleTextSystemState {
             font_kit::canvas::RasterizationOptions::GrayscaleAa,
         )?);
         // roostr: a COLR emoji's base glyph has no outline of its own (its
-        // layers do), so it measures empty; give it its advance and the
-        // font's ascent and descent.
+        // layers do), so it measures empty - or, where the base carries a
+        // partial outline, too small, and the painted layers were cut off
+        // (a large ⚠️ showed half its triangle). Cover its advance and the
+        // font's ascent and descent as well.
         #[cfg(target_os = "ios")]
-        if params.is_emoji && (bounds.size.width.0 == 0 || bounds.size.height.0 == 0) {
+        if params.is_emoji {
             let metrics = font.metrics();
             let em = f32::from(params.font_size) * params.scale_factor
                 / metrics.units_per_em as f32;
             let advance = font.advance(params.glyph_id.0)?.x() * em;
             let ascent = metrics.ascent * em;
             let descent = -metrics.descent * em;
-            bounds = Bounds {
+            let em_box = Bounds {
                 origin: point(DevicePixels(0), DevicePixels(-(ascent.ceil() as i32))),
                 size: size(
                     DevicePixels(advance.ceil() as i32),
                     DevicePixels((ascent + descent).ceil() as i32),
                 ),
+            };
+            bounds = if bounds.size.width.0 == 0 || bounds.size.height.0 == 0 {
+                em_box
+            } else {
+                bounds.union(&em_box)
             };
         }
 

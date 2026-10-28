@@ -475,8 +475,10 @@ impl Render for ObjectPage {
                 .with_priority(5)
             });
             // Built-in tools show their icon without any affordance; everything
-            // else gets a kit ghost button that toggles the emoji picker.
-            let content = div().flex().items_center().justify_center().map(|d| {
+            // else gets a kit ghost button that toggles the emoji picker. Its
+            // box never shrinks: squeezed (a phone in landscape), the button's
+            // clip cut the emoji in half.
+            let content = div().flex_none().flex().items_center().justify_center().map(|d| {
                 if !image.is_empty() {
                     let size = px(if mobile { 72. } else { 96. });
                     d.size(size).child(
@@ -513,6 +515,7 @@ impl Render for ObjectPage {
             } else {
                 Button::new("obj-emoji")
                     .ghost()
+                    .flex_none()
                     .p_0()
                     .h_auto()
                     .rounded(px(14.))

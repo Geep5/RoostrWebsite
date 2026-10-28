@@ -156,10 +156,24 @@ impl Workspace {
                     d.items_center()
                 }
             });
+        // The spaces and New space scroll when the window is too short for
+        // them (a phone in landscape); the sync dot and Settings stay put.
+        // Tiles never shrink: squeezed, they slid under the active highlight.
+        let mut list = div()
+            .id("rail-spaces")
+            .relative()
+            .flex_1()
+            .min_h_0()
+            .w_full()
+            .overflow_y_scroll()
+            .flex()
+            .flex_col()
+            .gap(px(4.))
+            .map(|d| if wide { d.items_stretch() } else { d.items_center() });
 
         // The active space's highlight is one element that slides to the
         // picked tile, under the tiles (tiles are fixed-size: 44px narrow,
-        // 52px wide, 4px apart below the 10px top padding).
+        // 52px wide, 4px apart).
         let tile_h = if wide { 52. } else { 44. };
         if let Some(index) = current
             .as_deref()
@@ -167,19 +181,19 @@ impl Workspace {
         {
             let top = motion::animate(
                 "rail-active-top",
-                10. + index as f32 * (tile_h + 4.),
+                index as f32 * (tile_h + 4.),
                 motion::Tween::bezier(260, [0.22, 1.0, 0.36, 1.0]),
                 window,
                 cx,
             );
-            rail = rail.child(
+            list = list.child(
                 div()
                     .absolute()
                     .top(px(top))
                     .h(px(tile_h))
                     .map(|d| {
                         if wide {
-                            d.left(px(8.)).right(px(8.))
+                            d.left_0().right_0()
                         } else {
                             d.left(px((width - 44.) / 2.)).w(px(44.))
                         }
@@ -210,6 +224,7 @@ impl Workspace {
             let tile = div()
                 .id(crate::eid("space", &id))
                 .relative()
+                .flex_none()
                 .flex()
                 .items_center()
                 .gap(px(12.))
@@ -326,12 +341,13 @@ impl Workspace {
                     }
                     cx.notify();
                 }));
-            rail = rail.child(tile);
+            list = list.child(tile);
         }
 
         // New space.
-        rail = rail.child(
+        list = list.child(
             rail_tile("new-space", wide, cx)
+                .flex_none()
                 .accessibility_label("New space")
                 .child(
                     tile_row(wide, 15.)
@@ -361,7 +377,7 @@ impl Workspace {
                 .tip("New space")
                 .on_click(cx.listener(|this, _, window, cx| this.new_space(window, cx))),
         );
-        rail = rail.child(div().flex_1());
+        rail = rail.child(list);
 
         // Sync dot.
         let progress = sync_progress(&status);
@@ -434,6 +450,7 @@ impl Workspace {
         };
         rail = rail.child(
             rail_tile("rail-settings", wide, cx)
+                .flex_none()
                 .accessibility_label(SharedString::from(label.clone()))
                 .child(
                     tile_row(wide, 17.)
