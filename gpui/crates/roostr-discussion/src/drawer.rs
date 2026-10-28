@@ -6,6 +6,7 @@
 
 use std::time::Duration;
 
+use gpui_kit::component::Icon;
 use gpui_kit::component::Sizable as _;
 use gpui_kit::component::alert::Alert;
 use gpui_kit::component::button::Button;
@@ -15,7 +16,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use roostr_core::layout::is_mobile;
 use roostr_core::nav::Route;
-use roostr_core::{Navigator, PaneState, PaneTab, PaneViews, Store, theme};
+use roostr_core::{Glyph, Navigator, PaneState, PaneTab, PaneViews, Store, theme};
 use roostr_properties::PropertiesPane;
 
 use crate::discussion::{Discussion, DiscussionOptions};
@@ -255,7 +256,9 @@ impl ConversationDrawer {
                     Some(tab) => p.set_open(tab, false, cx),
                 })
             })
-            .child(div().text_size(px(14.)).child("»"))
+            // An SVG, not the "»" character: a glyph sits on the font's
+            // baseline, about 2px low in the 26px button.
+            .child(Icon::new(Glyph::ChevronsRight).size(px(15.)))
     }
 
     /// A collapsed column folded into the open one's header: its icon and
