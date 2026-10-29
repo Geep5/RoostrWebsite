@@ -178,7 +178,14 @@ fn migrate(connection: &mut Connection) -> Result<(), StoreError> {
         );
         CREATE INDEX IF NOT EXISTS changes_object_id ON changes(object_id, seq);
         CREATE INDEX IF NOT EXISTS held_scope_kind ON held(scope, kind, created_at, id);
-        CREATE INDEX IF NOT EXISTS held_scope_b ON held(scope, b);",
+        CREATE INDEX IF NOT EXISTS held_scope_b ON held(scope, b);
+        CREATE TABLE IF NOT EXISTS records (object_id TEXT PRIMARY KEY, bytes BLOB NOT NULL);
+        CREATE TABLE IF NOT EXISTS journal (
+            key TEXT PRIMARY KEY,
+            object_id TEXT NOT NULL,
+            patch BLOB NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS record_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);",
     )?;
     tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     tx.commit()?;
@@ -966,7 +973,7 @@ impl ChangeStore for SqliteChangeStore {
     fn clear(&self) -> StoreFuture<'_, ()> {
         self.write(|tx| {
             tx.execute_batch(
-                "DELETE FROM changes; DELETE FROM meta; DELETE FROM checkpoints; DELETE FROM bases; DELETE FROM held; DELETE FROM replay_cache;",
+                "DELETE FROM changes; DELETE FROM meta; DELETE FROM checkpoints; DELETE FROM bases; DELETE FROM held; DELETE FROM replay_cache; DELETE FROM records; DELETE FROM journal; DELETE FROM record_meta;",
             )?;
             Ok(())
         })
@@ -984,6 +991,99 @@ impl ChangeStore for SqliteChangeStore {
                 None => Ok(()),
             }
         }))
+    }
+}
+
+impl RecordStore for SqliteChangeStore {
+    fn records(&self) -> StoreFuture<'_, Vec<(String, Vec<u8>)>> {
+        self.run(|connection| {
+            let mut statement = connection.prepare("SELECT object_id, bytes FROM records")?;
+            let rows = statement
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(rows)
+        })
+    }
+
+    fn record(&self, object_id: String) -> StoreFuture<'_, Option<Vec<u8>>> {
+        self.run(move |connection| {
+            Ok(connection
+                .query_row(
+                    "SELECT bytes FROM records WHERE object_id = ?",
+                    [object_id],
+                    |row| row.get(0),
+                )
+                .optional()?)
+        })
+    }
+
+    fn write_records(&self, batch: RecordBatch) -> StoreFuture<'_, ()> {
+        self.write(move |tx| {
+            {
+                let mut put = tx.prepare(
+                    "INSERT INTO records (object_id, bytes) VALUES (?, ?)
+                     ON CONFLICT(object_id) DO UPDATE SET bytes = excluded.bytes",
+                )?;
+                for (object_id, bytes) in &batch.put {
+                    put.execute(params![object_id, bytes])?;
+                }
+            }
+            for object_id in &batch.remove {
+                tx.execute("DELETE FROM records WHERE object_id = ?", [object_id])?;
+            }
+            for item in &batch.journal {
+                tx.execute(
+                    "INSERT OR REPLACE INTO journal (key, object_id, patch) VALUES (?, ?, ?)",
+                    params![item.key, item.object_id, item.patch],
+                )?;
+            }
+            for (key, value) in &batch.meta {
+                match value {
+                    Some(value) => tx.execute(
+                        "INSERT OR REPLACE INTO record_meta (key, value) VALUES (?, ?)",
+                        params![key, value],
+                    )?,
+                    None => tx.execute("DELETE FROM record_meta WHERE key = ?", [key])?,
+                };
+            }
+            Ok(())
+        })
+    }
+
+    fn journal(&self) -> StoreFuture<'_, Vec<JournalItem>> {
+        self.run(|connection| {
+            let mut statement =
+                connection.prepare("SELECT key, object_id, patch FROM journal ORDER BY key")?;
+            let rows = statement
+                .query_map([], |row| {
+                    Ok(JournalItem {
+                        key: row.get(0)?,
+                        object_id: row.get(1)?,
+                        patch: row.get(2)?,
+                    })
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(rows)
+        })
+    }
+
+    fn remove_journal(&self, keys: Vec<String>) -> StoreFuture<'_, ()> {
+        self.write(move |tx| {
+            for key in &keys {
+                tx.execute("DELETE FROM journal WHERE key = ?", [key])?;
+            }
+            Ok(())
+        })
+    }
+
+    fn record_meta(&self, key: String) -> StoreFuture<'_, Option<String>> {
+        self.run(move |connection| {
+            Ok(connection
+                .query_row("SELECT value FROM record_meta WHERE key = ?", [key], |row| {
+                    row.get(0)
+                })
+                .optional()?)
+        })
     }
 }
 

@@ -493,10 +493,55 @@ pub trait ChangeStore: MaybeSend + MaybeSync {
 
     // ---- lifecycle ----
 
-    /// Empties every table (logout keeping the database file).
+    /// Empties every table, record tables included (logout keeping the
+    /// database file).
     fn clear(&self) -> StoreFuture<'_, ()>;
     /// Closes the connection; every later call fails with [`StoreError::Closed`].
     fn close(&self) -> StoreFuture<'_, ()>;
+}
+
+/// A local edit's patch in record mode (docs/state-objects.md "Offline
+/// edits"), kept until a relay acknowledges its kind-1081 event. `key` is
+/// `<stamp time, 16 hex>-<objectId>`: key order is write order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JournalItem {
+    pub key: String,
+    pub object_id: String,
+    /// Canonical `Patch` protobuf.
+    pub patch: Vec<u8>,
+}
+
+/// One atomic record-mode write: records put (canonical `Record` bytes by
+/// object id) and removed, journal items added, record meta set (`None`
+/// deletes).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RecordBatch {
+    pub put: Vec<(String, Vec<u8>)>,
+    pub remove: Vec<String>,
+    pub journal: Vec<JournalItem>,
+    pub meta: Vec<(String, Option<String>)>,
+}
+
+impl RecordBatch {
+    pub fn is_empty(&self) -> bool {
+        self.put.is_empty() && self.remove.is_empty() && self.journal.is_empty() && self.meta.is_empty()
+    }
+}
+
+/// The record-mode store (docs/state-objects.md "Store keeps one record per
+/// object plus the journal"): beside the change tables, in the same
+/// database, so [`ChangeStore::clear`] empties it too.
+pub trait RecordStore: MaybeSend + MaybeSync {
+    /// Every held record, by object id.
+    fn records(&self) -> StoreFuture<'_, Vec<(String, Vec<u8>)>>;
+    fn record(&self, object_id: String) -> StoreFuture<'_, Option<Vec<u8>>>;
+    /// Applies `batch` in one transaction.
+    fn write_records(&self, batch: RecordBatch) -> StoreFuture<'_, ()>;
+    /// The journal in key order.
+    fn journal(&self) -> StoreFuture<'_, Vec<JournalItem>>;
+    fn remove_journal(&self, keys: Vec<String>) -> StoreFuture<'_, ()>;
+    /// Record-mode meta (stream cursors, the clock, the tombstone ledger).
+    fn record_meta(&self, key: String) -> StoreFuture<'_, Option<String>>;
 }
 
 /// Replay inputs from per-object id lists, checkpoint hashes and base hashes.

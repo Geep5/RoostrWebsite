@@ -16,7 +16,7 @@ use base64::engine::general_purpose::STANDARD;
 use serde_json::{Map, Value as Json, json};
 use sha2::{Digest, Sha256};
 
-pub use crate::record_decode::record_decode;
+pub use crate::record_decode::{patch_decode, record_decode};
 
 // ── Stamps and the hybrid logical clock ──────────────────────────────
 

@@ -4,7 +4,7 @@
 //! truncated message, a wrong wire type on a known field or a string that is
 //! not UTF-8 fails the decode.
 
-use crate::record::{Body, Content, Entry, EntryBody, Mark, Record, Value};
+use crate::record::{Body, Content, Entry, EntryBody, Mark, Patch, Record, Value};
 
 struct Reader<'a> {
     data: &'a [u8],
@@ -313,6 +313,20 @@ pub fn record_decode(data: &[u8]) -> Option<Record> {
         Some(true)
     })?;
     Some(record)
+}
+
+/// The inverse of [`crate::record::patch_canonical`]; `None` on malformed bytes.
+pub fn patch_decode(data: &[u8]) -> Option<Patch> {
+    let mut patch = Patch::default();
+    Reader::new(data).fields(|r, field, wire| {
+        match (field, wire) {
+            (1, 2) => patch.object_id = r.string()?,
+            (2, 2) => patch.entries.push(decode_entry(r.bytes()?)?),
+            _ => return Some(false),
+        }
+        Some(true)
+    })?;
+    Some(patch)
 }
 
 #[cfg(test)]

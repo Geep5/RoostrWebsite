@@ -156,6 +156,12 @@ pub enum SubscriptionItem {
     Event(Event),
     /// The relay sent everything it stored; what follows is live.
     Eose,
+    /// An event of a subscription with an `after` filter, with its stream
+    /// seq (RoostrRelay `["EVENT", sub, event, {"seq": n}]`).
+    Sequenced(Event, u64),
+    /// [`SubscriptionItem::Eose`] carrying the stream heads
+    /// (`{"head", "oldest"}`, or one such object per stream).
+    Cursor(Value),
 }
 
 struct QuerySlot {
@@ -596,6 +602,9 @@ impl Inner {
                 else {
                     return;
                 };
+                let seq = items
+                    .next()
+                    .and_then(|extra| extra.get("seq").and_then(Value::as_u64));
                 if self.options.verify_events && !event.verify() {
                     log::debug!(
                         "relay {}: dropped event {} with a bad id or signature",
@@ -612,19 +621,28 @@ impl Inner {
                     } else if let Some(slot) = st.subs.get(&id)
                         && self.accepts(&slot.filters, &event)
                     {
-                        let _ = slot.tx.unbounded_send(Ok(SubscriptionItem::Event(event)));
+                        let item = match seq {
+                            Some(seq) => SubscriptionItem::Sequenced(event, seq),
+                            None => SubscriptionItem::Event(event),
+                        };
+                        let _ = slot.tx.unbounded_send(Ok(item));
                     }
                 });
             }
             "EOSE" => {
                 let Some(id) = next_str() else { return };
+                let cursor = items.next().filter(Value::is_object);
                 let close = self.with_current(generation, |st| {
                     if let Some(slot) = st.queries.remove(&id) {
                         let _ = slot.tx.send(Ok(slot.events));
                         return true;
                     }
                     if let Some(slot) = st.subs.get(&id) {
-                        let _ = slot.tx.unbounded_send(Ok(SubscriptionItem::Eose));
+                        let item = match cursor {
+                            Some(cursor) => SubscriptionItem::Cursor(cursor),
+                            None => SubscriptionItem::Eose,
+                        };
+                        let _ = slot.tx.unbounded_send(Ok(item));
                     }
                     false
                 });

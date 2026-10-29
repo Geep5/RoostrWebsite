@@ -51,7 +51,8 @@ const CHUNK: u32 = 500;
 /// Memo rows per write transaction of `put_cached_replays`.
 const MEMO_BATCH: usize = 200;
 
-const DB_VERSION: u32 = 1;
+/// 2: the record-mode stores ([`RECORDS`], [`JOURNAL`], [`RECORD_META`]).
+const DB_VERSION: u32 = 2;
 const CHANGES: &str = "changes";
 const CHECKPOINTS: &str = "checkpoints";
 const META: &str = "meta";
@@ -59,7 +60,12 @@ const STATES: &str = "states";
 const RELAY_EVENTS: &str = "relay-events";
 const BASES: &str = "bases";
 const BASE_CURRENT: &str = "base-current";
-const ALL_STORES: [&str; 7] = [
+/// Canonical Record bytes by object id.
+const RECORDS: &str = "records";
+/// `{objectId, patch}` by journal key.
+const JOURNAL: &str = "journal";
+const RECORD_META: &str = "record-meta";
+const ALL_STORES: [&str; 10] = [
     CHANGES,
     CHECKPOINTS,
     META,
@@ -67,6 +73,9 @@ const ALL_STORES: [&str; 7] = [
     RELAY_EVENTS,
     BASES,
     BASE_CURRENT,
+    RECORDS,
+    JOURNAL,
+    RECORD_META,
 ];
 
 type Handler = Closure<dyn FnMut(Event)>;
@@ -875,7 +884,7 @@ fn upgrade(request: &IdbOpenDbRequest) -> Result<(), StoreError> {
             .create_index_with_str("seq", "seq")
             .map_err(js_error)?;
     }
-    for plain in [CHECKPOINTS, META, STATES, BASE_CURRENT] {
+    for plain in [CHECKPOINTS, META, STATES, BASE_CURRENT, RECORDS, JOURNAL, RECORD_META] {
         if !names.contains(plain) {
             db.create_object_store(plain).map_err(js_error)?;
         }
@@ -1747,6 +1756,120 @@ impl ChangeStore for IdbChangeStore {
             db.close();
         }
         Box::pin(async { Ok(()) })
+    }
+}
+
+impl RecordStore for IdbChangeStore {
+    fn records(&self) -> StoreFuture<'_, Vec<(String, Vec<u8>)>> {
+        let this = self.clone();
+        guarded("read", async move {
+            let tx = this.read(&[RECORDS])?;
+            let store = os(&tx, RECORDS)?;
+            let mut out = Vec::new();
+            each_row(Rows::Store(&store), |key, value| {
+                let id = key
+                    .as_string()
+                    .ok_or_else(|| StoreError::Corrupt("record key is not a string".into()))?;
+                let bytes = value
+                    .dyn_into::<Uint8Array>()
+                    .map_err(|_| StoreError::Corrupt(format!("record {id} is not bytes")))?;
+                out.push((id, bytes.to_vec()));
+                Ok(())
+            })
+            .await?;
+            Ok(out)
+        })
+    }
+
+    fn record(&self, object_id: String) -> StoreFuture<'_, Option<Vec<u8>>> {
+        let this = self.clone();
+        guarded("read", async move {
+            let store = os(&this.read(&[RECORDS])?, RECORDS)?;
+            let value = req(store.get(&object_id.as_str().into())).await?;
+            if value.is_undefined() {
+                return Ok(None);
+            }
+            value
+                .dyn_into::<Uint8Array>()
+                .map(|bytes| Some(bytes.to_vec()))
+                .map_err(|_| StoreError::Corrupt(format!("record {object_id} is not bytes")))
+        })
+    }
+
+    fn write_records(&self, batch: RecordBatch) -> StoreFuture<'_, ()> {
+        let this = self.clone();
+        guarded("write", async move {
+            let tx = this.write(&[RECORDS, JOURNAL, RECORD_META])?;
+            let records = os(&tx, RECORDS)?;
+            for (object_id, bytes) in &batch.put {
+                records
+                    .put_with_key(&Uint8Array::from(bytes.as_slice()), &object_id.as_str().into())
+                    .map_err(js_error)?;
+            }
+            for object_id in &batch.remove {
+                records.delete(&object_id.as_str().into()).map_err(js_error)?;
+            }
+            let journal = os(&tx, JOURNAL)?;
+            for item in &batch.journal {
+                let value = object(&[
+                    ("objectId", item.object_id.as_str().into()),
+                    ("patch", Uint8Array::from(item.patch.as_slice()).into()),
+                ]);
+                journal
+                    .put_with_key(&value, &item.key.as_str().into())
+                    .map_err(js_error)?;
+            }
+            let meta = os(&tx, RECORD_META)?;
+            for (key, value) in &batch.meta {
+                match value {
+                    Some(value) => meta.put_with_key(&value.as_str().into(), &key.as_str().into()),
+                    None => meta.delete(&key.as_str().into()),
+                }
+                .map_err(js_error)?;
+            }
+            done(&tx).await
+        })
+    }
+
+    fn journal(&self) -> StoreFuture<'_, Vec<JournalItem>> {
+        let this = self.clone();
+        guarded("read", async move {
+            let tx = this.read(&[JOURNAL])?;
+            let store = os(&tx, JOURNAL)?;
+            let mut out = Vec::new();
+            each_row(Rows::Store(&store), |key, value| {
+                out.push(JournalItem {
+                    key: key
+                        .as_string()
+                        .ok_or_else(|| StoreError::Corrupt("journal key is not a string".into()))?,
+                    object_id: text(&value, "objectId")?,
+                    patch: bytes(&value, "patch")?,
+                });
+                Ok(())
+            })
+            .await?;
+            Ok(out)
+        })
+    }
+
+    fn remove_journal(&self, keys: Vec<String>) -> StoreFuture<'_, ()> {
+        let this = self.clone();
+        guarded("write", async move {
+            let tx = this.write(&[JOURNAL])?;
+            let store = os(&tx, JOURNAL)?;
+            for key in &keys {
+                store.delete(&key.as_str().into()).map_err(js_error)?;
+            }
+            done(&tx).await
+        })
+    }
+
+    fn record_meta(&self, key: String) -> StoreFuture<'_, Option<String>> {
+        let this = self.clone();
+        guarded("read", async move {
+            let store = os(&this.read(&[RECORD_META])?, RECORD_META)?;
+            Ok(req(store.get(&key.as_str().into())).await?.as_string())
+        })
     }
 }
 

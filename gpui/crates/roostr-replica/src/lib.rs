@@ -8,6 +8,7 @@ mod device;
 pub mod identity;
 pub mod keyring;
 pub mod local;
+pub mod records;
 pub mod rt;
 pub mod sync;
 

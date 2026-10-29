@@ -21,6 +21,9 @@ pub struct Filter {
     pub since: Option<u64>,
     pub until: Option<u64>,
     pub limit: Option<u64>,
+    /// RoostrRelay's stream cursor: events of the one stream (`#s` or
+    /// `authors`) with seq above this, in seq order. Not matched locally.
+    pub after: Option<u64>,
 }
 
 impl Filter {
@@ -67,6 +70,11 @@ impl Filter {
 
     pub fn limit(mut self, limit: u64) -> Self {
         self.limit = Some(limit);
+        self
+    }
+
+    pub fn after(mut self, after: u64) -> Self {
+        self.after = Some(after);
         self
     }
 
@@ -132,6 +140,9 @@ impl Serialize for Filter {
         if let Some(limit) = self.limit {
             map.serialize_entry("limit", &limit)?;
         }
+        if let Some(after) = self.after {
+            map.serialize_entry("after", &after)?;
+        }
         map.end()
     }
 }
@@ -156,6 +167,7 @@ impl<'de> Deserialize<'de> for Filter {
                 "since" => filter.since = Some(field(value, "since")?),
                 "until" => filter.until = Some(field(value, "until")?),
                 "limit" => filter.limit = Some(field(value, "limit")?),
+                "after" => filter.after = Some(field(value, "after")?),
                 tag => {
                     let mut chars = tag.chars();
                     match (chars.next(), chars.next(), chars.next()) {

@@ -61,11 +61,11 @@ where
         }
         let next = st.sub.as_mut().expect("subscribed above").next().await;
         let item = match next {
-            Some(Ok(SubscriptionItem::Event(event))) => {
+            Some(Ok(SubscriptionItem::Event(event) | SubscriptionItem::Sequenced(event, _))) => {
                 st.backoff = BACKOFF_FLOOR;
                 LiveItem::Event(event)
             }
-            Some(Ok(SubscriptionItem::Eose)) => {
+            Some(Ok(SubscriptionItem::Eose | SubscriptionItem::Cursor(_))) => {
                 st.backoff = BACKOFF_FLOOR;
                 LiveItem::Up {
                     reconnected: st.reconnecting,

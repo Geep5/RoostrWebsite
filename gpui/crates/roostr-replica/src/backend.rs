@@ -34,6 +34,7 @@ use crate::device::DeviceInfo;
 use crate::identity;
 use crate::keyring::{KvSpaceKeyring, SPACE_KEYS};
 use crate::local::LocalKv;
+use crate::records::{RecordHost, RecordSync, Records};
 use crate::rt;
 use crate::sync::{self, LiteScopes, RelaySync, SharedSpaceInfo, SyncHost, VANISH_LOG_ID};
 
@@ -121,6 +122,8 @@ struct Session {
     keys: Keys,
     author: String,
     sync: RelaySync,
+    /// Record mode: this sync runs instead of `sync` (which never starts).
+    records: Option<RecordSync>,
 }
 
 #[derive(Default)]
@@ -210,6 +213,9 @@ struct Inner {
     device: DeviceInfo,
     /// One device record write at a time.
     device_lock: AsyncMutex<()>,
+    /// Record mode ([`ReplicaBackend::with_records`]): states are record
+    /// views and commits are patches; unset = the change DAG.
+    records: std::sync::OnceLock<Arc<Records>>,
     /// The browser store again, concretely, for the one-time import of the
     /// Svelte site's vault (set by [`ReplicaBackend::open_browser`]).
     #[cfg(target_family = "wasm")]
@@ -426,6 +432,7 @@ impl ReplicaBackend {
                 lite_frame_lock: AsyncMutex::new(()),
                 device: DeviceInfo::this_platform(),
                 device_lock: AsyncMutex::new(()),
+                records: std::sync::OnceLock::new(),
                 #[cfg(target_family = "wasm")]
                 svelte_import: std::cell::OnceCell::new(),
             }),
@@ -440,6 +447,43 @@ impl ReplicaBackend {
         self
     }
 
+    /// Record mode (glonOdin `docs/state-objects.md`) over `store`: states
+    /// are record views, commits patches, sync packs and the relay cursor
+    /// ([`crate::records`]). Before the first start; off by default.
+    pub async fn with_records(
+        self,
+        store: Arc<dyn roostr_replica_store::RecordStore>,
+    ) -> Result<Self> {
+        let records = Records::open(store).await?;
+        if self.inner.records.set(Arc::new(records)).is_err() {
+            bail!("record mode is already on");
+        }
+        Ok(self)
+    }
+
+    /// Whether record mode is on.
+    pub fn records(&self) -> Option<Arc<Records>> {
+        self.inner.records.get().cloned()
+    }
+
+    /// The running record sync, if any (tests, diagnostics).
+    pub fn record_sync(&self) -> Option<RecordSync> {
+        self.inner.session().and_then(|s| s.records.clone())
+    }
+
+    /// [`Self::with_records`] when the device asks for record mode: its
+    /// local [`crate::records::RECORDS_FLAG`] is `"1"` (the browser's
+    /// `localStorage`, `local.json`), or natively `ROOSTR_RECORDS=1`.
+    pub async fn records_if_flagged(
+        self,
+        store: Arc<dyn roostr_replica_store::RecordStore>,
+    ) -> Result<Self> {
+        let flagged = self.inner.kv.get(crate::records::RECORDS_FLAG).as_deref() == Some("1");
+        #[cfg(not(target_family = "wasm"))]
+        let flagged = flagged || std::env::var("ROOSTR_RECORDS").is_ok_and(|v| v == "1");
+        if flagged { self.with_records(store).await } else { Ok(self) }
+    }
+
     /// The desktop replica in `dir` (created): `replica.sqlite` and the
     /// private `local.json` (key, space keys, relays; mode 0600).
     #[cfg(not(target_family = "wasm"))]
@@ -449,12 +493,15 @@ impl ReplicaBackend {
             .await
             .map_err(|e| anyhow!("{e}"))?;
         let kv = crate::local::FileLocalKv::open(dir.join("local.json"))?;
-        Ok(Self::new(ReplicaParts {
+        let store = Arc::new(store);
+        Self::new(ReplicaParts {
             engine: Engine::native().map_err(|e| anyhow!("{e}"))?,
-            store: Arc::new(store),
+            store: store.clone(),
             kv: Arc::new(kv),
             label: format!("this device's replica in {}", dir.display()),
-        }))
+        })
+        .records_if_flagged(store)
+        .await
     }
 
     /// The default desktop replica directory: `$ROOSTR_REPLICA_DIR`, else
@@ -489,7 +536,9 @@ impl ReplicaBackend {
             kv: Arc::new(crate::local::BrowserLocalKv),
             label: "this browser's replica".into(),
         })
-        .lite_by_default();
+        .lite_by_default()
+        .records_if_flagged(Arc::new(store.clone()))
+        .await?;
         let _ = backend.inner.svelte_import.set(store);
         Ok(backend)
     }
@@ -723,6 +772,12 @@ impl Inner {
     #[allow(clippy::arc_with_non_send_sync)]
     fn new_session(self: &Arc<Self>, keys: Keys) -> Session {
         let host: Arc<dyn SyncHost> = Arc::new(Host(Arc::downgrade(self)));
+        let records = self.records.get().and_then(|records| {
+            let host: Arc<dyn RecordHost> = Arc::new(Host(Arc::downgrade(self)));
+            RecordSync::new(keys.clone(), self.relays(), records.clone(), host)
+                .map_err(|error| log::error!("[replica] record sync: {error:#}"))
+                .ok()
+        });
         let sync = RelaySync::new(
             self.engine.clone(),
             self.store.clone(),
@@ -736,12 +791,16 @@ impl Inner {
             author: keys.author_id(),
             keys,
             sync,
+            records,
         }
     }
 
     fn stop(&self) {
         if let Some(session) = self.session.lock().take() {
             session.sync.stop();
+            if let Some(records) = &session.records {
+                records.stop();
+            }
         }
         // The next start prepares again from what the memo then holds.
         let mut st = self.state.lock();
@@ -758,6 +817,9 @@ impl Inner {
             return;
         };
         old.sync.stop();
+        if let Some(records) = &old.records {
+            records.stop();
+        }
         let session = Arc::new(self.new_session(old.keys.clone()));
         self.state.lock().device_writer = false;
         if let Err(error) = self.choose_holding(&session).await {
@@ -773,6 +835,12 @@ impl Inner {
     /// and the store holds nothing yet; a replica already holding a vault
     /// stays full. A lite session starts with what it holds whole.
     async fn choose_holding(&self, session: &Session) -> Result<()> {
+        // Record mode holds every stream whole (a lite record replica reads
+        // single objects through `RecordSync::fetch_object`).
+        if session.records.is_some() {
+            self.state.lock().lite = None;
+            return Ok(());
+        }
         let lite = match self.kv.get(HOLDING).as_deref() {
             Some(holding) => holding == "lite",
             None => {
@@ -815,6 +883,19 @@ impl Inner {
     /// device may rebase its own orphans there), which only its state
     /// answers. A lite replica then fetches its directories.
     async fn start_sync(self: &Arc<Self>, session: &Arc<Session>) {
+        if let Some(records) = session.records.clone() {
+            let this = self.clone();
+            rt::spawn(async move {
+                let started = match this.ensure_complete().await {
+                    Ok(()) => records.start().await,
+                    Err(error) => Err(error),
+                };
+                if let Err(error) = started {
+                    log::warn!("[replica] record sync start failed: {error:#}");
+                }
+            });
+            return;
+        }
         if self.state.lock().waiting.is_empty() {
             match session.sync.start().await {
                 Ok(()) => self.spawn_lite_frame(),
@@ -1240,6 +1321,10 @@ impl Inner {
     /// the fewest changes - spaces, types and properties before long pages,
     /// and the most objects in view soonest.
     async fn restore_cached_states(&self) -> Result<Vec<String>> {
+        if let Some(records) = self.records.get() {
+            self.restore_records(records).await?;
+            return Ok(Vec::new());
+        }
         let inputs = self.store.replay_inputs().await?;
         let wanted: Vec<String> = {
             let mut st = self.state.lock();
@@ -1300,12 +1385,54 @@ impl Inner {
         Ok(misses)
     }
 
+    /// Record mode: every record's view is the state (no replay, no memo);
+    /// states of objects without a record go.
+    async fn restore_records(&self, records: &Records) -> Result<()> {
+        let all = records.all().await?;
+        let held: HashSet<&str> = all.iter().map(|r| r.object_id.as_str()).collect();
+        let gone: Vec<String> = {
+            let st = self.state.lock();
+            st.states.keys().filter(|id| !held.contains(id.as_str())).cloned().collect()
+        };
+        for id in gone {
+            self.set_record_state(&id, None);
+        }
+        for record in &all {
+            self.set_record_state(&record.object_id, Some(crate::records::view_of(record)));
+        }
+        Ok(())
+    }
+
+    /// One object's record view in (or, `None`, out of) the states.
+    fn set_record_state(&self, id: &str, view: Option<Json>) {
+        let mut st = self.state.lock();
+        st.inputs.remove(id);
+        match view {
+            None => {
+                if st.states.remove(id).is_some() {
+                    st.query_removed.insert(id.to_string());
+                }
+            }
+            Some(view) => {
+                if st.states.get(id).is_none_or(|previous| heads(previous) != heads(&view)) {
+                    st.query_upserted.insert(id.to_string());
+                }
+                st.states.insert(id.to_string(), Arc::new(view));
+            }
+        }
+    }
+
     /// Replays one object (current base + live deltas); the memo row to write.
     async fn replay_one(
         &self,
         id: &str,
         pending: &HashSet<String>,
     ) -> Result<Option<CachedReplay>> {
+        if let Some(records) = self.records.get() {
+            let view = records.view(id).await?;
+            self.set_record_state(id, view);
+            return Ok(None);
+        }
         let held = self.store.object_inputs(id.to_string()).await?;
         let input = ReplayInput::new(
             held.changes.iter().map(|c| c.id.as_str()),
@@ -1521,6 +1648,17 @@ impl Inner {
             changed
         };
         session.sync.set_shared_spaces(infos.clone()).await?;
+        if let Some(records) = &session.records {
+            let author = session.keys.pubkey().to_string();
+            let spaces = infos
+                .iter()
+                .map(|info| {
+                    let owner = info.owner.clone().unwrap_or_else(|| author.clone());
+                    (info.space_id.clone(), info.key_hex.clone(), owner)
+                })
+                .collect();
+            records.set_spaces(spaces).await?;
+        }
         if shared_changed && let Some(lite) = self.state.lock().lite.as_mut() {
             lite.asked.clear();
             lite.keys_generation += 1;
@@ -2386,6 +2524,27 @@ impl Inner {
         for change in plan.vanish_changes {
             self.commit(session, change).await?;
         }
+        // Record mode: a vanish also drops the records here and on every
+        // device (kind 1082), beside the ledger's own patch.
+        if action == "vanish"
+            && let Some(records) = &session.records
+        {
+            let ids: Vec<String> = params
+                .get("object_id")
+                .into_iter()
+                .chain(params.get("object_ids").and_then(Json::as_array).into_iter().flatten())
+                .filter_map(Json::as_str)
+                .map(str::to_string)
+                .collect();
+            for id in &ids {
+                if let Err(error) = records.vanish(id).await {
+                    log::warn!("[replica] vanish of {id} not published: {error:#}");
+                }
+            }
+            self.state.lock().dirty.extend(ids.iter().cloned());
+            self.ensure().await?;
+            self.notify(&ids);
+        }
         if shared_changed {
             self.spawn_refresh();
         }
@@ -2479,6 +2638,9 @@ impl Inner {
     /// publish one planned change. On an object with a base it is a delta of
     /// that base: its events carry `["b", base]`.
     async fn commit(self: &Arc<Self>, session: &Session, mut change: Change) -> Result<()> {
+        if let Some(records) = self.records.get() {
+            return self.commit_record(session, records, change).await;
+        }
         let object_id = change.object_id.clone();
         let held = self.store.object_inputs(object_id.clone()).await?;
         let pending = self.store.pending_change_ids().await?;
@@ -2546,6 +2708,32 @@ impl Inner {
             .await
         {
             log::error!("[replica] publish deferred: {error:#}");
+        }
+        self.notify(&[object_id]);
+        Ok(())
+    }
+
+    /// Record mode's commit (the daemon's `records_commit_change`): the
+    /// change's patch merged into the record and journaled, the view
+    /// refreshed, the journal sent in the background.
+    async fn commit_record(
+        self: &Arc<Self>,
+        session: &Session,
+        records: &Records,
+        mut change: Change,
+    ) -> Result<()> {
+        let object_id = change.object_id.clone();
+        change.parent_ids.clear();
+        // Addressed as the DAG would address it: the patch replays it.
+        let bytes = self.engine.encode_change(&change).await?;
+        let change = self.engine.decode_change(&bytes).await?;
+        if !records.commit_local(&self.engine, &change).await? {
+            return Ok(());
+        }
+        self.state.lock().dirty.insert(object_id.clone());
+        self.ensure().await?;
+        if let Some(sync) = &session.records {
+            sync.spawn_publish();
         }
         self.notify(&[object_id]);
         Ok(())
@@ -3172,6 +3360,19 @@ impl SyncHost for Host {
         if (complete && !inner.is_lite()) || !reachable {
             inner.start_device_records();
         }
+    }
+}
+
+impl RecordHost for Host {
+    fn on_records(&self, ids: Vec<String>) {
+        SyncHost::on_objects(self, ids);
+    }
+
+    fn space_of(&self, object_id: &str) -> Option<String> {
+        let inner = self.0.upgrade()?;
+        let st = inner.state.lock();
+        let space = st.states.get(object_id).map(|s| space_of_state(s))?;
+        st.shared_spaces.contains(&space).then_some(space)
     }
 }
 

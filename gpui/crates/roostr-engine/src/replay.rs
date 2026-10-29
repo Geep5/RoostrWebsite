@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::codec::{base64_bytes, base64_option, to_base64};
-use crate::record::{Record, ReplayWriters, from_object_state};
+use crate::record::{Patch, Record, ReplayWriters, Stamp, from_object_state, patch_decode, record_canonical, record_decode};
 use crate::{Change, Engine, EngineError};
 
 /// Everything held for one object that its state is built from
@@ -411,6 +411,57 @@ impl Engine {
         };
         self.call_as("record", &payload, None).await
     }
+
+    /// The patch a local change writes on `record` (`None`: the object has
+    /// no record yet), every entry at `stamp`, and the record with it merged
+    /// (`record` `patch`, the daemon's record-mode commit). An empty patch
+    /// means the change wrote nothing a record keeps.
+    pub async fn record_patch(
+        &self,
+        record: Option<&Record>,
+        change: &Change,
+        stamp: Stamp,
+    ) -> Result<(Patch, Record), EngineError> {
+        #[derive(Deserialize)]
+        struct Out {
+            patch: String,
+            record: String,
+        }
+        let payload = serde_json::json!({
+            "action": "patch",
+            "record": record.map(|r| hex_encode(&record_canonical(r))).unwrap_or_default(),
+            "change": change,
+            "stamp": {"time": stamp.time, "device": stamp.device},
+        });
+        let out: Out = self.call_as("record", &payload, None).await?;
+        let bad = |what: &str| EngineError::Domain(format!("record patch: malformed {what}"));
+        let patch = hex_decode(&out.patch)
+            .and_then(|bytes| patch_decode(&bytes))
+            .ok_or_else(|| bad("patch"))?;
+        let merged = hex_decode(&out.record)
+            .and_then(|bytes| record_decode(&bytes))
+            .ok_or_else(|| bad("record"))?;
+        Ok((patch, merged))
+    }
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        let _ = write!(out, "{byte:02x}");
+    }
+    out
+}
+
+fn hex_decode(text: &str) -> Option<Vec<u8>> {
+    if !text.len().is_multiple_of(2) {
+        return None;
+    }
+    (0..text.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(text.get(i..i + 2)?, 16).ok())
+        .collect()
 }
 
 #[derive(Serialize)]
