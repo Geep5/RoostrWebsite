@@ -655,15 +655,71 @@ impl AppleTextSystemState {
             }
         }
         let typographic_bounds = line.get_typographic_bounds();
+        #[allow(unused_mut)]
+        let mut width: f32 = typographic_bounds.width as f32;
+        // roostr: on iOS emoji fall back to the bundled Twemoji, which has no
+        // glyph for the emoji variation selector U+FE0F; CoreText then shapes
+        // the selector with another font as a visible-width glyph, so "⚠️" or
+        // "🏟️" got a gap after them in a row and a big icon box measured too
+        // wide. A selector only picks the presentation: drop its glyph and
+        // its advance.
+        #[cfg(target_os = "ios")]
+        drop_variation_selectors(text, &mut runs, &mut width);
         LineLayout {
             runs,
             font_size,
-            width: typographic_bounds.width.into(),
+            width: width.into(),
             ascent: max_ascent.into(),
             descent: max_descent.into(),
             len: text.len(),
         }
     }
+}
+
+/// Remove U+FE0F / U+FE0E glyphs and close the gap they left: every later
+/// glyph (in visual order) moves left by the dropped advance.
+#[cfg(target_os = "ios")]
+fn drop_variation_selectors(text: &str, runs: &mut [ShapedRun], width: &mut f32) {
+    let is_selector = |ix: usize| {
+        text.get(ix..)
+            .and_then(|s| s.chars().next())
+            .is_some_and(|c| c == '\u{FE0F}' || c == '\u{FE0E}')
+    };
+    if !runs.iter().flat_map(|r| &r.glyphs).any(|g| is_selector(g.index)) {
+        return;
+    }
+    // Every glyph's x, in visual order, to find each selector's advance.
+    let mut xs: Vec<f32> = runs
+        .iter()
+        .flat_map(|r| r.glyphs.iter().map(|g| f32::from(g.position.x)))
+        .collect();
+    xs.sort_by(|a, b| a.total_cmp(b));
+    let next_x = |x: f32| {
+        xs.iter()
+            .copied()
+            .find(|&n| n > x)
+            .unwrap_or(*width)
+    };
+    let mut gaps: Vec<(f32, f32)> = Vec::new(); // (x of the selector, its advance)
+    for run in runs.iter_mut() {
+        run.glyphs.retain(|g| {
+            if is_selector(g.index) {
+                let x = f32::from(g.position.x);
+                gaps.push((x, (next_x(x) - x).max(0.)));
+                false
+            } else {
+                true
+            }
+        });
+    }
+    for run in runs.iter_mut() {
+        for g in &mut run.glyphs {
+            let x = f32::from(g.position.x);
+            let shift: f32 = gaps.iter().filter(|(gx, _)| *gx < x).map(|(_, a)| a).sum();
+            g.position.x = px(x - shift);
+        }
+    }
+    *width -= gaps.iter().map(|(_, a)| a).sum::<f32>();
 }
 
 #[derive(Debug, Clone)]
