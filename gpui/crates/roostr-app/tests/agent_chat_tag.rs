@@ -181,7 +181,16 @@ fn an_agents_chat_on_a_phone_opens_addressed_to_it(cx: &mut TestAppContext) {
     assert!(cx.debug_bounds("disc-sheet").is_some(), "the chat sheet");
     send(cx, "hello");
     assert_eq!(posts(&backend), [post("agent-1", "@Scout hello")]);
-    // A sent line leaves the composer addressed to the agent again.
+    let pill = |cx: &mut VisualTestContext| cx.debug_bounds("composer-tag-Scout").is_some();
+    assert!(pill(cx), "the composer is addressed to Scout again, as a tag");
+    // Leaving and opening the chat again keeps that draft, still a tag (it
+    // came back as plain "@Scout" text), with the caret after it.
+    cx.update(|_, cx| navigate(Route::Object("chat-1".into()), cx));
+    cx.run_until_parked();
+    cx.update(|_, cx| navigate(Route::Object("agent-1".into()), cx));
+    cx.run_until_parked();
+    tap(cx, "m-pane");
+    assert!(pill(cx), "the kept draft's @Scout is a tag");
     send(cx, "and again");
     assert_eq!(posts(&backend)[1..], [post("agent-1", "@Scout and again")]);
 

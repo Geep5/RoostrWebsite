@@ -249,7 +249,11 @@ impl Discussion {
                 .auto_grow(1, 16)
                 .submit_on_enter(true)
         });
-        composer.update(cx, |state, cx| state.set_value(draft.clone(), window, cx));
+        // A restored draft is picked up where it ends.
+        composer.update(cx, |state, cx| {
+            state.set_value(draft.clone(), window, cx);
+            state.set_selected_range(draft.len()..draft.len(), cx);
+        });
         // One row: the trailing footer (empty note, typing, problem).
         let scroller = cx.new(|cx| MessageScrollerState::new(1, cx));
         let mention_menu = cx.new(|cx| CommandState::new(window, cx));
@@ -359,13 +363,23 @@ impl Discussion {
             let guests = |o: &Option<Arc<Object>>| o.as_ref().map(|o| guest_agents(&o.fields));
             let agents_changed = guests(&self.object) != guests(&object);
             self.object = object;
-            self.derive(cx);
             // Agents added or removed on the object: the @-options and the
-            // composer's default tag follow at once, no reload.
+            // composer's default tag follow at once, no reload. Reset before
+            // `derive`, which starts the load a restored draft needs.
             if agents_changed {
                 self.tag_options = None;
                 self.tag_loading = None;
-                self.seed_default_agent(Vec::new(), cx);
+            }
+            self.derive(cx);
+            if agents_changed {
+                if self.draft.is_empty() {
+                    self.seed_default_agent(Vec::new(), cx);
+                } else {
+                    // A kept draft: its `@Agent` names become tags once the
+                    // agents load (they stayed plain text when the chat opened
+                    // again with one).
+                    self.ensure_tag_options(cx);
+                }
             }
         } else {
             let store = Store::global(cx);
@@ -2934,7 +2948,12 @@ impl Discussion {
                 let space = roostr_core::nav::Navigator::global(cx).read(cx).space().to_string();
                 let paint =
                     roostr_core::options::agent_tag_paint(Store::global(cx).read(cx), &name, &space);
-                pill(line, paint, icon, name).into_any_element()
+                let selector = format!("composer-tag-{name}");
+                div()
+                    .flex_none()
+                    .debug_selector(move || selector)
+                    .child(pill(line, paint, icon, name))
+                    .into_any_element()
             };
         div()
             .relative()
