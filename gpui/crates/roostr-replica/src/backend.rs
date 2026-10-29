@@ -471,17 +471,18 @@ impl ReplicaBackend {
         self.inner.session().and_then(|s| s.records.clone())
     }
 
-    /// [`Self::with_records`] when the device asks for record mode: its
-    /// local [`crate::records::RECORDS_FLAG`] is `"1"` (the browser's
-    /// `localStorage`, `local.json`), or natively `ROOSTR_RECORDS=1`.
+    /// [`Self::with_records`]: every device syncs records (the legacy
+    /// protocol is retired). The local [`crate::records::RECORDS_FLAG`] set
+    /// to `"0"` (the browser's `localStorage`, `local.json`) or natively
+    /// `ROOSTR_RECORDS=0` keeps the legacy sync, for diagnosis only.
     pub async fn records_if_flagged(
         self,
         store: Arc<dyn roostr_replica_store::RecordStore>,
     ) -> Result<Self> {
-        let flagged = self.inner.kv.get(crate::records::RECORDS_FLAG).as_deref() == Some("1");
+        let legacy = self.inner.kv.get(crate::records::RECORDS_FLAG).as_deref() == Some("0");
         #[cfg(not(target_family = "wasm"))]
-        let flagged = flagged || std::env::var("ROOSTR_RECORDS").is_ok_and(|v| v == "1");
-        if flagged { self.with_records(store).await } else { Ok(self) }
+        let legacy = legacy || std::env::var("ROOSTR_RECORDS").is_ok_and(|v| v == "0");
+        if legacy { Ok(self) } else { self.with_records(store).await }
     }
 
     /// The desktop replica in `dir` (created): `replica.sqlite` and the

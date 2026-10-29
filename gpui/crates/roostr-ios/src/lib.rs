@@ -55,7 +55,7 @@ fn open_replica() -> anyhow::Result<ReplicaBackend> {
     .map_err(|error| anyhow::anyhow!("{error}"))?;
     let kv = local::IosLocalKv::open(&dir.join("local.json"))?;
     // A fresh install starts lite; the Swift app's vault, when there is one, stays full.
-    // Record mode only when `local.json` sets `roostr-records` to "1".
+    // Record sync unless `local.json` sets `roostr-records` to "0".
     let store = Arc::new(store);
     let backend = ReplicaBackend::new(ReplicaParts {
         engine: roostr_engine::Engine::native().map_err(|error| anyhow::anyhow!("{error}"))?,
