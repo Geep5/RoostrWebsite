@@ -16,6 +16,8 @@ use base64::engine::general_purpose::STANDARD;
 use serde_json::{Map, Value as Json, json};
 use sha2::{Digest, Sha256};
 
+pub use crate::record_decode::record_decode;
+
 // ── Stamps and the hybrid logical clock ──────────────────────────────
 
 /// Hybrid logical clock time (`unix ms << 16 | counter`) plus the writing
@@ -1134,6 +1136,212 @@ pub fn sibling_positions(n: usize) -> Vec<String> {
     out
 }
 
+// ── Conversation participants (`record_participants_split`) ─────────
+
+/// Custom content type of a conversation root block; its data is a
+/// `Conversation` protobuf.
+pub const DISCUSSION_CONTENT: &str = "discussion";
+/// Conversation participants live as one field entry each:
+/// `participant:<thread block id>:<participant>` = Int list index.
+pub const PARTICIPANT_PREFIX: &str = "participant:";
+
+/// Field key prefix of the participant entries of discussion `block_id`.
+pub fn participant_prefix(block_id: &str) -> String {
+    format!("{PARTICIPANT_PREFIX}{block_id}:")
+}
+
+/// A `Conversation` as `decode_conversation` (`conversation.odin`) reads
+/// it: the known fields, an out-of-range kind as unspecified, every other
+/// field kept verbatim and re-emitted last.
+#[derive(Default)]
+struct Conversation {
+    id: Vec<u8>,
+    kind: u64,
+    title: Vec<u8>,
+    participants: Vec<Vec<u8>>,
+    created_at: u64,
+    opened_by: Vec<u8>,
+    about_message_id: Vec<u8>,
+    closed: bool,
+    unknown: Vec<u8>,
+}
+
+/// Wire reader with `proto.odin`'s limits; `None` where it sets `err`.
+struct Reader<'a> {
+    data: &'a [u8],
+    pos: usize,
+}
+
+impl<'a> Reader<'a> {
+    fn varint(&mut self) -> Option<u64> {
+        let mut result = 0u64;
+        let mut shift = 0u32;
+        while let Some(&byte) = self.data.get(self.pos) {
+            self.pos += 1;
+            if shift == 63 && byte > 1 {
+                return None;
+            }
+            result |= u64::from(byte & 0x7f) << shift;
+            if byte < 0x80 {
+                return Some(result);
+            }
+            shift += 7;
+            if shift >= 64 {
+                return None;
+            }
+        }
+        None
+    }
+
+    fn bytes(&mut self) -> Option<&'a [u8]> {
+        let size = usize::try_from(self.varint()?).ok()?;
+        let out = self.data.get(self.pos..self.pos.checked_add(size)?)?;
+        self.pos += size;
+        Some(out)
+    }
+
+    fn skip(&mut self, wire: u64) -> Option<()> {
+        match wire {
+            0 => {
+                self.varint()?;
+            }
+            1 => self.pos += 8,
+            2 => {
+                self.bytes()?;
+            }
+            5 => self.pos += 4,
+            _ => return None,
+        }
+        (self.pos <= self.data.len()).then_some(())
+    }
+}
+
+impl Conversation {
+    /// Known fields are read by number whatever their wire type, as the
+    /// engine reads them.
+    fn decode(data: &[u8]) -> Option<Conversation> {
+        let mut r = Reader { data, pos: 0 };
+        let mut out = Conversation::default();
+        while r.pos < data.len() {
+            let start = r.pos;
+            let tag = r.varint()?;
+            match tag >> 3 {
+                1 => out.id = r.bytes()?.to_vec(),
+                2 => {
+                    let kind = r.varint()?;
+                    out.kind = if (1..=3).contains(&kind) { kind } else { 0 };
+                }
+                3 => out.title = r.bytes()?.to_vec(),
+                4 => out.participants.push(r.bytes()?.to_vec()),
+                5 => out.created_at = r.varint()?,
+                6 => out.opened_by = r.bytes()?.to_vec(),
+                7 => out.about_message_id = r.bytes()?.to_vec(),
+                8 => out.closed = r.varint()? != 0,
+                _ => {
+                    r.skip(tag & 7)?;
+                    out.unknown.extend_from_slice(&data[start..r.pos]);
+                }
+            }
+        }
+        Some(out)
+    }
+
+    /// `encode_conversation`: proto3, defaults (empty strings included) omitted.
+    fn encode(&self) -> Vec<u8> {
+        fn text(w: &mut Writer, field: u64, data: &[u8]) {
+            if !data.is_empty() {
+                w.bytes(field, data);
+            }
+        }
+        let mut w = Writer::default();
+        text(&mut w, 1, &self.id);
+        w.uint(2, self.kind);
+        text(&mut w, 3, &self.title);
+        for participant in &self.participants {
+            text(&mut w, 4, participant);
+        }
+        w.uint(5, self.created_at);
+        text(&mut w, 6, &self.opened_by);
+        text(&mut w, 7, &self.about_message_id);
+        w.bool(8, self.closed);
+        w.0.extend_from_slice(&self.unknown);
+        w.0
+    }
+}
+
+/// A discussion root's content without its participants, and the
+/// participants in order (`record_participants_split`). `None` when it is
+/// not a conversation, or one whose bytes a split and join would not
+/// reproduce exactly (non-canonical encoding, a participant listed twice,
+/// a participant that is not UTF-8).
+pub fn participants_split(content: &Content) -> Option<(Content, Vec<String>)> {
+    let Content::Custom {
+        content_type,
+        data,
+        meta,
+    } = content
+    else {
+        return None;
+    };
+    if content_type != DISCUSSION_CONTENT {
+        return None;
+    }
+    let mut conversation = Conversation::decode(data)?;
+    if conversation.encode() != *data {
+        return None;
+    }
+    let mut seen = std::collections::HashSet::new();
+    let mut parts = Vec::with_capacity(conversation.participants.len());
+    for participant in std::mem::take(&mut conversation.participants) {
+        let participant = String::from_utf8(participant).ok()?;
+        if !seen.insert(participant.clone()) {
+            return None;
+        }
+        parts.push(participant);
+    }
+    let stripped = Content::Custom {
+        content_type: content_type.clone(),
+        data: conversation.encode(),
+        meta: meta.clone(),
+    };
+    Some((stripped, parts))
+}
+
+/// The discussion `id` with its participant entries (live Int fields under
+/// its prefix, ordered by (index, id)) folded back in; `None` when it is
+/// not a discussion, has no entries or does not decode.
+fn joined_discussion(id: &str, body: &Body, participants: &[(&str, i64)]) -> Option<Body> {
+    let Content::Custom {
+        content_type,
+        data,
+        meta,
+    } = &body.content
+    else {
+        return None;
+    };
+    if content_type != DISCUSSION_CONTENT {
+        return None;
+    }
+    let prefix = participant_prefix(id);
+    let mut parts: Vec<(i64, &str)> = participants
+        .iter()
+        .filter_map(|(key, index)| key.strip_prefix(prefix.as_str()).map(|who| (*index, who)))
+        .collect();
+    if parts.is_empty() {
+        return None;
+    }
+    let mut conversation = Conversation::decode(data)?;
+    parts.sort_by(|a, b| (a.0, a.1.as_bytes()).cmp(&(b.0, b.1.as_bytes())));
+    conversation.participants = parts.iter().map(|(_, who)| who.as_bytes().to_vec()).collect();
+    let mut joined = body.clone();
+    joined.content = Content::Custom {
+        content_type: content_type.clone(),
+        data: conversation.encode(),
+        meta: meta.clone(),
+    };
+    Some(joined)
+}
+
 // ── View: record → ObjectJSON ────────────────────────────────────────
 
 fn live_value(entry: Option<&Entry>) -> Option<&Value> {
@@ -1175,8 +1383,9 @@ fn block_json(id: &str, body: &Body, children: &[&str], wire: bool) -> Json {
 /// `object_to_json_value`): live fields, the block tree (blocks and messages
 /// together, siblings by (position, id), preorder from the roots,
 /// unreachable entries hidden, `__content__` internal), timestamps from the
-/// stamps. The engine's derived `conversations` / `mailbox` projections are
-/// not produced here.
+/// stamps, participant entries folded back into their discussions and not
+/// shown as fields. The engine's derived `conversations` / `mailbox`
+/// projections are not produced here.
 pub fn record_view(record: &Record) -> Json {
     view_json(record, false)
 }
@@ -1212,6 +1421,15 @@ fn view_json(record: &Record, wire: bool) -> Json {
         by_key.insert(key, body);
         children.entry(body.parent.as_str()).or_default().push(key);
     }
+    let participants: Vec<(&str, i64)> = record
+        .fields
+        .iter()
+        .filter(|entry| entry.key.starts_with(PARTICIPANT_PREFIX))
+        .filter_map(|entry| match live_value(Some(entry)) {
+            Some(Value::Int(index)) => Some((entry.key.as_str(), *index)),
+            _ => None,
+        })
+        .collect();
     let mut blocks = Vec::new();
     let mut emitted = std::collections::HashSet::new();
     let mut stack: Vec<&str> = children.get("").cloned().unwrap_or_default();
@@ -1222,7 +1440,8 @@ fn view_json(record: &Record, wire: bool) -> Json {
         }
         let kids: &[&str] = children.get(id).map(Vec::as_slice).unwrap_or(&[]);
         if wire || id != "__content__" {
-            blocks.push(block_json(id, by_key[id], kids, wire));
+            let joined = joined_discussion(id, by_key[id], &participants);
+            blocks.push(block_json(id, joined.as_ref().unwrap_or(by_key[id]), kids, wire));
         }
         stack.extend(kids.iter().rev());
     }
@@ -1253,6 +1472,7 @@ fn view_json(record: &Record, wire: bool) -> Json {
     let fields: Map<String, Json> = record
         .fields
         .iter()
+        .filter(|entry| !entry.key.starts_with(PARTICIPANT_PREFIX))
         .filter_map(|entry| live_value(Some(entry)).map(|value| (entry.key.clone(), value.to_json())))
         .collect();
     json!({
@@ -1317,7 +1537,8 @@ fn is_chat(content: &Content) -> bool {
 /// Stamps a replayed ObjectJSON into a record: every entry's stamp is the
 /// time of the change that last wrote it and its author's device index
 /// (`device_of`; an unknown author is an error). Keys a change wrote that
-/// the state no longer holds become tombstones.
+/// the state no longer holds become tombstones. A discussion's participants
+/// become field entries ([`participants_split`]); the views join them back.
 pub fn from_object_state(
     state: &Json,
     writers: &Writers,
@@ -1424,7 +1645,7 @@ pub fn from_object_state(
         let Some(position) = position.remove(id) else {
             continue;
         };
-        let body = Body {
+        let mut body = Body {
             parent: parent[id].to_owned(),
             position,
             content: block.get("content").map(Content::from_json).unwrap_or_default(),
@@ -1434,6 +1655,20 @@ pub fn from_object_state(
         };
         let stamp = stamp_of(id, writers.blocks.get(id))?;
         let chat = is_chat(&body.content);
+        // A discussion's participants as their own entries, stamped as the block.
+        let split = participants_split(&body.content).filter(|(_, parts)| !parts.is_empty());
+        if let Some((stripped, parts)) = split {
+            body.content = stripped;
+            let prefix = participant_prefix(id);
+            for (index, who) in parts.iter().enumerate() {
+                record.fields.push(Entry {
+                    key: format!("{prefix}{who}"),
+                    stamp,
+                    gone: false,
+                    body: EntryBody::Value(Value::Int(index as i64)),
+                });
+            }
+        }
         let entry = Entry {
             key: id.to_owned(),
             stamp,

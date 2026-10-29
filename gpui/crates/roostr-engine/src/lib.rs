@@ -34,10 +34,13 @@
 mod authority;
 mod codec;
 mod contracts;
+pub mod deflate;
 mod error;
 mod mutation;
+pub mod pack;
 mod query;
 pub mod record;
+mod record_decode;
 mod replay;
 mod serving;
 mod session;

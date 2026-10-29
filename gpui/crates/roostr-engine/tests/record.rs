@@ -444,15 +444,21 @@ fn drop_repeated_refs(state: &mut serde_json::Value) -> bool {
     changed
 }
 
-/// For every replay fixture and conversion vector: view(convert(replay)) is
-/// today's replay state, and the Rust conversion is byte-identical to the
-/// engine's own.
+/// For every replay fixture and conversion vector (participants.json's
+/// included): view(convert(replay)) is today's replay state, and the Rust
+/// conversion is byte-identical to the engine's own.
 #[test]
 fn converted_view_equals_replay() {
     let engine = engine();
     let mut checked = 0;
-    for source in ["core/replay_fixtures.json", "core/testdata/record_vectors/conversion.json"] {
-        for fixture in odin_file(source).as_array().expect("array") {
+    let participants = vectors("participants")["conversion"].clone();
+    let sources = [
+        odin_file("core/replay_fixtures.json"),
+        odin_file("core/testdata/record_vectors/conversion.json"),
+        participants,
+    ];
+    for source in &sources {
+        for fixture in source.as_array().expect("array") {
             let name = fixture["name"].as_str().unwrap_or("");
             let changes: Vec<Change> =
                 serde_json::from_value(fixture["changes"].clone()).expect("changes");
@@ -478,7 +484,7 @@ fn converted_view_equals_replay() {
             checked += 1;
         }
     }
-    assert!(checked >= 14, "{checked} fixtures checked");
+    assert!(checked >= 20, "{checked} fixtures checked");
 }
 
 #[test]
@@ -631,5 +637,30 @@ fn vectors_conversion() {
                 expect_record(&record, &case["expected"], name);
             }
         }
+    }
+}
+
+/// participants.json: conversion splits a discussion's participants into
+/// entries; the view joins them back and hides them.
+#[test]
+fn vectors_participants() {
+    let engine = engine();
+    let case = vectors("participants");
+    for case in case["conversion"].as_array().expect("conversion") {
+        let name = case["name"].as_str().unwrap_or("");
+        let changes: Vec<Change> =
+            serde_json::from_value(case["changes"].clone()).expect("changes");
+        let devices: BTreeMap<String, u32> =
+            serde_json::from_value(case["devices"].clone()).expect("devices");
+        let record = block_on(engine.record_from_changes(&changes, None, |author| {
+            devices.get(author).copied()
+        }))
+        .unwrap_or_else(|error| panic!("{name}: {error}"));
+        expect_record(&record, &case["expected"], name);
+    }
+    for case in case["view"].as_array().expect("view") {
+        let name = case["name"].as_str().unwrap_or("");
+        let record = Record::from_json(&case["record"]).expect("record");
+        assert_eq!(record_state(&record), case["expected"], "{name}");
     }
 }

@@ -6528,9 +6528,12 @@ dependencies = [
 name = "roostr-engine"
 version = "0.1.0"
 dependencies = [
+ "aes-gcm",
  "base64 0.22.1",
  "futures",
+ "hmac",
  "js-sys",
+ "miniz_oxide 0.8.9",
  "serde",
  "serde_json",
  "sha2 0.10.9",
