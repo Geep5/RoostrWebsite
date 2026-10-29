@@ -3375,6 +3375,10 @@ impl RecordHost for Host {
         let space = st.states.get(object_id).map(|s| space_of_state(s))?;
         st.shared_spaces.contains(&space).then_some(space)
     }
+
+    fn on_status(&self, status: sync::SyncStatus) {
+        SyncHost::on_status(self, status);
+    }
 }
 
 impl Backend for ReplicaBackend {

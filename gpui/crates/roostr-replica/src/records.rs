@@ -143,6 +143,14 @@ impl std::fmt::Debug for StreamKey {
 }
 
 impl StreamKey {
+    /// The stream in the loading line's words.
+    pub fn label(&self) -> String {
+        match &self.space_id {
+            None => "your data".into(),
+            Some(id) => format!("shared space {}", id.get(..8).unwrap_or(id)),
+        }
+    }
+
     pub fn personal(keys: &Keys) -> Result<Self> {
         let conversation = nip44::conversation_key(keys, keys.pubkey()).map_err(|e| anyhow!("{e}"))?;
         let prefix = keys.secret_bytes().to_vec();
@@ -741,6 +749,8 @@ pub trait RecordHost: MaybeSend + MaybeSync {
     fn on_records(&self, ids: Vec<String>);
     /// The shared space a write to `object_id` goes to (`None`: personal).
     fn space_of(&self, object_id: &str) -> Option<String>;
+    /// Where loading stands, for the "Loading your vault…" line.
+    fn on_status(&self, _status: crate::sync::SyncStatus) {}
 }
 
 /// Record-mode relay sync of one identity. Cheap to clone.
@@ -829,10 +839,26 @@ impl RecordSync {
         }
         self.inner.stopped.store(false, Ordering::Relaxed);
         self.inner.started.store(true, Ordering::Relaxed);
-        for stream in self.streams() {
-            self.inner.sync_stream(&stream).await?;
+        let streams = self.streams();
+        let total = streams.len();
+        for (i, stream) in streams.iter().enumerate() {
+            let step = if total > 1 { format!(" ({} of {total})", i + 1) } else { String::new() };
+            self.inner.status(false, format!("checking {}{step}", stream.label()));
+            if let Err(error) = self.inner.sync_stream(stream).await {
+                self.inner.host.on_status(crate::sync::SyncStatus {
+                    phase: crate::sync::Phase::Error,
+                    detail: Some(format!("{}: {error:#}", stream.label())),
+                    ..Default::default()
+                });
+                return Err(error);
+            }
         }
         self.inner.publish_journal().await?;
+        self.inner.host.on_status(crate::sync::SyncStatus {
+            phase: crate::sync::Phase::Live,
+            bootstrapped: true,
+            ..Default::default()
+        });
         self.inner.clone().subscribe();
         Ok(())
     }
@@ -927,6 +953,16 @@ impl Heads {
 }
 
 impl SyncInner {
+    /// Loading in progress: `detail` on the "Loading your vault…" line.
+    fn status(&self, bootstrapped: bool, detail: String) {
+        self.host.on_status(crate::sync::SyncStatus {
+            phase: crate::sync::Phase::Backfill,
+            detail: Some(detail),
+            bootstrapped,
+            ..Default::default()
+        });
+    }
+
     fn streams(&self) -> Vec<StreamKey> {
         std::iter::once(self.personal.clone())
             .chain(self.spaces.lock().iter().cloned())
@@ -1038,6 +1074,10 @@ impl SyncInner {
             }
             let count = events.len() as u64;
             let last = events.iter().map(|(_, seq)| *seq).max().unwrap_or(after);
+            if count > 0 {
+                let behind = heads.map_or(String::new(), |h| format!(", {} to go", h.head.saturating_sub(last)));
+                self.status(false, format!("catching up {}: {count} edits{behind}", stream.label()));
+            }
             self.apply(stream, events, last).await?;
             after = last;
             let done = heads.is_some_and(|h| after >= h.head) || count < PAGE;
@@ -1052,9 +1092,19 @@ impl SyncInner {
 
     /// Downloads, checks and merges the announced pack.
     async fn load_pack(&self, stream: &StreamKey, announcement: &PackAnnouncement) -> Result<()> {
+        self.status(
+            false,
+            format!(
+                "downloading {} ({:.1} MB, {} objects)",
+                stream.label(),
+                announcement.size as f64 / 1_048_576.,
+                announcement.records
+            ),
+        );
         let records = fetch_pack(&self.server().await, stream, announcement)
             .await
             .with_context(|| format!("pack of {stream:?} at cursor {}", announcement.cursor))?;
+        self.status(false, format!("unpacking {} objects of {}", records.len(), stream.label()));
         let touched = self.records.merge_pack(stream, records, announcement.cursor).await?;
         if !touched.is_empty() {
             self.host.on_records(touched);

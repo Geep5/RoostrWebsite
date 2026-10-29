@@ -103,8 +103,9 @@ pub trait Keyring: SpaceKeyring + MaybeSend + MaybeSync {}
 impl<T: SpaceKeyring + MaybeSend + MaybeSync + ?Sized> Keyring for T {}
 
 /// What the status dot shows.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum Phase {
+    #[default]
     Idle,
     Backfill,
     Live,
@@ -112,7 +113,7 @@ pub enum Phase {
 }
 
 /// One sync status report (backend.ts `SyncStatus`).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SyncStatus {
     pub phase: Phase,
     /// Changes imported this session.
