@@ -98,6 +98,18 @@ struct Metrics {
     short: bool,
     /// `@media (max-width: 400px)`.
     tiny: bool,
+    /// Too short for the one-screen layout (an embed, a small window): no
+    /// rooster, the parts that don't fit are left out, and whatever still
+    /// doesn't fit scrolls instead of overlapping.
+    compact: bool,
+    /// The three feature cards fit.
+    features: bool,
+    /// The footer fits.
+    footer: bool,
+    /// The lede paragraph fits.
+    lede: bool,
+    /// The "Open source · …" line beside the button fits.
+    tagline: bool,
 }
 
 impl Metrics {
@@ -222,26 +234,29 @@ impl LandingPage {
                                     .run(".", Some(red())),
                             ),
                     )
-                    .child(
-                        div()
-                            .id("alpha")
-                            .relative()
-                            .top(px(1.))
-                            .rounded_full()
-                            .bg(red())
-                            .pt(px(3.))
-                            .pb(px(2.))
-                            .px(px(9.))
-                            .child(
-                                spaced(fonts::INTER, 11., 1.5)
-                                    .weight(FontWeight(750.))
-                                    .line_height(px(11. * 1.4))
-                                    .run("ALPHA", Some(paper())),
-                            )
-                            .tooltip(ui::tooltip(
-                                "Roostr is in alpha: expect rough edges and changes",
-                            )),
-                    ),
+                    // A narrow embed has no room for the pill beside Guide.
+                    .when(!m.tiny, |row| {
+                        row.child(
+                            div()
+                                .id("alpha")
+                                .relative()
+                                .top(px(1.))
+                                .rounded_full()
+                                .bg(red())
+                                .pt(px(3.))
+                                .pb(px(2.))
+                                .px(px(9.))
+                                .child(
+                                    spaced(fonts::INTER, 11., 1.5)
+                                        .weight(FontWeight(750.))
+                                        .line_height(px(11. * 1.4))
+                                        .run("ALPHA", Some(paper())),
+                                )
+                                .tooltip(ui::tooltip(
+                                    "Roostr is in alpha: expect rough edges and changes",
+                                )),
+                        )
+                    }),
             )
             .child(
                 div()
@@ -370,19 +385,21 @@ impl LandingPage {
                 .mb(px(clamp(10., m.vh(2.4), 24.)))
                 .children(lines),
         )
-        .child(
-            div()
-                .max_w(ch * 46.)
-                .mb(px(clamp(12., m.vh(3.), 30.)))
-                .text_size(px(lede_size))
-                .line_height(relative(lede_lh))
-                .font_family(lede_family)
-                .font_weight(FontWeight(450.))
-                .child(
-                    "Not for making projects — for keeping them on track and growing them. \
-                     Agents and people work side by side on the same linked objects, in the open.",
-                ),
-        )
+        .when(m.lede, |copy| {
+            copy.child(
+                div()
+                    .max_w(ch * 46.)
+                    .mb(px(clamp(12., m.vh(3.), 30.)))
+                    .text_size(px(lede_size))
+                    .line_height(relative(lede_lh))
+                    .font_family(lede_family)
+                    .font_weight(FontWeight(450.))
+                    .child(
+                        "Not for making projects — for keeping them on track and growing them. \
+                         Agents and people work side by side on the same linked objects, in the open.",
+                    ),
+            )
+        })
         .child(
             div()
                 .flex()
@@ -401,13 +418,15 @@ impl LandingPage {
                     |cx| nav::navigate(Route::Home, cx),
                     cx,
                 ))
-                .child(
-                    div()
-                        .text_size(px(if m.narrow { 12. } else { 14. }))
-                        .font_weight(FontWeight(550.))
-                        .opacity(0.75)
-                        .child("Open source · no account · runs on your own machines"),
-                ),
+                .when(m.tagline, |row| {
+                    row.child(
+                        div()
+                            .text_size(px(if m.narrow { 12. } else { 14. }))
+                            .font_weight(FontWeight(550.))
+                            .opacity(0.75)
+                            .child("Open source · no account · runs on your own machines"),
+                    )
+                }),
         )
     }
 
@@ -455,6 +474,15 @@ impl LandingPage {
     ) -> impl IntoElement {
         let pad_top = clamp(6., m.vh(1.6), 24.);
         let pad_bottom = clamp(22., m.vh(4.5), 48.);
+        if m.compact {
+            // Natural height, top to bottom: the copy alone.
+            return div()
+                .flex_none()
+                .pt(px(pad_top))
+                .pb(px(pad_bottom))
+                .child(self.hero_copy(m, window, cx))
+                .into_any_element();
+        }
         let hero = div().flex_1().min_h_0().pt(px(pad_top)).pb(px(pad_bottom));
         if m.narrow {
             let gap = clamp(6., m.vh(1.5), 16.);
@@ -616,20 +644,39 @@ impl Render for LandingPage {
             .get()
             .unwrap_or_else(|| window.viewport_size());
         let (w, h) = (f32::from(size.width), f32::from(size.height));
+        let narrow = w <= 880.;
+        let compact = h <= if narrow { 560. } else { 640. };
         let m = Metrics {
             w,
             h,
-            narrow: w <= 880.,
-            short: w <= 880. && h <= 700.,
+            narrow,
+            short: narrow && h <= 700.,
             tiny: w <= 400.,
+            compact,
+            features: !compact || h >= 480.,
+            footer: !compact,
+            lede: h >= 360.,
+            tagline: h >= 300.,
         };
         let pad_x = if m.narrow { 20. } else { 32. };
         let inner_width = w.min(1200.) - 2. * pad_x;
         let viewport = self.viewport.clone();
+        let column = div()
+            .flex()
+            .flex_col()
+            .w_full()
+            .max_w(px(1200.))
+            .px(px(pad_x))
+            .map(|c| if m.compact { c.min_h_full() } else { c.h_full() })
+            .child(self.header(&m, cx))
+            .child(self.hero(&m, inner_width, window, cx))
+            .when(m.features, |c| c.child(self.features(&m, inner_width)))
+            .when(m.footer, |c| c.child(self.footer(&m)));
         div()
+            .id("landing")
             .relative()
             .size_full()
-            .overflow_hidden()
+            .map(|d| if m.compact { d.overflow_y_scroll() } else { d.overflow_hidden() })
             .bg(cream())
             .text_color(ink())
             .font_family(fonts::INTER)
@@ -649,19 +696,12 @@ impl Render for LandingPage {
                 .size_full(),
             )
             .child(
-                div().flex().justify_center().size_full().child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .h_full()
-                        .w_full()
-                        .max_w(px(1200.))
-                        .px(px(pad_x))
-                        .child(self.header(&m, cx))
-                        .child(self.hero(&m, inner_width, window, cx))
-                        .child(self.features(&m, inner_width))
-                        .child(self.footer(&m)),
-                ),
+                div()
+                    .flex()
+                    .justify_center()
+                    .w_full()
+                    .map(|d| if m.compact { d.min_h_full() } else { d.h_full() })
+                    .child(column),
             )
     }
 }
