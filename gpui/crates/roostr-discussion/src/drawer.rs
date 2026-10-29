@@ -420,9 +420,10 @@ impl Render for ConversationDrawer {
         let tab = self.tab();
         self.ensure_view(tab, window, cx);
         self.drop_view(tab.other());
-        // The Chat / Properties switch: the kit's segmented tab bar.
+        // The Properties / Chat switch: the kit's segmented tab bar, in the
+        // desktop columns' order.
         let shown: Vec<PaneTab> = if self.chat {
-            vec![PaneTab::Chat, PaneTab::Properties]
+            vec![PaneTab::Properties, PaneTab::Chat]
         } else {
             vec![PaneTab::Properties]
         };
