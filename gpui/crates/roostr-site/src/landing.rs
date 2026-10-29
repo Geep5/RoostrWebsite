@@ -14,7 +14,6 @@ use roostr_core::theme::fonts;
 use roostr_core::ui::{self, SpacedText};
 
 use crate::assets::{GITHUB_MARK, SiteImage};
-use crate::text::Rich;
 
 /// A line in `family` at `size` with CSS `letter-spacing: <spacing>px`.
 fn spaced(family: &'static str, size: f32, spacing: f32) -> SpacedText {
@@ -43,11 +42,6 @@ fn paper() -> Hsla {
 fn clamp(min: f32, value: f32, max: f32) -> f32 {
     value.max(min).min(max)
 }
-
-/// Inter's vertical metrics (units/em 2048: ascender 1984, descender 494),
-/// for the line-box arithmetic CSS does around the inline-block eyebrow.
-const INTER_ASCENT: f32 = 1984. / 2048.;
-const INTER_CONTENT: f32 = (1984. + 494.) / 2048.;
 
 /// The CSS `ease` timing function, `cubic-bezier(0.25, 0.1, 0.25, 1)`.
 fn ease(t: f32) -> f32 {
@@ -322,12 +316,12 @@ impl LandingPage {
             }
         };
         let lines = if m.narrow {
-            vec![h1_line("YOUR THINGS", false), h1_line("SPEAK", true)]
+            vec![h1_line("YOUR TEAM,", false), h1_line("HUMAN AND NOT", true)]
         } else {
             vec![
-                h1_line("YOUR", false),
-                h1_line("THINGS", false),
-                h1_line("SPEAK", true),
+                h1_line("YOUR TEAM,", false),
+                h1_line("HUMAN", false),
+                h1_line("AND NOT", true),
             ]
         };
 
@@ -347,32 +341,8 @@ impl LandingPage {
             .ch_advance(window.text_system().resolve_font(&lede_font), px(lede_size))
             .unwrap_or(px(lede_size * 0.6));
 
-        let mut copy = div().flex().flex_col();
-        if !m.narrow {
-            // `.eyebrow` is an inline-block on a line whose strut is the
-            // page's 17px/1.55 text; its margin-bottom hangs below the baseline.
-            let margin = clamp(8., m.vh(2.), 20.);
-            let strut_lh = 17. * 1.55;
-            let strut_above = (strut_lh - 17. * INTER_CONTENT) / 2. + 17. * INTER_ASCENT;
-            let eyebrow_lh = 13. * 1.55;
-            let eyebrow_above = (eyebrow_lh - 13. * INTER_CONTENT) / 2. + 13. * INTER_ASCENT;
-            let height =
-                strut_above + (strut_lh - strut_above).max(eyebrow_lh - eyebrow_above + margin);
-            copy = copy.child(
-                div().relative().h(px(height)).child(
-                    div()
-                        .absolute()
-                        .left_0()
-                        .top(px(strut_above - eyebrow_above))
-                        .child(
-                            spaced(fonts::INTER, 13., 2.5)
-                                .weight(FontWeight(750.))
-                                .line_height(px(eyebrow_lh))
-                                .run("PEOPLE + AGENTS, ONE WORKSPACE", Some(red())),
-                        ),
-                ),
-            );
-        }
+        // The headline says "people + agents" now: no eyebrow above it.
+        let copy = div().flex().flex_col();
         let (btn_pad, btn_size) = if m.narrow {
             ((9., 18.), 14.)
         } else {
@@ -395,8 +365,9 @@ impl LandingPage {
                     .font_family(lede_family)
                     .font_weight(FontWeight(450.))
                     .child(
-                        "Not for making projects — for keeping them on track and growing them. \
-                         Agents and people work side by side on the same linked objects, in the open.",
+                        "Run your company, your household or a side project with agents that work like teammates. \
+                         Each has a job, a schedule and its own logins, and works on your real records, \
+                         like emails, people and tasks, right where you can see and fix what it did.",
                     ),
             )
         })
@@ -421,10 +392,11 @@ impl LandingPage {
                 .when(m.tagline, |row| {
                     row.child(
                         div()
+                            .max_w_full()
                             .text_size(px(if m.narrow { 12. } else { 14. }))
                             .font_weight(FontWeight(550.))
                             .opacity(0.75)
-                            .child("Open source · no account · runs on your own machines"),
+                            .child("Open source · end-to-end encrypted · agents run on your own computers"),
                     )
                 }),
         )
@@ -483,25 +455,31 @@ impl LandingPage {
                 .child(self.hero_copy(m, window, cx))
                 .into_any_element();
         }
-        let hero = div().flex_1().min_h_0().pt(px(pad_top)).pb(px(pad_bottom));
         if m.narrow {
+            // A phone column scrolls: the rooster gets a fixed share of the
+            // screen above the copy instead of whatever height is left, which
+            // a longer lede could take to nothing and overlap the header.
             let gap = clamp(6., m.vh(1.5), 16.);
-            return hero
+            let art_h = clamp(140., m.vh(24.), 280.);
+            return div()
+                .flex_none()
+                .pt(px(pad_top))
+                .pb(px(pad_bottom))
                 .flex()
                 .flex_col()
                 .gap(px(gap))
-                .when(m.short, |el| el.justify_center())
                 .when(!m.short, |el| {
                     el.child(
                         div()
-                            .flex_1()
-                            .min_h_0()
+                            .flex_none()
+                            .h(px(art_h))
                             .child(self.hero_art(inner_width, cx)),
                     )
                 })
                 .child(self.hero_copy(m, window, cx))
                 .into_any_element();
         }
+        let hero = div().flex_1().min_h_0().pt(px(pad_top)).pb(px(pad_bottom));
         // `grid-template-columns: minmax(540px, 1.1fr) 1fr; gap: 40px`.
         let free = (inner_width - 40.).max(0.);
         let copy_width = (free * 1.1 / 2.1).max(540.);
@@ -584,21 +562,6 @@ impl LandingPage {
                 }
             }
         };
-        let mut third = Rich::default();
-        third.pill(
-            "@mention",
-            HighlightStyle {
-                color: Some(rgb(0x2f389e).into()),
-                background_color: Some(rgba(0x5865f24d).into()),
-                font_weight: Some(FontWeight(500.)),
-                ..Default::default()
-            },
-            1,
-        );
-        third.push(
-            " an agent in any chat and it answers there, or tags another agent in. Make a task repeat and its agent does it on schedule, following the page.",
-            HighlightStyle::default(),
-        );
         div()
             .flex()
             .when(m.narrow, |el| el.flex_col())
@@ -607,18 +570,24 @@ impl LandingPage {
             .child(feature(
                 0,
                 "01",
-                "Objects, not files",
-                "Everything has properties and links. See any set as a table, board, gallery, calendar or graph. Files go peer to peer over WebRTC, coordinated over Nostr."
+                "One space per world",
+                "A space holds one part of your life, with its own people, types, logins and agents. Share it with the people in it; everything is encrypted end to end."
                     .into_any_element(),
             ))
             .child(feature(
                 1,
                 "02",
-                "Agents are objects",
-                "Set one up like anything else: a prompt, a model, skills, logins. Its logins are objects too, so it signs in on whichever of your computers runs it."
+                "Agents with jobs",
+                "Give an agent a role, a schedule and the logins it needs. It triages the inbox, updates the site, chases leads, and every change it makes is an object you can open."
                     .into_any_element(),
             ))
-            .child(feature(2, "03", "One team", third.into_element("mention")))
+            .child(feature(
+                2,
+                "03",
+                "Everything is an object",
+                "Emails, texts, people, files and bookmarks come in as linked objects. Any set becomes a table, board or calendar, and agents and people work on the same ones."
+                    .into_any_element(),
+            ))
     }
 
     fn footer(&self, m: &Metrics) -> impl IntoElement {
@@ -646,6 +615,8 @@ impl Render for LandingPage {
         let (w, h) = (f32::from(size.width), f32::from(size.height));
         let narrow = w <= 880.;
         let compact = h <= if narrow { 560. } else { 640. };
+        // Natural height and a scrollbar: short windows and every phone column.
+        let scroll = compact || narrow;
         let m = Metrics {
             w,
             h,
@@ -667,7 +638,7 @@ impl Render for LandingPage {
             .w_full()
             .max_w(px(1200.))
             .px(px(pad_x))
-            .map(|c| if m.compact { c.min_h_full() } else { c.h_full() })
+            .map(|c| if scroll { c.min_h_full() } else { c.h_full() })
             .child(self.header(&m, cx))
             .child(self.hero(&m, inner_width, window, cx))
             .when(m.features, |c| c.child(self.features(&m, inner_width)))
@@ -676,7 +647,7 @@ impl Render for LandingPage {
             .id("landing")
             .relative()
             .size_full()
-            .map(|d| if m.compact { d.overflow_y_scroll() } else { d.overflow_hidden() })
+            .map(|d| if scroll { d.overflow_y_scroll() } else { d.overflow_hidden() })
             .bg(cream())
             .text_color(ink())
             .font_family(fonts::INTER)
@@ -700,7 +671,7 @@ impl Render for LandingPage {
                     .flex()
                     .justify_center()
                     .w_full()
-                    .map(|d| if m.compact { d.min_h_full() } else { d.h_full() })
+                    .map(|d| if scroll { d.min_h_full() } else { d.h_full() })
                     .child(column),
             )
     }

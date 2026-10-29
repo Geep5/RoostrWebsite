@@ -128,7 +128,7 @@ impl Route {
             }
             Self::Graph { .. } => "Graph — Roostr".into(),
             Self::Home | Self::Chat(_) => "Roostr".into(),
-            Self::Site(SitePage::Landing) => "Roostr — your things speak".into(),
+            Self::Site(SitePage::Landing) => "Roostr — your team, human and not".into(),
             Self::Site(SitePage::Guide) => "Guide — Roostr".into(),
             Self::Site(SitePage::Privacy) => "Privacy — Roostr".into(),
             Self::Site(SitePage::Join(_)) => "Join a space — Roostr".into(),
@@ -514,7 +514,7 @@ mod tests {
     #[test]
     fn titles_match_the_svelte_pages() {
         let site = |page| Route::Site(page).title(None);
-        assert_eq!(site(SitePage::Landing), "Roostr — your things speak");
+        assert_eq!(site(SitePage::Landing), "Roostr — your team, human and not");
         assert_eq!(site(SitePage::Guide), "Guide — Roostr");
         assert_eq!(site(SitePage::Privacy), "Privacy — Roostr");
         assert_eq!(site(SitePage::Join("r2.x".into())), "Join a space — Roostr");

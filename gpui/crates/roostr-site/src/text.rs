@@ -143,16 +143,6 @@ impl Rich {
         self
     }
 
-    /// Append a pill: `text` on `background`, padded by thin spaces.
-    pub(crate) fn pill(&mut self, text: &str, highlight: HighlightStyle, pad: usize) -> &mut Self {
-        let padding = THIN.repeat(pad);
-        let start = self.text.len();
-        self.text.push_str(&padding);
-        self.text.push_str(text);
-        self.text.push_str(&padding);
-        self.highlights.push((start..self.text.len(), highlight));
-        self
-    }
 
     /// `<code>`: system mono on the code background, `padding: 1px 6px`.
     /// The background goes on three runs (pad, code, pad): a font-family
