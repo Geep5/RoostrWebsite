@@ -2290,10 +2290,25 @@ impl Inner {
     async fn push_query(&self, body: Option<&Json>) -> Result<roostr_engine::QueryResult> {
         let generation = self.engine.generation();
         let cold = self.state.lock().query_generation != Some(generation);
-        if cold && let Err(error) = self.load_corpus().await {
-            // A refused corpus must not wedge querying: push every state as
-            // JSON with a reset, slower but independent.
-            log::warn!("[replica] corpus load fell back to JSON: {error:#}");
+        // Record mode holds no change histories: the corpus would load the
+        // legacy store (empty on a new device, stale on an old one) and drop
+        // every record view from the pending upserts, so queries - search,
+        // views, "recent" - came back empty. The record views are the states.
+        let records = self.records.get().is_some();
+        let corpus_failed = if cold && !records {
+            match self.load_corpus().await {
+                Ok(()) => false,
+                Err(error) => {
+                    log::warn!("[replica] corpus load fell back to JSON: {error:#}");
+                    true
+                }
+            }
+        } else {
+            false
+        };
+        if cold && (records || corpus_failed) {
+            // Every state as JSON with a reset (a refused corpus must not
+            // wedge querying either).
             let states = self.states_snapshot();
             let upserts: Vec<Json> = states.iter().map(|s| (**s).clone()).collect();
             let result = self

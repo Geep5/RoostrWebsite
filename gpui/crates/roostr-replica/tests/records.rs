@@ -347,6 +347,20 @@ fn a_new_device_loads_the_pack_and_catches_up_to_the_builders_root() {
         let edited = b.object(&w.edited).await.unwrap();
         assert_eq!(edited.name(), "Renamed after the pack");
         assert!(b.object(&w.late).await.is_ok());
+        // Queries see them too: search and views run on the engine's cache,
+        // which on a new device used to be loaded from the (empty) legacy
+        // store, dropping every record - "search finds nothing".
+        let found = b
+            .query(&json!({ "textQuery": "renamed after", "limit": 10 }))
+            .await
+            .unwrap();
+        assert_eq!(
+            found.records.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
+            [w.edited.as_str()],
+            "search finds the renamed page"
+        );
+        let all = b.query(&json!({ "limit": 100 })).await.unwrap();
+        assert!(all.records.iter().any(|r| r.id == w.late), "the page made after the pack is listed");
         b.stop();
     });
 }
