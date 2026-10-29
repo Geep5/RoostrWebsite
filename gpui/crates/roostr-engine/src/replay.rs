@@ -1,12 +1,13 @@
 //! `replay`, DAG heads, and state sync (docs/state-sync.md "Core API"):
 //! `replay.ts` and Engine.swift's state-sync calls.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::codec::{base64_bytes, base64_option, to_base64};
+use crate::record::{Record, ReplayWriters, from_object_state};
 use crate::{Change, Engine, EngineError};
 
 /// Everything held for one object that its state is built from
@@ -360,4 +361,75 @@ impl Engine {
         self.heads_of(&changes, Some(&input.bases[current.index]))
             .await
     }
+
+    /// One replay of the object's DAG that also reports, per entry key, the
+    /// change that last wrote it (`record` `writers`): the input of
+    /// [`crate::record::from_object_state`]. The state is lossless (wire
+    /// blocks, `__content__` kept).
+    pub async fn record_writers(
+        &self,
+        changes: &[Change],
+        checkpoint: Option<&[u8]>,
+    ) -> Result<ReplayWriters, EngineError> {
+        let payload = RecordRequest {
+            action: "writers",
+            changes,
+            checkpoint: checkpoint.map(to_base64),
+            devices: None,
+        };
+        self.call_as("record", &payload, None).await
+    }
+
+    /// Converts an object's DAG into a stamped [`Record`]: one replay through
+    /// [`Engine::record_writers`], stamped here with `device_of(author)`.
+    pub async fn record_from_changes(
+        &self,
+        changes: &[Change],
+        checkpoint: Option<&[u8]>,
+        device_of: impl Fn(&str) -> Option<u32>,
+    ) -> Result<Record, EngineError> {
+        let replayed = self.record_writers(changes, checkpoint).await?;
+        let mut writers = replayed.writers;
+        writers.seed = replayed.seed;
+        from_object_state(&replayed.state, &writers, device_of)
+            .map_err(|error| EngineError::Domain(error.to_string()))
+    }
+
+    /// The engine's own conversion (`record` `from_changes`), for parity
+    /// checks against [`Engine::record_from_changes`].
+    pub async fn engine_record_from_changes(
+        &self,
+        changes: &[Change],
+        checkpoint: Option<&[u8]>,
+        devices: &BTreeMap<String, u32>,
+    ) -> Result<EngineRecord, EngineError> {
+        let payload = RecordRequest {
+            action: "from_changes",
+            changes,
+            checkpoint: checkpoint.map(to_base64),
+            devices: Some(devices),
+        };
+        self.call_as("record", &payload, None).await
+    }
+}
+
+#[derive(Serialize)]
+struct RecordRequest<'a> {
+    action: &'a str,
+    changes: &'a [Change],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    checkpoint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    devices: Option<&'a BTreeMap<String, u32>>,
+}
+
+/// `record` `from_changes`: the engine's converted record.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct EngineRecord {
+    /// Record JSON ([`Record::from_json`]).
+    pub record: Value,
+    /// Hex canonical protobuf.
+    pub canonical: String,
+    /// Hex sha256 of `canonical`.
+    pub hash: String,
 }

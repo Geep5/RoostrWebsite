@@ -37,6 +37,7 @@ mod contracts;
 mod error;
 mod mutation;
 mod query;
+pub mod record;
 mod replay;
 mod serving;
 mod session;
@@ -58,7 +59,7 @@ pub use mutation::{Applied, MutationPlan, MutationRequest, MutationResponse};
 pub use query::{CorpusLoad, QueryResult, QueryUpdate};
 pub use replay::{
     BaseBlobOpened, BaseCurrent, BaseDecoded, BaseSummary, Classification, ClassificationBase,
-    CompactPlan, Rebased, RebasedChange, StateInputs,
+    CompactPlan, EngineRecord, Rebased, RebasedChange, StateInputs,
 };
 pub use serving::{Serving, ServingInputs};
 pub use session::{
