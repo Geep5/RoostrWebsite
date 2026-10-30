@@ -950,8 +950,7 @@ impl PropertiesPane {
                 let id = object.id.clone();
                 self.capability_status = Some(cx.new(|cx| CapabilityStatus::new(id, cx)));
             }
-            // Any object's Project folder: the folder work on it uses.
-            if key == "repo_path" {
+            if key == "repo_path" && object.type_key == "agent" {
                 let id = object.id.clone();
                 let target = object.id.clone();
                 self.project_folder = Some(cx.new(|cx| {
@@ -2152,6 +2151,7 @@ impl PropertiesPane {
                 }),
             );
             if key == "repo_path"
+                && object.type_key == "agent"
                 && let Some(f) = &self.project_folder
             {
                 pop = pop.child(f.clone());

@@ -1,8 +1,7 @@
-//! Under an object's Project folder (`ProjectFolder.svelte`): Choose… opens
-//! the macOS folder window through this computer's harness - offered only
-//! where the folder must exist: an agent's Served by, or the computer of an
-//! agent on the object (any computer when none is listed) - and shows the
-//! folder as that computer sees it.
+//! Under an agent's Project folder (`ProjectFolder.svelte`): Choose… opens
+//! the macOS folder window through this computer's harness (offered only
+//! when this computer is the agent's Served by, since the folder must exist
+//! there) and shows the folder as that computer sees it.
 
 use std::rc::Rc;
 
@@ -129,26 +128,12 @@ fn folder_note(text: &'static str) -> Label {
 
 impl Render for ProjectFolder {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let store = Store::global(cx).read(cx);
-        let Some(object) = store.object(&self.object_id) else {
+        let Some(object) = Store::global(cx).read(cx).object(&self.object_id) else {
             return div();
         };
         let path = field_str(&object.fields, "repo_path").trim().to_string();
-        let is_agent = object.type_key == "agent";
-        // The computers the folder must be on: an agent's own, or those of
-        // the agents on this object (its Agent property). None listed: any
-        // agent tagged here works on its own computer, so this one may pick.
-        let computers: Vec<String> = if is_agent {
-            vec![field_str(&object.fields, "served_by").to_string()]
-        } else {
-            roostr_core::types::guest_agents(&object.fields)
-                .iter()
-                .filter_map(|id| store.object(id))
-                .map(|agent| field_str(&agent.fields, "served_by").to_string())
-                .collect()
-        };
-        let local = !self.here.is_empty()
-            && (computers.is_empty() || computers.iter().any(|c| *c == self.here));
+        let served_by = field_str(&object.fields, "served_by").to_string();
+        let local = !self.here.is_empty() && self.here == served_by;
         if !local || path.is_empty() {
             if !self.checked.is_empty() || self.status.is_some() {
                 self.checked.clear();
@@ -184,12 +169,10 @@ impl Render for ProjectFolder {
                             }
                         })),
                     )
-                } else if is_agent && computers.iter().all(String::is_empty) {
-                    d.child(folder_note("Set Served by first - the folder must be on that computer."))
-                } else if is_agent {
+                } else if !served_by.is_empty() {
                     d.child(folder_note("The folder must be on this agent's computer; it checks it there, and a problem shows on its Error."))
                 } else {
-                    d.child(folder_note("The folder must be on the computer its agents run on - choose it there. An agent that can't find it says so in the chat."))
+                    d.child(folder_note("Set Served by first - the folder must be on that computer."))
                 }
             })
             .when_some(self.status.clone(), |d, (ok, text)| {
@@ -203,10 +186,6 @@ impl Render for ProjectFolder {
                     .text_size(px(12.)),
                 )
             })
-            .child(if is_agent {
-                folder_note("Optional, a fallback: the agent works here on its own page and where no folder is set. Better: set the folder on the task or Project the work is for.")
-            } else {
-                folder_note("Optional. Agents working here use it: they're told it's the project (and its git repo), read its AGENTS.md, and their shell starts there. Tasks linked to a Project with a folder use the Project's.")
-            })
+            .child(folder_note("Optional. When set, the agent works there: it's told the folder is its project (and its git repo), reads its AGENTS.md, and its shell starts there."))
     }
 }
