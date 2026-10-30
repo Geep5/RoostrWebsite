@@ -132,6 +132,8 @@ pub struct Workspace {
     pane_layout: PaneLayout,
     /// The middle column as its own cached view (see [`MainColumn`]).
     main_column: Option<Entity<MainColumn>>,
+    /// The space's nav column as its own cached view (see [`SidebarColumn`]).
+    sidebar_column: Option<Entity<SidebarColumn>>,
     /// The desk has rendered: columns animate only after its first frame
     /// (a CSS transition doesn't run on mount).
     desk_shown: bool,
@@ -274,6 +276,7 @@ impl Workspace {
             props_col: motion::ValueState::new(0.),
             pane_layout: PaneLayout::HIDDEN,
             main_column: None,
+            sidebar_column: None,
             desk_shown: false,
             pin_folds: HashMap::new(),
             legacy_folds,
@@ -1069,6 +1072,31 @@ impl Workspace {
             .into_any_element()
     }
 
+    /// The nav column (second from the left), cached like [`Self::main_column`]:
+    /// its scrolling notifies only it. Drawn inside the workspace, a wheel
+    /// step notified the workspace, which the main column observes - so every
+    /// frame of scrolling the nav laid the open page out again.
+    fn sidebar_column(&mut self, width: f32, cx: &mut Context<Self>) -> AnyElement {
+        let workspace = cx.entity();
+        let view = self
+            .sidebar_column
+            .get_or_insert_with(|| {
+                cx.new(|cx| SidebarColumn {
+                    _workspace_changed: cx.observe(&workspace, |_, _, cx| cx.notify()),
+                    workspace: workspace.downgrade(),
+                    width,
+                })
+            })
+            .clone();
+        view.update(cx, |column, cx| {
+            if column.width != width {
+                column.width = width;
+                cx.notify();
+            }
+        });
+        view.cached(StyleRefinement::default().h_full()).into_any_element()
+    }
+
     fn render_desk(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         // Build (or fetch) the page first: a new page publishes its pane while being built.
         let route = Navigator::global(cx).read(cx).route().clone();
@@ -1150,7 +1178,7 @@ impl Workspace {
                     .h_full()
                     .py(px(6.))
                     .when(!self.nav_hidden && side_col > 6., |d| {
-                        d.child(self.render_sidebar(side_col - 6., window, cx))
+                        d.child(self.sidebar_column(side_col - 6., cx))
                     }),
             )
             .child(self.main_column(wide, cx))
@@ -1411,6 +1439,22 @@ fn json_number(v: &serde_json::Value) -> Option<f32> {
 
 /// The workspace's middle column (header + scrolling page) as a view of its
 /// own, so it can be cached (see [`Workspace::main_column`]).
+/// The nav column: the workspace's sidebar, drawn in its own view.
+struct SidebarColumn {
+    workspace: WeakEntity<Workspace>,
+    width: f32,
+    _workspace_changed: Subscription,
+}
+
+impl Render for SidebarColumn {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let width = self.width;
+        self.workspace
+            .update(cx, |workspace, cx| workspace.render_sidebar(width, window, cx))
+            .unwrap_or_else(|_| div())
+    }
+}
+
 struct MainColumn {
     workspace: WeakEntity<Workspace>,
     /// Queries, sets and collections run wide (no 920px column).
