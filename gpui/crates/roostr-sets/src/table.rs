@@ -64,6 +64,11 @@ fn special_emoji(key: &str) -> Option<&'static str> {
 }
 /// Rows per page.
 const PAGE: usize = 100;
+/// A body row's height before one is drawn (13px text, 7px padding, border).
+const ROW_H_GUESS: f32 = 33.;
+/// Rows drawn beyond the window, as a share of its height on each side: a
+/// wheel step or a fling between frames lands on rows already drawn.
+const OVERSCAN: f32 = 1.;
 /// What every row draws whatever the columns - and its space (`channel`):
 /// a cell's editor offers and creates linked objects in the row's space.
 const ROW_FIELDS: &[&str] = &[
@@ -183,7 +188,11 @@ pub(crate) struct SetTable {
     pending_new: bool,
     new_input: Entity<InputState>,
     committing: bool,
+    /// Every row's bounds last frame: measured for the rows drawn, placed
+    /// by [`Self::row_h`] for those outside the drawn window.
     row_bounds: Rc<RefCell<Vec<Bounds<Pixels>>>>,
+    /// A body row's height as last drawn (rows are one line: near uniform).
+    row_h: Rc<std::cell::Cell<f32>>,
     table_bounds: BoundsCell,
     scroll_bounds: BoundsCell,
     pop_bounds: BoundsCell,
@@ -274,6 +283,7 @@ impl SetTable {
             new_input,
             committing: false,
             row_bounds: Rc::new(RefCell::new(Vec::new())),
+            row_h: Rc::new(std::cell::Cell::new(ROW_H_GUESS)),
             table_bounds: bounds_cell(),
             scroll_bounds: bounds_cell(),
             pop_bounds: bounds_cell(),
@@ -1827,15 +1837,46 @@ impl Render for SetTable {
                 .on_drop(cx.listener(|this, _: &ColumnDrag, _, cx| this.drop_column(cx))),
         );
 
-        // Body rows.
+        // Body rows: only those in (or near) the window are built - the
+        // page scrolls the table, and each frame of it built every loaded
+        // row (hundreds, each a row of cells). Spacers stand in for the rest.
+        let n_rows = self.rows.len();
+        let row_h = self.row_h.get().max(1.);
+        let (first, last) = {
+            let view_h = f32::from(window.viewport_size().height);
+            let over = view_h * OVERSCAN;
+            // Last frame's place of the first row (the header is 35px).
+            let top = f32::from(self.table_bounds.get().top()) + 35.;
+            let first = (((-over - top) / row_h).floor().max(0.) as usize).min(n_rows);
+            let last = ((((view_h + over - top) / row_h).ceil().max(0.)) as usize).clamp(first, n_rows);
+            (first, last)
+        };
         let mut rows_el = div().flex().flex_col();
         let row_bounds = self.row_bounds.clone();
-        let n_rows = self.rows.len();
+        let row_h_cell = self.row_h.clone();
         rows_el = rows_el.on_children_prepainted(move |bounds, _, _| {
-            *row_bounds.borrow_mut() = bounds.into_iter().take(n_rows).collect();
+            // Children: the top spacer, the drawn rows, the bottom spacer, then the rest.
+            let drawn = bounds.get(1..1 + (last - first)).unwrap_or(&[]);
+            if !drawn.is_empty() {
+                let h = drawn.iter().map(|b| f32::from(b.size.height)).sum::<f32>() / drawn.len() as f32;
+                row_h_cell.set(h);
+            }
+            let (Some(top), Some(bottom)) = (bounds.first(), bounds.get(1 + (last - first))) else {
+                return;
+            };
+            let at = |origin: Bounds<Pixels>, k: usize| Bounds {
+                origin: point(origin.left(), origin.top() + px(row_h * k as f32)),
+                size: size(origin.size.width, px(row_h)),
+            };
+            let mut all = Vec::with_capacity(n_rows);
+            all.extend((0..first).map(|i| at(*top, i)));
+            all.extend(drawn.iter().copied());
+            all.extend((last..n_rows).map(|i| at(*bottom, i - last)));
+            *row_bounds.borrow_mut() = all;
         });
+        rows_el = rows_el.child(div().flex_none().h(px(row_h * first as f32)));
         let space = current_space_id(cx);
-        for r in &self.rows {
+        for r in &self.rows[first..last] {
             let selected = self.selected.contains(&r.id);
             let id = r.id.clone();
             let id_aux = r.id.clone();
@@ -1925,6 +1966,7 @@ impl Render for SetTable {
             row = row.child(div().flex_none().w(px(plus_w)));
             rows_el = rows_el.child(row);
         }
+        rows_el = rows_el.child(div().flex_none().h(px(row_h * (n_rows - last) as f32)));
         if self.page_query.is_some() && self.rows.len() < self.total {
             // The next page loads as this comes within a screen of view.
             let entity = cx.entity().downgrade();
