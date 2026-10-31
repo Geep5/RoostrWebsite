@@ -942,9 +942,11 @@ impl QueryControls {
         self.rules_panel(panel)
     }
 
-    /// An object filter's values: the picked objects (removable) and a search
-    /// over the objects the property may hold (its type limit, this space),
-    /// a click adding one. The engine matches links by id.
+    /// An object filter's values, as Anytype's (OptionSelect in the filter's
+    /// values menu): a "Filter Objects..." field over a list of the objects
+    /// the property may hold (its type limit, this space) - "Selected" first,
+    /// then "All values" - each row the object's icon and name; a click adds
+    /// or removes it. The engine matches links by id.
     fn object_values(
         &mut self,
         i: usize,
@@ -954,15 +956,19 @@ impl QueryControls {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Div {
+        /// Rows in "All values" (Anytype's LIMIT).
+        const LIMIT: usize = 40;
         let search = self
             .object_search
             .entry(i)
             .or_insert_with(|| {
-                let input = cx.new(|cx| InputState::new(window, cx).placeholder("find an object"));
+                let input =
+                    cx.new(|cx| InputState::new(window, cx).placeholder("Filter Objects..."));
                 cx.observe(&input, |_, _, cx| cx.notify()).detach();
                 input
             })
             .clone();
+        let focused = search.focus_handle(cx).is_focused(window);
         let q = search.read(cx).value().trim().to_lowercase();
         let store = Store::global(cx).read(cx);
         let space = object_space_id(store, &view.fields);
@@ -975,29 +981,26 @@ impl QueryControls {
             .iter()
             .filter_map(|id| store.types.iter().find(|t| &t.id == id).map(|t| t.key.clone()))
             .collect();
-        let name_of = |id: &str| -> (String, String) {
+        // (id, name, the icon to show: its own, else its type's).
+        let icon_of = |icon: &str, type_key: &str| {
+            roostr_core::objects::object_icon(store, icon, type_key, &space)
+        };
+        let row_of = |id: &str| -> (String, String, String) {
             match store.summary(id) {
-                Some(s) => (s.name.clone(), s.icon.clone()),
+                Some(s) => (id.to_string(), s.name.clone(), icon_of(&s.icon, &s.type_key)),
                 None => store
                     .agent(id)
-                    .map(|a| (a.name.clone(), a.icon.clone()))
-                    .unwrap_or_else(|| (id.to_string(), String::new())),
+                    .map(|a| (id.to_string(), a.name.clone(), icon_of(&a.icon, "agent")))
+                    .unwrap_or_else(|| (id.to_string(), id.to_string(), String::new())),
             }
         };
-        let picked: Vec<(String, String, String)> = f
-            .value
-            .iter()
-            .map(|id| {
-                let (name, icon) = name_of(id);
-                (id.clone(), name, icon)
-            })
-            .collect();
-        let mut pool: Vec<(String, String, String)> = if allowed.iter().any(|k| k == "agent") {
+        let selected: Vec<(String, String, String)> = f.value.iter().map(|id| row_of(id)).collect();
+        let mut rest: Vec<(String, String, String)> = if allowed.iter().any(|k| k == "agent") {
             store
                 .agents
                 .iter()
                 .filter(|a| a.channel.is_empty() || a.channel == space)
-                .map(|a| (a.id.clone(), a.name.clone(), a.icon.clone()))
+                .map(|a| (a.id.clone(), a.name.clone(), icon_of(&a.icon, "agent")))
                 .collect()
         } else {
             store
@@ -1005,64 +1008,155 @@ impl QueryControls {
                 .iter()
                 .filter(|s| s.channel_id == space || s.channel_id.is_empty())
                 .filter(|s| allowed.is_empty() || allowed.contains(&s.type_key))
-                .map(|s| (s.id.clone(), s.name.clone(), s.icon.clone()))
+                .map(|s| (s.id.clone(), s.name.clone(), icon_of(&s.icon, &s.type_key)))
                 .collect()
         };
-        pool.retain(|(id, name, _)| {
+        rest.retain(|(id, name, _)| {
             !f.value.contains(id) && !name.is_empty() && (q.is_empty() || name.to_lowercase().contains(&q))
         });
-        pool.sort_by(|a, b| a.1.to_lowercase().cmp(&b.1.to_lowercase()));
-        pool.truncate(12);
-        let pill = |name: String, icon: String| {
-            Tag::custom(theme::border(), theme::fg(), theme::border())
-                .rounded_full()
-                .gap(px(4.))
-                .px(px(10.))
-                .py(px(2.))
+        rest.sort_by(|a, b| a.1.to_lowercase().cmp(&b.1.to_lowercase()));
+        rest.truncate(LIMIT);
+        let selected: Vec<_> = selected
+            .into_iter()
+            .filter(|(_, name, _)| q.is_empty() || name.to_lowercase().contains(&q))
+            .collect();
+
+        // `.sectionName`: 5px 16px, small, secondary, medium weight.
+        let section = |name: &'static str| {
+            div()
+                .px(px(16.))
+                .py(px(5.))
                 .text_size(px(12.))
-                .when(!icon.is_empty(), |t| t.child(icon))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(theme::muted())
                 .child(name)
         };
-        let mut out = div().flex().flex_wrap().items_center().gap(px(6.));
-        for (j, (id, name, icon)) in picked.into_iter().enumerate() {
-            let current = f.value.clone();
-            let selector = format!("fobj-{id}");
-            out = out.child(div().debug_selector(move || selector).child(
-                pill(name, icon).child(
-                    x_button(("fobj-x", i * 1000 + j), "Remove value").on_click(cx.listener(
-                        move |this, _, _, cx| {
-                            let next = current.iter().filter(|v| **v != id).cloned().collect();
+        let mut list = div()
+            .id(("fobj-list", i))
+            .max_h(px(280.))
+            .overflow_y_scroll()
+            .flex()
+            .flex_col();
+        let empty = selected.is_empty() && rest.is_empty();
+        for (on, rows) in [(true, selected), (false, rest)] {
+            if rows.is_empty() {
+                continue;
+            }
+            if !f.value.is_empty() {
+                list = list.child(section(if on { "Selected" } else { "All values" }));
+            }
+            for (id, name, icon) in rows {
+                let current = f.value.clone();
+                let search = search.clone();
+                let selector = format!("fobj-{}-{id}", if on { "on" } else { "add" });
+                let glyph = icon;
+                list = list.child(
+                    // `.item`: 32px, 6px 16px (18px left), the hover a rounded
+                    // fill inset 8px from the menu's edges.
+                    div()
+                        .id(SharedString::from(format!("fobj-{i}-{id}")))
+                        .debug_selector(move || selector)
+                        .px(px(8.))
+                        .h(px(32.))
+                        .flex()
+                        .items_center()
+                        .cursor_pointer()
+                        .group("fobj-row")
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            let next = if current.contains(&id) {
+                                current.iter().filter(|v| **v != id).cloned().collect()
+                            } else {
+                                let mut next = current.clone();
+                                next.push(id.clone());
+                                next
+                            };
+                            search.update(cx, |s, cx| s.set_value("", window, cx));
                             this.update_filter(i, None, None, Some(next), cx)
-                        },
-                    )),
-                ),
-            ));
+                        }))
+                        .child(
+                            div()
+                                .flex_1()
+                                .h_full()
+                                .flex()
+                                .items_center()
+                                .gap(px(4.))
+                                .pl(px(10.))
+                                .pr(px(8.))
+                                .rounded(px(6.))
+                                .group_hover("fobj-row", |s| s.bg(theme::hover()))
+                                .child(
+                                    div()
+                                        .flex_none()
+                                        .w(px(20.))
+                                        .flex()
+                                        .justify_center()
+                                        .text_size(px(14.))
+                                        .child(glyph),
+                                )
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .overflow_hidden()
+                                        .whitespace_nowrap()
+                                        .text_ellipsis()
+                                        .text_size(px(14.))
+                                        .child(name),
+                                )
+                                .when(on, |d| {
+                                    d.child(
+                                        Icon::new(IconName::Check)
+                                            .size(px(14.))
+                                            .text_color(theme::fg()),
+                                    )
+                                }),
+                        ),
+                );
+            }
         }
-        out = out.child(div().w(px(160.)).child(field_input(&search)));
-        let mut offers = div().w_full().flex().flex_wrap().gap(px(6.));
-        for (id, name, icon) in pool {
-            let current = f.value.clone();
-            let search = search.clone();
-            offers = offers.child(
+        if empty {
+            list = list.child(
                 div()
-                    .id(SharedString::from(format!("fobj-add-{i}-{id}")))
-                    .debug_selector({
-                        let selector = format!("fobj-add-{id}");
-                        move || selector
-                    })
-                    .child(pill(name, icon))
-                    .opacity(0.7)
-                    .cursor_pointer()
-                    .hover(|s| s.opacity(1.))
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        let mut next = current.clone();
-                        next.push(id.clone());
-                        search.update(cx, |s, cx| s.set_value("", window, cx));
-                        this.update_filter(i, None, None, Some(next), cx)
-                    })),
+                    .px(px(16.))
+                    .py(px(6.))
+                    .text_size(px(13.))
+                    .text_color(theme::muted())
+                    .child("Type to search options"),
             );
         }
-        div().flex().flex_col().gap(px(6.)).child(out).child(offers)
+        div()
+            .w(px(280.))
+            .flex()
+            .flex_col()
+            .gap(px(4.))
+            .py(px(4.))
+            .bg(theme::panel())
+            .border_1()
+            .border_color(theme::border())
+            .rounded(theme::radius::menu())
+            .child(
+                // Anytype's filter field: filled, borderless, radius 10, 8px 12px.
+                div()
+                    .mx(px(8.))
+                    .mt(px(4.))
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .px(px(12.))
+                    .py(px(8.))
+                    .rounded(theme::radius::menu())
+                    .bg(if focused { theme::hl_med() } else { theme::hl_light() })
+                    .child(Icon::new(IconName::Search).size(px(14.)).text_color(theme::muted()))
+                    .child(
+                        Input::new(&search)
+                            .appearance(false)
+                            .text_size(px(13.))
+                            .p_0()
+                            .h(px(17.))
+                            .w_full(),
+                    ),
+            )
+            .child(list)
     }
 
     /// The condition `<select>`: the current label, a dropdown of the key's catalog.

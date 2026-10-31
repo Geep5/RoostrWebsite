@@ -183,6 +183,6 @@ fn a_query_filters_by_the_agent_an_object_has(cx: &mut TestAppContext) {
         .map(|v| serde_json::to_string(&v).unwrap())
         .unwrap_or_default();
     assert!(saved.contains("\"in\"") && saved.contains("agent-1"), "the filter holds the agent's id: {saved}");
-    assert!(cx.debug_bounds("fobj-agent-1").is_some(), "the picked agent shows in the filter");
+    assert!(cx.debug_bounds("fobj-on-agent-1").is_some(), "the picked agent shows under Selected");
     assert!(cx.debug_bounds("fobj-add-agent-1").is_none(), "and is no longer offered");
 }
