@@ -213,6 +213,9 @@ pub struct Editor {
     /// edge autoscroll aims its wheel events here, like scrolling the
     /// nearest overflow ancestor directly.
     pub(crate) visible: Rc<std::cell::Cell<Bounds<Pixels>>>,
+    /// Each root block's height as last drawn: long pages build only the
+    /// blocks in and near the window, and these size the space for the rest.
+    pub(crate) block_heights: Rc<std::cell::RefCell<HashMap<String, f32>>>,
     /// Embed stills and titles by URL (`None` while the fetch runs).
     pub(crate) posters: std::cell::RefCell<HashMap<String, Option<crate::embed::Poster>>>,
     // Spellcheck and Tool code lint.
@@ -330,6 +333,7 @@ impl Editor {
             bot_strips: Rows::default(),
             bounds: Rc::new(std::cell::Cell::new(Bounds::default())),
             visible: Rc::new(std::cell::Cell::new(Bounds::default())),
+            block_heights: Rc::new(std::cell::RefCell::new(HashMap::new())),
             posters: Default::default(),
             misspelled: HashMap::new(),
             spell_task: None,

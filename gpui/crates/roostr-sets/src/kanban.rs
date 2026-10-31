@@ -3,6 +3,9 @@
 //! in every group it belongs to; dragging a card between columns rewrites
 //! its group value.
 
+use std::cell::Cell;
+use std::rc::Rc;
+
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use roostr_core::motion::{self, LayoutGroup};
@@ -81,7 +84,17 @@ pub(crate) struct KanbanView {
     slide_next: bool,
     /// The rows on show arrived after a drop (refreshes from sync snap).
     cards_slide: bool,
+    /// The board's top (window y) and the distance from one card to the
+    /// next, last frame: each column builds only the cards in and near the
+    /// window.
+    board_top: Rc<Cell<f32>>,
+    pitch: Rc<Cell<f32>>,
 }
+
+/// One card to the next before any is drawn (a one-line card + the 6px gap).
+const PITCH_GUESS: f32 = 42.;
+/// A column's header, before its first card.
+const HEAD_H: f32 = 30.;
 
 impl EventEmitter<ViewMsg> for KanbanView {}
 
@@ -103,6 +116,8 @@ impl KanbanView {
             cards_layout: LayoutGroup::default(),
             slide_next: false,
             cards_slide: false,
+            board_top: Rc::new(Cell::new(0.)),
+            pitch: Rc::new(Cell::new(PITCH_GUESS)),
         };
         this.load(cx);
         this
@@ -345,7 +360,7 @@ fn css_named_color(name: &str) -> Option<Hsla> {
 }
 
 impl Render for KanbanView {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let Some(rel) = self.rel(cx) else {
             return common::empty_state(
                 "Pick a property to group by (a status, tag, or checkbox).",
@@ -361,14 +376,33 @@ impl Render for KanbanView {
             .overflow_x_scroll()
             .pt(px(4.))
             .pb(px(16.));
+        // Each column builds only the cards in, or a window's height around,
+        // the window (the page scrolls the board, and each frame of it built
+        // every card); spacers keep the columns' heights.
+        let pitch = self.pitch.get().max(1.);
+        let view_h = f32::from(window.viewport_size().height);
+        let cards_top = self.board_top.get() + 4. + 8. + HEAD_H;
         for col in Self::columns(&rel) {
             let cards = self.cards_for(&rel, &col);
+            let n = cards.len();
+            let first = (((-view_h - cards_top) / pitch).floor().max(0.) as usize).min(n);
+            let last = ((((2. * view_h - cards_top) / pitch).ceil().max(0.)) as usize).clamp(first, n);
+            let pitch_cell = self.pitch.clone();
             let over = self.drop_col.as_deref() == Some(col.id.as_str());
             // The web sets `color: <option colour name>`: the browser reads it as a CSS colour.
             let color = css_named_color(&col.color);
             let col_id = col.id.clone();
             let col_drop = col.clone();
             let mut column = div()
+                .on_children_prepainted(move |bounds, _, _| {
+                    // Children: the header, the top spacer, the drawn cards, ...
+                    let drawn = bounds.get(2..2 + (last - first)).unwrap_or(&[]);
+                    if let (Some(a), Some(b)) = (drawn.first(), drawn.last())
+                        && drawn.len() > 1
+                    {
+                        pitch_cell.set(f32::from(b.top() - a.top()) / (drawn.len() - 1) as f32);
+                    }
+                })
                 .id(SharedString::from(format!("col-{}", col.id)))
                 .flex_none()
                 .w(px(236.))
@@ -422,7 +456,9 @@ impl Render for KanbanView {
                         ),
                 );
             let empty = cards.is_empty();
-            for r in cards {
+            // The gap after the spacer stands in for the hidden cards' last one.
+            column = column.child(div().flex_none().h(px((pitch * first as f32 - 6.).max(0.))));
+            for r in &cards[first..last] {
                 let icon = common::row_icon(r, cx);
                 let name = common::row_name(r);
                 let id = r.id.clone();
@@ -457,6 +493,7 @@ impl Render for KanbanView {
                         .transition(motion::CONTROL.transition()),
                 );
             }
+            column = column.child(div().flex_none().h(px((pitch * (n - last) as f32 - 6.).max(0.))));
             if empty {
                 column = column.child(
                     div()
@@ -469,6 +506,12 @@ impl Render for KanbanView {
             }
             board = board.child(column);
         }
+        let board_top = self.board_top.clone();
+        let board = board.child(
+            canvas(move |bounds, _, _| board_top.set(f32::from(bounds.top())), |_, _, _, _| {})
+                .absolute()
+                .size_full(),
+        );
         // Cards measure their slides from the board: the page moving it slides nothing.
         let board = self
             .cards_layout

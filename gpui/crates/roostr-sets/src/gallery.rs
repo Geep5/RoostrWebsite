@@ -31,7 +31,14 @@ pub(crate) struct GalleryView {
     /// The grid's width last frame (auto-fill columns).
     width: Rc<Cell<Pixels>>,
     columns: usize,
+    /// The grid's top (window y) and a line of cards' height, gap included,
+    /// last frame: only the lines in and near the window are built.
+    top: Rc<Cell<f32>>,
+    line_h: Rc<Cell<f32>>,
 }
+
+/// A line of cards' height before one is drawn (a card's 100px minimum + gap).
+const LINE_H_GUESS: f32 = 110.;
 
 impl GalleryView {
     pub(crate) fn new(
@@ -49,6 +56,8 @@ impl GalleryView {
             collection,
             width: Rc::new(Cell::new(px(0.))),
             columns: 4,
+            top: Rc::new(Cell::new(0.)),
+            line_h: Rc::new(Cell::new(LINE_H_GUESS)),
         };
         this.load(cx);
         this
@@ -170,7 +179,7 @@ pub(crate) fn js_number_string(f: f64) -> String {
 }
 
 impl Render for GalleryView {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let Some(object) = cached_object(&self.object_id, cx) else {
             return div().into_any_element();
         };
@@ -192,9 +201,11 @@ impl Render for GalleryView {
             self.columns = cols;
         }
         let width_cell = self.width.clone();
+        let top_cell = self.top.clone();
         let entity = cx.entity().downgrade();
         let measure = canvas(
             move |bounds, _, cx| {
+                top_cell.set(f32::from(bounds.top()));
                 if width_cell.get() != bounds.size.width {
                     width_cell.set(bounds.size.width);
                     let entity = entity.clone();
@@ -209,13 +220,38 @@ impl Render for GalleryView {
         .top_0()
         .left_0()
         .size_full();
+        // Lines of `cols` cards (the CSS grid's rows): only those in, or a
+        // window's height around, the window are built - the page scrolls the
+        // gallery, and each frame of it built every card. Spacers keep the
+        // gallery's full height.
+        let lines = self.rows.len().div_ceil(cols);
+        let line_h = self.line_h.get().max(1.);
+        let (first, last) = {
+            let view_h = f32::from(window.viewport_size().height);
+            let top = self.top.get() + 4.;
+            let first = (((-view_h - top) / line_h).floor().max(0.) as usize).min(lines);
+            let last = ((((2. * view_h - top) / line_h).ceil().max(0.)) as usize).clamp(first, lines);
+            (first, last)
+        };
+        let line_h_cell = self.line_h.clone();
         let mut grid = div()
-            .grid()
-            .grid_cols(cols as u16)
-            .gap(px(GAP))
+            .flex()
+            .flex_col()
             .pt(px(4.))
-            .pb(px(24.));
-        for r in &self.rows {
+            .pb(px(24.))
+            .on_children_prepainted(move |bounds, _, _| {
+                // Children: the top spacer, the drawn lines, the bottom spacer.
+                let drawn = bounds.get(1..1 + (last - first)).unwrap_or(&[]);
+                if !drawn.is_empty() {
+                    let h = drawn.iter().map(|b| f32::from(b.size.height)).sum::<f32>();
+                    line_h_cell.set(h / drawn.len() as f32);
+                }
+            })
+            .child(div().flex_none().h(px(line_h * first as f32)));
+        let mut line = div().flex().gap(px(GAP)).pb(px(GAP));
+        let mut in_line = 0;
+        let end = (last * cols).min(self.rows.len());
+        for r in &self.rows[first * cols..end] {
             let id = r.id.clone();
             let id2 = r.id.clone();
             let mut card = div()
@@ -330,8 +366,21 @@ impl Render for GalleryView {
                     }
                 }
             }
-            grid = grid.child(card);
+            line = line.child(div().flex_1().min_w_0().flex().child(card.flex_1()));
+            in_line += 1;
+            if in_line == cols {
+                grid = grid.child(std::mem::replace(&mut line, div().flex().gap(px(GAP)).pb(px(GAP))));
+                in_line = 0;
+            }
         }
+        if in_line > 0 {
+            // A short last line keeps the columns' width.
+            for _ in in_line..cols {
+                line = line.child(div().flex_1().min_w_0());
+            }
+            grid = grid.child(line);
+        }
+        grid = grid.child(div().flex_none().h(px(line_h * (lines - last) as f32)));
         let empty = self.rows.is_empty();
         div()
             .relative()

@@ -2,7 +2,7 @@
 //! `TableBlock.svelte` + `RelationBlock.svelte`): every block kind, the
 //! drag rail, drop hints, selection, and the floating menus.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
@@ -255,8 +255,10 @@ impl Editor {
     ) -> Stateful<Div> {
         let down_id = id.to_string();
         let menu_id = id.to_string();
+        let selector = format!("block-{id}");
         div()
             .id(Self::row_id("row", id))
+            .debug_selector(move || selector)
             .when(!hovers.is_empty(), |d| {
                 d.on_hover(move |hovered: &bool, _, cx| {
                     for state in &hovers {
@@ -1733,6 +1735,89 @@ impl Editor {
         self.file_views.retain(|id, _| live.contains(id));
     }
 
+    /// The root blocks to build this frame and their slots (`Some(id)` a
+    /// block, `None` a spacer), in order - see [`Editor::render`].
+    fn windowed_blocks(
+        &mut self,
+        frame: &Frame,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> (Vec<AnyElement>, Vec<Option<String>>) {
+        let dragging = self.dragging.is_some()
+            || self.file_drag.is_some()
+            || self.touch_lift.is_some()
+            || self.drag_sel.is_some()
+            || self.text_drag.is_some();
+        // The root each id lives under (blocks nest under toggles, lists, columns).
+        let mut root_of: HashMap<&str, &str> = HashMap::new();
+        for root in &frame.roots {
+            let mut stack = vec![root.as_str()];
+            while let Some(id) = stack.pop() {
+                root_of.insert(id, root.as_str());
+                if let Some(b) = frame.by_id.get(id) {
+                    stack.extend(b.children_ids.iter().map(String::as_str));
+                }
+            }
+        }
+        let mut pinned: HashSet<&str> = HashSet::new();
+        for id in self
+            .active
+            .iter()
+            .chain(self.selected.iter())
+            .chain(std::iter::once(&self.last_focused))
+            .chain(self.focus_request.as_ref().map(|(id, _)| id))
+            .chain(self.link_picker.as_ref().map(|(id, ..)| id))
+            .chain(self.property_suggest.as_ref().map(|(id, ..)| id))
+        {
+            if let Some(root) = root_of.get(id.as_str()) {
+                pinned.insert(root);
+            }
+        }
+        // The window, in the editor's own coordinates (last frame's place).
+        let view_h = f32::from(window.viewport_size().height);
+        let editor = self.bounds.get();
+        let seen = self.visible.get();
+        let (lo, hi) = if seen.size.height > px(0.) {
+            let top = f32::from(seen.top() - editor.top());
+            (top - view_h, top + f32::from(seen.size.height) + view_h)
+        } else {
+            (-view_h, 2. * view_h)
+        };
+        let heights = self.block_heights.borrow().clone();
+        let typical = if heights.is_empty() {
+            32.
+        } else {
+            heights.values().sum::<f32>() / heights.len() as f32
+        };
+        let mut blocks = Vec::new();
+        let mut slots = Vec::new();
+        let mut gap = 0.;
+        let mut y = 0.;
+        for id in &frame.roots {
+            let h = heights.get(id).copied().unwrap_or(typical);
+            let near = y + h >= lo && y <= hi;
+            y += h;
+            if !(dragging || near || pinned.contains(id.as_str())) {
+                gap += h;
+                continue;
+            }
+            if gap > 0. {
+                blocks.push(div().flex_none().h(px(gap)).into_any_element());
+                slots.push(None);
+                gap = 0.;
+            }
+            if let Some(el) = self.render_block(id, frame, window, cx) {
+                blocks.push(el);
+                slots.push(Some(id.clone()));
+            }
+        }
+        if gap > 0. {
+            blocks.push(div().flex_none().h(px(gap)).into_any_element());
+            slots.push(None);
+        }
+        (blocks, slots)
+    }
+
     fn update_present_relations(&mut self, cx: &App) {
         let store = Store::global(cx).read(cx);
         let fields = self.object_fields();
@@ -2036,12 +2121,13 @@ impl Render for Editor {
             all_roots: crate::doc::root_order(&self.blocks),
             space: roostr_core::relations::object_space_id(store, &self.object_fields()),
         };
-        let blocks: Vec<AnyElement> = frame
-            .roots
-            .clone()
-            .iter()
-            .filter_map(|id| self.render_block(id, &frame, window, cx))
-            .collect();
+        // A long page builds only the root blocks in, or a window's height
+        // around, the window: the page scrolls the editor, and each frame of
+        // it built every block (hundreds of text fields). Spacers sized by the
+        // blocks' last drawn heights stand in for the rest. Blocks in use
+        // (typing, selected, open menus) are always built, and every block
+        // is while something is dragged (drop targets come from what's drawn).
+        let (blocks, slots) = self.windowed_blocks(&frame, window, cx);
         let empty = frame.roots.is_empty();
         let loaded = self.object.is_some();
         let overlays = self.overlays(window, cx);
@@ -2050,7 +2136,24 @@ impl Render for Editor {
         let entity = cx.entity();
         let bounds_cell = self.bounds.clone();
         let visible_cell = self.visible.clone();
+        let heights = self.block_heights.clone();
         div()
+            .on_children_prepainted(move |bounds, _, _| {
+                // Children: the gesture canvas, then the slots in order.
+                // A block's share is from its top to the next slot's, so its
+                // margins count too; the last one's is its own height.
+                let mut heights = heights.borrow_mut();
+                let placed = bounds.get(1..1 + slots.len()).unwrap_or(&[]);
+                for (i, (slot, b)) in slots.iter().zip(placed).enumerate() {
+                    if let Some(id) = slot {
+                        let h = match placed.get(i + 1) {
+                            Some(next) => next.top() - b.top(),
+                            None => b.size.height,
+                        };
+                        heights.insert(id.clone(), f32::from(h));
+                    }
+                }
+            })
             .id("roostr-editor")
             .key_context("RoostrEditor")
             .track_focus(&self.focus_handle)
