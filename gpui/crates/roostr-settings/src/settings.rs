@@ -2138,6 +2138,31 @@ impl Render for Settings {
                         ),
                     ),
                 );
+                // The window was closed, or opened in the wrong browser: stop
+                // waiting, or open a fresh sign-in.
+                row = row
+                    .child(
+                        Btn::small("plan-restart", "Open sign-in again")
+                            .subtle()
+                            .disabled(self.plan_busy)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                let server = this.plan_server.clone();
+                                this.plan_action(
+                                    "/claude-plan/start",
+                                    Some(json!({ "servedBy": server })),
+                                    cx,
+                                )
+                                .detach();
+                            })),
+                    )
+                    .child(
+                        Btn::small("plan-cancel", "Cancel")
+                            .subtle()
+                            .disabled(self.plan_busy)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.plan_action("/claude-plan/cancel", None, cx).detach()
+                            })),
+                    );
             } else {
                 row = row.child(
                     Btn::action(
