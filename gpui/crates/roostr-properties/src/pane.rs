@@ -128,15 +128,14 @@ const SYSTEM_KEYS: &[&str] = &[
     "modifiedDate",
 ];
 const TOOL_KEYS: &[&str] = &["tool_inputs", "tool_builtin", "tool_version"];
+/// Types with no Repeat. Queries and collections repeat: their run hands
+/// the agent what they hold.
 const NO_REPEAT: &[&str] = &[
     "channel",
     "chat",
     "type",
     "relation",
     "template",
-    "query",
-    "set",
-    "collection",
     "agent",
     "tool",
 ];
@@ -1276,7 +1275,10 @@ impl PropertiesPane {
                 .repeat
                 .get_or_insert_with(|| cx.new(|cx| RepeatView::new(id, window, cx)))
                 .clone();
-            return div().child(repeat).into_any_element();
+            return div()
+                .debug_selector(|| "prop-row-__repeat__".into())
+                .child(repeat)
+                .into_any_element();
         }
         let key = rel.key.clone();
         let v = object.field(&key);

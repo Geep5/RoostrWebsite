@@ -185,4 +185,8 @@ fn a_query_filters_by_the_agent_an_object_has(cx: &mut TestAppContext) {
     assert!(saved.contains("\"in\"") && saved.contains("agent-1"), "the filter holds the agent's id: {saved}");
     assert!(cx.debug_bounds("fobj-on-agent-1").is_some(), "the picked agent shows under Selected");
     assert!(cx.debug_bounds("fobj-add-agent-1").is_none(), "and is no longer offered");
+
+    // A query repeats like a task: its Properties offer Repeat (its run
+    // hands the agent what it holds).
+    assert!(cx.debug_bounds("prop-row-__repeat__").is_some(), "Repeat on a query");
 }
