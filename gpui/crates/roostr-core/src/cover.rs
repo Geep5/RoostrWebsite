@@ -235,21 +235,10 @@ pub fn openai_credential(space_id: &str, cx: &App) -> Task<Result<Option<OpenAiC
     cx.background_spawn(async move { Ok(pick_openai_credential(rows.await?)) })
 }
 
-/// What the phone's ⋯ menu asks of the open page's cover.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum CoverAction {
-    /// Add or change: choose, paste or generate an image.
-    Choose,
-    Reposition,
-    Remove,
-    Generate,
-}
-
-/// A [`CoverAction`] for the page showing `object_id`.
+/// The phone's ⋯ menu asks the page showing `object_id` to open its cover menu.
 #[derive(Clone, PartialEq, Debug)]
 pub struct CoverAsk {
     pub object_id: String,
-    pub action: CoverAction,
 }
 
 /// Carries [`CoverAsk`]s from the shell's menus to the object page.
@@ -272,10 +261,10 @@ impl CoverAsks {
     }
 }
 
-/// Ask the page showing `object_id` to do `action` with its cover.
-pub fn ask(object_id: &str, action: CoverAction, cx: &mut App) {
+/// Ask the page showing `object_id` to open its cover menu.
+pub fn ask(object_id: &str, cx: &mut App) {
     let object_id = object_id.to_string();
-    CoverAsks::global(cx).update(cx, |_, cx| cx.emit(CoverAsk { object_id, action }));
+    CoverAsks::global(cx).update(cx, |_, cx| cx.emit(CoverAsk { object_id }));
 }
 
 #[cfg(test)]

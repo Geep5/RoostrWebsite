@@ -147,9 +147,9 @@ impl ObjectPage {
             cx.subscribe_in(
                 &CoverAsks::global(cx),
                 window,
-                |this, _, ask: &CoverAsk, window, cx| {
+                |this, _, ask: &CoverAsk, _, cx| {
                     if ask.object_id == this.id {
-                        this.on_cover_ask(ask.action, window, cx);
+                        this.on_cover_ask(cx);
                     }
                 },
             ),

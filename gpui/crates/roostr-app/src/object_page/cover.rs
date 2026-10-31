@@ -1,8 +1,8 @@
 //! A page's cover ([`roostr_core::cover`]): the banner above the icon and
-//! title (the icon overlaps its bottom edge), its actions - desktop: on
-//! hover; phone: the ⋯ menu - Reposition, the image chooser behind Add
-//! cover / Change cover, and Generate: a spinner on the banner until the
-//! new image replaces the cover.
+//! title (the icon overlaps its bottom edge) and, as Anytype, one Cover
+//! button (desktop: on hover; phone: the ⋯ menu) opening the cover menu -
+//! Upload / Generate tabs, and Reposition / Remove for a page with a cover.
+//! Generating spins on the banner until the new image replaces the cover.
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -14,7 +14,7 @@ use gpui_kit::component::input::{InputEvent, Textarea, TextareaState};
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use roostr_core::cover::{self, CoverAction};
+use roostr_core::cover;
 use roostr_core::create::{AddFile, add_failure_text};
 use roostr_core::nav::{Route, navigate};
 use roostr_core::types::Object;
@@ -168,19 +168,9 @@ impl ObjectPage {
         }
     }
 
-    /// What the phone's ⋯ menu asked of this page's cover.
-    pub(super) fn on_cover_ask(
-        &mut self,
-        action: CoverAction,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        match action {
-            CoverAction::Choose => self.open_chooser(cx),
-            CoverAction::Reposition => self.start_reposition(cx),
-            CoverAction::Remove => self.remove_cover(cx),
-            CoverAction::Generate => self.open_prompt(window, cx),
-        }
+    /// The phone's ⋯ menu asked for this page's cover menu.
+    pub(super) fn on_cover_ask(&mut self, cx: &mut Context<Self>) {
+        self.open_chooser(cx);
     }
 
     fn open_chooser(&mut self, cx: &mut Context<Self>) {
@@ -422,26 +412,11 @@ impl ObjectPage {
                     .bottom(px(12.))
                     .flex()
                     .gap(px(6.))
+                    // One Cover button, as Anytype: everything else is in its menu.
                     .child(tagged(
                         "cover-change",
-                        pill("cover-change", "Change cover", cx)
+                        pill("cover-change", "Cover", cx)
                             .on_click(cx.listener(|this, _, _, cx| this.open_chooser(cx))),
-                    ))
-                    .child(tagged(
-                        "cover-generate",
-                        pill("cover-generate", "Generate", cx).on_click(
-                            cx.listener(|this, _, window, cx| this.open_prompt(window, cx)),
-                        ),
-                    ))
-                    .child(tagged(
-                        "cover-reposition",
-                        pill("cover-reposition", "Reposition", cx)
-                            .on_click(cx.listener(|this, _, _, cx| this.start_reposition(cx))),
-                    ))
-                    .child(tagged(
-                        "cover-remove",
-                        pill("cover-remove", "Remove", cx)
-                            .on_click(cx.listener(|this, _, _, cx| this.remove_cover(cx))),
                     ))
             });
         let spinner = generating.then(|| {
@@ -628,7 +603,7 @@ impl ObjectPage {
             .flex_col()
             .gap(px(8.))
             .when(mobile, |d| d.px(px(16.)))
-            .children(self.render_chooser(cx))
+            .children(self.render_chooser(cover::cover_file(&object.fields).is_some(), cx))
             .children(self.render_failure(object, cx))
     }
 
@@ -643,7 +618,7 @@ impl ObjectPage {
     /// the tab's body. Upload: the large drop-zone tile ("Choose Image") and
     /// the secondary line under it; Generate: the prompt and its buttons.
     /// A press outside closes it, as a menu.
-    fn render_chooser(&self, cx: &mut Context<Self>) -> Option<Div> {
+    fn render_chooser(&self, has_cover: bool, cx: &mut Context<Self>) -> Option<Div> {
         let chooser = self.cover.chooser.as_ref()?;
         let tab = chooser.tab;
         let busy = chooser.adding;
@@ -679,7 +654,34 @@ impl ObjectPage {
             .child(
                 head_tab("cover-chooser-generate", "Generate", Tab::Generate)
                     .on_click(cx.listener(|this, _, window, cx| this.open_prompt(window, cx))),
-            );
+            )
+            // The cover's own actions, at the head's right (a page with a cover).
+            .when(has_cover, |d| {
+                let action = |id: &'static str, label: &'static str| {
+                    div()
+                        .id(id)
+                        .debug_selector(move || id.into())
+                        .text_size(px(14.))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(theme::muted())
+                        .hover(|s| s.text_color(theme::fg()))
+                        .cursor_pointer()
+                        .child(label)
+                };
+                d.child(div().flex_1())
+                    .child(action("cover-reposition", "Reposition").on_click(cx.listener(
+                        |this, _, _, cx| {
+                            this.close_chooser(cx);
+                            this.start_reposition(cx)
+                        },
+                    )))
+                    .child(action("cover-remove", "Remove").on_click(cx.listener(
+                        |this, _, _, cx| {
+                            this.close_chooser(cx);
+                            this.remove_cover(cx)
+                        },
+                    )))
+            });
         let body = match tab {
             Tab::Upload => {
                 // `.dropzone`: radius 8, highlight fill, centred icon and label, 200px tall.

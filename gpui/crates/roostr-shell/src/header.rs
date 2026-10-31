@@ -14,7 +14,7 @@ use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
 use gpui_kit::component::{ElementExt as _, Icon, IconNamed as _, WindowExt as _};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use roostr_core::cover::{self, CoverAction};
+use roostr_core::cover;
 use roostr_core::nav::{Navigator, Route, navigate, open_tab};
 use roostr_core::objects::{is_image_icon, object_icon, type_glyph};
 use roostr_core::store::Store;
@@ -939,70 +939,26 @@ fn more_items(
     }
 }
 
-/// The phone's cover actions for the open page (desktop shows them on hover).
+/// The phone's cover entry for the open page: one item opening the cover
+/// menu, where every cover action lives (as the desktop's one Cover button).
 fn cover_items(
-    mut menu: PopupMenu,
+    menu: PopupMenu,
     id: &str,
     has_cover: bool,
     workspace: &WeakEntity<Workspace>,
 ) -> PopupMenu {
-    let items: &[(&str, &str, Glyph, CoverAction)] = if has_cover {
-        &[
-            (
-                "more-cover-change",
-                "Change cover",
-                Glyph::Pencil,
-                CoverAction::Choose,
-            ),
-            (
-                "more-cover-reposition",
-                "Reposition",
-                Glyph::SlidersHorizontal,
-                CoverAction::Reposition,
-            ),
-            (
-                "more-cover-remove",
-                "Remove cover",
-                Glyph::Trash,
-                CoverAction::Remove,
-            ),
-            (
-                "more-cover-generate",
-                "Generate cover",
-                Glyph::Palette,
-                CoverAction::Generate,
-            ),
-        ]
-    } else {
-        &[
-            (
-                "more-cover-add",
-                "Add cover",
-                Glyph::Plus,
-                CoverAction::Choose,
-            ),
-            (
-                "more-cover-generate",
-                "Generate cover",
-                Glyph::Palette,
-                CoverAction::Generate,
-            ),
-        ]
-    };
-    for &(selector, label, glyph, action) in items {
-        let (ws, target) = (workspace.clone(), id.to_string());
-        menu = menu.item(
-            PopupMenuItem::element(move |_, _| {
-                div().debug_selector(move || selector.into()).child(label)
-            })
-            .icon(Icon::new(glyph))
-            .on_click(move |_, _, cx| {
-                close_more(&ws, cx);
-                cover::ask(&target, action, cx);
-            }),
-        );
-    }
-    menu
+    let (ws, target) = (workspace.clone(), id.to_string());
+    let label = if has_cover { "Cover" } else { "Add cover" };
+    menu.item(
+        PopupMenuItem::element(move |_, _| {
+            div().debug_selector(|| "more-cover".into()).child(label)
+        })
+        .icon(Icon::new(if has_cover { Glyph::Palette } else { Glyph::Plus }))
+        .on_click(move |_, _, cx| {
+            close_more(&ws, cx);
+            cover::ask(&target, cx);
+        }),
+    )
 }
 
 /// The space's types an object can change to, matching `filter`.

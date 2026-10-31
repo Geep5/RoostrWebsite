@@ -430,17 +430,15 @@ fn on_a_desktop_page(cx: &mut TestAppContext) {
     assert!(icon.top() < banner.bottom() && banner.bottom() < icon.bottom());
     assert!(banner.size.width > title.size.width);
 
-    // Hovering the cover shows its actions; Reposition drags the focus.
+    // Hovering the cover shows one Cover button (as Anytype); its menu holds
+    // the rest. Reposition drags the focus.
     hover(cx, "object-cover");
-    for action in [
-        "cover-change",
-        "cover-reposition",
-        "cover-remove",
-        "cover-generate",
-    ] {
-        assert!(shown(cx, action), "{action}");
-    }
+    assert!(shown(cx, "cover-change"));
+    assert!(!shown(cx, "cover-reposition") && !shown(cx, "cover-remove"));
+    tap(cx, "cover-change");
+    assert!(shown(cx, "cover-chooser") && shown(cx, "cover-reposition") && shown(cx, "cover-remove"));
     tap(cx, "cover-reposition");
+    assert!(!shown(cx, "cover-chooser"));
     assert!(shown(cx, "cover-save") && !shown(cx, "cover-remove"));
     let from = banner.center();
     let to = point(from.x, from.y - px(60.));
@@ -462,8 +460,9 @@ fn on_a_desktop_page(cx: &mut TestAppContext) {
     assert!((y - (0.5 + 60. / overflow)).abs() < 1e-3, "{y}");
     assert!(!shown(cx, "cover-save"));
 
-    // Remove deletes both fields.
+    // Remove, from the Cover menu, deletes both fields.
     hover(cx, "object-cover");
+    tap(cx, "cover-change");
     tap(cx, "cover-remove");
     assert_eq!(
         backend.take_log(),
@@ -511,7 +510,8 @@ fn on_a_desktop_page(cx: &mut TestAppContext) {
 
     // A failure says why, with the way to the credential when the key is the trouble.
     hover(cx, "object-cover");
-    tap(cx, "cover-generate");
+    tap(cx, "cover-change");
+    tap(cx, "cover-chooser-generate");
     cx.simulate_input("A red barn");
     settle(cx);
     tap(cx, "cover-prompt-generate");
@@ -538,16 +538,17 @@ fn in_a_phones_more_menu(cx: &mut TestAppContext) {
     let backend = Arc::new(Vault::new("http://127.0.0.1:9", b"unserved"));
     let (cx, _) = open(cx, backend.clone(), 390., 844.);
 
+    // The ⋯ menu has one cover entry: it opens the cover menu.
     tap(cx, "m-more");
-    assert!(shown(cx, "more-cover-add") && shown(cx, "more-cover-generate"));
-    assert!(!shown(cx, "more-cover-remove"));
-    tap(cx, "more-cover-add");
+    assert!(shown(cx, "more-cover"));
+    tap(cx, "more-cover");
     assert!(shown(cx, "cover-chooser"));
+    assert!(!shown(cx, "cover-remove"), "nothing to remove yet");
     // A press outside closes it, as a menu.
     tap(cx, "object-title");
     assert!(!shown(cx, "cover-chooser"));
 
-    // With a cover: Change, Reposition, Remove, Generate; Reposition shows Save / Cancel.
+    // With a cover: the menu adds Reposition and Remove; Reposition shows Save / Cancel.
     backend.edit(PAGE, |f| {
         f.insert("cover".into(), Value::link("file-1", "cover"));
     });
@@ -556,25 +557,20 @@ fn in_a_phones_more_menu(cx: &mut TestAppContext) {
     let banner = cx.debug_bounds("object-cover").expect("the cover");
     assert_eq!(banner.size, size(px(390.), px(140.)));
     tap(cx, "m-more");
-    for item in [
-        "more-cover-change",
-        "more-cover-reposition",
-        "more-cover-remove",
-        "more-cover-generate",
-    ] {
-        assert!(shown(cx, item), "{item}");
-    }
-    tap(cx, "more-cover-reposition");
+    tap(cx, "more-cover");
+    tap(cx, "cover-reposition");
     assert!(shown(cx, "cover-save") && shown(cx, "cover-cancel"));
     tap(cx, "cover-cancel");
     tap(cx, "m-more");
-    tap(cx, "more-cover-remove");
+    tap(cx, "more-cover");
+    tap(cx, "cover-remove");
     assert_eq!(
         backend.take_log(),
         vec![deleted("cover"), deleted("cover_y")]
     );
     tap(cx, "m-more");
-    tap(cx, "more-cover-generate");
+    tap(cx, "more-cover");
+    tap(cx, "cover-chooser-generate");
     assert!(shown(cx, "cover-prompt"));
     // Choose for me asks with no prompt: the computer picks the idea.
     tap(cx, "cover-prompt-choose");
