@@ -474,8 +474,9 @@ fn on_a_desktop_page(cx: &mut TestAppContext) {
     // Generate, from Add cover: a prompt box; nothing is asked until it has words.
     hover(cx, "object-title");
     tap(cx, "cover-add");
+    // The cover menu's Generate tab.
     tap(cx, "cover-chooser-generate");
-    assert!(!shown(cx, "cover-chooser") && shown(cx, "cover-prompt"));
+    assert!(shown(cx, "cover-chooser") && shown(cx, "cover-prompt"));
     tap(cx, "cover-prompt-generate");
     assert_eq!(asked(&backend), None, "an empty prompt asks nothing");
     cx.simulate_input("A misty pine forest");
@@ -542,7 +543,9 @@ fn in_a_phones_more_menu(cx: &mut TestAppContext) {
     assert!(!shown(cx, "more-cover-remove"));
     tap(cx, "more-cover-add");
     assert!(shown(cx, "cover-chooser"));
-    tap(cx, "cover-chooser-close");
+    // A press outside closes it, as a menu.
+    tap(cx, "object-title");
+    assert!(!shown(cx, "cover-chooser"));
 
     // With a cover: Change, Reposition, Remove, Generate; Reposition shows Save / Cancel.
     backend.edit(PAGE, |f| {

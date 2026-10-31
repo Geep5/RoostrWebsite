@@ -74,11 +74,21 @@ struct Reposition {
     drag: Option<(Pixels, f32)>,
 }
 
-/// Add cover / Change cover: choose, paste or generate an image.
+/// Add cover / Change cover: Anytype's cover menu - its tabs over the way
+/// to set one (an image, or a generated one).
 #[derive(Default)]
 struct Chooser {
+    tab: Tab,
     adding: bool,
     error: String,
+}
+
+/// The cover menu's tabs (Anytype's head row).
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+enum Tab {
+    #[default]
+    Upload,
+    Generate,
 }
 
 /// Generate's prompt box: the person's words for the cover.
@@ -285,10 +295,12 @@ impl ObjectPage {
         cx.notify();
     }
 
-    /// Open the prompt box: the person writes what the cover should show.
+    /// The cover menu on its Generate tab: the person writes what the cover should show.
     fn open_prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.cover.chooser = None;
+        let chooser = self.cover.chooser.get_or_insert_with(Chooser::default);
+        chooser.tab = Tab::Generate;
         if self.cover.prompt.is_some() {
+            cx.notify();
             return;
         }
         let input = cx.new(|cx| {
@@ -329,6 +341,7 @@ impl ObjectPage {
             return;
         };
         self.cover.prompt = None;
+        self.cover.chooser = None;
         self.cover.ask_error.clear();
         let ask = cover::request(&object, prompt, cx);
         cx.spawn(async move |this, cx| {
@@ -615,102 +628,205 @@ impl ObjectPage {
             .flex_col()
             .gap(px(8.))
             .when(mobile, |d| d.px(px(16.)))
-            .children(self.render_chooser(object, cx))
-            .children(self.render_prompt(cx))
+            .children(self.render_chooser(cx))
             .children(self.render_failure(object, cx))
     }
 
-    fn render_prompt(&self, cx: &mut Context<Self>) -> Option<Div> {
-        let prompt = self.cover.prompt.as_ref()?;
-        let empty = prompt.input.read(cx).value().trim().is_empty();
-        Some(
-            card("cover-prompt")
-                .child(card_title(
-                    "Generate a cover",
-                    "cover-prompt-close",
-                    cx.listener(|this, _, _, cx| {
-                        this.cover.prompt = None;
-                        cx.notify();
-                    }),
-                ))
-                .child(Textarea::new(&prompt.input).text_size(px(13.)))
-                .child(
-                    div()
-                        .flex()
-                        .gap(px(8.))
-                        .child(tagged(
-                            "cover-prompt-generate",
-                            ui::disabled(
-                                ui::primary_button("cover-prompt-generate", "Generate"),
-                                empty,
-                            )
-                            .on_click(cx.listener(|this, _, _, cx| this.generate(cx))),
-                        ))
-                        .child(tagged(
-                            "cover-prompt-choose",
-                            ui::outline_button("cover-prompt-choose", "Choose for me")
-                                .on_click(cx.listener(|this, _, _, cx| this.ask_cover("", cx))),
-                        )),
-                ),
-        )
+    fn close_chooser(&mut self, cx: &mut Context<Self>) {
+        self.cover.chooser = None;
+        self.cover.prompt = None;
+        cx.notify();
     }
 
-    fn render_chooser(&self, object: &Object, cx: &mut Context<Self>) -> Option<Div> {
+    /// Anytype's cover menu (`menuBlockCover`): 408px wide, a head row of
+    /// tabs (the active one in the primary text colour) over a hairline, then
+    /// the tab's body. Upload: the large drop-zone tile ("Choose Image") and
+    /// the secondary line under it; Generate: the prompt and its buttons.
+    /// A press outside closes it, as a menu.
+    fn render_chooser(&self, cx: &mut Context<Self>) -> Option<Div> {
         let chooser = self.cover.chooser.as_ref()?;
-        let title = if cover::cover_file(&object.fields).is_some() {
-            "Change cover"
-        } else {
-            "Add cover"
+        let tab = chooser.tab;
+        let busy = chooser.adding;
+        let head_tab = |id: &'static str, label: &'static str, this_tab: Tab| {
+            let active = tab == this_tab;
+            div()
+                .id(id)
+                .debug_selector(move || id.into())
+                .text_size(px(14.))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(if active { theme::fg() } else { theme::muted() })
+                .hover(|s| s.text_color(theme::fg()))
+                .cursor_pointer()
+                .child(label)
         };
-        let disabled = chooser.adding;
-        Some(
-            card("cover-chooser")
-                .child(card_title(
-                    title,
-                    "cover-chooser-close",
-                    cx.listener(|this, _, _, cx| {
-                        this.cover.chooser = None;
+        let head = div()
+            .flex()
+            .gap(px(16.))
+            .px(px(14.))
+            .pt(px(3.))
+            .pb(px(10.))
+            .border_b_1()
+            .border_color(theme::border())
+            .child(
+                head_tab("cover-tab-upload", "Upload", Tab::Upload)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        if let Some(c) = &mut this.cover.chooser {
+                            c.tab = Tab::Upload;
+                        }
                         cx.notify();
-                    }),
-                ))
-                .child(
-                    div()
-                        .flex()
-                        .flex_wrap()
-                        .gap(px(8.))
-                        .when(roostr_editor::CAN_PICK_FILES, |d| {
-                            d.child(tagged(
-                                "cover-pick",
+                    })),
+            )
+            .child(
+                head_tab("cover-chooser-generate", "Generate", Tab::Generate)
+                    .on_click(cx.listener(|this, _, window, cx| this.open_prompt(window, cx))),
+            );
+        let body = match tab {
+            Tab::Upload => {
+                // `.dropzone`: radius 8, highlight fill, centred icon and label, 200px tall.
+                let zone = div()
+                    .id("cover-pick")
+                    .debug_selector(|| "cover-pick".into())
+                    .min_h(px(200.))
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .justify_center()
+                    .gap(px(6.))
+                    .rounded(px(8.))
+                    .bg(theme::hl_med())
+                    .text_color(theme::fg())
+                    .child(Icon::new(Glyph::Download).size(px(28.)).text_color(theme::muted()))
+                    .child(div().text_size(px(14.)).child(if busy {
+                        "Adding the image…"
+                    } else if roostr_editor::CAN_PICK_FILES {
+                        "Choose Image"
+                    } else {
+                        "Paste an image"
+                    }))
+                    .when(!busy, |d| {
+                        d.cursor_pointer().hover(|s| s.bg(theme::hl_light())).on_click(
+                            cx.listener(|this, _, _, cx| {
+                                if roostr_editor::CAN_PICK_FILES {
+                                    this.pick_cover(cx)
+                                } else {
+                                    this.paste_cover(cx)
+                                }
+                            }),
+                        )
+                    });
+                // `.urlSection`: a small secondary label over the line's control.
+                let paste = div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(6.))
+                    .child(
+                        div()
+                            .text_size(px(12.))
+                            .text_color(theme::muted())
+                            .child("Or paste an image you copied"),
+                    )
+                    .child(
+                        div()
+                            .id("cover-paste")
+                            .debug_selector(|| "cover-paste".into())
+                            .h(px(36.))
+                            .flex()
+                            .items_center()
+                            .gap(px(8.))
+                            .px(px(12.))
+                            .rounded(px(12.))
+                            .bg(theme::hl_light())
+                            .text_size(px(14.))
+                            .text_color(theme::muted())
+                            .when(!busy, |d| {
+                                d.cursor_pointer()
+                                    .hover(|s| s.bg(theme::hl_med()))
+                                    .on_click(cx.listener(|this, _, _, cx| this.paste_cover(cx)))
+                            })
+                            .child(Icon::new(Glyph::Copy).size(px(16.)))
+                            .child("Paste image"),
+                    );
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(16.))
+                    .p(px(16.))
+                    .child(zone)
+                    // Without a file dialog (the web) the tile itself pastes.
+                    .when(roostr_editor::CAN_PICK_FILES, |d| d.child(paste))
+                    .when(!chooser.error.is_empty(), |d| {
+                        d.child(small_note(chooser.error.clone()).text_color(theme::red()))
+                    })
+            }
+            Tab::Generate => {
+                let empty = self
+                    .cover
+                    .prompt
+                    .as_ref()
+                    .is_none_or(|p| p.input.read(cx).value().trim().is_empty());
+                div()
+                    .debug_selector(|| "cover-prompt".into())
+                    .flex()
+                    .flex_col()
+                    .gap(px(12.))
+                    .p(px(16.))
+                    .when_some(self.cover.prompt.as_ref(), |d, p| {
+                        d.child(
+                            div()
+                                .rounded(px(12.))
+                                .bg(theme::hl_light())
+                                .px(px(12.))
+                                .py(px(8.))
+                                .child(Textarea::new(&p.input).appearance(false).text_size(px(14.))),
+                        )
+                    })
+                    .child(
+                        div()
+                            .text_size(px(12.))
+                            .text_color(theme::muted())
+                            .child("Describe the cover, or let the page choose one."),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .gap(px(8.))
+                            .child(tagged(
+                                "cover-prompt-generate",
                                 ui::disabled(
-                                    ui::outline_button("cover-pick", "Choose an image…"),
-                                    disabled,
+                                    ui::primary_button("cover-prompt-generate", "Generate"),
+                                    empty,
                                 )
-                                .on_click(cx.listener(|this, _, _, cx| this.pick_cover(cx))),
+                                .on_click(cx.listener(|this, _, _, cx| this.generate(cx))),
                             ))
-                        })
-                        .child(tagged(
-                            "cover-paste",
-                            ui::disabled(
-                                ui::outline_button("cover-paste", "Paste image"),
-                                disabled,
-                            )
-                            .on_click(cx.listener(|this, _, _, cx| this.paste_cover(cx))),
-                        ))
-                        .child(tagged(
-                            "cover-chooser-generate",
-                            ui::disabled(
-                                ui::outline_button("cover-chooser-generate", "Generate"),
-                                disabled,
-                            )
-                            .on_click(
-                                cx.listener(|this, _, window, cx| this.open_prompt(window, cx)),
-                            ),
-                        )),
-                )
-                .when(chooser.adding, |d| d.child(small_note("Adding the image…")))
-                .when(!chooser.error.is_empty(), |d| {
-                    d.child(small_note(chooser.error.clone()).text_color(theme::red()))
-                }),
+                            .child(tagged(
+                                "cover-prompt-choose",
+                                ui::outline_button("cover-prompt-choose", "Choose for me")
+                                    .on_click(cx.listener(|this, _, _, cx| this.ask_cover("", cx))),
+                            )),
+                    )
+            }
+        };
+        Some(
+            div()
+                .debug_selector(|| "cover-chooser".into())
+                .w(px(408.))
+                .max_w_full()
+                .mb(px(12.))
+                .pt(px(10.))
+                .flex()
+                .flex_col()
+                .bg(theme::panel())
+                .border_1()
+                .border_color(theme::border())
+                .rounded(theme::radius::menu())
+                .shadow(ui::menu_shadow())
+                .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                    if !this.cover.chooser.as_ref().is_some_and(|c| c.adding) {
+                        this.close_chooser(cx)
+                    }
+                }))
+                .child(head)
+                .child(body),
         )
     }
 
