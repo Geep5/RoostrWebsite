@@ -99,6 +99,8 @@ pub(crate) struct QueryControls {
     new_prop: Option<Entity<InputState>>,
     cond_open: Option<usize>,
     rule_inputs: HashMap<usize, RuleInputs>,
+    /// Each object filter's search box (its values are picked, not typed).
+    object_search: HashMap<usize, Entity<InputState>>,
     settings_bounds: BoundsCell,
     vmenu_bounds: BoundsCell,
     /// The view menu's row whose property list opens beside it.
@@ -153,6 +155,7 @@ impl QueryControls {
             new_prop: None,
             cond_open: None,
             rule_inputs: HashMap::new(),
+            object_search: HashMap::new(),
             settings_bounds: bounds_cell(),
             vsub_bounds: bounds_cell(),
             vmenu_bounds: bounds_cell(),
@@ -272,6 +275,7 @@ impl QueryControls {
             rule.value.truncate(1);
         }
         self.rule_inputs.remove(&idx);
+        self.object_search.remove(&idx);
         self.save_filters(next, cx);
     }
 
@@ -812,7 +816,11 @@ impl QueryControls {
                 ),
             );
             rule = rule.child(self.condition_select(i, f, relations, window, cx));
-            if config::needs_value(relations, f) {
+            if config::needs_value(relations, f)
+                && config::filter_format(relations, &f.key) == "object"
+            {
+                rule = rule.child(self.object_values(i, f, relations, &object, window, cx));
+            } else if config::needs_value(relations, f) {
                 let options = config::options_for(relations, &f.key);
                 if !options.is_empty() {
                     let mut tags = div().flex().flex_wrap().gap(px(6.));
@@ -910,6 +918,7 @@ impl QueryControls {
                         .map(|(_, f)| f.clone())
                         .collect();
                     this.rule_inputs.clear();
+                    this.object_search.clear();
                     this.save_filters(next, cx);
                 },
             )));
@@ -931,6 +940,129 @@ impl QueryControls {
             }),
         ));
         self.rules_panel(panel)
+    }
+
+    /// An object filter's values: the picked objects (removable) and a search
+    /// over the objects the property may hold (its type limit, this space),
+    /// a click adding one. The engine matches links by id.
+    fn object_values(
+        &mut self,
+        i: usize,
+        f: &FilterRule,
+        relations: &[RelationDef],
+        view: &Object,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let search = self
+            .object_search
+            .entry(i)
+            .or_insert_with(|| {
+                let input = cx.new(|cx| InputState::new(window, cx).placeholder("find an object"));
+                cx.observe(&input, |_, _, cx| cx.notify()).detach();
+                input
+            })
+            .clone();
+        let q = search.read(cx).value().trim().to_lowercase();
+        let store = Store::global(cx).read(cx);
+        let space = object_space_id(store, &view.fields);
+        // The property's type limit, as type keys (its object_types are type ids).
+        let allowed: Vec<String> = relations
+            .iter()
+            .find(|r| r.key == f.key)
+            .and_then(|r| r.object_types.clone())
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|id| store.types.iter().find(|t| &t.id == id).map(|t| t.key.clone()))
+            .collect();
+        let name_of = |id: &str| -> (String, String) {
+            match store.summary(id) {
+                Some(s) => (s.name.clone(), s.icon.clone()),
+                None => store
+                    .agent(id)
+                    .map(|a| (a.name.clone(), a.icon.clone()))
+                    .unwrap_or_else(|| (id.to_string(), String::new())),
+            }
+        };
+        let picked: Vec<(String, String, String)> = f
+            .value
+            .iter()
+            .map(|id| {
+                let (name, icon) = name_of(id);
+                (id.clone(), name, icon)
+            })
+            .collect();
+        let mut pool: Vec<(String, String, String)> = if allowed.iter().any(|k| k == "agent") {
+            store
+                .agents
+                .iter()
+                .filter(|a| a.channel.is_empty() || a.channel == space)
+                .map(|a| (a.id.clone(), a.name.clone(), a.icon.clone()))
+                .collect()
+        } else {
+            store
+                .summaries
+                .iter()
+                .filter(|s| s.channel_id == space || s.channel_id.is_empty())
+                .filter(|s| allowed.is_empty() || allowed.contains(&s.type_key))
+                .map(|s| (s.id.clone(), s.name.clone(), s.icon.clone()))
+                .collect()
+        };
+        pool.retain(|(id, name, _)| {
+            !f.value.contains(id) && !name.is_empty() && (q.is_empty() || name.to_lowercase().contains(&q))
+        });
+        pool.sort_by(|a, b| a.1.to_lowercase().cmp(&b.1.to_lowercase()));
+        pool.truncate(12);
+        let pill = |name: String, icon: String| {
+            Tag::custom(theme::border(), theme::fg(), theme::border())
+                .rounded_full()
+                .gap(px(4.))
+                .px(px(10.))
+                .py(px(2.))
+                .text_size(px(12.))
+                .when(!icon.is_empty(), |t| t.child(icon))
+                .child(name)
+        };
+        let mut out = div().flex().flex_wrap().items_center().gap(px(6.));
+        for (j, (id, name, icon)) in picked.into_iter().enumerate() {
+            let current = f.value.clone();
+            let selector = format!("fobj-{id}");
+            out = out.child(div().debug_selector(move || selector).child(
+                pill(name, icon).child(
+                    x_button(("fobj-x", i * 1000 + j), "Remove value").on_click(cx.listener(
+                        move |this, _, _, cx| {
+                            let next = current.iter().filter(|v| **v != id).cloned().collect();
+                            this.update_filter(i, None, None, Some(next), cx)
+                        },
+                    )),
+                ),
+            ));
+        }
+        out = out.child(div().w(px(160.)).child(field_input(&search)));
+        let mut offers = div().w_full().flex().flex_wrap().gap(px(6.));
+        for (id, name, icon) in pool {
+            let current = f.value.clone();
+            let search = search.clone();
+            offers = offers.child(
+                div()
+                    .id(SharedString::from(format!("fobj-add-{i}-{id}")))
+                    .debug_selector({
+                        let selector = format!("fobj-add-{id}");
+                        move || selector
+                    })
+                    .child(pill(name, icon))
+                    .opacity(0.7)
+                    .cursor_pointer()
+                    .hover(|s| s.opacity(1.))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        let mut next = current.clone();
+                        next.push(id.clone());
+                        search.update(cx, |s, cx| s.set_value("", window, cx));
+                        this.update_filter(i, None, None, Some(next), cx)
+                    })),
+            );
+        }
+        div().flex().flex_col().gap(px(6.)).child(out).child(offers)
     }
 
     /// The condition `<select>`: the current label, a dropdown of the key's catalog.
@@ -1591,19 +1723,21 @@ impl Render for QueryControls {
                     .on_click(cx.listener(|this, _, window, cx| this.toggle_search(window, cx))),
             )
             .child(
-                self.cbtn(
-                    "dv-filter",
-                    Glyph::DvFilter,
-                    filters_on || self.open == Panel::Filter,
-                )
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.open = if this.open == Panel::Filter {
-                        Panel::None
-                    } else {
-                        Panel::Filter
-                    };
-                    cx.notify();
-                })),
+                div().flex_none().debug_selector(|| "dv-filter".into()).child(
+                    self.cbtn(
+                        "dv-filter",
+                        Glyph::DvFilter,
+                        filters_on || self.open == Panel::Filter,
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.open = if this.open == Panel::Filter {
+                            Panel::None
+                        } else {
+                            Panel::Filter
+                        };
+                        cx.notify();
+                    })),
+                ),
             )
             .child(
                 self.cbtn(

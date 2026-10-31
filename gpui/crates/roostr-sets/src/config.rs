@@ -294,7 +294,11 @@ const SELECT_CONDITIONS: &[ConditionDef] = &[
     c("empty", "is empty", false),
     c("notEmpty", "is not empty", false),
 ];
-const PRESENCE_CONDITIONS: &[ConditionDef] = &[
+/// Links: which objects it holds (by id), or whether it holds any.
+const OBJECT_CONDITIONS: &[ConditionDef] = &[
+    c("in", "has any of", true),
+    c("allIn", "has all of", true),
+    c("notIn", "has none of", true),
     c("empty", "is empty", false),
     c("notEmpty", "is not empty", false),
 ];
@@ -351,7 +355,7 @@ pub(crate) fn conditions_for(relations: &[RelationDef], key: &str) -> &'static [
         "number" | "date" => NUMBER_CONDITIONS,
         "tag" | "status" => SELECT_CONDITIONS,
         "checkbox" => CHECKBOX_CONDITIONS,
-        "object" => PRESENCE_CONDITIONS,
+        "object" => OBJECT_CONDITIONS,
         _ => TEXT_CONDITIONS,
     }
 }
@@ -492,5 +496,18 @@ mod tests {
             }]
         );
         assert_eq!(stored_name_width(&fields), Some(260.));
+    }
+
+    /// Filtering on an object property (Agent, Linked projects...) can ask
+    /// which objects it holds - it offered only "is empty" / "is not empty".
+    #[test]
+    fn object_properties_filter_by_which_objects() {
+        let rel = RelationDef {
+            key: "agent".into(),
+            format: "object".into(),
+            ..RelationDef::default()
+        };
+        let ids: Vec<&str> = conditions_for(&[rel], "agent").iter().map(|c| c.id).collect();
+        assert_eq!(ids, ["in", "allIn", "notIn", "empty", "notEmpty"]);
     }
 }
