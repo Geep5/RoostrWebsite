@@ -2,6 +2,9 @@
 //! definition (agents read it) and every object holding a value for it,
 //! each value rendered in the property's own format.
 
+use std::cell::Cell;
+use std::rc::Rc;
+
 use gpui_kit::component::input::{InputEvent, TextareaState};
 use gpui_kit::component::link::Link;
 use gpui_kit::component::tag::Tag;
@@ -26,8 +29,15 @@ pub struct PropertyPanel {
     rows: Vec<QueryRow>,
     loaded: bool,
     loaded_key: Option<String>,
+    /// Where the first row was last frame (window y) and a row's height:
+    /// only the rows in and near the window are built (see `render`).
+    rows_top: Rc<Cell<f32>>,
+    row_h: Rc<Cell<f32>>,
     _subs: Vec<Subscription>,
 }
+
+/// A row's height before one is drawn (14px text, 8px padding, border).
+const ROW_H_GUESS: f32 = 38.;
 
 impl PropertyPanel {
     /// The panel for the relation object `object_id`.
@@ -60,6 +70,8 @@ impl PropertyPanel {
             rows: vec![],
             loaded: false,
             loaded_key: None,
+            rows_top: Rc::new(Cell::new(0.)),
+            row_h: Rc::new(Cell::new(ROW_H_GUESS)),
             _subs: subs,
         }
     }
@@ -313,12 +325,42 @@ impl Render for PropertyPanel {
                 .child(div().w(relative(0.42)).min_w_0().max_w(px(340.)).child(b))
                 .child(div().flex_1().min_w_0().child(c))
         };
-        let mut table = div().mt(px(8.)).flex().flex_col().child(cols(
-            th("Name").into_any_element(),
-            th("Value").into_any_element(),
-            th("Type").into_any_element(),
-        ));
-        for r in &self.rows {
+        // Only the rows in (or a window's height around) the window are
+        // built: a common property lists a thousand objects, and the page
+        // built every one of them on each frame of scrolling. Spacers keep
+        // the list's full height.
+        let row_h = self.row_h.get().max(1.);
+        let (first, last) = {
+            let view_h = f32::from(window.viewport_size().height);
+            let top = self.rows_top.get();
+            let first = (((-view_h - top) / row_h).floor().max(0.) as usize).min(n);
+            let last = ((((2. * view_h - top) / row_h).ceil().max(0.)) as usize).clamp(first, n);
+            (first, last)
+        };
+        let (rows_top, row_h_cell) = (self.rows_top.clone(), self.row_h.clone());
+        let mut table = div()
+            .mt(px(8.))
+            .flex()
+            .flex_col()
+            .on_children_prepainted(move |bounds, _, _| {
+                // Children: the header, the top spacer, the drawn rows, the bottom spacer.
+                // The top spacer starts where row 0 is.
+                if let Some(spacer) = bounds.get(1) {
+                    rows_top.set(f32::from(spacer.top()));
+                }
+                let drawn = bounds.get(2..2 + (last - first)).unwrap_or(&[]);
+                if !drawn.is_empty() {
+                    let h = drawn.iter().map(|b| f32::from(b.size.height)).sum::<f32>();
+                    row_h_cell.set(h / drawn.len() as f32);
+                }
+            })
+            .child(cols(
+                th("Name").into_any_element(),
+                th("Value").into_any_element(),
+                th("Type").into_any_element(),
+            ))
+            .child(div().flex_none().h(px(row_h * first as f32)));
+        for r in &self.rows[first..last] {
             let rid = r.id.clone();
             let name = r
                 .name
@@ -409,6 +451,7 @@ impl Render for PropertyPanel {
                 type_cell.into_any_element(),
             ));
         }
+        table = table.child(div().flex_none().h(px(row_h * (n - last) as f32)));
         panel = panel.child(table);
         panel
     }

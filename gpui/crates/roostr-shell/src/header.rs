@@ -818,8 +818,6 @@ fn more_items(
                 );
             }),
         )
-    } else if matches!(m.kind, MoreKind::Property) {
-        None
     } else {
         let (ws, target) = (workspace.clone(), id.clone());
         Some(
@@ -846,7 +844,7 @@ fn more_items(
         None => menu,
     };
     match &m.kind {
-        MoreKind::Property => menu.separator().item(if m.blocker.is_empty() {
+        MoreKind::Property => menu.item(copy_id).separator().item(if m.blocker.is_empty() {
             let ws = workspace.clone();
             danger_item("Delete property").on_click(move |_, window, cx| {
                 let rel = Store::global(cx)
