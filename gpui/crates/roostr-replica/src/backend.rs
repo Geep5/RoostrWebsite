@@ -360,6 +360,34 @@ fn space_of_state(o: &Json) -> String {
     }
 }
 
+/// An object as the engine's query cache holds it: queries read fields and
+/// text blocks only (filters, sorts, full-text search, the snippet), so
+/// conversations, files and embeds stay out. A whole vault's states (a phone
+/// holding ~7,600 objects, 60 MB of JSON - most of it agent and chat
+/// transcripts) passed the cache's memory limit and the vault would not
+/// open; text-only it is ~25 MB.
+fn query_state(o: &Json) -> Json {
+    let Json::Object(map) = o else { return o.clone() };
+    // Copies only what the cache keeps: transcripts are most of a vault.
+    Json::Object(
+        map.iter()
+            .map(|(k, v)| match (k.as_str(), v) {
+                ("blocks", Json::Array(blocks)) => (
+                    k.clone(),
+                    Json::Array(
+                        blocks
+                            .iter()
+                            .filter(|b| b.get("content").is_some_and(|c| c.get("text").is_some()))
+                            .cloned()
+                            .collect(),
+                    ),
+                ),
+                _ => (k.clone(), v.clone()),
+            })
+            .collect(),
+    )
+}
+
 fn heads(o: &Json) -> Vec<&str> {
     o["heads"]
         .as_array()
@@ -2310,7 +2338,7 @@ impl Inner {
             // Every state as JSON with a reset (a refused corpus must not
             // wedge querying either).
             let states = self.states_snapshot();
-            let upserts: Vec<Json> = states.iter().map(|s| (**s).clone()).collect();
+            let upserts: Vec<Json> = states.iter().map(|s| query_state(s)).collect();
             let result = self
                 .engine
                 .query(QueryUpdate {
@@ -2335,7 +2363,7 @@ impl Inner {
                 .query_upserted
                 .iter()
                 .filter_map(|id| st.states.get(id))
-                .map(|s| (**s).clone())
+                .map(|s| query_state(s))
                 .collect();
             let removed: Vec<String> = st
                 .query_removed
