@@ -85,15 +85,25 @@ impl Backend for Vault {
         ready(Ok(vec![Space { id: SPACE.into(), name: "Personal".into(), created_at: 1, ..Space::default() }]))
     }
     fn relations(&self) -> BoxFuture<anyhow::Result<Vec<RelationDef>>> {
-        ready(Ok(vec![RelationDef {
-            id: "rel-agent".into(),
-            key: "agent".into(),
-            format: "object".into(),
-            name: "Agent".into(),
-            object_types: Some(vec!["type-agent".into()]),
-            space: Some(SPACE.into()),
-            ..RelationDef::default()
-        }]))
+        ready(Ok(vec![
+            RelationDef {
+                id: "rel-agent".into(),
+                key: "agent".into(),
+                format: "object".into(),
+                name: "Agent".into(),
+                object_types: Some(vec!["type-agent".into()]),
+                space: Some(SPACE.into()),
+                ..RelationDef::default()
+            },
+            RelationDef {
+                id: "rel-repeat-instructions".into(),
+                key: "repeat_instructions".into(),
+                format: "longtext".into(),
+                name: "Repeat instructions".into(),
+                space: Some(SPACE.into()),
+                ..RelationDef::default()
+            },
+        ]))
     }
     fn query(&self, body: &Json) -> BoxFuture<anyhow::Result<QueryResult>> {
         let text = body.to_string();
@@ -189,4 +199,21 @@ fn a_query_filters_by_the_agent_an_object_has(cx: &mut TestAppContext) {
     // A query repeats like a task: its Properties offer Repeat (its run
     // hands the agent what it holds).
     assert!(cx.debug_bounds("prop-row-__repeat__").is_some(), "Repeat on a query");
+
+    // Repeat instructions - what each run asks of the agent - show once it
+    // repeats, right under Repeat.
+    assert!(cx.debug_bounds("prop-row-repeat_instructions").is_none(), "not before it repeats");
+    let rule: Value = serde_json::from_value(json!({"mapValue": {"entries": {
+        "freq": {"stringValue": "day"}, "interval": {"intValue": 1}, "anchor": {"intValue": 0}, "next": {"intValue": 4_102_444_800_000_i64},
+        "times": {"valuesValue": {"items": [{"intValue": 540}]}}
+    }}}))
+    .unwrap();
+    if let Some(q) = backend.objects.lock().iter_mut().find(|o| o.id == "q1") {
+        q.fields.insert("repeat".into(), rule);
+    }
+    cx.update(|_, cx| roostr_core::Store::global(cx).update(cx, |s, cx| s.reload_object("q1", cx)));
+    settle(cx);
+    let repeat = cx.debug_bounds("prop-row-__repeat__").expect("Repeat");
+    let instructions = cx.debug_bounds("prop-row-repeat_instructions").expect("Repeat instructions once it repeats");
+    assert!(instructions.top() >= repeat.bottom() && instructions.top() - repeat.bottom() < px(40.), "{instructions:?} under {repeat:?}");
 }

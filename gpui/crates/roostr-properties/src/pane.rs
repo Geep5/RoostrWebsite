@@ -110,6 +110,7 @@ const HOW_KEYS: &[&str] = &[
     "chat_color",
     "assignee",
     "check_first",
+    "repeat_instructions",
     "error",
     "capability",
 ];
@@ -729,6 +730,9 @@ impl PropertiesPane {
                     "served_by" => machine_bound || has(k),
                     "credentials" | "skills" | "tools" => has(k),
                     "check_first" => repeating || has(k),
+                    // What each run asks of the agent: wherever runs happen
+                    // (a Repeat, or pushes into a Check first).
+                    "repeat_instructions" => repeating || has("check_first") || has(k),
                     "agent" => !AGENTLESS_TYPES.contains(&type_key) || has(k),
                     "model" => type_key == "agent" || has(k),
                     _ => !r.hidden && (has(k) || self.view_keys.contains(k)),
@@ -1125,6 +1129,7 @@ impl Render for PropertiesPane {
         };
         let assignee = take(&mut how, "assignee");
         let check_first = take(&mut how, "check_first");
+        let instructions = take(&mut how, "repeat_instructions");
         let error = take(&mut how, "error");
         if can_repeat {
             how.push(RelationDef {
@@ -1133,6 +1138,8 @@ impl Render for PropertiesPane {
                 ..Default::default()
             });
         }
+        // Repeat instructions sit under Repeat: what each run should do.
+        how.extend(instructions);
         how.extend(assignee);
         how.extend(check_first);
         how.extend(error);
@@ -1305,6 +1312,7 @@ impl PropertiesPane {
             "skills" => "No skills",
             "tools" => "No tools",
             "check_first" => "None",
+            "repeat_instructions" => "What each run should do",
             _ => match rel.format.as_str() {
                 "status" => "Select option",
                 "tag" => "Select options",
