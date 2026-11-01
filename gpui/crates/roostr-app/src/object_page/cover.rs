@@ -48,7 +48,13 @@ pub(super) struct CoverUi {
     ask_error: String,
     /// Where the banner was painted and its image's size, for dragging.
     geometry: Rc<Cell<Geometry>>,
+    /// Where the button that opens the cover menu (Cover / Add cover) was
+    /// painted: the menu opens under it, and a press on it toggles the menu.
+    trigger: Rc<Cell<Bounds<Pixels>>>,
 }
+
+/// Width of the cover menu (Anytype's `menuBlockCover`).
+const MENU_W: f32 = 408.;
 
 #[derive(Clone, Copy, Default)]
 struct Geometry {
@@ -139,6 +145,16 @@ fn tagged(id: &'static str, button: impl IntoElement) -> Div {
     div().debug_selector(move || id.into()).child(button)
 }
 
+/// The button opening the cover menu, recording where it was painted.
+fn trigger(id: &'static str, button: impl IntoElement, at: &Rc<Cell<Bounds<Pixels>>>) -> Div {
+    let at = at.clone();
+    tagged(id, button).relative().child(
+        canvas(move |bounds, _, _| at.set(bounds), |_, _, _, _| {})
+            .absolute()
+            .inset_0(),
+    )
+}
+
 impl ObjectPage {
     /// Bring the banner in line with the page's cover.
     pub(super) fn sync_cover(&mut self, object: &Object, cx: &mut Context<Self>) {
@@ -176,6 +192,15 @@ impl ObjectPage {
     fn open_chooser(&mut self, cx: &mut Context<Self>) {
         self.cover.chooser = Some(Chooser::default());
         cx.notify();
+    }
+
+    /// The Cover / Add cover button: opens the menu, or closes it when open.
+    fn toggle_chooser(&mut self, cx: &mut Context<Self>) {
+        if self.cover.chooser.is_some() {
+            self.close_chooser(cx);
+        } else {
+            self.open_chooser(cx);
+        }
     }
 
     fn pick_cover(&mut self, cx: &mut Context<Self>) {
@@ -403,7 +428,7 @@ impl ObjectPage {
         .inset_0();
         let actions = (!mobile
             && !generating
-            && self.cover.banner_hovered
+            && (self.cover.banner_hovered || self.cover.chooser.is_some())
             && self.cover.reposition.is_none())
             .then(|| {
                 div()
@@ -413,10 +438,11 @@ impl ObjectPage {
                     .flex()
                     .gap(px(6.))
                     // One Cover button, as Anytype: everything else is in its menu.
-                    .child(tagged(
+                    .child(trigger(
                         "cover-change",
                         pill("cover-change", "Cover", cx)
-                            .on_click(cx.listener(|this, _, _, cx| this.open_chooser(cx))),
+                            .on_click(cx.listener(|this, _, _, cx| this.toggle_chooser(cx))),
+                        &self.cover.trigger,
                     ))
             });
         let spinner = generating.then(|| {
@@ -558,16 +584,15 @@ impl ObjectPage {
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let offer = !mobile
-            && self.cover.head_hovered
+            && (self.cover.head_hovered || self.cover.chooser.is_some())
             && self.cover.banner.is_none()
-            && self.cover.chooser.is_none()
             && cover::can_have_cover(object);
         offer.then(|| {
             div()
                 .absolute()
                 .top(px(4.))
                 .right_0()
-                .child(tagged(
+                .child(trigger(
                     "cover-add",
                     Button::new("cover-add")
                         .ghost()
@@ -584,31 +609,51 @@ impl ObjectPage {
                                 .child(Icon::new(Glyph::Plus).size(px(14.)))
                                 .child("Add cover"),
                         )
-                        .on_click(cx.listener(|this, _, _, cx| this.open_chooser(cx))),
+                        .on_click(cx.listener(|this, _, _, cx| this.toggle_chooser(cx))),
+                    &self.cover.trigger,
                 ))
                 .into_any_element()
         })
     }
 
-    /// The chooser, Generate's prompt box, and why the last Generate failed,
-    /// under the title.
+    /// The cover menu and why the last Generate failed. On desktop the menu
+    /// floats under the button that opened it (as Anytype's, centred on it);
+    /// on the phone, opened from the ⋯ menu, it sits under the title.
     pub(super) fn render_cover_cards(
         &mut self,
         object: &Object,
         mobile: bool,
         cx: &mut Context<Self>,
     ) -> Div {
+        let at = self.cover.trigger.get();
+        let float = !mobile && at.size.width > px(0.);
+        let menu = self.render_chooser(cover::cover_file(&object.fields).is_some(), float, cx);
+        let (floating, inline) = if float { (menu, None) } else { (None, menu) };
         div()
             .flex()
             .flex_col()
             .gap(px(8.))
             .when(mobile, |d| d.px(px(16.)))
-            .children(self.render_chooser(cover::cover_file(&object.fields).is_some(), cx))
+            .children(inline)
+            .children(floating.map(|menu| {
+                deferred(
+                    anchored()
+                        .position(point(
+                            at.center().x - px(MENU_W / 2.),
+                            at.bottom() + px(6.),
+                        ))
+                        .snap_to_window_with_margin(px(8.))
+                        .child(menu),
+                )
+                .with_priority(3)
+            }))
             .children(self.render_failure(object, cx))
     }
 
     fn close_chooser(&mut self, cx: &mut Context<Self>) {
         self.cover.chooser = None;
+        // Repainted while shown; a stale spot must not swallow a later press.
+        self.cover.trigger.set(Bounds::default());
         self.cover.prompt = None;
         cx.notify();
     }
@@ -618,7 +663,7 @@ impl ObjectPage {
     /// the tab's body. Upload: the large drop-zone tile ("Choose Image") and
     /// the secondary line under it; Generate: the prompt and its buttons.
     /// A press outside closes it, as a menu.
-    fn render_chooser(&self, has_cover: bool, cx: &mut Context<Self>) -> Option<Div> {
+    fn render_chooser(&self, has_cover: bool, float: bool, cx: &mut Context<Self>) -> Option<Div> {
         let chooser = self.cover.chooser.as_ref()?;
         let tab = chooser.tab;
         let busy = chooser.adding;
@@ -811,9 +856,11 @@ impl ObjectPage {
         Some(
             div()
                 .debug_selector(|| "cover-chooser".into())
-                .w(px(408.))
+                .w(px(MENU_W))
                 .max_w_full()
-                .mb(px(12.))
+                .when(!float, |d| d.mb(px(12.)))
+                // Floating over the page: presses on it must not reach what is under it.
+                .occlude()
                 .pt(px(10.))
                 .flex()
                 .flex_col()
@@ -822,8 +869,10 @@ impl ObjectPage {
                 .border_color(theme::border())
                 .rounded(theme::radius::menu())
                 .shadow(ui::menu_shadow())
-                .on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                    if !this.cover.chooser.as_ref().is_some_and(|c| c.adding) {
+                .on_mouse_down_out(cx.listener(|this, e: &MouseDownEvent, _, cx| {
+                    // A press on the button that opened it is its toggle's.
+                    let on_trigger = this.cover.trigger.get().contains(&e.position);
+                    if !on_trigger && !this.cover.chooser.as_ref().is_some_and(|c| c.adding) {
                         this.close_chooser(cx)
                     }
                 }))

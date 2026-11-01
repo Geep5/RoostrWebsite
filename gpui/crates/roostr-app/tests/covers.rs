@@ -437,6 +437,16 @@ fn on_a_desktop_page(cx: &mut TestAppContext) {
     assert!(!shown(cx, "cover-reposition") && !shown(cx, "cover-remove"));
     tap(cx, "cover-change");
     assert!(shown(cx, "cover-chooser") && shown(cx, "cover-reposition") && shown(cx, "cover-remove"));
+    // The menu floats under the button, centred on it; pressing the button
+    // again closes it (not close-then-reopen), and once more opens it.
+    let button = cx.debug_bounds("cover-change").unwrap();
+    let menu = cx.debug_bounds("cover-chooser").unwrap();
+    assert!(menu.top() >= button.bottom() && menu.top() - button.bottom() < px(12.), "{menu:?} under {button:?}");
+    assert!(menu.left() <= button.left() && menu.right() >= button.right(), "{menu:?} spans {button:?}");
+    tap(cx, "cover-change");
+    assert!(!shown(cx, "cover-chooser"), "a second press closes it");
+    tap(cx, "cover-change");
+    assert!(shown(cx, "cover-chooser"));
     tap(cx, "cover-reposition");
     assert!(!shown(cx, "cover-chooser"));
     assert!(shown(cx, "cover-save") && !shown(cx, "cover-remove"));
