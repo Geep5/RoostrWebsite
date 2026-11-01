@@ -566,6 +566,11 @@ fn in_a_phones_more_menu(cx: &mut TestAppContext) {
     settle(cx);
     let banner = cx.debug_bounds("object-cover").expect("the cover");
     assert_eq!(banner.size, size(px(390.), px(140.)));
+    // No hover on a phone: a tap on the cover opens its menu, another closes it.
+    tap(cx, "object-cover");
+    assert!(shown(cx, "cover-chooser") && shown(cx, "cover-remove"));
+    tap(cx, "object-cover");
+    assert!(!shown(cx, "cover-chooser"), "a second tap closes it");
     tap(cx, "m-more");
     tap(cx, "more-cover");
     tap(cx, "cover-reposition");

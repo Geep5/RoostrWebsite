@@ -440,8 +440,11 @@ impl ObjectPage {
                     // One Cover button, as Anytype: everything else is in its menu.
                     .child(trigger(
                         "cover-change",
-                        pill("cover-change", "Cover", cx)
-                            .on_click(cx.listener(|this, _, _, cx| this.toggle_chooser(cx))),
+                        pill("cover-change", "Cover", cx).on_click(cx.listener(|this, _, _, cx| {
+                            // Not the banner's own click as well (it toggles too).
+                            cx.stop_propagation();
+                            this.toggle_chooser(cx)
+                        })),
                         &self.cover.trigger,
                     ))
             });
@@ -507,6 +510,12 @@ impl ObjectPage {
             .rounded(radius)
             .bg(theme::hover())
             .when(mobile, |d| d.mt(px(-24.)))
+            // A tap on the cover opens its menu: the phone has no hover to
+            // show the Cover button (and a press on it closes the menu).
+            .when(!generating && self.cover.reposition.is_none(), |d| {
+                d.cursor_pointer()
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle_chooser(cx)))
+            })
             .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
                 this.cover.banner_hovered = *hovered;
                 cx.notify();
@@ -871,7 +880,9 @@ impl ObjectPage {
                 .shadow(ui::menu_shadow())
                 .on_mouse_down_out(cx.listener(|this, e: &MouseDownEvent, _, cx| {
                     // A press on the button that opened it is its toggle's.
-                    let on_trigger = this.cover.trigger.get().contains(&e.position);
+                    let on_trigger = this.cover.trigger.get().contains(&e.position)
+                        || (this.cover.banner.is_some()
+                            && this.cover.geometry.get().bounds.contains(&e.position));
                     if !on_trigger && !this.cover.chooser.as_ref().is_some_and(|c| c.adding) {
                         this.close_chooser(cx)
                     }
