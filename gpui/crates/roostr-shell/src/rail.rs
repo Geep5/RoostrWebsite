@@ -289,7 +289,7 @@ impl Workspace {
                 .on_click(cx.listener({
                     let id = id.clone();
                     move |_, _, _, cx| {
-                        roostr_core::nav::open_space(&id, cx);
+                        roostr_core::nav::Navigator::global(cx).update(cx, |nav, cx| nav.use_space(&id, cx));
                     }
                 }))
                 .on_drag(payload, |payload, _, _, cx| {

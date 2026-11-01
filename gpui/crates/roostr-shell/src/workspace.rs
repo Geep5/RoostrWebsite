@@ -171,6 +171,9 @@ pub struct Workspace {
     // Mobile shell (`isMobile`).
     /// A space card was tapped open: its home shows instead of the Spaces list.
     pub(crate) mobile_space_open: bool,
+    /// Phone: a space was just picked from the Spaces list - its top pin
+    /// opens, not its pinned-cards home ([`Self::mobile_space_changed`]).
+    pub(crate) entering_space: bool,
     /// `mCollapsed`: folded sections of the space home (pinned cards fold on the object).
     pub(crate) mobile_collapsed: HashMap<String, bool>,
     /// The space card held up for a reorder (`spaceLiftId`).
@@ -301,6 +304,7 @@ impl Workspace {
             anchors: Rc::default(),
             tab_focus: HashMap::new(),
             mobile_space_open: false,
+            entering_space: false,
             mobile_collapsed: HashMap::new(),
             space_lift: None,
             card_bounds: Rc::default(),
@@ -1388,6 +1392,21 @@ impl Render for Workspace {
             return root
                 .child(self.render_mobile(window, cx))
                 .children(self.render_overlays(window, cx));
+        }
+        // Nothing open (a new tab, the last one closed, a space with no saved
+        // tabs, the open object binned): the space's top pin opens instead of
+        // its empty home. The home still shows in a space with no pins.
+        if route == Route::Home {
+            let space = Navigator::global(cx).read(cx).space().to_string();
+            if let Some(pin) = roostr_core::nav::top_pin(&space, cx) {
+                cx.defer(move |cx| {
+                    Navigator::global(cx).update(cx, |nav, cx| {
+                        if *nav.route() == Route::Home && nav.space() == space {
+                            nav.replace(Route::Object(pin), cx);
+                        }
+                    })
+                });
+            }
         }
         if matches!(route, Route::Site(_) | Route::Chat(_)) {
             let page = self.page(&route, window, cx);

@@ -181,6 +181,11 @@ fn phone_width_runs_the_mobile_shell(cx: &mut TestAppContext) {
         cx.add_window_view(|window, cx| Workspace::new(roostr_app::pages(), window, cx));
     cx.simulate_resize(size(px(390.), px(844.)));
     cx.run_until_parked();
+    // The window's first frames were desktop-sized: with nothing open, the
+    // desktop opened Personal's top pin. Back to nothing open.
+    assert_eq!(cx.update(|_, cx| Navigator::global(cx).read(cx).route().clone()), Route::Object("page-1".into()));
+    cx.update(|_, cx| navigate(Route::Home, cx));
+    cx.run_until_parked();
 
     // Screen 1: the Spaces list, in creation order.
     assert!(shown(cx, "m-shell") && !shown(cx, "desk"));
@@ -213,8 +218,13 @@ fn phone_width_runs_the_mobile_shell(cx: &mut TestAppContext) {
         "a lift is a reorder, never navigation"
     );
 
-    // Screen 2: a tap opens the space home; ＋ toggles the New menu.
+    // A tap enters the space at its top pin; Back shows the space home,
+    // its pinned cards. ＋ toggles the New menu.
     tap(cx, "m-card-sp-1");
+    assert_eq!(cx.update(|_, cx| Navigator::global(cx).read(cx).route().clone()), Route::Object("page-1".into()));
+    assert!(shown(cx, "m-back") && !shown(cx, "m-space-home"));
+    tap(cx, "m-back");
+    settle_motion(cx);
     assert!(shown(cx, "m-space-home"));
     assert_eq!(
         cx.update(|_, cx| Navigator::global(cx).read(cx).space().to_string()),

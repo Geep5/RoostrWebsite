@@ -283,10 +283,21 @@ fn a_click_while_the_remembered_space_prepares_stays_where_it_was_made(cx: &mut 
     rail("space:sp-matcherino", cx);
     assert_eq!(space(cx), MATCHERINO);
     assert_eq!(route(cx), Route::Object(ALL_AGENTS.into()), "last opened");
-    // ...and one with nothing open opens its first pinned object.
+    // ...and nothing open - the last tab closed, a new tab - opens its first
+    // pinned object (a section pin with no object is skipped), not its home.
     cx.update(|_, cx| Navigator::global(cx).update(cx, |nav, cx| nav.close(0, cx)));
-    assert_eq!(route(cx), Route::Home);
+    settle(cx);
+    assert_eq!(route(cx), Route::Object(PLAN.into()), "the last tab closed: the first pin");
+    cx.update(|_, cx| roostr_core::nav::open_tab(Route::Home, false, cx));
+    settle(cx);
+    assert_eq!(route(cx), Route::Object(PLAN.into()), "a new tab: the first pin");
+    let back = cx.update(|_, cx| Navigator::global(cx).read(cx).can_go_back());
+    cx.update(|_, cx| Navigator::global(cx).update(cx, |nav, cx| nav.back(cx)));
+    settle(cx);
+    assert!(back && route(cx) != Route::Home, "Back never lands on the home it replaced");
+    // A space with nothing pinned keeps its home.
     rail("space:sp-viv", cx);
-    rail("space:sp-matcherino", cx);
-    assert_eq!(route(cx), Route::Object(PLAN.into()), "the first pin");
+    cx.update(|_, cx| roostr_core::nav::open_tab(Route::Home, false, cx));
+    settle(cx);
+    assert_eq!(route(cx), Route::Home, "no pins: the space home");
 }

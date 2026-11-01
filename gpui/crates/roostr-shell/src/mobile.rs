@@ -1039,8 +1039,17 @@ impl Workspace {
                         if this.space_lift.is_some() {
                             return;
                         }
-                        Navigator::global(cx).update(cx, |nav, cx| nav.use_space(&id, cx));
+                        // Entering a space opens its top pin (its pinned
+                        // cards are one Back away). A new space's SpaceChanged
+                        // does it; the space already current does it here.
+                        let nav = Navigator::global(cx);
+                        let same = nav.read(cx).space() == id;
+                        this.entering_space = !same;
+                        nav.update(cx, |nav, cx| nav.use_space(&id, cx));
                         this.mobile_space_open = true;
+                        if same {
+                            navigate(Self::space_entry(&id, cx), cx);
+                        }
                         cx.notify();
                     })),
             );
@@ -1730,10 +1739,21 @@ impl Workspace {
         if !layout::is_mobile(window) {
             return;
         }
+        let entering = std::mem::take(&mut self.entering_space);
         let target = match &self.shown_route {
             Route::Graph { .. } => self.shown_route.clone(),
+            _ if entering => {
+                let space = Navigator::global(cx).read(cx).space().to_string();
+                Self::space_entry(&space, cx)
+            }
             _ => Route::Home,
         };
         navigate(target, cx);
+    }
+
+    /// Where entering `space` from the Spaces list lands: its top pin, or
+    /// its home when nothing is pinned.
+    fn space_entry(space: &str, cx: &App) -> Route {
+        roostr_core::nav::top_pin(space, cx).map_or(Route::Home, Route::Object)
     }
 }

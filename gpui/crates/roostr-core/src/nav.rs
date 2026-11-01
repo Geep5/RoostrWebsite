@@ -254,6 +254,18 @@ impl Navigator {
         cx.notify();
     }
 
+    /// Show `route` in the active tab in place of the current route, in
+    /// history too: Back does not return to what it replaced.
+    pub fn replace(&mut self, route: Route, cx: &mut Context<Self>) {
+        if *self.route() == route {
+            return;
+        }
+        if let Some(entry) = self.history.get_mut(self.history_ix) {
+            *entry = route.clone();
+        }
+        self.show(route, cx);
+    }
+
     pub fn back(&mut self, cx: &mut Context<Self>) {
         if self.can_go_back() {
             self.history_ix -= 1;
@@ -421,27 +433,17 @@ pub fn open_tab(route: Route, background: bool, cx: &mut App) {
     Navigator::global(cx).update(cx, |nav, cx| nav.open_tab(route, background, cx));
 }
 
-/// A space picked in the rail: its last-opened page, or - when it has none
-/// yet (the space home) - its first pinned object. Pinned sections without
-/// an object (`any-…`: All Objects, Favorites) are skipped.
-pub fn open_space(space: &str, cx: &mut App) {
-    Navigator::global(cx).update(cx, |nav, cx| nav.use_space(space, cx));
-    if *Navigator::global(cx).read(cx).route() != Route::Home {
-        return;
-    }
-    let first = {
-        let store = crate::Store::global(cx).read(cx);
-        store.space(space).and_then(|s| {
-            let ids = s.pinned_ids.iter().filter(|id| !id.starts_with("any-"));
-            ids.clone()
-                .find(|id| store.summary(id).is_some())
-                .or_else(|| ids.clone().next())
-                .cloned()
-        })
-    };
-    if let Some(id) = first {
-        navigate(Route::Object(id), cx);
-    }
+/// A space's top pinned object, as its sidebar lists them: what it shows
+/// when nothing is open. Pins with no object here (a section such as All
+/// Objects, or one not synced yet) are skipped, as the sidebar skips them.
+pub fn top_pin(space: &str, cx: &App) -> Option<String> {
+    let store = crate::Store::global(cx).read(cx);
+    store
+        .space(space)?
+        .pinned_ids
+        .iter()
+        .find(|id| store.summary(id).is_some())
+        .cloned()
 }
 
 #[cfg(test)]
