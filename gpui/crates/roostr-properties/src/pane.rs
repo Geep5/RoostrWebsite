@@ -52,7 +52,6 @@ const AGENTLESS_TYPES: &[&str] = &[
     "agent",
     "channel",
     "relation",
-    "type",
     "skill",
     "tool",
     "credential",
@@ -129,12 +128,11 @@ const SYSTEM_KEYS: &[&str] = &[
     "modifiedDate",
 ];
 const TOOL_KEYS: &[&str] = &["tool_inputs", "tool_builtin", "tool_version"];
-/// Types with no Repeat. Queries and collections repeat: their run hands
-/// the agent what they hold.
+/// Types with no Repeat. Queries, collections and types repeat: their run
+/// hands the agent what they hold.
 const NO_REPEAT: &[&str] = &[
     "channel",
     "chat",
-    "type",
     "relation",
     "template",
     "agent",

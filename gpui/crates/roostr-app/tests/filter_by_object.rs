@@ -263,4 +263,10 @@ fn a_query_filters_by_the_agent_an_object_has(cx: &mut TestAppContext) {
     let saved = backend.objects.lock().iter().find(|o| o.id == "q1").and_then(|o| o.fields.get("repeat_instructions").cloned());
     assert_eq!(saved.and_then(|v| v.string_value).as_deref(), Some("Tell Grant the most important task"));
     assert!(cx.debug_bounds("pop-done").is_none(), "and closes the box");
+
+    // A type has agents and a Repeat too (its run hands the agent everything of the type).
+    cx.update(|_, cx| roostr_core::nav::navigate(Route::Object("type-task".into()), cx));
+    settle(cx);
+    assert!(cx.debug_bounds("prop-row-agent").is_some(), "Agent on a type");
+    assert!(cx.debug_bounds("prop-row-__repeat__").is_some(), "Repeat on a type");
 }
