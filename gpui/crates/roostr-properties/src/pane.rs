@@ -1074,7 +1074,14 @@ fn chip(tone: Hsla, outline: Hsla) -> Tag {
 /// A chip's interactive shell (`Tag` has no id, click or tooltip): it keeps
 /// the chip's element id for clicks, tooltips and tests.
 fn chip_hit(id: SharedString, chip: Tag) -> Stateful<Div> {
-    div().id(id).flex().min_w_0().max_w_full().child(chip)
+    let selector = id.clone();
+    div()
+        .id(id)
+        .debug_selector(move || selector.to_string())
+        .flex()
+        .min_w_0()
+        .max_w_full()
+        .child(chip)
 }
 
 /// A chip's outline: the quiet border, tinted to muted by `hover` (0..1).
@@ -1633,7 +1640,11 @@ impl PropertiesPane {
                                 .child(div().text_size(px(12.)).flex_none().child(icon))
                                 .child(name),
                             )
-                            .tooltip(tip(title)),
+                            .tooltip(tip(title))
+                            // The chip opens the agent; the row around it edits the list.
+                            .when(a.is_some(), |c| {
+                                c.cursor_pointer().on_click(open_object(id.clone()))
+                            }),
                         )
                         .when(editable, |d| {
                             d.child(chip_rm(
@@ -1711,7 +1722,9 @@ impl PropertiesPane {
                                 ))
                                 .child(name),
                             )
-                            .tooltip(tip(title)),
+                            .tooltip(tip(title))
+                            .cursor_pointer()
+                            .on_click(open_object(id.clone())),
                         )
                         .when(editable, |d| {
                             d.child(chip_rm(

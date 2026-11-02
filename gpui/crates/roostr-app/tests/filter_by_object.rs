@@ -269,4 +269,25 @@ fn a_query_filters_by_the_agent_an_object_has(cx: &mut TestAppContext) {
     settle(cx);
     assert!(cx.debug_bounds("prop-row-agent").is_some(), "Agent on a type");
     assert!(cx.debug_bounds("prop-row-__repeat__").is_some(), "Repeat on a type");
+
+    // An agent chip opens the agent; the row around it opens the list to add more.
+    cx.update(|_, cx| roostr_core::nav::navigate(Route::Object("q1".into()), cx));
+    settle(cx);
+    let row = cx.debug_bounds("prop-row-agent").expect("Agent row");
+    cx.simulate_click(gpui::point(row.right() - px(8.), row.center().y), Modifiers::none());
+    settle(cx);
+    assert!(cx.debug_bounds("prop-pop").is_some(), "the row opens the editor");
+    cx.simulate_keystrokes("escape");
+    settle(cx);
+    cx.update(|_, cx| roostr_core::nav::navigate(Route::Object("q1".into()), cx));
+    settle(cx);
+    if cx.debug_bounds("prop-pop").is_some() {
+        click(cx, "prop-row-agent");
+    }
+    click(cx, "agentchip-agent-1");
+    assert_eq!(
+        cx.update(|_, cx| roostr_core::nav::Navigator::global(cx).read(cx).route().clone()),
+        Route::Object("agent-1".into()),
+        "the chip opens its agent"
+    );
 }
