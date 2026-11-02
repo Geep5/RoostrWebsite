@@ -1,4 +1,4 @@
-# Zed's `gpui_web` as published in gpui-pre-web 0.3.10, vendored (and patched
+# Zed's `gpui_web` as published in gpui-pre-web 0.3.11, vendored (and patched
 # in through the workspace's [patch.crates-io]) for two changes, marked
 # `roostr:` in src/events.rs:
 # - A touch ends hover: GPUI keeps a lifted finger's position as the pointer,
@@ -16,7 +16,7 @@
 [package]
 edition = "2024"
 name = "gpui-pre-web"
-version = "0.3.10"
+version = "0.3.11"
 build = false
 publish = false
 autolib = false
@@ -24,7 +24,7 @@ autobins = false
 autoexamples = false
 autotests = false
 autobenches = false
-description = "Zed's `gpui_web` crate (gpui-pre snapshot of zed@08cbb88)"
+description = "Zed's `gpui_web` crate (gpui-pre snapshot of zed@f816e1f)"
 readme = false
 license = "Apache-2.0"
 repository = "https://github.com/zed-industries/zed"
@@ -36,7 +36,7 @@ ignored = ["scheduler"]
 [package.metadata.gpui-pre]
 zed-crate = "gpui_web"
 zed-version = "0.1.0"
-zed-rev = "08cbb88a152c3751a43e853425a70e9f631a5918"
+zed-rev = "f816e1f9263e3a8ef63c4baaa02e1441ce1c6038"
 
 [features]
 default = ["multithreaded"]
@@ -73,16 +73,16 @@ version = "0.1.7"
 version = "0.3.34"
 
 [target.'cfg(target_family = "wasm")'.dependencies.gpui]
-version = "=0.3.10"
+version = "=0.3.11"
 default-features = false
 package = "gpui-pre"
 
 [target.'cfg(target_family = "wasm")'.dependencies.gpui_wgpu]
-version = "=0.3.10"
+version = "=0.3.11"
 package = "gpui-pre-wgpu"
 
 [target.'cfg(target_family = "wasm")'.dependencies.http_client]
-version = "=0.3.10"
+version = "=0.3.11"
 package = "gpui-pre-http-client"
 
 [target.'cfg(target_family = "wasm")'.dependencies.js-sys]
@@ -101,7 +101,7 @@ features = ["nightly"]
 version = "0.6"
 
 [target.'cfg(target_family = "wasm")'.dependencies.scheduler]
-version = "=0.3.10"
+version = "=0.3.11"
 package = "gpui-pre-scheduler"
 
 [target.'cfg(target_family = "wasm")'.dependencies.smallvec]
