@@ -102,13 +102,22 @@ impl PropertyValue {
     }
 }
 
+actions!(property_value, [CommitValue]);
+
 impl RenderOnce for PropertyValue {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let state = window.use_keyed_state(self.id.clone(), cx, |window, cx| {
             ValueEditor::new(window, cx)
         });
         state.update(cx, |s, cx| s.set_props(self, window, cx));
-        div().w_full().min_w_0().child(state)
+        let commit = state.clone();
+        div()
+            .w_full()
+            .min_w_0()
+            .on_action(move |_: &CommitValue, window, cx| {
+                commit.update(cx, |s, cx| s.commit_text(window, cx))
+            })
+            .child(state)
     }
 }
 

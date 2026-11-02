@@ -870,6 +870,17 @@ impl PropertiesPane {
         cx.notify();
     }
 
+    /// Close the open value box, saving what is typed (a text box otherwise
+    /// saves only when it loses focus): the box being edited commits, then
+    /// the box closes.
+    fn finish_editing(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        window.dispatch_action(Box::new(crate::value::CommitValue), cx);
+        cx.defer_in(window, |this, _, cx| {
+            this.editing = None;
+            cx.notify();
+        });
+    }
+
     fn remove_prop(&mut self, key: &str, cx: &mut Context<Self>) {
         self.editing = None;
         api::note::delete_field(&self.object_id, key, cx).detach_and_log_err(cx);
@@ -1222,11 +1233,8 @@ impl Render for PropertiesPane {
         }
         if self.editing.is_some() {
             let this = cx.entity().downgrade();
-            root = root.child(backdrop("pane-backdrop", move |_, cx| {
-                let _ = this.update(cx, |this, cx| {
-                    this.editing = None;
-                    cx.notify();
-                });
+            root = root.child(backdrop("pane-backdrop", move |window, cx| {
+                let _ = this.update(cx, |this, cx| this.finish_editing(window, cx));
             }));
         }
         if !locked {
@@ -2130,9 +2138,20 @@ impl PropertiesPane {
                 ),
             );
         }
+        // Multi-line text: Enter is a new line, so Done saves and closes.
+        if rel.format == "longtext" || key == "error" {
+            let (g_done, done) = pop_rm("done", "Done".into(), theme::accent());
+            actions = actions.child(
+                div().debug_selector(|| "pop-done".into()).group(g_done).child(
+                    done.tooltip("Save and close")
+                        .on_click(cx.listener(|this, _, window, cx| this.finish_editing(window, cx))),
+                ),
+            );
+        }
         head = head.child(actions);
         let mut pop = div()
             .id("pop")
+            .debug_selector(|| "prop-pop".into())
             .w(self.row_width.get())
             .flex()
             .flex_col()

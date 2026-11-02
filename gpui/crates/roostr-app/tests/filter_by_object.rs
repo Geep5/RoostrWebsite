@@ -248,4 +248,19 @@ fn a_query_filters_by_the_agent_an_object_has(cx: &mut TestAppContext) {
     let rule = backend.rules.lock().last().cloned().expect("saved");
     assert_eq!(rule["interval"], json!(2));
     assert_eq!(rule["slots"], json!([[540], [540]]), "a new slot starts at the first period's time: {rule}");
+
+    // Repeat instructions: typed in their box, Done saves them.
+    settle(cx);
+    click(cx, "prop-row-repeat_instructions");
+    // Into the box (below the popup's head).
+    let pop = cx.debug_bounds("prop-pop").expect("the value box");
+    cx.simulate_click(gpui::point(pop.center().x, pop.bottom() - px(20.)), Modifiers::none());
+    settle(cx);
+    cx.simulate_input("Tell Grant the most important task");
+    settle(cx);
+    click(cx, "pop-done");
+    settle(cx);
+    let saved = backend.objects.lock().iter().find(|o| o.id == "q1").and_then(|o| o.fields.get("repeat_instructions").cloned());
+    assert_eq!(saved.and_then(|v| v.string_value).as_deref(), Some("Tell Grant the most important task"));
+    assert!(cx.debug_bounds("pop-done").is_none(), "and closes the box");
 }
