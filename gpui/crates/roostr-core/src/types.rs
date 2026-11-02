@@ -801,6 +801,11 @@ pub struct RepeatRule {
     pub monthly: String,
     /// Minutes after local midnight.
     pub times: Vec<u32>,
+    /// Day/week/month/year, interval >= 2: one entry per period of the cycle
+    /// ("every 3 days" = Day 1, Day 2, Day 3), each its own times, [] = off.
+    /// Empty: only the cycle's first period runs, at `times`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub slots: Vec<Vec<u32>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub window: Option<[u32; 2]>,
     pub tz: String,
@@ -832,7 +837,10 @@ pub struct Repeat {
     pub weekdays: Vec<u8>,
     /// "date" | "weekday"
     pub monthly: String,
+    /// With `slots`, their union.
     pub times: Vec<u32>,
+    /// Per period of the cycle ([`RepeatRule::slots`]); empty = a plain rule.
+    pub slots: Vec<Vec<u32>>,
     pub window: Option<[u32; 2]>,
     pub tz: String,
     /// Local-day index the cadence counts from.
@@ -908,6 +916,15 @@ pub fn repeat_of(fields: &Fields) -> Option<Repeat> {
             "date".into()
         },
         times,
+        slots: e
+            .get("slots")
+            .map(|s| {
+                s.items()
+                    .iter()
+                    .map(|slot| slot.items().iter().filter_map(|t| t.int_value).map(|t| t as u32).collect())
+                    .collect()
+            })
+            .unwrap_or_default(),
         window,
         tz: str_("tz").unwrap_or_default(),
         anchor,

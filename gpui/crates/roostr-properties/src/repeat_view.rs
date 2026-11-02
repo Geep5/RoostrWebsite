@@ -15,7 +15,8 @@ use gpui_kit::component::{FocusableExt as _, Sizable as _};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use roostr_core::repeat::{
-    DAY, DAY_MINUTES, RepeatDraft, WD, describe_draft, ordinal_of, sod, sorted_times, to_draft,
+    DAY, DAY_MINUTES, RepeatDraft, WD, describe_draft, draft_slots, fit_more, ordinal_of,
+    period_name, slotted, sod, sorted_times, to_draft,
 };
 use roostr_core::types::{guest_agents, repeat_of};
 use roostr_core::{Fields, Glyph, Object, RepeatFreq, RepeatRule, Store, Value, api, theme, ui};
@@ -125,6 +126,12 @@ fn day_fits(d: &RepeatDraft, ms: i64) -> bool {
 
 /// Next occurrence day strictly after `from` (preview only; the engine computes `next`).
 fn step_from(d: &RepeatDraft, from: i64) -> i64 {
+    // Each period its own times: every period is a candidate.
+    let interval = if slotted(d) { 1 } else { d.interval };
+    let d = &RepeatDraft {
+        interval,
+        ..d.clone()
+    };
     match d.freq {
         RepeatFreq::Minute | RepeatFreq::Hour => {
             let mut cur = add_days(from, 1);
@@ -172,10 +179,28 @@ fn step_from(d: &RepeatDraft, from: i64) -> i64 {
     }
 }
 
-/// The occurrence times on a day the rule runs.
-fn day_times(d: &RepeatDraft) -> Vec<u32> {
+/// Which period of the cycle the day `ms` is in (0 = the anchor's).
+fn period_of(d: &RepeatDraft, ms: i64) -> usize {
+    let (a, b) = (date_of(d.anchor), date_of(ms));
+    let periods = match d.freq {
+        RepeatFreq::Week => {
+            let start = |x: NaiveDate| x - chrono::Days::new(x.weekday().num_days_from_sunday() as u64);
+            (start(b) - start(a)).num_days() / 7
+        }
+        RepeatFreq::Month => (b.year() as i64 * 12 + b.month() as i64) - (a.year() as i64 * 12 + a.month() as i64),
+        RepeatFreq::Year => (b.year() - a.year()) as i64,
+        _ => (b - a).num_days(),
+    };
+    periods.rem_euclid(d.interval.max(1) as i64) as usize
+}
+
+/// The occurrence times on the day `ms` (none: its period is off).
+fn day_times(d: &RepeatDraft, ms: i64) -> Vec<u32> {
     if !d.freq.is_sub_daily() {
-        return sorted_times(&d.times);
+        return match period_of(d, ms) {
+            k if k > 0 && slotted(d) => sorted_times(&d.more[k - 1]),
+            _ => sorted_times(&d.times),
+        };
     }
     let [from, until] = d.window.unwrap_or([0, DAY_MINUTES - 1]);
     let period = d.interval * if d.freq == RepeatFreq::Hour { 60 } else { 1 };
@@ -184,7 +209,6 @@ fn day_times(d: &RepeatDraft) -> Vec<u32> {
 
 /// The next five occurrences from now.
 fn preview(d: &RepeatDraft) -> Vec<i64> {
-    let times = day_times(d);
     let now = chrono::Utc::now().timestamp_millis();
     let mut out = Vec::new();
     let mut day = if day_fits(d, d.anchor) {
@@ -197,7 +221,7 @@ fn preview(d: &RepeatDraft) -> Vec<i64> {
             break;
         }
         let date = date_of(day);
-        for t in &times {
+        for t in &day_times(d, day) {
             let naive = date.and_hms_opt(t / 60, t % 60, 0).expect("valid time");
             let at = Local
                 .from_local_datetime(&naive)
@@ -222,6 +246,7 @@ fn same_rule(a: &RepeatDraft, b: &RepeatDraft) -> bool {
         && a.monthly == b.monthly
         && a.anchor == b.anchor
         && sorted_times(&a.times) == sorted_times(&b.times)
+        && draft_slots(a) == draft_slots(b)
         && a.window == b.window
         && aw == bw
 }
@@ -291,7 +316,9 @@ pub(crate) struct RepeatView {
     freq_picker: Picker,
     calendar: Option<Entity<CalendarPicker>>,
     interval: Entity<InputState>,
-    times: Vec<Entity<InputState>>,
+    /// The time inputs of each period: [0] the first (the plain rule's
+    /// times), then Day 2 … Day N when the interval is 2 or more.
+    slot_inputs: Vec<Vec<Entity<InputState>>>,
     window_from: Entity<InputState>,
     window_until: Entity<InputState>,
     _subs: Vec<Subscription>,
@@ -306,6 +333,7 @@ fn seed() -> RepeatDraft {
         monthly: "date".into(),
         anchor,
         times: vec![9 * 60],
+        more: Vec::new(),
         window: None,
     }
 }
@@ -322,11 +350,13 @@ impl RepeatView {
         let window_until = cx.new(|cx| InputState::new(window, cx).placeholder("HH:MM"));
         let subs = vec![
             cx.observe(&Store::global(cx), |_, _, cx| cx.notify()),
-            cx.subscribe(&interval, |this, input, ev: &InputEvent, cx| {
+            cx.subscribe_in(&interval, window, |this, input, ev: &InputEvent, window, cx| {
                 if matches!(ev, InputEvent::Change) {
                     let raw = input.read(cx).value().to_string();
                     let n = raw.trim().parse::<f64>().unwrap_or(1.).floor().max(1.) as u32;
                     this.draft.interval = n.min(max_interval(this.draft.freq));
+                    // Every 3 days: a time slot for each of Day 1, 2, 3.
+                    this.fit_slots(window, cx);
                     cx.notify();
                 }
             }),
@@ -381,7 +411,7 @@ impl RepeatView {
             freq_picker,
             calendar: None,
             interval,
-            times: vec![],
+            slot_inputs: vec![],
             window_from,
             window_until,
             _subs: subs,
@@ -414,27 +444,37 @@ impl RepeatView {
     fn sync_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let n = self.draft.interval.to_string();
         self.interval.update(cx, |s, cx| s.set_value(n, window, cx));
-        self.times = self
-            .draft
-            .times
+        let slots: Vec<Vec<u32>> = std::iter::once(&self.draft.times)
+            .chain(&self.draft.more)
+            .cloned()
+            .collect();
+        self.slot_inputs = slots
             .iter()
             .enumerate()
-            .map(|(i, t)| {
-                let input = cx.new(|cx| InputState::new(window, cx).default_value(hhmm(*t)));
-                let sub = cx.subscribe(
-                    &input,
-                    move |this: &mut Self, input, ev: &InputEvent, cx| {
-                        if matches!(ev, InputEvent::Blur | InputEvent::PressEnter { .. })
-                            && let Some(t) = minutes_of(&input.read(cx).value())
-                            && i < this.draft.times.len()
-                        {
-                            this.draft.times[i] = t;
-                            cx.notify();
-                        }
-                    },
-                );
-                self._subs.push(sub);
-                input
+            .map(|(k, times)| {
+                times
+                    .iter()
+                    .enumerate()
+                    .map(|(i, t)| {
+                        let input =
+                            cx.new(|cx| InputState::new(window, cx).default_value(hhmm(*t)));
+                        let sub = cx.subscribe(
+                            &input,
+                            move |this: &mut Self, input, ev: &InputEvent, cx| {
+                                if matches!(ev, InputEvent::Blur | InputEvent::PressEnter { .. })
+                                    && let Some(t) = minutes_of(&input.read(cx).value())
+                                    && let Some(slot) = this.slot_mut(k)
+                                    && i < slot.len()
+                                {
+                                    slot[i] = t;
+                                    cx.notify();
+                                }
+                            },
+                        );
+                        self._subs.push(sub);
+                        input
+                    })
+                    .collect()
             })
             .collect();
         if let Some([a, b]) = self.draft.window {
@@ -476,7 +516,27 @@ impl RepeatView {
         self.draft.interval = self.draft.interval.min(max_interval(freq));
         let n = self.draft.interval.to_string();
         self.interval.update(cx, |s, cx| s.set_value(n, window, cx));
+        self.fit_slots(window, cx);
         cx.notify();
+    }
+
+    /// One time slot per period of the cycle (Day 1 … Day N); a resize keeps
+    /// what was set and starts new periods off.
+    fn fit_slots(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let before = self.draft.more.len();
+        fit_more(&mut self.draft);
+        if self.draft.more.len() != before {
+            self.sync_inputs(window, cx);
+        }
+    }
+
+    /// Period `k`'s times: 0 the first (the plain rule's), then Day 2 ….
+    fn slot_mut(&mut self, k: usize) -> Option<&mut Vec<u32>> {
+        if k == 0 {
+            Some(&mut self.draft.times)
+        } else {
+            self.draft.more.get_mut(k - 1)
+        }
     }
 
     fn set_anchor(&mut self, next: i64, cx: &mut Context<Self>) {
@@ -500,29 +560,40 @@ impl RepeatView {
         cx.notify();
     }
 
-    fn add_time(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let mut t = (self.draft.times.last().copied().unwrap_or(9 * 60) + 60) % DAY_MINUTES;
+    fn add_time(&mut self, k: usize, window: &mut Window, cx: &mut Context<Self>) {
+        // An empty period starts at the first period's time (9:00 by default).
+        let first = self.draft.times.first().copied().unwrap_or(9 * 60);
+        let Some(slot) = self.slot_mut(k) else {
+            return;
+        };
+        let mut t = slot.last().map_or(first, |last| (last + 60) % DAY_MINUTES);
         for _ in 0..24 {
-            if !self.draft.times.contains(&t) {
+            if !slot.contains(&t) {
                 break;
             }
             t = (t + 60) % DAY_MINUTES;
         }
-        self.draft.times.push(t);
+        slot.push(t);
         self.sync_inputs(window, cx);
         cx.notify();
     }
 
-    fn remove_time(&mut self, i: usize, window: &mut Window, cx: &mut Context<Self>) {
-        self.draft.times.remove(i);
+    fn remove_time(&mut self, k: usize, i: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(slot) = self.slot_mut(k)
+            && i < slot.len()
+        {
+            slot.remove(i);
+        }
         self.sync_inputs(window, cx);
         cx.notify();
     }
 
     fn invalid(&self) -> &'static str {
-        match self.draft.window {
-            Some([a, b]) if self.draft.freq.is_sub_daily() && a > b => {
-                "The window ends before it starts."
+        let d = &self.draft;
+        match d.window {
+            Some([a, b]) if d.freq.is_sub_daily() && a > b => "The window ends before it starts.",
+            _ if !d.freq.is_sub_daily() && d.times.is_empty() && !slotted(d) => {
+                "Give at least one period a time."
             }
             _ => "",
         }
@@ -599,7 +670,13 @@ impl RepeatView {
                 vec![]
             },
             monthly: d.monthly.clone(),
-            times: if sub { vec![] } else { sorted_times(&d.times) },
+            // With slots, the times are their union (the engine checks it).
+            times: if sub {
+                vec![]
+            } else {
+                sorted_times(&[d.times.clone(), d.more.concat()].concat())
+            },
+            slots: if sub { vec![] } else { draft_slots(&d) },
             window: if sub { d.window } else { None },
             tz: iana_time_zone::get_timezone().unwrap_or_default(),
             // Noon, so the engine lands on the same wall-clock day across DST.
@@ -670,7 +747,7 @@ impl RepeatView {
 }
 
 /// A form row's caption (kit [`Label`]): 12px muted, a 52px column.
-fn lbl(text: &'static str) -> Label {
+fn lbl(text: impl Into<SharedString>) -> Label {
     note(text, 12.).flex_none().w(px(52.))
 }
 
@@ -953,7 +1030,11 @@ impl Render for RepeatView {
             pop = pop.child(
                 fieldrow()
                     .child(lbl("Every"))
-                    .child(field(&self.interval, FieldSkin::Compact, window, cx).w(px(48.)))
+                    .child(
+                        div()
+                            .debug_selector(|| "repeat-every".into())
+                            .child(field(&self.interval, FieldSkin::Compact, window, cx).w(px(48.))),
+                    )
                     .child(choice_select(&self.freq_picker.select, "freq-select", 140.)),
             );
 
@@ -1080,71 +1161,91 @@ impl Render for RepeatView {
             }
 
             if !sub {
-                let mut list = div()
-                    .flex_1()
-                    .min_w_0()
-                    .flex()
-                    .flex_wrap()
-                    .items_center()
-                    .gap(px(6.));
-                let many = self.times.len() > 1;
-                for (i, input) in self.times.iter().enumerate() {
+                // One row of times per period of the cycle: "At" for a plain
+                // rule, Day 1 … Day N when the interval is 2 or more.
+                let cycle = self.slot_inputs.len() > 1;
+                for (k, inputs) in self.slot_inputs.iter().enumerate() {
+                    let mut list = div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_wrap()
+                        .items_center()
+                        .gap(px(6.));
+                    // A plain rule keeps one time; a period may be off.
+                    let removable = cycle || inputs.len() > 1;
+                    if inputs.is_empty() {
+                        list = list.child(note("Off", 12.).text_color(theme::muted()));
+                    }
+                    for (i, input) in inputs.iter().enumerate() {
+                        list = list.child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(2.))
+                                .child(field(input, FieldSkin::Compact, window, cx).w(px(64.)))
+                                .when(removable, |e| {
+                                    e.child(
+                                        Button::new(("time-rm", k * 100 + i))
+                                            .custom(
+                                                ButtonCustomVariant::new(cx)
+                                                    .foreground(theme::muted()),
+                                            )
+                                            .group("time-rm")
+                                            .accessibility_label("Remove time")
+                                            .tooltip("Remove time")
+                                            .h_auto()
+                                            .px(px(3.))
+                                            .on_click(cx.listener(move |this, _, window, cx| {
+                                                this.remove_time(k, i, window, cx)
+                                            }))
+                                            .child(
+                                                div()
+                                                    .text_size(px(14.))
+                                                    .group_hover("time-rm", |s| {
+                                                        s.text_color(theme::red())
+                                                    })
+                                                    .child("×"),
+                                            ),
+                                    )
+                                }),
+                        );
+                    }
                     list = list.child(
+                        div().debug_selector(move || format!("repeat-add-time-{k}")).child(
+                        Button::new(("add-time", k))
+                            .custom(ButtonCustomVariant::new(cx).foreground(theme::muted()))
+                            .group("add-time")
+                            .accessibility_label("Add time")
+                            .h_auto()
+                            .px(px(4.))
+                            .py(px(3.))
+                            .on_click(
+                                cx.listener(move |this, _, window, cx| this.add_time(k, window, cx)),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(12.))
+                                    .group_hover("add-time", |s| s.text_color(theme::fg()))
+                                    .child("+ Add time"),
+                            ),
+                        ),
+                    );
+                    let label: SharedString = if cycle {
+                        format!("{} {}", period_name(d.freq), k + 1).into()
+                    } else {
+                        "At".into()
+                    };
+                    pop = pop.child(
                         div()
+                            .debug_selector(move || format!("repeat-slot-{k}"))
                             .flex()
-                            .items_center()
-                            .gap(px(2.))
-                            .child(field(input, FieldSkin::Compact, window, cx).w(px(64.)))
-                            .when(many, |e| {
-                                e.child(
-                                    Button::new(("time-rm", i))
-                                        .custom(
-                                            ButtonCustomVariant::new(cx).foreground(theme::muted()),
-                                        )
-                                        .group("time-rm")
-                                        .accessibility_label("Remove time")
-                                        .tooltip("Remove time")
-                                        .h_auto()
-                                        .px(px(3.))
-                                        .on_click(cx.listener(move |this, _, window, cx| {
-                                            this.remove_time(i, window, cx)
-                                        }))
-                                        .child(
-                                            div()
-                                                .text_size(px(14.))
-                                                .group_hover("time-rm", |s| {
-                                                    s.text_color(theme::red())
-                                                })
-                                                .child("×"),
-                                        ),
-                                )
-                            }),
+                            .items_start()
+                            .gap(px(6.))
+                            .child(lbl(label).pt(px(5.)))
+                            .child(list),
                     );
                 }
-                list = list.child(
-                    Button::new("add-time")
-                        .custom(ButtonCustomVariant::new(cx).foreground(theme::muted()))
-                        .group("add-time")
-                        .accessibility_label("Add time")
-                        .h_auto()
-                        .px(px(4.))
-                        .py(px(3.))
-                        .on_click(cx.listener(|this, _, window, cx| this.add_time(window, cx)))
-                        .child(
-                            div()
-                                .text_size(px(12.))
-                                .group_hover("add-time", |s| s.text_color(theme::fg()))
-                                .child("+ Add time"),
-                        ),
-                );
-                pop = pop.child(
-                    div()
-                        .flex()
-                        .items_start()
-                        .gap(px(6.))
-                        .child(lbl("At").pt(px(5.)))
-                        .child(list),
-                );
             }
 
             let invalid = self.invalid();
@@ -1246,7 +1347,7 @@ impl Render for RepeatView {
                 })),
             )
             .child(
-                ui::disabled(
+                div().debug_selector(|| "repeat-save".into()).child(ui::disabled(
                     small_btn(
                         "save",
                         if rule.is_some() { "Update" } else { "Repeat" },
@@ -1258,7 +1359,7 @@ impl Render for RepeatView {
                     if !save_disabled {
                         this.save(cx)
                     }
-                })),
+                }))),
             );
         pop = pop.child(foot);
         let close = cx.entity().downgrade();

@@ -23,8 +23,12 @@ pub struct RepeatDraft {
     pub monthly: String,
     /// Local midnight (epoch ms) of the day the cadence counts from.
     pub anchor: i64,
-    /// Day/week/month/year: occurrence times (minutes after local midnight).
+    /// Day/week/month/year: occurrence times (minutes after local midnight) -
+    /// with an interval of 2 or more, the cycle's first period's (Day 1).
     pub times: Vec<u32>,
+    /// Day/week/month/year, interval >= 2: the times of the cycle's other
+    /// periods (Day 2 … Day N), [] = off. All off is the plain rule.
+    pub more: Vec<Vec<u32>>,
     /// Minute/hour: the minutes the grid runs in; `None` = the whole day.
     pub window: Option<[u32; 2]>,
 }
@@ -126,27 +130,64 @@ pub fn sorted_times(times: &[u32]) -> Vec<u32> {
     t
 }
 
+/// The draft's other periods, sized to its interval (none for minute/hour
+/// or an interval of 1): kept times stay, new periods start off.
+pub fn fit_more(d: &mut RepeatDraft) {
+    let n = if d.freq.is_sub_daily() { 0 } else { d.interval.saturating_sub(1) as usize };
+    d.more.resize(n, Vec::new());
+}
+
+/// Whether the draft gives some period other than the first its own times.
+pub fn slotted(d: &RepeatDraft) -> bool {
+    d.more.iter().any(|t| !t.is_empty())
+}
+
+/// What the engine stores as `slots`: Day 1 … Day N, or none (a plain rule).
+pub fn draft_slots(d: &RepeatDraft) -> Vec<Vec<u32>> {
+    if !slotted(d) {
+        return Vec::new();
+    }
+    std::iter::once(&d.times)
+        .chain(&d.more)
+        .map(|t| sorted_times(t))
+        .collect()
+}
+
+/// "Day", "Week", … : a period of the cycle's label.
+pub fn period_name(freq: RepeatFreq) -> &'static str {
+    match freq {
+        RepeatFreq::Week => "Week",
+        RepeatFreq::Month => "Month",
+        RepeatFreq::Year => "Year",
+        _ => "Day",
+    }
+}
+
 /// Runs more than once a day, so "when next" needs the time.
 pub fn many_a_day(freq: RepeatFreq, times: &[u32]) -> bool {
     freq.is_sub_daily() || times.len() > 1
 }
 
 pub fn to_draft(r: &Repeat) -> RepeatDraft {
-    RepeatDraft {
+    let (times, more) = match r.slots.split_first() {
+        Some((first, rest)) => (first.clone(), rest.to_vec()),
+        // A minute/hour rule has no times; switching it to daily starts from 9:00.
+        None if r.times.is_empty() => (vec![9 * 60], Vec::new()),
+        None => (r.times.clone(), Vec::new()),
+    };
+    let mut d = RepeatDraft {
         freq: r.freq,
         interval: r.interval,
         weekdays: r.weekdays.clone(),
         monthly: r.monthly.clone(),
         anchor: day_to_local(r.anchor),
-        // A minute/hour rule has no times; switching it to daily starts from 9:00.
-        times: if r.times.is_empty() {
-            vec![9 * 60]
-        } else {
-            r.times.clone()
-        },
+        times,
+        more,
         // The engine stores the whole day as [0, 1439]: that is no window.
         window: r.window.filter(|w| w[0] > 0 || w[1] < DAY_MINUTES - 1),
-    }
+    };
+    fit_more(&mut d);
+    d
 }
 
 /// "Mon–Fri" for a run of three or more days, else "Mon, Wed".
@@ -217,8 +258,23 @@ pub fn describe_draft(d: &RepeatDraft) -> String {
         RepeatFreq::Year => format!("{every} {unit} on {}", fmt(d.anchor)),
         _ => format!("{every} {unit}"),
     };
-    let times: Vec<String> = sorted_times(&d.times).into_iter().map(fmt_time).collect();
-    format!("{s} at {}", times.join(", "))
+    let at = |times: &[u32]| {
+        sorted_times(times)
+            .into_iter()
+            .map(fmt_time)
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    if slotted(d) {
+        let periods: Vec<String> = std::iter::once(&d.times)
+            .chain(&d.more)
+            .enumerate()
+            .filter(|(_, t)| !t.is_empty())
+            .map(|(i, t)| format!("{} {} at {}", period_name(d.freq), i + 1, at(t)))
+            .collect();
+        return format!("{s}: {}", periods.join("; "));
+    }
+    format!("{s} at {}", at(&d.times))
 }
 
 /// A table cell's words: the rule, when it next runs, and why that run moved.
@@ -250,6 +306,7 @@ mod tests {
             monthly: "date".into(),
             anchor,
             times: times.to_vec(),
+            more: Vec::new(),
             window: None,
         }
     }
@@ -292,6 +349,16 @@ mod tests {
             describe_draft(&hourly),
             "Every 2 hours on Mon–Fri, 9:00 AM–5:00 PM"
         );
+        // Each day of the cycle its own times.
+        let mut cycle = draft(RepeatFreq::Day, 3, &[], &[540]);
+        cycle.more = vec![vec![], vec![1080, 840]];
+        assert_eq!(
+            describe_draft(&cycle),
+            "Every 3 days: Day 1 at 9:00 AM; Day 3 at 2:00 PM, 6:00 PM"
+        );
+        assert_eq!(draft_slots(&cycle), vec![vec![540], vec![], vec![840, 1080]]);
+        cycle.more = vec![vec![], vec![]];
+        assert!(draft_slots(&cycle).is_empty(), "only Day 1: the plain rule");
         assert_eq!(suffix(11), "th");
         assert_eq!(suffix(22), "nd");
     }

@@ -289,6 +289,7 @@ fn upcoming_occurrences_follow_repeat_next() {
             weekdays: Vec::new(),
             monthly: "date".into(),
             times: Vec::new(),
+            slots: Vec::new(),
             window: None,
             tz: "UTC".into(),
             anchor_ms: None,

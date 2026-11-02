@@ -34,6 +34,8 @@ fn object(id: &str, type_key: &str, pairs: &[(&str, Value)]) -> Object {
 /// Two agents, a task on the designer, and a query filtering on Agent.
 struct Vault {
     objects: Mutex<Vec<Object>>,
+    /// repeat_set calls' rules.
+    rules: Mutex<Vec<Json>>,
 }
 
 impl Default for Vault {
@@ -51,6 +53,7 @@ impl Default for Vault {
                 object("t1", "task", &[("name", Value::string("Landing mockup")), ("agent", Value::values(vec![Value::link("agent-1", "agent")]))]),
                 object("q1", "query", &[("name", Value::string("Uses designer")), ("viewFilters", filter)]),
             ]),
+            rules: Mutex::new(Vec::new()),
         }
     }
 }
@@ -123,6 +126,9 @@ impl Backend for Vault {
         ready(Ok(QueryResult { total: records.len() as u64, records }))
     }
     fn mutate(&self, action: &str, params: JsonMap) -> BoxFuture<anyhow::Result<JsonMap>> {
+        if action == "repeat_set" {
+            self.rules.lock().push(params["rule"].clone());
+        }
         if action == "set_field" {
             let id = params["object_id"].as_str().unwrap_or_default().to_string();
             let key = params["key"].as_str().unwrap_or_default().to_string();
@@ -219,4 +225,27 @@ fn a_query_filters_by_the_agent_an_object_has(cx: &mut TestAppContext) {
     let repeat = cx.debug_bounds("prop-row-__repeat__").expect("Repeat");
     let instructions = cx.debug_bounds("prop-row-repeat_instructions").expect("Repeat instructions once it repeats");
     assert!(instructions.top() >= repeat.bottom() && instructions.top() - repeat.bottom() < px(40.), "{instructions:?} under {repeat:?}");
+
+    // Every 2 (days, weeks…): a time slot per period of the cycle - the
+    // first keeps its time, the second starts off and gets its own.
+    // (A repeat needs an agent on the object to edit its cadence.)
+    if let Some(q) = backend.objects.lock().iter_mut().find(|o| o.id == "q1") {
+        q.fields.insert("agent".into(), Value::values(vec![Value::link("agent-1", "agent")]));
+    }
+    cx.update(|_, cx| roostr_core::Store::global(cx).update(cx, |s, cx| s.reload_object("q1", cx)));
+    settle(cx);
+    if cx.debug_bounds("repeat-every").is_none() {
+        click(cx, "prop-row-__repeat__");
+    }
+    assert!(cx.debug_bounds("repeat-slot-1").is_none(), "one slot at an interval of 1");
+    click(cx, "repeat-every");
+    cx.simulate_keystrokes("backspace 2");
+    settle(cx);
+    assert!(cx.debug_bounds("repeat-slot-0").is_some() && cx.debug_bounds("repeat-slot-1").is_some());
+    assert!(cx.debug_bounds("repeat-slot-2").is_none());
+    click(cx, "repeat-add-time-1");
+    click(cx, "repeat-save");
+    let rule = backend.rules.lock().last().cloned().expect("saved");
+    assert_eq!(rule["interval"], json!(2));
+    assert_eq!(rule["slots"], json!([[540], [540]]), "a new slot starts at the first period's time: {rule}");
 }
