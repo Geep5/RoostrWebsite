@@ -311,6 +311,11 @@ fn seed() -> RepeatDraft {
 }
 
 impl RepeatView {
+    /// The editor is open (a rule being picked).
+    pub(crate) fn is_open(&self) -> bool {
+        self.open
+    }
+
     pub(crate) fn new(object_id: String, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let interval = cx.new(|cx| InputState::new(window, cx));
         let window_from = cx.new(|cx| InputState::new(window, cx).placeholder("HH:MM"));

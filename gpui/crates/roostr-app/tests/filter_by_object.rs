@@ -203,6 +203,9 @@ fn a_query_filters_by_the_agent_an_object_has(cx: &mut TestAppContext) {
     // Repeat instructions - what each run asks of the agent - show once it
     // repeats, right under Repeat.
     assert!(cx.debug_bounds("prop-row-repeat_instructions").is_none(), "not before it repeats");
+    // Picking a Repeat (its editor open) shows them already.
+    click(cx, "prop-row-__repeat__");
+    assert!(cx.debug_bounds("prop-row-repeat_instructions").is_some(), "shown while Repeat is being set");
     let rule: Value = serde_json::from_value(json!({"mapValue": {"entries": {
         "freq": {"stringValue": "day"}, "interval": {"intValue": 1}, "anchor": {"intValue": 0}, "next": {"intValue": 4_102_444_800_000_i64},
         "times": {"valuesValue": {"items": [{"intValue": 540}]}}

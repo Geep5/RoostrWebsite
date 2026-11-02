@@ -1129,7 +1129,24 @@ impl Render for PropertiesPane {
         };
         let assignee = take(&mut how, "assignee");
         let check_first = take(&mut how, "check_first");
-        let instructions = take(&mut how, "repeat_instructions");
+        // Repeat instructions show the moment Repeat is being set (its editor
+        // open), not only once a rule is saved; a space missing the bundled
+        // property (not synced yet) still gets the row.
+        let editing_repeat = self.repeat.as_ref().is_some_and(|r| r.read(cx).is_open());
+        let instructions = take(&mut how, "repeat_instructions").or_else(|| {
+            (can_repeat && (editing_repeat || repeat_of(&object.fields).is_some())).then(|| {
+                relations
+                    .iter()
+                    .find(|r| r.key == "repeat_instructions")
+                    .cloned()
+                    .unwrap_or_else(|| RelationDef {
+                        key: "repeat_instructions".into(),
+                        name: "Repeat instructions".into(),
+                        format: "longtext".into(),
+                        ..Default::default()
+                    })
+            })
+        });
         let error = take(&mut how, "error");
         if can_repeat {
             how.push(RelationDef {
@@ -1280,7 +1297,12 @@ impl PropertiesPane {
             let id = object.id.clone();
             let repeat = self
                 .repeat
-                .get_or_insert_with(|| cx.new(|cx| RepeatView::new(id, window, cx)))
+                .get_or_insert_with(|| {
+                    let view = cx.new(|cx| RepeatView::new(id, window, cx));
+                    // Its editor opening shows Repeat instructions here.
+                    cx.observe(&view, |_, _, cx| cx.notify()).detach();
+                    view
+                })
                 .clone();
             return div()
                 .debug_selector(|| "prop-row-__repeat__".into())
