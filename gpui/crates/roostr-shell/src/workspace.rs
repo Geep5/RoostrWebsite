@@ -134,6 +134,10 @@ pub struct Workspace {
     main_column: Option<Entity<MainColumn>>,
     /// The space's nav column as its own cached view (see [`SidebarColumn`]).
     sidebar_column: Option<Entity<SidebarColumn>>,
+    /// The desktop shell's columns as their own view (see [`Desk`]).
+    desk: Option<Entity<Desk>>,
+    /// The last frame drew the desk (not the phone shell, a site page or the boot screen).
+    desk_drawn: bool,
     /// The desk has rendered: columns animate only after its first frame
     /// (a CSS transition doesn't run on mount).
     desk_shown: bool,
@@ -217,8 +221,8 @@ impl Workspace {
                     this.mobile_space_changed(window, cx);
                 }
             }),
-            cx.observe(&pane, |_, _, cx| cx.notify()),
-            cx.observe(&host, |_, _, cx| cx.notify()),
+            cx.observe(&pane, |this, _, cx| this.pane_changed(cx)),
+            cx.observe(&host, |this, _, cx| this.pane_changed(cx)),
             cx.observe(
                 &roostr_core::profile::ProfileCache::global(cx),
                 |_, _, cx| cx.notify(),
@@ -280,6 +284,8 @@ impl Workspace {
             pane_layout: PaneLayout::HIDDEN,
             main_column: None,
             sidebar_column: None,
+            desk: None,
+            desk_drawn: false,
             desk_shown: false,
             pin_folds: HashMap::new(),
             legacy_folds,
@@ -1101,6 +1107,32 @@ impl Workspace {
         view.cached(StyleRefinement::default().h_full()).into_any_element()
     }
 
+    /// The desktop shell, drawn by [`Desk`] so its slides tick that view, not this one.
+    fn desk(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        self.desk_drawn = true;
+        let workspace = cx.entity().downgrade();
+        self.desk
+            .get_or_insert_with(|| cx.new(|_| Desk { workspace }))
+            .clone()
+            .into_any_element()
+    }
+
+    /// The pane's state and views changed. On the desk they draw its columns
+    /// and the page header's pane button and count - never the nav, which a
+    /// notified workspace lays out again (every chat message's count did).
+    /// Anywhere else (the phone's sheet) the workspace draws them itself.
+    fn pane_changed(&mut self, cx: &mut Context<Self>) {
+        match (&self.desk, self.desk_drawn) {
+            (Some(desk), true) => {
+                desk.update(cx, |_, cx| cx.notify());
+                if let Some(main) = &self.main_column {
+                    main.update(cx, |_, cx| cx.notify());
+                }
+            }
+            _ => cx.notify(),
+        }
+    }
+
     fn render_desk(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         // Build (or fetch) the page first: a new page publishes its pane while being built.
         let route = Navigator::global(cx).read(cx).route().clone();
@@ -1383,6 +1415,7 @@ impl Render for Workspace {
             .on_action(
                 cx.listener(|this, _: &NewObject, window, cx| this.open_create_menu(window, cx)),
             );
+        self.desk_drawn = false;
         if let Some(boot) = self.render_boot(window, cx) {
             return root.child(boot);
         }
@@ -1413,7 +1446,7 @@ impl Render for Workspace {
             return root.child(page).children(self.render_overlays(window, cx));
         }
         let resizing = self.resizing();
-        root.child(self.render_desk(window, cx))
+        root.child(self.desk(cx))
             .children(self.render_overlays(window, cx))
             .when(resizing, |d| {
                 d.cursor_col_resize().child(
@@ -1456,6 +1489,18 @@ fn json_number(v: &serde_json::Value) -> Option<f32> {
         .or_else(|| v.as_str().and_then(|s| s.trim().parse::<f32>().ok()))
 }
 
+/// How many times the nav column has been drawn (debug builds): the tests
+/// that keep the nav - hundreds of rows - out of other columns' frames.
+#[cfg(debug_assertions)]
+static NAV_LAYOUTS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// See [`NAV_LAYOUTS`].
+#[cfg(debug_assertions)]
+#[doc(hidden)]
+pub fn nav_layouts() -> usize {
+    NAV_LAYOUTS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// The workspace's middle column (header + scrolling page) as a view of its
 /// own, so it can be cached (see [`Workspace::main_column`]).
 /// The nav column: the workspace's sidebar, drawn in its own view.
@@ -1467,10 +1512,30 @@ struct SidebarColumn {
 
 impl Render for SidebarColumn {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        #[cfg(debug_assertions)]
+        NAV_LAYOUTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let width = self.width;
         self.workspace
             .update(cx, |workspace, cx| workspace.render_sidebar(width, window, cx))
             .unwrap_or_else(|_| div())
+    }
+}
+
+/// The desktop shell's columns ([`Workspace::render_desk`]). A sliding column
+/// asks for its next frame by notifying the view drawing it; drawn by the
+/// workspace, every frame of a slide notified the workspace, and with it
+/// everything observing it - the cached nav and page columns, laid out again
+/// on each frame (opening Properties redrew the whole nav on each frame).
+/// Drawn here, a slide redraws this view and what changed size.
+struct Desk {
+    workspace: WeakEntity<Workspace>,
+}
+
+impl Render for Desk {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.workspace
+            .update(cx, |workspace, cx| workspace.render_desk(window, cx))
+            .unwrap_or_else(|_| div().into_any_element())
     }
 }
 

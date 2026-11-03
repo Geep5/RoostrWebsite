@@ -40,6 +40,8 @@ use roostr_core::PaneViews;
 use roostr_core::theme;
 
 pub use workspace::{PageFactory, Workspace};
+#[cfg(debug_assertions)]
+pub use workspace::nav_layouts;
 
 actions!(
     roostr_shell,

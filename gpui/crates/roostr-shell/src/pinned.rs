@@ -2,6 +2,8 @@
 //! sets render a mini version of their current view (rows, gallery cards,
 //! kanban group counts, a mini month); any other object lists what it links to.
 
+use std::ops::Range;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use chrono::{Datelike, Local, NaiveDate, TimeZone};
@@ -44,6 +46,9 @@ pub(crate) struct PinnedWidget {
     /// targets), so the refresh after the fetch does not ask again.
     fetched: Vec<String>,
     _subscriptions: Vec<Subscription>,
+    /// A list's first row's top on the window, as the last frame placed it
+    /// (`None` until it was placed): which rows are near enough to draw.
+    rows_top: Rc<std::cell::Cell<Option<f32>>>,
 }
 
 impl PinnedWidget {
@@ -74,6 +79,7 @@ impl PinnedWidget {
             partial_space: None,
             fetched: Vec::new(),
             _subscriptions: subscriptions,
+            rows_top: Rc::new(std::cell::Cell::new(None)),
         };
         this.load(cx);
         this
@@ -788,22 +794,72 @@ impl Render for PinnedWidget {
             return body.child(grid);
         }
 
-        let mut body = body;
-        for r in &self.rows {
-            body = body.child(
-                line(
-                    crate::eid("w-row", &r.id),
-                    r.id == current_id,
-                    div()
-                        .debug_selector(|| format!("w-row-{}", r.id))
-                        .child(div().flex_none().text_size(px(11.)).child(row_icon(r)))
-                        .child(div().min_w_0().truncate().child(row_name(r))),
-                )
-                .on_click(open(r.id.clone())),
+        // Only the rows in and near the window are drawn, spacers standing
+        // for the rest: a list of hundreds was laid out whole on every full
+        // redraw, and a click redraws the whole window - so every click
+        // anywhere spent most of its frame on the nav. Until the list has
+        // been placed once, every row is drawn.
+        let n = self.rows.len();
+        let view_h = f32::from(window.viewport_size().height);
+        let drawn = match self.rows_top.get() {
+            Some(top) => rows_near(n, top, view_h, OVERSCAN),
+            None => 0..n,
+        };
+        let rows_top = self.rows_top.clone();
+        let this = cx.entity().downgrade();
+        let shown = drawn.clone();
+        let mut rows = div()
+            .flex()
+            .flex_col()
+            .on_children_prepainted(move |bounds, window, cx| {
+                let Some(spacer) = bounds.first() else {
+                    return;
+                };
+                let top = f32::from(spacer.top());
+                rows_top.set(Some(top));
+                // Rows in view now that this frame did not draw (the nav moved
+                // further than the overscan since): draw them next frame.
+                let visible = rows_near(n, top, f32::from(window.viewport_size().height), 0.);
+                if visible.start < shown.start || visible.end > shown.end {
+                    let this = this.clone();
+                    cx.defer(move |cx| {
+                        let _ = this.update(cx, |_, cx| cx.notify());
+                    });
+                }
+            });
+        rows = rows.child(div().flex_none().h(px(ROW_PITCH * drawn.start as f32)));
+        for r in &self.rows[drawn.clone()] {
+            rows = rows.child(
+                div().flex_none().pb(px(1.)).child(
+                    line(
+                        crate::eid("w-row", &r.id),
+                        r.id == current_id,
+                        div()
+                            .debug_selector(|| format!("w-row-{}", r.id))
+                            .child(div().flex_none().text_size(px(11.)).child(row_icon(r)))
+                            .child(div().min_w_0().truncate().child(row_name(r))),
+                    )
+                    .on_click(open(r.id.clone())),
+                ),
             );
         }
-        body
+        rows = rows.child(div().flex_none().h(px(ROW_PITCH * (n - drawn.end) as f32)));
+        body.child(rows)
     }
+}
+
+/// A list widget's row: the 24px line and the 1px below it.
+const ROW_PITCH: f32 = 25.;
+/// How far past the window a list draws rows, in window heights each way.
+const OVERSCAN: f32 = 1.;
+
+/// The rows of an `n`-row list whose first row's top is at window y `top`
+/// that are on a `view_h` tall window or within `overscan` windows of it.
+fn rows_near(n: usize, top: f32, view_h: f32, overscan: f32) -> Range<usize> {
+    let over = view_h * overscan;
+    let first = (((-over - top) / ROW_PITCH).floor().max(0.) as usize).min(n);
+    let last = (((view_h + over - top) / ROW_PITCH).ceil().max(0.) as usize).clamp(first, n);
+    first..last
 }
 
 /// Rendered width of `text` in the UI font.

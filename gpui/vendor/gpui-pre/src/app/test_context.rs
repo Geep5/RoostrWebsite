@@ -896,6 +896,22 @@ impl VisualTestContext {
         self.cx.background_executor.run_until_parked();
     }
 
+    /// roostr: deliver one frame from the platform's frame source, as a
+    /// display refresh would: the window runs its next-frame callbacks
+    /// (`request_animation_frame`) and draws what is dirty - unlike
+    /// [`Window::refresh`], which redraws every view, cached or not. Never
+    /// throttled (a test window is inactive, and its frames come faster
+    /// than real time).
+    pub fn simulate_frame(&mut self) {
+        self.cx
+            .test_window(self.window)
+            .simulate_frame_request(crate::RequestFrameOptions {
+                require_presentation: true,
+                ..Default::default()
+            });
+        self.run_until_parked();
+    }
+
     /// Dispatch the action to the currently focused node.
     pub fn dispatch_action<A>(&mut self, action: A)
     where
