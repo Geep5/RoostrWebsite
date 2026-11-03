@@ -599,12 +599,16 @@ impl Render for ObjectPage {
                     }))
                 })
                 .when(task, |d| {
+                    // Centred on the title's capitals (their middle is 0.87em
+                    // below the top of its line - below the line box's own
+                    // centre), not on the line box, which left it high.
+                    let (size, pad) = if mobile { (32., 4.) } else { (34., 8.) };
                     d.child(
                         ui::checkbox("done-check", done)
                             .flex_none()
                             .ml(px(15.))
                             .mr(px(7.))
-                            .mt(px(if mobile { 15. } else { 20. }))
+                            .mt(px(pad + size * 0.87 - 8.))
                             .tooltip(if done { "Done" } else { "Mark done" })
                             .on_change(cx.listener(move |this, _: &bool, _, cx| {
                                 cx.stop_propagation();
