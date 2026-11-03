@@ -3,6 +3,7 @@
 //! properties they use on an inner ring, three zoom levels (Types / Schema /
 //! Objects), hover and pin highlights, a finder, and `?focus=` pinning.
 
+mod live;
 mod model;
 mod paint;
 mod panel;

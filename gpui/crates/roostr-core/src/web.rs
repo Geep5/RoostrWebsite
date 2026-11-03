@@ -529,6 +529,10 @@ impl Backend for WebDaemonBackend {
         self.get("/api/sync/digest")
     }
 
+    fn engine_status(&self) -> Option<BoxFuture<Result<JsonMap>>> {
+        Some(self.get("/api/records/status"))
+    }
+
     /// A task on the page's event loop reads the streamed body into a
     /// channel; dropping the stream aborts the fetch.
     fn events(&self) -> BoxStream<Result<BackendEvent>> {

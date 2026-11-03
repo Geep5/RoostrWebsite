@@ -163,6 +163,48 @@ impl Derived {
     }
 }
 
+/// A screen-space circle: filled, or stroked `width` wide.
+fn circle(
+    window: &mut Window,
+    at: gpui_kit::Point<Pixels>,
+    r: f32,
+    width: Option<f32>,
+    color: Hsla,
+) {
+    let mut path = match width {
+        Some(w) => PathBuilder::stroke(px(w)),
+        None => PathBuilder::fill(),
+    };
+    for i in 0..=48 {
+        let th = i as f32 / 48. * std::f32::consts::TAU;
+        let p = point(at.x + px(r * th.cos()), at.y + px(r * th.sin()));
+        if i == 0 {
+            path.move_to(p);
+        } else {
+            path.line_to(p);
+        }
+    }
+    if let Ok(path) = path.build() {
+        window.paint_path(path, color);
+    }
+}
+
+/// A screen-space line `width` wide.
+fn line(
+    window: &mut Window,
+    a: gpui_kit::Point<Pixels>,
+    b: gpui_kit::Point<Pixels>,
+    width: f32,
+    color: Hsla,
+) {
+    let mut path = PathBuilder::stroke(px(width));
+    path.move_to(a);
+    path.line_to(b);
+    if let Ok(path) = path.build() {
+        window.paint_path(path, color);
+    }
+}
+
 fn xy(x: f64, y: f64) -> (f64, f64) {
     (x, y)
 }
@@ -717,6 +759,8 @@ pub(crate) struct Frame {
     pub view: View,
     /// Objects whose labels show (type, index).
     pub label_objs: Vec<(usize, usize)>,
+    /// This computer's engine and harness (`live`), when it serves the space.
+    pub hub: Option<crate::live::Hub>,
 }
 
 const WHITE: u32 = 0xffffff;
@@ -1058,6 +1102,94 @@ impl Frame {
                 continue;
             }
             let _ = line.paint(origin, height, TextAlign::Left, None, window, cx);
+        }
+    }
+
+    /// This computer, live: lines to its agents (lit while they work), a
+    /// pulse from each working agent to the object its turn is on, and a
+    /// card with its engine and harness.
+    pub fn paint_live(&self, bounds: Bounds<Pixels>, window: &mut Window, cx: &mut App) {
+        let Some(hub) = &self.hub else {
+            return;
+        };
+        let screen = self.screen(bounds);
+        let green = hex(0x4ade80, 1.);
+        let at = screen.project(hub.at.0, hub.at.1);
+        let dot_r = (DOT_R * self.view.s) as f32;
+        for &((x, y), working) in &hub.agents {
+            let p = screen.project(x, y);
+            line(
+                window,
+                at,
+                p,
+                1.5,
+                if working {
+                    fade(green, 0.75)
+                } else {
+                    hex(WHITE, 0.16)
+                },
+            );
+            if working {
+                circle(window, p, dot_r.max(3.) + 4., Some(2.), green);
+            }
+        }
+        for &((ax, ay), (ox, oy)) in &hub.pulses {
+            let (a, o) = (screen.project(ax, ay), screen.project(ox, oy));
+            line(window, a, o, 1.5, fade(green, 0.35));
+            let t = hub.phase as f32;
+            let p = point(a.x + (o.x - a.x) * t, a.y + (o.y - a.y) * t);
+            circle(window, p, 4., None, green);
+        }
+        let color = if hub.answering {
+            green
+        } else {
+            hex(0x8a90a0, 1.)
+        };
+        let r = dot_r.max(5.) + 6.;
+        if !hub.pulses.is_empty() || hub.agents.iter().any(|(_, w)| *w) {
+            let k = hub.phase as f32;
+            circle(
+                window,
+                at,
+                r + 10. * k,
+                Some(2.),
+                fade(color, f64::from(1. - k)),
+            );
+        }
+        circle(window, at, r, Some(2.5), color);
+
+        // The card, right of the computer.
+        let rows = [
+            (hub.name.as_str(), hex(WHITE, 1.)),
+            (hub.lines[0].as_str(), hex(0xc6cbd6, 1.)),
+            (hub.lines[1].as_str(), color),
+        ];
+        let lines: Vec<_> = rows
+            .iter()
+            .map(|(text, color)| {
+                let text = SharedString::from(text.to_string());
+                let run = TextRun {
+                    len: text.len(),
+                    font: font(theme::fonts::UI),
+                    color: *color,
+                    background_color: None,
+                    underline: None,
+                    strikethrough: None,
+                };
+                window.text_system().shape_line(text, px(12.), &[run], None)
+            })
+            .collect();
+        let line_h = px(17.);
+        let width = lines.iter().map(|l| l.width).fold(px(0.), |a, b| a.max(b));
+        let origin = point(at.x + px(r + 12.), at.y - line_h * 1.5 - px(8.));
+        let card = Bounds::new(
+            origin,
+            gpui_kit::size(width + px(20.), line_h * 3. + px(16.)),
+        );
+        window.paint_quad(gpui_kit::fill(card, hex(0x0c0e13, 0.88)).corner_radii(px(8.)));
+        for (i, l) in lines.iter().enumerate() {
+            let o = point(origin.x + px(10.), origin.y + px(8.) + line_h * i as f32);
+            let _ = l.paint(o, line_h, TextAlign::Left, None, window, cx);
         }
     }
 }

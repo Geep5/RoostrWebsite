@@ -18,6 +18,8 @@ use crate::paint::oklch;
 pub(crate) const DOT_SPACING: f64 = 13.;
 /// Lite: at most this many faint placeholder dots per type; the label says how many.
 pub(crate) const SHADOW_DOTS: usize = 400;
+/// A Computer's type key: agents reach theirs through `served_by` = its `machine_id`.
+pub(crate) const MACHINE_TYPE: &str = "machine";
 
 pub(crate) struct GraphObject {
     pub id: String,
@@ -182,11 +184,34 @@ pub(crate) fn build_schema_graph(
     types: &[TypeDef],
     counts: &HashMap<String, u64>,
 ) -> SchemaGraph {
+    // The space's objects, and the Computers (wherever they live) that serve
+    // its agents: an agent's `served_by` names a computer by `machine_id`.
+    let in_space = |r: &QueryRow| {
+        let ch = field_string(&r.fields, "channel").unwrap_or("");
+        ch == channel_id || (ch.is_empty() && is_default_channel)
+    };
+    let served: HashSet<String> = rows
+        .iter()
+        .filter(|r| in_space(r))
+        .filter_map(|r| field_string(&r.fields, "served_by").filter(|s| !s.is_empty()))
+        .map(str::to_string)
+        .collect();
     let rows: Vec<QueryRow> = rows
         .into_iter()
         .filter(|r| {
-            let ch = field_string(&r.fields, "channel").unwrap_or("");
-            ch == channel_id || (ch.is_empty() && is_default_channel)
+            in_space(r)
+                || (r.type_key == MACHINE_TYPE
+                    && field_string(&r.fields, "machine_id").is_some_and(|m| served.contains(m)))
+        })
+        .collect();
+    let machine_by_id: HashMap<String, String> = rows
+        .iter()
+        .filter(|r| r.type_key == MACHINE_TYPE)
+        .filter_map(|r| {
+            Some((
+                field_string(&r.fields, "machine_id")?.to_string(),
+                r.id.clone(),
+            ))
         })
         .collect();
     let object_count = rows.len();
@@ -223,6 +248,7 @@ pub(crate) fn build_schema_graph(
         };
         let links = outgoing_ids(&r.fields, &object_keys)
             .into_iter()
+            .map(|id| machine_by_id.get(&id).cloned().unwrap_or(id))
             .filter(|id| *id != r.id && in_graph.contains(id))
             .collect();
         let obj = GraphObject {
@@ -461,5 +487,64 @@ mod tests {
         let g = build_schema_graph(vec![row("a", "page")], "s", true, &[], &[], &HashMap::new());
         assert_eq!(g.shadow_count, 0);
         assert!(g.types.iter().all(|t| t.shadow == 0));
+    }
+
+    #[test]
+    fn agents_link_to_the_computers_serving_them_from_any_space() {
+        let with = |id: &str, type_key: &str, fields: &[(&str, &str)]| QueryRow {
+            fields: fields
+                .iter()
+                .map(|(k, v)| (k.to_string(), Value::string(*v)))
+                .collect(),
+            ..row(id, type_key)
+        };
+        let rows = vec![
+            with(
+                "agent-1",
+                "agent",
+                &[("channel", "s"), ("served_by", "m-1")],
+            ),
+            // Computers live in another space; the one serving this space's agent joins its graph.
+            with(
+                "computer-1",
+                MACHINE_TYPE,
+                &[("channel", "home"), ("machine_id", "m-1")],
+            ),
+            with(
+                "computer-2",
+                MACHINE_TYPE,
+                &[("channel", "home"), ("machine_id", "m-2")],
+            ),
+        ];
+        let served_by = RelationDef {
+            key: "served_by".into(),
+            format: "object".into(),
+            ..RelationDef::default()
+        };
+        let g = build_schema_graph(rows, "s", false, &[served_by], &[], &HashMap::new());
+        let ids: Vec<&str> = g
+            .types
+            .iter()
+            .flat_map(|t| t.objects.iter().map(|o| o.id.as_str()))
+            .collect();
+        assert!(
+            ids.contains(&"computer-1"),
+            "the serving computer is in the graph: {ids:?}"
+        );
+        assert!(
+            !ids.contains(&"computer-2"),
+            "a computer serving none of its agents is not"
+        );
+        let agent = g
+            .types
+            .iter()
+            .flat_map(|t| &t.objects)
+            .find(|o| o.id == "agent-1")
+            .unwrap();
+        assert_eq!(
+            agent.links,
+            vec!["computer-1".to_string()],
+            "the agent links to its computer"
+        );
     }
 }

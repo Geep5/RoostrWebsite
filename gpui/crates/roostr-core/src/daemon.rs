@@ -238,6 +238,10 @@ impl Backend for DaemonBackend {
         self.run(|c| c.get("/api/sync/digest"))
     }
 
+    fn engine_status(&self) -> Option<BoxFuture<Result<JsonMap>>> {
+        Some(self.run(|c| c.get("/api/records/status")))
+    }
+
     /// A plain thread reads the stream (it blocks for the life of the
     /// connection) and hands events over a channel; it ends with the
     /// connection or once the receiver is gone.

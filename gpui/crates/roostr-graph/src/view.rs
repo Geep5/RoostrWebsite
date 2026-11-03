@@ -16,6 +16,7 @@ use roostr_core::relations::{current_space_id, space_relations};
 use roostr_core::{Navigator, Store};
 use web_time::Instant;
 
+use crate::live::{Hub, Local};
 use crate::model::build_schema_graph;
 use crate::paint::{View, hex, lod};
 use crate::panel;
@@ -37,6 +38,10 @@ pub(crate) const LEVELS: [(&str, &str); 3] = [
 const LABEL_CAP: usize = 600;
 /// Eased zoom duration.
 const ZOOM_MS: f64 = 700.;
+/// How often the graph asks this computer's harness and engine what they're doing.
+const POLL: Duration = Duration::from_secs(2);
+/// One pulse's trip from an agent to the object it works on (ms).
+const PULSE_MS: f64 = 1400.;
 
 /// A finder result.
 #[derive(Clone)]
@@ -105,6 +110,12 @@ pub struct GraphView {
     label_geo: Option<Rc<LabelGeo>>,
     sel_geo: Option<Rc<SelGeo>>,
     _subs: Vec<Subscription>,
+    /// This computer's engine and harness (`live`), as last read.
+    local: Option<Local>,
+    /// Reads `local` every couple of seconds; none without a harness (a replica).
+    _poll: Option<Task<()>>,
+    /// The pulses' clock.
+    epoch: Instant,
 }
 
 impl GraphView {
@@ -157,6 +168,9 @@ impl GraphView {
             label_geo: None,
             sel_geo: None,
             _subs: subs,
+            local: None,
+            _poll: Self::poll(cx),
+            epoch: Instant::now(),
         };
         // Labels laid out before the browser's emoji font arrived lack emoji.
         #[cfg(target_family = "wasm")]
@@ -168,6 +182,57 @@ impl GraphView {
         );
         this.sync(cx);
         this
+    }
+
+    /// Ask this computer's harness and engine what they're doing, every
+    /// [`POLL`], while the graph is open (the task ends with the view).
+    fn poll(cx: &mut Context<Self>) -> Option<Task<()>> {
+        let harness = roostr_core::harness::harness(cx)?;
+        Some(cx.spawn(async move |this, cx| {
+            loop {
+                let (h, backend) = (
+                    harness.clone(),
+                    cx.update(|cx| Store::global(cx).read(cx).backend()),
+                );
+                let read = cx.update(|cx| {
+                    roostr_core::io::spawn(cx, async move {
+                        let machine_id = h
+                            .get_json("/machine")
+                            .await
+                            .ok()
+                            .and_then(|j| j.get("id")?.as_str().map(str::to_string))
+                            .unwrap_or_default();
+                        let turns = h
+                            .get_json("/agent/status")
+                            .await
+                            .ok()
+                            .map(|j| Local::turns_from(&j));
+                        let engine = match backend.engine_status() {
+                            Some(status) => status.await.ok().and_then(|m| Local::engine_from(&m)),
+                            None => None,
+                        };
+                        Local {
+                            machine_id,
+                            turns,
+                            engine,
+                        }
+                    })
+                });
+                let local = read.await;
+                let gone = this
+                    .update(cx, |this, cx| {
+                        if this.local.as_ref() != Some(&local) {
+                            this.local = Some(local);
+                            cx.notify();
+                        }
+                    })
+                    .is_err();
+                if gone {
+                    return;
+                }
+                cx.background_executor().timer(POLL).await;
+            }
+        }))
     }
 
     // ------------------------------------------------------------ building
@@ -952,6 +1017,10 @@ impl GraphView {
         {
             self.sel_geo = Some(Rc::new(SelGeo::build(&b, &d, lod)));
         }
+        let hub = self.local.as_ref().and_then(|local| {
+            let ms = self.epoch.elapsed().as_millis() as f64;
+            Hub::build(&b, local, (ms % PULSE_MS) / PULSE_MS)
+        });
         Some(Rc::new(Frame {
             b,
             labels: self.labels.clone(),
@@ -961,6 +1030,7 @@ impl GraphView {
             d,
             view: self.v,
             label_objs: self.label_objs.clone(),
+            hub,
         }))
     }
 }
@@ -1032,7 +1102,16 @@ impl Render for GraphView {
                 }))
                 .children(layer(layers.obj, frame, |f, b, w, cx| {
                     f.paint_object_labels(b, w, cx)
-                }));
+                }))
+                .children(layer(1., frame, |f, b, w, cx| f.paint_live(b, w, cx)));
+            // Pulses move while an agent here is working.
+            if frame
+                .hub
+                .as_ref()
+                .is_some_and(|h| h.agents.iter().any(|(_, w)| *w) || !h.pulses.is_empty())
+            {
+                window.request_animation_frame();
+            }
         }
 
         // Pointer: one hitbox over the stage; moves and releases are followed

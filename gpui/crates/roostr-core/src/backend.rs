@@ -62,6 +62,11 @@ pub trait Backend: MaybeSend + MaybeSync + 'static {
     fn lite(&self) -> Option<std::sync::Arc<dyn crate::lite::LiteControl>> {
         None
     }
+    /// The local engine's record store (`GET /api/records/status`: `journal`
+    /// = edits not yet sent); `None` where no engine runs (a replica).
+    fn engine_status(&self) -> Option<BoxFuture<Result<JsonMap>>> {
+        None
+    }
 }
 
 /// The commit stream's SSE framing (`data:` lines, a blank line dispatches),
