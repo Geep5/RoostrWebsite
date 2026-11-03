@@ -534,13 +534,27 @@ impl Workspace {
                 for choice in choices {
                     let target = id.clone();
                     let workspace = workspace.clone();
+                    // The New menu's row: its icon column, 8px gap, 13px name.
+                    let (icon, name) = (choice.icon.clone(), choice.name.clone());
                     menu = menu.item(
-                        PopupMenuItem::new(format!("{} {}", choice.icon, choice.name)).on_click(
-                            move |_, _, cx| {
-                                close_more(&workspace, cx);
-                                change_type(&target, &choice.key, cx);
-                            },
-                        ),
+                        // An element row keeps its height: a plain item's fixed
+                        // 26px shrank to fit when the list overflowed its 360px.
+                        PopupMenuItem::element(move |_, _| {
+                            div()
+                                .flex()
+                                .flex_1()
+                                .items_center()
+                                .gap(px(8.))
+                                .py(px(3.))
+                                .text_size(px(13.))
+                                .whitespace_nowrap()
+                                .child(crate::sidebar::obj_icon(&icon))
+                                .child(name.clone())
+                        })
+                        .on_click(move |_, _, cx| {
+                            close_more(&workspace, cx);
+                            change_type(&target, &choice.key, cx);
+                        }),
                     );
                 }
                 menu
