@@ -294,12 +294,21 @@ fn a_cell_editor_at_the_page_columns_edge_opens_where_it_can_be_used(cx: &mut Te
         scrolled < before,
         "→ scrolled the table: {before:?} → {scrolled:?}"
     );
-    // The Name column stays where it was, over the cells scrolled under it:
-    // a click on it opens the publisher, never the editor of a cell beneath.
+    // The Name column stays where it was, over the cells scrolled under it -
+    // all of its place, its left edge included (a pixel's seam there showed
+    // the cells under it): a click on it opens the publisher, never the
+    // editor of a cell beneath.
+    let pinned = cx.debug_bounds(NAME).unwrap();
     assert_eq!(
-        cx.debug_bounds(NAME).unwrap().left(),
-        name.left(),
+        pinned.right(),
+        name.right(),
         "the Name column stays put while the table scrolls"
+    );
+    assert!(
+        pinned.left() < name.left(),
+        "the pinned Name covers past its column's left edge: {:?} < {:?}",
+        pinned.left(),
+        name.left()
     );
     assert!(
         scrolled < name.right(),

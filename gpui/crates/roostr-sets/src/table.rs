@@ -88,6 +88,8 @@ const SERVING_KEY: &str = "served_by";
 const PLUS_W: f32 = 32.;
 /// How far ← / → scroll a hovered table: about one column.
 const ARROW_STEP: f32 = 160.;
+/// How far a pinned Name cell reaches past its left edge, over the table's.
+const PIN_BLEED: f32 = 2.;
 
 #[derive(Clone, Debug)]
 struct ServingInfo {
@@ -1791,6 +1793,17 @@ impl Render for SetTable {
             .max(0.);
         let pinned = pin > 0.;
         let pin_shadow = || vec![common::shadow(hsla(0., 0., 0., 0.6), 8., 0., 8., -8.)];
+        // Pinned, the cell reaches PIN_BLEED past its left edge (its content
+        // stays put): fractional column widths, laid out right to left, can
+        // leave its edge a pixel short of the table's, a seam the cells
+        // scrolled under it showed through.
+        let pin_bleed = |d: Stateful<Div>| {
+            d.occlude()
+                .shadow(pin_shadow())
+                .ml(px(-PIN_BLEED))
+                .pl(px(PIN_BLEED))
+                .w(px(name_width + PIN_BLEED))
+        };
         let name_th = div()
             .id("th-name")
             .group(name_group.clone())
@@ -1803,7 +1816,7 @@ impl Render for SetTable {
             .items_center()
             .overflow_hidden()
             .bg(theme::bg())
-            .when(pinned, |d| d.occlude().shadow(pin_shadow()))
+            .when(pinned, pin_bleed)
             .child(track_bounds(&name_bounds))
             .child(
                 sort_head("head-name".into(), None, format!("Name {name_arrow}"))
@@ -1975,7 +1988,7 @@ impl Render for SetTable {
                 .flex_none()
                 .w(px(name_width))
                 .bg(theme::bg())
-                .when(pinned, |d| d.occlude().shadow(pin_shadow()))
+                .when(pinned, pin_bleed)
                 .on_click(cx.listener(move |this, e: &ClickEvent, _, cx| {
                     cx.stop_propagation();
                     this.on_row_click(e, &id_name, cx)
