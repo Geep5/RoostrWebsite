@@ -610,6 +610,7 @@ impl BlockMenu {
             let tops = tops.clone();
             let this = this.clone();
             Self::row(SharedString::from(format!("sub-{label}")))
+                .debug_selector(move || format!("block-menu-sub-{label}"))
                 .relative()
                 .when(open, |d| d.bg(theme::hover()))
                 .on_hover(move |hovered, _, cx| {
@@ -662,7 +663,6 @@ impl BlockMenu {
         CommandItem::new().label(label).child(move |_, _| {
             let this = this.clone();
             Self::row(id)
-                .debug_selector(move || format!("block-menu-{id}"))
                 .when(danger, |d| d.text_color(rgb(0xf55522)))
                 .on_hover(move |hovered, _, cx| {
                     if *hovered {
@@ -701,6 +701,28 @@ impl BlockMenu {
             match kind {
                 SubKind::Style => {
                     let Some(t) = &t else { return m };
+                    // A text style first, above the block styles (the list
+                    // scrolls): the whole block struck through.
+                    let spans = crate::marks::spans_from_marks(&t.text, t.marks.as_deref().unwrap_or(&[]));
+                    let struck = !t.text.is_empty()
+                        && crate::marks::covers(&spans, 0, t.text.len(), roostr_core::types::mark::STRIKETHROUGH);
+                    m = m.item(
+                        PopupMenuItem::element(move |_, _| {
+                            Self::fly_row("fly-strike", struck)
+                                .debug_selector(|| "block-menu-strike".to_string())
+                                .child(
+                                    div()
+                                        .w(px(34.))
+                                        .flex()
+                                        .justify_center()
+                                        .child(Icon::new(Glyph::Strikethrough).size(px(16.))),
+                                )
+                                .child(div().text_size(px(13.)).line_through().child("Strikethrough"))
+                        })
+                        .checked(struck)
+                        .on_click(on(Fired::Action(MenuAction::Strikethrough))),
+                    );
+                    m = m.separator();
                     for (i, (label, value, desc, preview, cls)) in STYLES.iter().enumerate() {
                         let active = t.style == *value;
                         m = m.item(
@@ -981,8 +1003,6 @@ impl BlockMenu {
         ));
         acts.push(RowAct::Sub(SubKind::Background));
         if t.is_some() {
-            g = g.item(self.plain_item("strike", Glyph::Strikethrough, "Strikethrough", false, cx));
-            acts.push(RowAct::Fire(Fired::Action(MenuAction::Strikethrough)));
             g = g.item(self.plain_item("clear", Glyph::Eraser, "Clear style", false, cx));
             acts.push(RowAct::Fire(Fired::Action(MenuAction::ClearStyle)));
         }

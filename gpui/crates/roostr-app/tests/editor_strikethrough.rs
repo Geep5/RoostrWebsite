@@ -186,8 +186,8 @@ fn cmd_shift_s_strikes_the_selection_through_and_back(cx: &mut TestAppContext) {
     settle(cx);
     assert_eq!(saved_marks(&backend), Some(Vec::new()), "a second ⌘⇧S took it off");
 
-    // The block's right-click menu: Strikethrough strikes the whole line
-    // through, nothing selected; chosen again, it takes it off.
+    // The block's right-click menu, under Style: Strikethrough strikes the
+    // whole line through, nothing selected; chosen again, it takes it off.
     let strike_from_menu = |cx: &mut VisualTestContext| {
         let line = cx.debug_bounds("block-p0").expect("the line");
         cx.simulate_event(gpui::MouseDownEvent {
@@ -204,7 +204,10 @@ fn cmd_shift_s_strikes_the_selection_through_and_back(cx: &mut TestAppContext) {
             click_count: 1,
         });
         settle(cx);
-        let row = cx.debug_bounds("block-menu-strike").expect("Strikethrough in the block menu");
+        let style = cx.debug_bounds("block-menu-sub-Style").expect("Style in the block menu");
+        cx.simulate_mouse_move(style.center(), None, Modifiers::none());
+        settle(cx);
+        let row = cx.debug_bounds("block-menu-strike").expect("Strikethrough in the Style submenu");
         cx.simulate_click(row.center(), Modifiers::none());
         settle(cx);
     };
