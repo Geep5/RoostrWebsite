@@ -104,6 +104,23 @@ pub fn merge_adjacent(mut spans: Vec<Span>) -> Vec<Span> {
     out
 }
 
+/// Whether `kind` marks all of `[from, to)` (one span or several end to end).
+pub fn covers(spans: &[Span], from: usize, to: usize, kind: u32) -> bool {
+    let mut sorted: Vec<&Span> = spans.iter().filter(|m| m.kind == kind).collect();
+    sorted.sort_by_key(|m| m.from);
+    let mut pos = from;
+    for m in sorted {
+        if m.from > pos {
+            break;
+        }
+        pos = pos.max(m.to);
+        if pos >= to {
+            return true;
+        }
+    }
+    pos >= to
+}
+
 /// `toggleMark`: when the whole `[from, to)` already carries `kind`, remove it
 /// there; otherwise apply it.
 pub fn toggle_mark(
@@ -118,23 +135,7 @@ pub fn toggle_mark(
     }
     let others = spans.iter().filter(|m| m.kind != kind).cloned();
     let mut same: Vec<Span> = spans.iter().filter(|m| m.kind == kind).cloned().collect();
-    let covered = {
-        let mut sorted = same.clone();
-        sorted.sort_by_key(|m| m.from);
-        let mut pos = from;
-        let mut done = false;
-        for m in &sorted {
-            if m.from > pos {
-                break;
-            }
-            pos = pos.max(m.to);
-            if pos >= to {
-                done = true;
-                break;
-            }
-        }
-        done || pos >= to
-    };
+    let covered = covers(spans, from, to, kind);
     let mut result = Vec::new();
     if covered {
         for m in same.drain(..) {

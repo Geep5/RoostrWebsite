@@ -26,10 +26,18 @@ fn ready<T: Send + 'static>(value: T) -> BoxFuture<T> {
     Box::pin(std::future::ready(value))
 }
 
-/// One page with one line; every mutation it receives, kept.
-#[derive(Default)]
+/// One page with one line, as the store holds it: a block update replaces
+/// the line's content (the editor reloads the page after a menu action).
+/// Every mutation it receives, kept.
 struct Vault {
+    page: Mutex<Object>,
     mutations: Mutex<Vec<(String, JsonMap)>>,
+}
+
+impl Default for Vault {
+    fn default() -> Self {
+        Self { page: Mutex::new(page()), mutations: Mutex::default() }
+    }
 }
 
 fn page() -> Object {
@@ -70,7 +78,7 @@ impl Backend for Vault {
         }]))
     }
     fn object(&self, id: &str) -> BoxFuture<anyhow::Result<Object>> {
-        ready(if id == PAGE { Ok(page()) } else { Err(anyhow::anyhow!("unknown object {id}")) })
+        ready(if id == PAGE { Ok(self.page.lock().clone()) } else { Err(anyhow::anyhow!("unknown object {id}")) })
     }
     fn channels(&self) -> BoxFuture<anyhow::Result<Vec<Space>>> {
         ready(Ok(vec![Space { id: SPACE.into(), name: "Personal".into(), created_at: 1, ..Space::default() }]))
@@ -82,6 +90,15 @@ impl Backend for Vault {
         ready(Ok(QueryResult::default()))
     }
     fn mutate(&self, action: &str, params: JsonMap) -> BoxFuture<anyhow::Result<JsonMap>> {
+        if action == "block_update"
+            && let Some(content) = params.get("content").cloned()
+            && let Ok(content) = serde_json::from_value::<BlockContent>(content)
+        {
+            let block_id = params.get("block_id").and_then(Json::as_str).unwrap_or_default();
+            if let Some(b) = self.page.lock().blocks.iter_mut().find(|b| b.id == block_id) {
+                b.content = content;
+            }
+        }
         self.mutations.lock().push((action.to_string(), params));
         ready(Ok(JsonMap::new()))
     }
@@ -168,4 +185,35 @@ fn cmd_shift_s_strikes_the_selection_through_and_back(cx: &mut TestAppContext) {
     cx.simulate_keystrokes("shift-cmd-left cmd-shift-s");
     settle(cx);
     assert_eq!(saved_marks(&backend), Some(Vec::new()), "a second ⌘⇧S took it off");
+
+    // The block's right-click menu: Strikethrough strikes the whole line
+    // through, nothing selected; chosen again, it takes it off.
+    let strike_from_menu = |cx: &mut VisualTestContext| {
+        let line = cx.debug_bounds("block-p0").expect("the line");
+        cx.simulate_event(gpui::MouseDownEvent {
+            position: line.center(),
+            button: gpui::MouseButton::Right,
+            modifiers: Modifiers::none(),
+            click_count: 1,
+            first_mouse: false,
+        });
+        cx.simulate_event(gpui::MouseUpEvent {
+            position: line.center(),
+            button: gpui::MouseButton::Right,
+            modifiers: Modifiers::none(),
+            click_count: 1,
+        });
+        settle(cx);
+        let row = cx.debug_bounds("block-menu-strike").expect("Strikethrough in the block menu");
+        cx.simulate_click(row.center(), Modifiers::none());
+        settle(cx);
+    };
+    strike_from_menu(cx);
+    assert_eq!(
+        saved_marks(&backend),
+        Some(vec![(0, end, u64::from(mark::STRIKETHROUGH))]),
+        "the menu's Strikethrough struck the whole line through"
+    );
+    strike_from_menu(cx);
+    assert_eq!(saved_marks(&backend), Some(Vec::new()), "chosen again, it took it off");
 }

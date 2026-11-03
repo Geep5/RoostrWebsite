@@ -1309,6 +1309,32 @@ impl Editor {
                 }
                 self.await_then_refresh(tasks, cx);
             }
+            MenuAction::Strikethrough => {
+                // One answer for the whole group: off only when every block
+                // with text is already struck through end to end.
+                let strike = roostr_core::types::mark::STRIKETHROUGH;
+                let all_struck = text_ids.iter().all(|b| {
+                    let (text, spans) = self.live(b);
+                    text.is_empty() || marks::covers(&spans, 0, text.len(), strike)
+                });
+                let tasks = group_text(
+                    self,
+                    &|cur, text, spans| {
+                        let next = if all_struck != marks::covers(spans, 0, text.len(), strike) {
+                            spans.to_vec()
+                        } else {
+                            marks::toggle_mark(spans, 0, text.len(), strike, None)
+                        };
+                        roostr_core::types::TextContent {
+                            text: text.to_string(),
+                            marks: Some(marks::marks_from_spans(text, &next)),
+                            ..cur.clone()
+                        }
+                    },
+                    cx,
+                );
+                self.await_then_refresh(tasks, cx);
+            }
             MenuAction::Delete => {
                 if ids.len() > 1 {
                     let set: HashSet<String> = ids.iter().cloned().collect();

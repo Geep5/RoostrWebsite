@@ -28,6 +28,9 @@ pub enum MenuAction {
     Delete,
     LinkStyle(String),
     ClearStyle,
+    /// Strike every selected text block through end to end, or, when all
+    /// of them already are, take it off.
+    Strikethrough,
     TurnIntoObject(String),
 }
 
@@ -659,6 +662,7 @@ impl BlockMenu {
         CommandItem::new().label(label).child(move |_, _| {
             let this = this.clone();
             Self::row(id)
+                .debug_selector(move || format!("block-menu-{id}"))
                 .when(danger, |d| d.text_color(rgb(0xf55522)))
                 .on_hover(move |hovered, _, cx| {
                     if *hovered {
@@ -977,6 +981,8 @@ impl BlockMenu {
         ));
         acts.push(RowAct::Sub(SubKind::Background));
         if t.is_some() {
+            g = g.item(self.plain_item("strike", Glyph::Strikethrough, "Strikethrough", false, cx));
+            acts.push(RowAct::Fire(Fired::Action(MenuAction::Strikethrough)));
             g = g.item(self.plain_item("clear", Glyph::Eraser, "Clear style", false, cx));
             acts.push(RowAct::Fire(Fired::Action(MenuAction::ClearStyle)));
         }

@@ -281,6 +281,7 @@ glyphs! {
     SortArrowDown => "sort-arrow-down",
     StarOff => "star-off",
     Star => "star",
+    Strikethrough => "strikethrough",
     Trash => "trash",
     Type => "type",
 }
