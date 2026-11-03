@@ -1781,34 +1781,43 @@ impl Render for SetTable {
             ""
         };
         let name_bounds = self.name_th_bounds.clone();
+        // The Name column stays put while the table scrolls sideways: its
+        // cells move right by as much as the table moved left, over the
+        // cells scrolled under them. Rows and the header lay out right to
+        // left with Name added last, so it is drawn (and hit) on top; once
+        // something is under it, it takes the pointer for itself.
+        let pin = (-f32::from(self.scroll.offset().x))
+            .min(f32::from(self.scroll.max_offset().x))
+            .max(0.);
+        let pinned = pin > 0.;
+        let pin_shadow = || vec![common::shadow(hsla(0., 0., 0., 0.6), 8., 0., 8., -8.)];
+        let name_th = div()
+            .id("th-name")
+            .group(name_group.clone())
+            .relative()
+            .left(px(pin))
+            .flex_none()
+            .w(px(name_width))
+            .h_full()
+            .flex()
+            .items_center()
+            .overflow_hidden()
+            .bg(theme::bg())
+            .when(pinned, |d| d.occlude().shadow(pin_shadow()))
+            .child(track_bounds(&name_bounds))
+            .child(
+                sort_head("head-name".into(), None, format!("Name {name_arrow}"))
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle_sort("name", cx))),
+            )
+            .child(self.resize_grip("grip-name".into(), name_group, None, 0., cx));
         let mut header = div()
             .flex()
+            .flex_row_reverse()
             .h(px(35.))
             .border_b_1()
             .border_color(theme::border())
-            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .child(
-                div()
-                    .id("th-name")
-                    .group(name_group.clone())
-                    .relative()
-                    .flex_none()
-                    .w(px(name_width))
-                    .h_full()
-                    .flex()
-                    .items_center()
-                    .overflow_hidden()
-                    .child(track_bounds(&name_bounds))
-                    .child(
-                        sort_head("head-name".into(), None, format!("Name {name_arrow}"))
-                            .on_click(cx.listener(|this, _, _, cx| this.toggle_sort("name", cx))),
-                    )
-                    .child(self.resize_grip("grip-name".into(), name_group, None, 0., cx)),
-            );
-        for (i, c) in cols.iter().enumerate() {
-            header = header.child(self.header_cell(i, c, widths[i], &relations, &sort, n, cx));
-        }
-        // The "+" column's drop target (its button is pinned on top, see below).
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation());
+        // The "+" column's drop target (its button is pinned on top, see below), first: the header runs right to left.
         let plus_bounds = self.plus_bounds.clone();
         header = header.child(
             div()
@@ -1836,6 +1845,10 @@ impl Render for SetTable {
                 )
                 .on_drop(cx.listener(|this, _: &ColumnDrag, _, cx| this.drop_column(cx))),
         );
+        for (i, c) in cols.iter().enumerate().rev() {
+            header = header.child(self.header_cell(i, c, widths[i], &relations, &sort, n, cx));
+        }
+        header = header.child(name_th);
 
         // Body rows: only those in (or near) the window are built - the
         // page scrolls the table, and each frame of it built every loaded
@@ -1881,6 +1894,11 @@ impl Render for SetTable {
             let id = r.id.clone();
             let id_aux = r.id.clone();
             let id_ctx = r.id.clone();
+            let id_name = r.id.clone();
+            let id_name_aux = r.id.clone();
+            let name_selector = format!("name-{}", r.id);
+            let id_name_ctx = r.id.clone();
+            let row_group = SharedString::from(format!("row-{}", r.id));
             let task = Store::global(cx).read(cx).layout_of(&r.type_key) == "task";
             let done = r.fields.get("done").and_then(|v| v.bool_value) == Some(true);
             let lead: AnyElement = if task {
@@ -1911,9 +1929,12 @@ impl Render for SetTable {
                 );
                 div().flex_none().mr(px(4.)).child(icon).into_any_element()
             };
+            // Right to left (see the header): the "+" spacer, the columns from the last, then Name on top.
             let mut row = div()
                 .id(SharedString::from(format!("row-{}", r.id)))
+                .group(row_group.clone())
                 .flex()
+                .flex_row_reverse()
                 .border_b_1()
                 .border_color(theme::border())
                 .text_size(px(13.))
@@ -1933,27 +1954,8 @@ impl Render for SetTable {
                         this.open_menu(id_ctx.clone(), e.position, window, cx)
                     }),
                 )
-                .child(
-                    div()
-                        .flex_none()
-                        .w(px(name_width))
-                        .flex()
-                        .items_center()
-                        .px(px(10.))
-                        .py(px(7.))
-                        .overflow_hidden()
-                        .whitespace_nowrap()
-                        .font_weight(FontWeight(550.))
-                        .child(lead)
-                        .child(
-                            div()
-                                .min_w_0()
-                                .overflow_hidden()
-                                .text_ellipsis()
-                                .child(common::row_name(r)),
-                        ),
-                );
-            for (i, c) in cols.iter().enumerate() {
+                .child(div().flex_none().w(px(plus_w)));
+            for (i, c) in cols.iter().enumerate().rev() {
                 row = row.child(self.body_cell(
                     r,
                     &c.key,
@@ -1963,7 +1965,57 @@ impl Render for SetTable {
                     cx,
                 ));
             }
-            row = row.child(div().flex_none().w(px(plus_w)));
+            // Opaque, so the cells scrolled under it don't show through; the
+            // row's selection and hover are painted again on top of that.
+            let name_cell = div()
+                .id(SharedString::from(format!("name-{}", r.id)))
+                .debug_selector(move || name_selector.clone())
+                .relative()
+                .left(px(pin))
+                .flex_none()
+                .w(px(name_width))
+                .bg(theme::bg())
+                .when(pinned, |d| d.occlude().shadow(pin_shadow()))
+                .on_click(cx.listener(move |this, e: &ClickEvent, _, cx| {
+                    cx.stop_propagation();
+                    this.on_row_click(e, &id_name, cx)
+                }))
+                .on_mouse_down(MouseButton::Middle, move |_, _, cx| {
+                    cx.stop_propagation();
+                    common::open_object_tab(&id_name_aux, cx)
+                })
+                .on_mouse_down(
+                    MouseButton::Right,
+                    cx.listener(move |this, e: &MouseDownEvent, window, cx| {
+                        cx.stop_propagation();
+                        this.open_menu(id_name_ctx.clone(), e.position, window, cx)
+                    }),
+                )
+                .child(
+                    div()
+                        .size_full()
+                        .flex()
+                        .items_center()
+                        .px(px(10.))
+                        .py(px(7.))
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .font_weight(FontWeight(550.))
+                        .when(selected, |d| d.bg(rgba(0x377aff40)))
+                        .when(!selected, |d| {
+                            d.hover(|s| s.bg(theme::hover()))
+                                .group_hover(row_group, |s| s.bg(theme::hover()))
+                        })
+                        .child(lead)
+                        .child(
+                            div()
+                                .min_w_0()
+                                .overflow_hidden()
+                                .text_ellipsis()
+                                .child(common::row_name(r)),
+                        ),
+                );
+            row = row.child(name_cell);
             rows_el = rows_el.child(row);
         }
         rows_el = rows_el.child(div().flex_none().h(px(row_h * (n_rows - last) as f32)));

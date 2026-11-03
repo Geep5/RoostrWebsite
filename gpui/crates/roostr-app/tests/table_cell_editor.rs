@@ -24,6 +24,7 @@ use serde_json::{Value as Json, json};
 const SPACE: &str = "sp-1";
 const PUBLISHER: &str = "pub-1";
 const CELL: &str = "cell-pub-1-main_games";
+const NAME: &str = "name-pub-1";
 
 /// One space: Game and Game Publisher types, two games, a publisher whose
 /// Main games (no type limit, any number) holds TYR, and a query of publishers
@@ -279,6 +280,7 @@ fn a_cell_editor_at_the_page_columns_edge_opens_where_it_can_be_used(cx: &mut Te
     cx.update(|window, cx| window.blur(cx));
     let cell = cx.debug_bounds(CELL).expect("the Main games cell");
     let before = cell.left();
+    let name = cx.debug_bounds(NAME).expect("the publisher's Name cell");
     // Its visible part: the cell runs past the table's clipped edge.
     cx.simulate_mouse_move(
         point(cell.origin.x + px(8.), cell.center().y),
@@ -291,6 +293,41 @@ fn a_cell_editor_at_the_page_columns_edge_opens_where_it_can_be_used(cx: &mut Te
     assert!(
         scrolled < before,
         "→ scrolled the table: {before:?} → {scrolled:?}"
+    );
+    // The Name column stays where it was, over the cells scrolled under it:
+    // a click on it opens the publisher, never the editor of a cell beneath.
+    assert_eq!(
+        cx.debug_bounds(NAME).unwrap().left(),
+        name.left(),
+        "the Name column stays put while the table scrolls"
+    );
+    assert!(
+        scrolled < name.right(),
+        "Main games scrolled under the Name column: {scrolled:?} < {:?}",
+        name.right()
+    );
+    let under = cx.debug_bounds(CELL).unwrap().center().y;
+    cx.simulate_click(point(name.right() - px(4.), under), Modifiers::none());
+    settle(cx);
+    assert!(
+        cx.debug_bounds("link-object").is_none(),
+        "a click on the pinned Name opened no cell editor"
+    );
+    assert_eq!(
+        cx.update(|_, cx| roostr_core::nav::Navigator::global(cx)
+            .read(cx)
+            .route()
+            .clone()),
+        Route::Object(PUBLISHER.into()),
+        "a click on the pinned Name opens its row's object"
+    );
+    cx.update(|_, cx| navigate(Route::Object("q1".into()), cx));
+    settle(cx);
+    cx.update(|window, cx| window.blur(cx));
+    cx.simulate_mouse_move(
+        point(cell.origin.x + px(8.), cell.center().y),
+        None,
+        Modifiers::none(),
     );
     cx.simulate_keystrokes("left");
     settle(cx);
