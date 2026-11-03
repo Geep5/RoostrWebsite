@@ -218,14 +218,11 @@ fn phone_width_runs_the_mobile_shell(cx: &mut TestAppContext) {
         "a lift is a reorder, never navigation"
     );
 
-    // A tap enters the space at its top pin; Back shows the space home,
-    // its pinned cards. ＋ toggles the New menu.
+    // A tap opens the space home - its pinned cards; nothing opens by
+    // itself on a phone (the desktop opens the top pin). ＋ toggles the New menu.
     tap(cx, "m-card-sp-1");
-    assert_eq!(cx.update(|_, cx| Navigator::global(cx).read(cx).route().clone()), Route::Object("page-1".into()));
-    assert!(shown(cx, "m-back") && !shown(cx, "m-space-home"));
-    tap(cx, "m-back");
-    settle_motion(cx);
     assert!(shown(cx, "m-space-home"));
+    assert_eq!(cx.update(|_, cx| Navigator::global(cx).read(cx).route().clone()), Route::Home);
     assert_eq!(
         cx.update(|_, cx| Navigator::global(cx).read(cx).space().to_string()),
         "sp-1"
