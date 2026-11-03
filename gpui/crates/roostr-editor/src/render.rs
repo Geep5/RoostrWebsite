@@ -1607,7 +1607,7 @@ impl Editor {
                 ))
                 .content(tool_button(
                     "tb-strike",
-                    "Strikethrough",
+                    "Strikethrough (⌘⇧S)",
                     div().line_through().child("S").into_any_element(),
                     mk(mark::STRIKETHROUGH),
                 ))
@@ -2201,6 +2201,7 @@ impl Render for Editor {
             .on_action(cx.listener(Self::on_bold))
             .on_action(cx.listener(Self::on_italic))
             .on_action(cx.listener(Self::on_underline))
+            .on_action(cx.listener(Self::on_strikethrough))
             .on_action(cx.listener(Self::on_inline_code))
             .on_action(cx.listener(Self::on_escape))
             .on_action(cx.listener(Self::on_undo))

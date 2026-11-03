@@ -19,7 +19,7 @@ use crate::{
     DeleteWordRight, DocEnd, DocStart, Down, Enter, Escape, InlineCode, Italic, Left, LineEnd,
     LineStart, Redo, Right, SelectAll, SelectDocEnd, SelectDocStart, SelectDown, SelectLeft,
     SelectLineEnd, SelectLineStart, SelectRight, SelectUp, SelectWordLeft, SelectWordRight,
-    ShiftEnter, ShiftTab, Tab, Underline, Undo, Up, WordLeft, WordRight,
+    ShiftEnter, ShiftTab, Strikethrough, Tab, Underline, Undo, Up, WordLeft, WordRight,
 };
 
 const LIST: [u32; 4] = [
@@ -1110,6 +1110,17 @@ impl Editor {
     ) {
         self.with_key(window, cx, |this, _, cx| {
             this.mark_shortcut(mark::UNDERLINE, cx)
+        });
+    }
+
+    pub(crate) fn on_strikethrough(
+        &mut self,
+        _: &Strikethrough,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.with_key(window, cx, |this, _, cx| {
+            this.mark_shortcut(mark::STRIKETHROUGH, cx)
         });
     }
 
