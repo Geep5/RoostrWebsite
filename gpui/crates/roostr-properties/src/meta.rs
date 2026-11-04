@@ -48,6 +48,10 @@ pub struct ObjectMeta {
 
 impl ObjectMeta {
     /// Drop (or restore) the badges' 48px left indent.
+    pub fn flush(&self) -> bool {
+        self.flush
+    }
+
     pub fn set_flush(&mut self, flush: bool, cx: &mut Context<Self>) {
         if self.flush != flush {
             self.flush = flush;

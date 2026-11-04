@@ -432,7 +432,11 @@ impl Render for ObjectPage {
         // document's block handles hang in the margin to the left instead
         // of taking a 48px rail inside the page.
         let flush = !mobile;
-        if let Some(meta) = &self.meta {
+        // Written only when it changes: a write while drawing redraws the
+        // badges every frame (and, on GPUI Fast, the page around them).
+        if let Some(meta) = &self.meta
+            && meta.read(cx).flush() != flush
+        {
             meta.update(cx, |meta, cx| meta.set_flush(flush, cx));
         }
 
