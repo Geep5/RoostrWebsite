@@ -313,6 +313,22 @@ impl SetTable {
         }
     }
 
+    /// A wheel turn over the horizontal scrollbar strip of a too-wide table
+    /// scrolls it sideways (either wheel axis); false when elsewhere.
+    fn wheel_on_scrollbar(&mut self, e: &ScrollEvent, cx: &mut Context<Self>) -> bool {
+        let bounds = self.scroll.bounds();
+        if self.scroll.max_offset().x <= px(0.) || !bounds.contains(&e.position) {
+            return false;
+        }
+        if e.position.y < bounds.bottom() - px(TABLE_SCROLLBAR_ROOM) {
+            return false;
+        }
+        let delta = e.delta.pixel_delta(px(20.));
+        let dx = if delta.y.abs() > delta.x.abs() { delta.y } else { delta.x };
+        self.scroll_x_by(dx, cx);
+        true
+    }
+
     pub(crate) fn set_input(&mut self, input: ViewInput, cx: &mut Context<Self>) {
         // The table reloads on its body and sorts (the page's own refresh reloads it too).
         if input.body != self.input.body || input.sorts != self.input.sorts {
@@ -2252,6 +2268,20 @@ impl Render for SetTable {
                             window.on_mouse_event(move |_: &MouseUpEvent, phase, _, cx| {
                                 if phase == DispatchPhase::Bubble {
                                     let _ = e2.update(cx, |this, cx| this.mouse_up(cx));
+                                }
+                            });
+                            // The wheel over the horizontal scrollbar scrolls
+                            // the table sideways, not the page.
+                            let e3 = entity.clone();
+                            window.on_mouse_event(move |e: &ScrollEvent, phase, _, cx| {
+                                if phase != DispatchPhase::Capture {
+                                    return;
+                                }
+                                let took = e3
+                                    .update(cx, |this, cx| this.wheel_on_scrollbar(e, cx))
+                                    .unwrap_or(false);
+                                if took {
+                                    cx.stop_propagation();
                                 }
                             });
                         },

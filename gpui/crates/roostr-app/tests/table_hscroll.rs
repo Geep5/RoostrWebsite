@@ -166,6 +166,23 @@ fn a_table_wider_than_its_pane_shows_a_horizontal_scrollbar(cx: &mut TestAppCont
     let last = cx.debug_bounds("cell-e2-p0").expect("the last row");
     assert!(bar.bottom() >= last.bottom(), "the scrollbar area ends below the last row");
 
+    // The wheel (a plain vertical turn) over the scrollbar scrolls the table
+    // sideways; the same turn over the rows does not.
+    let col_x = |cx: &mut VisualTestContext| cx.debug_bounds("cell-e0-p3").expect("a cell").left();
+    let before = col_x(cx);
+    let wheel = |cx: &mut VisualTestContext, at: gpui::Point<gpui::Pixels>| {
+        cx.simulate_event(gpui::ScrollEvent {
+            position: at,
+            delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.), px(-120.))),
+            ..Default::default()
+        });
+        cx.run_until_parked();
+    };
+    wheel(cx, last.center());
+    assert_eq!(col_x(cx), before, "a wheel over the rows leaves the table where it is");
+    wheel(cx, gpui::point(bar.center().x, bar.bottom() - px(4.)));
+    assert!(col_x(cx) < before, "a wheel over the scrollbar moves the columns left");
+
     cx.simulate_resize(size(px(4000.), px(700.)));
     settle(cx);
     settle(cx);
