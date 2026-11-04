@@ -40,10 +40,13 @@ impl Workspace {
     /// else the object's field (absent = open; not loaded yet = folded, so
     /// a folded widget never flashes open).
     pub fn pin_collapsed(&mut self, id: &str, cx: &mut Context<Self>) -> bool {
-        let object = Store::global(cx).update(cx, |store, cx| {
-            store.ensure_object(id, cx);
-            store.object(id)
-        });
+        // Read, and ask for the object only when the store has never been
+        // asked: an update while drawing redraws everything reading the store.
+        let store = Store::global(cx);
+        if store.read(cx).object_slot(id).is_none() {
+            store.update(cx, |store, cx| store.ensure_object(id, cx));
+        }
+        let object = store.read(cx).object(id);
         let stored = object.as_deref().map(|o| pins::collapsed(&o.fields));
         if let Some(pending) = self.pin_folds.get(id) {
             let settled = match &pending.landed {
@@ -131,11 +134,13 @@ impl Workspace {
                 }
             });
         }
-        store.update(cx, |store, cx| {
-            for id in &load {
-                store.ensure_object(id, cx);
-            }
-        });
+        if !load.is_empty() {
+            store.update(cx, |store, cx| {
+                for id in &load {
+                    store.ensure_object(id, cx);
+                }
+            });
+        }
         for id in writes {
             let task = api::note::set_field(&id, COLLAPSED_KEY, Value::bool(true), cx);
             cx.spawn(async move |_, _| {

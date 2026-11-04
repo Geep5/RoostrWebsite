@@ -1363,7 +1363,13 @@ impl Workspace {
                         .or_insert_with(|| cx.new(|cx| PinnedWidget::new(id.clone(), cx)))
                         .clone();
                     // The gallery fits its columns to the card's inner width.
-                    view.update(cx, |w, _| w.side_width = card_width - 2. - 20. + 48.);
+                    let width = card_width - 2. - 20. + 48.;
+                    if view.read(cx).side_width != width {
+                        view.update(cx, |w, cx| {
+                            w.side_width = width;
+                            cx.notify();
+                        });
+                    }
                     view
                 })
                 // A widget with no preview (notes, pages) has no body at all.

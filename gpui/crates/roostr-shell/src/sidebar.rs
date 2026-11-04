@@ -369,8 +369,14 @@ impl Workspace {
                     .clone()
             });
             if let Some(view) = &body {
+                // Written only when it changed: a write while drawing redraws the widget.
                 let side_width = self.side_width;
-                view.update(cx, |w, _| w.side_width = side_width);
+                if view.read(cx).side_width != side_width {
+                    view.update(cx, |w, cx| {
+                        w.side_width = side_width;
+                        cx.notify();
+                    });
+                }
             }
             let over_here = over
                 .as_ref()

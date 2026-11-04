@@ -86,29 +86,19 @@ impl ObjectMeta {
         this
     }
 
-    /// Objects whose fields link to this one (every object is scanned: a cap would hide backlinks).
+    /// Objects whose fields link to this one: the engine's `$links` (every
+    /// link field, list of links and collection membership) holds the id.
     fn load_backlinks(&mut self, cx: &mut Context<Self>) {
-        let task = api::query_all(json!({}), cx);
+        let task = api::query_all(
+            json!({ "filters": [{ "key": "$links", "condition": "in", "value": [self.object_id] }] }),
+            cx,
+        );
         let id = self.object_id.clone();
         cx.spawn(async move |this, cx| {
             let Ok(records) = task.await else { return };
-            let links = |fields: &Fields| {
-                fields.iter().any(|(key, v)| {
-                    if key == "channel" {
-                        return false;
-                    }
-                    if v.link_value.as_ref().is_some_and(|l| l.target_id == id) {
-                        return true;
-                    }
-                    v.items().iter().any(|i| {
-                        i.link_value.as_ref().is_some_and(|l| l.target_id == id)
-                            || (key == "collectionIds" && i.as_str() == Some(id.as_str()))
-                    })
-                })
-            };
             let out: Vec<Backlink> = records
                 .iter()
-                .filter(|r| r.id != id && links(&r.fields))
+                .filter(|r| r.id != id)
                 .map(|r| Backlink {
                     id: r.id.clone(),
                     name: Some(roostr_core::field_str(&r.fields, "name"))

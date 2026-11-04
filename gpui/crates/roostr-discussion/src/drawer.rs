@@ -312,7 +312,7 @@ impl ConversationDrawer {
             )
     }
 
-    fn render_error(&self, cx: &mut Context<Self>) -> Option<Div> {
+    fn render_error(&self, this: WeakEntity<Self>) -> Option<Div> {
         (!self.refresh_error.is_empty()).then(|| {
             div()
                 .flex()
@@ -333,7 +333,9 @@ impl ConversationDrawer {
                         .outline()
                         .xsmall()
                         .label("Refresh")
-                        .on_click(cx.listener(|this, _, _, cx| this.refresh_active(cx))),
+                        .on_click(move |_, _, cx| {
+                            let _ = this.update(cx, |this, cx| this.refresh_active(cx));
+                        }),
                 )
         })
     }
@@ -361,17 +363,30 @@ impl ConversationDrawer {
         }
     }
 
-    /// A desktop column: its icon and name, its collapse button, its view.
-    /// A refresh failure shows in the first expanded column.
-    fn render_column(
-        &mut self,
-        tab: PaneTab,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
+    /// Whether drawing column `tab` has state to set first (its view not
+    /// made yet, a collapsed column's view to drop, the sheet's mark to
+    /// clear). Each column draws the drawer by reading it: one written while
+    /// drawing would draw the other column again, frame after frame.
+    fn column_needs_prepare(&self, tab: PaneTab, cx: &App) -> bool {
+        let pane = PaneState::global(cx).read(cx);
+        self.in_sheet
+            || (!pane.chat_open && self.discussion.is_some())
+            || (!pane.props_open && self.properties.is_some())
+            || match tab {
+                PaneTab::Chat => self.discussion.is_none(),
+                PaneTab::Properties => self.properties.is_none(),
+            }
+    }
+
+    fn prepare_column(&mut self, tab: PaneTab, window: &mut Window, cx: &mut Context<Self>) {
         self.in_sheet = false;
         self.drop_collapsed(cx);
         self.ensure_view(tab, window, cx);
+    }
+
+    /// A desktop column: its icon and name, its collapse button, its view.
+    /// A refresh failure shows in the first expanded column.
+    fn render_column(&self, tab: PaneTab, this: WeakEntity<Self>, cx: &App) -> AnyElement {
         let (first, folded) = {
             let pane = PaneState::global(cx).read(cx);
             let other = tab.other();
@@ -407,7 +422,7 @@ impl ConversationDrawer {
             .flex_col()
             .text_color(theme::fg())
             .child(head)
-            .when(first, |d| d.children(self.render_error(cx)))
+            .when(first, |d| d.children(self.render_error(this)))
             .child(self.render_body(tab))
             .into_any_element()
     }
@@ -454,7 +469,7 @@ impl Render for ConversationDrawer {
             .flex_col()
             .text_color(theme::fg())
             .child(head)
-            .children(self.render_error(cx))
+            .children(self.render_error(cx.entity().downgrade()))
             .child(self.render_body(tab))
     }
 }
@@ -479,8 +494,12 @@ impl PaneColumn {
 impl Render for PaneColumn {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let tab = self.tab;
-        self.drawer
-            .update(cx, |drawer, cx| drawer.render_column(tab, window, cx))
-            .unwrap_or_else(|_| div().into_any_element())
+        let Some(drawer) = self.drawer.upgrade() else {
+            return div().into_any_element();
+        };
+        if drawer.read(cx).column_needs_prepare(tab, cx) {
+            drawer.update(cx, |drawer, cx| drawer.prepare_column(tab, window, cx));
+        }
+        drawer.read(cx).render_column(tab, self.drawer.clone(), cx)
     }
 }

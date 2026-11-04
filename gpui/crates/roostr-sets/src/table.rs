@@ -315,12 +315,21 @@ impl SetTable {
 
     /// A wheel turn over the horizontal scrollbar strip of a too-wide table
     /// scrolls it sideways (either wheel axis); false when elsewhere.
-    fn wheel_on_scrollbar(&mut self, e: &ScrollEvent, cx: &mut Context<Self>) -> bool {
+    /// The wheel is over the horizontal scrollbar of a table wider than its pane.
+    fn on_scrollbar(&self, e: &ScrollEvent) -> bool {
         let bounds = self.scroll.bounds();
-        if self.scroll.max_offset().x <= px(0.) || !bounds.contains(&e.position) {
-            return false;
-        }
-        if e.position.y < bounds.bottom() - px(TABLE_SCROLLBAR_ROOM) {
+        self.scroll.max_offset().x > px(0.)
+            && bounds.contains(&e.position)
+            && e.position.y >= bounds.bottom() - px(TABLE_SCROLLBAR_ROOM)
+    }
+
+    /// A column resize or marquee is running: window-wide moves are its.
+    fn tracking(&self) -> bool {
+        self.resize.is_some() || self.marquee.is_some()
+    }
+
+    fn wheel_on_scrollbar(&mut self, e: &ScrollEvent, cx: &mut Context<Self>) -> bool {
+        if !self.on_scrollbar(e) {
             return false;
         }
         let delta = e.delta.pixel_delta(px(20.));
@@ -739,19 +748,14 @@ impl SetTable {
             .unwrap_or_default()
     }
 
-    fn on_cell_click(
-        &mut self,
-        record: &str,
-        key: &str,
-        relations: &[RelationDef],
-        cx: &mut Context<Self>,
-    ) {
+    /// A click on cell `key` of `record`: a checkbox toggles, any other opens its editor.
+    fn on_cell_click(&mut self, record: &str, key: &str, checkbox: bool, cx: &mut Context<Self>) {
         // The mouseup ending a row-drag must not open an editor.
         if self.drag_moved {
             self.drag_moved = false;
             return;
         }
-        if Self::format_of(relations, key) == "checkbox" {
+        if checkbox {
             // Checkbox cells toggle on click, no menu.
             let cur = self
                 .rows
@@ -1553,10 +1557,10 @@ impl SetTable {
         let locked = is_locked_tool(&r.fields);
         if Self::is_editable(relations, c) && !locked {
             let fmt = Self::format_of(relations, c);
-            let rel = common::find_rel(relations, c).cloned();
+            let rel = common::find_rel(relations, c);
             let record = r.id.clone();
             let key = c.to_string();
-            let rels = relations.to_vec();
+            let checkbox = fmt == "checkbox";
             let mut cell = base()
                 .id(SharedString::from(format!("cell-{}-{}", r.id, c)))
                 .debug_selector({
@@ -1571,7 +1575,7 @@ impl SetTable {
                 )
                 .on_click(cx.listener(move |this, _, _, cx| {
                     cx.stop_propagation();
-                    this.on_cell_click(&record, &key, &rels, cx)
+                    this.on_cell_click(&record, &key, checkbox, cx)
                 }));
             match fmt.as_str() {
                 "tag" | "status" => {
@@ -1582,7 +1586,6 @@ impl SetTable {
                     }
                     for t in items {
                         let color = rel
-                            .as_ref()
                             .and_then(|rel| rel.options.iter().find(|o| o.text == t))
                             .map(|o| o.color.clone())
                             .unwrap_or_default();
@@ -1675,7 +1678,6 @@ impl SetTable {
             }
             if !locked {
                 let record = r.id.clone();
-                let rels = relations.to_vec();
                 cell = cell
                     .cursor_pointer()
                     .hover(|s| s.bg(theme::hl_light()))
@@ -1685,7 +1687,7 @@ impl SetTable {
                     )
                     .on_click(cx.listener(move |this, _, _, cx| {
                         cx.stop_propagation();
-                        this.on_cell_click(&record, "serving", &rels, cx)
+                        this.on_cell_click(&record, "serving", false, cx)
                     }));
             }
         }
@@ -2258,15 +2260,22 @@ impl Render for SetTable {
                         |_, _, _| {},
                         move |_, _, window, _| {
                             let e1 = entity.clone();
+                            // Window-wide listeners: they read first and update the
+                            // table only for its own gesture - an update on every
+                            // move or wheel redraws the table (and what reads it).
                             window.on_mouse_event(move |e: &MouseMoveEvent, phase, _, cx| {
-                                if phase == DispatchPhase::Bubble {
+                                if phase == DispatchPhase::Bubble
+                                    && e1.upgrade().is_some_and(|t| t.read(cx).tracking())
+                                {
                                     let _ =
                                         e1.update(cx, |this, cx| this.mouse_move(e.position, cx));
                                 }
                             });
                             let e2 = entity.clone();
                             window.on_mouse_event(move |_: &MouseUpEvent, phase, _, cx| {
-                                if phase == DispatchPhase::Bubble {
+                                if phase == DispatchPhase::Bubble
+                                    && e2.upgrade().is_some_and(|t| t.read(cx).tracking())
+                                {
                                     let _ = e2.update(cx, |this, cx| this.mouse_up(cx));
                                 }
                             });
@@ -2274,7 +2283,9 @@ impl Render for SetTable {
                             // the table sideways, not the page.
                             let e3 = entity.clone();
                             window.on_mouse_event(move |e: &ScrollEvent, phase, _, cx| {
-                                if phase != DispatchPhase::Capture {
+                                if phase != DispatchPhase::Capture
+                                    || !e3.upgrade().is_some_and(|t| t.read(cx).on_scrollbar(e))
+                                {
                                     return;
                                 }
                                 let took = e3
