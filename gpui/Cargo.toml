@@ -78,15 +78,21 @@ strip = true
 
 # The iOS app's emoji fallback and color rasterization (iOS-only changes; see
 # vendor/gpui-pre-apple/Cargo.toml), the iOS platform's additions (see
-# vendor/gpui-pre-ios/Cargo.toml; gpui-pre-platform names it on iOS, so the
+# vendor/gpui-pre-ios/Cargo.toml; gpui-fast-platform names it on iOS, so the
 # vendored copy replaces it there too), the browser's touch hover (see
-# vendor/gpui-pre-web/Cargo.toml), gpui-motion's clock on wasm (see
+# vendor/gpui-fast-web/Cargo.toml), gpui-motion's clock on wasm (see
 # vendor/gpui-motion-kit/Cargo.toml), and touch pans that keep to one axis
-# (see vendor/gpui-pre/Cargo.toml).
+# (see vendor/gpui-fast/Cargo.toml).
 [patch.crates-io]
-gpui-pre = { path = "vendor/gpui-pre" }
+# GPUI Fast in place of gpui-pre: GPUI Kit's gpui-pre crates are shims
+# re-exporting it (vendor/compat), and its core and web carry our patches.
+gpui-pre = { path = "vendor/compat/gpui-pre" }
+gpui-pre-macros = { path = "vendor/compat/gpui-pre-macros" }
+gpui-pre-platform = { path = "vendor/compat/gpui-pre-platform" }
+gpui-pre-web = { path = "vendor/compat/gpui-pre-web" }
+gpui-fast = { path = "vendor/gpui-fast" }
+gpui-fast-web = { path = "vendor/gpui-fast-web" }
 gpui-pre-apple = { path = "vendor/gpui-pre-apple" }
 gpui-pre-ios = { path = "vendor/gpui-pre-ios" }
-gpui-pre-web = { path = "vendor/gpui-pre-web" }
 gpui-motion-kit = { path = "vendor/gpui-motion-kit" }
 gpui-ce-motion = { path = "vendor/gpui-ce-motion" }

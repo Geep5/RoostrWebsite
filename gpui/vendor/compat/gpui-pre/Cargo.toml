@@ -1,0 +1,33 @@
+# gpui-fast under the name and version GPUI Kit 0.9.0 pins (gpui-pre =0.3.11),
+# so GPUI Kit and everything built on gpui-pre run on GPUI Fast - after
+# longbridge/gpui-fast's compat/gpui-pre, moved to 0.3.11.
+[package]
+name = "gpui-pre"
+version = "0.3.11"
+edition = "2024"
+publish = false
+license = "Apache-2.0"
+
+[lib]
+name = "gpui"
+path = "lib.rs"
+doctest = false
+
+[features]
+default = ["gpui_fast/default"]
+bench = ["gpui_fast/bench"]
+bench-support = ["gpui_fast/bench-support"]
+font-kit = ["gpui_fast/font-kit"]
+hot-reload = ["gpui_fast/hot-reload"]
+inspector = ["gpui_fast/inspector"]
+leak-detection = ["gpui_fast/leak-detection"]
+profiler = ["gpui_fast/profiler"]
+screen-capture = ["gpui_fast/screen-capture"]
+stacker = ["gpui_fast/stacker"]
+test-support = ["gpui_fast/test-support"]
+wayland = ["gpui_fast/wayland"]
+windows-manifest = ["gpui_fast/windows-manifest"]
+x11 = ["gpui_fast/x11"]
+
+[dependencies]
+gpui_fast = { package = "gpui-fast", version = "=0.1.13", default-features = false }

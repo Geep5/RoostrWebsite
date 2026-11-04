@@ -2,6 +2,9 @@
 //! app's `Editor.svelte` (with BlockNode, BlockMenu, SlashMenu, LinkPicker,
 //! TableBlock, FileBlock, RelationBlock) and `File.svelte`.
 
+// GPUI Fast's macros name `gpui::`, not `::gpui_kit::` as gpui-pre's did.
+extern crate gpui_kit as gpui;
+
 /// The desktop block gutter (drag handle rail) left of every block. The
 /// object page shifts a document left by it, so the text lines up under
 /// the header's arrows and the handles hang in the margin.

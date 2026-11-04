@@ -211,6 +211,9 @@ impl Backend for Vault {
 fn settle(cx: &mut VisualTestContext) {
     cx.executor().advance_clock(Duration::from_secs(2));
     cx.run_until_parked();
+    // A display's next frame: an animation (the pane columns sliding open)
+    // redraws only the view that asked for it, on the frame after.
+    cx.simulate_frame();
 }
 
 fn shown(cx: &mut VisualTestContext, selector: &'static str) -> bool {

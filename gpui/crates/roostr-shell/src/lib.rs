@@ -15,6 +15,9 @@
 //! - [`set_pane`]: the object page's right pane (ConversationDrawer's views).
 //! - Actions [`Search`], [`NewObject`], [`OpenSettings`] for the app menu.
 
+// GPUI Fast's macros name `gpui::`, not `::gpui_kit::` as gpui-pre's did.
+extern crate gpui_kit as gpui;
+
 mod back_swipe;
 mod create_menu;
 mod header;
