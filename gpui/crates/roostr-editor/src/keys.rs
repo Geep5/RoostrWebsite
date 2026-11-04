@@ -1637,7 +1637,7 @@ impl Editor {
             return false;
         }
         let index = layout.index_for_point(position);
-        let probe = if index > 0 && index == text.len() { index - 1 } else { index };
+        let probe = char_under(&text, index);
         let marked = marks::mark_at(&spans, probe, mark::LINK).is_some()
             || marks::mark_at(&spans, probe, mark::MENTION).is_some();
         // Past a line's last character nothing is under the pointer (the
@@ -1658,11 +1658,7 @@ impl Editor {
         let Some(index) = index else { return };
         let (text, spans) = self.live(id);
         // A click lands between characters; the mark is the one under the pointer.
-        let probe = if index > 0 && index == text.len() {
-            index - 1
-        } else {
-            index
-        };
+        let probe = char_under(&text, index);
         if let Some(link) = marks::mark_at(&spans, probe, mark::LINK).and_then(|m| m.param.clone())
         {
             // The stored param is the URL itself (the web decodes its attribute back to it).
@@ -1756,6 +1752,17 @@ impl Editor {
             let _ = this.update(cx, |this, cx| this.refresh(cx).detach());
         })
         .detach();
+    }
+}
+
+/// The character under a pointer that lands at byte `index` of `text`: the
+/// one starting there, or past the end the last one - stepped back a whole
+/// character, never into the middle of one ("Open ↗" ends in a 3-byte arrow).
+fn char_under(text: &str, index: usize) -> usize {
+    if index > 0 && index == text.len() {
+        text.char_indices().next_back().map_or(0, |(at, _)| at)
+    } else {
+        index
     }
 }
 

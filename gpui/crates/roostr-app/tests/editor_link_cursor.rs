@@ -48,19 +48,36 @@ fn page() -> Object {
         id: PAGE.into(),
         type_key: "page".into(),
         fields,
-        blocks: vec![Block {
-            id: "p0".into(),
-            content: BlockContent {
-                text: Some(TextContent {
-                    text: TEXT.into(),
-                    // "example.com", a web link.
-                    marks: Some(vec![roostr_core::types::Mark { from: 4, to: 15, kind: mark::LINK, param: Some("https://example.com".into()) }]),
-                    ..TextContent::default()
-                }),
-                ..BlockContent::default()
+        blocks: vec![
+            Block {
+                id: "p0".into(),
+                content: BlockContent {
+                    text: Some(TextContent {
+                        text: TEXT.into(),
+                        // "example.com", a web link.
+                        marks: Some(vec![roostr_core::types::Mark { from: 4, to: 15, kind: mark::LINK, param: Some("https://example.com".into()) }]),
+                        ..TextContent::default()
+                    }),
+                    ..BlockContent::default()
+                },
+                ..Block::default()
             },
-            ..Block::default()
-        }],
+            // A line that is all link and ends in a 3-byte arrow, as emails'
+            // "Open ↗" do (marks count UTF-16 units: 6). Field report: the
+            // pointer past its end crashed the app.
+            Block {
+                id: "p1".into(),
+                content: BlockContent {
+                    text: Some(TextContent {
+                        text: "Open ↗".into(),
+                        marks: Some(vec![roostr_core::types::Mark { from: 0, to: 6, kind: mark::LINK, param: Some("https://example.com".into()) }]),
+                        ..TextContent::default()
+                    }),
+                    ..BlockContent::default()
+                },
+                ..Block::default()
+            },
+        ],
         ..Object::default()
     }
 }
@@ -142,21 +159,36 @@ fn a_link_shows_a_pointing_hand(cx: &mut TestAppContext) {
     settle(cx);
     settle(cx);
 
-    // Sweep the pointer along the line: the hand shows over "example.com"
-    // only - one stretch, after "See ", well before the line's end.
-    let line = cx.debug_bounds("block-p0").expect("the line");
-    let y = line.center().y;
-    let mut hand = Vec::new();
-    let mut x = line.left() + px(1.);
-    while x < line.right() {
-        cx.simulate_mouse_move(gpui::point(x, y), None, Modifiers::none());
-        cx.run_until_parked();
-        hand.push(cx.debug_bounds("editor-link-hover").is_some());
-        x += px(2.);
-    }
+    // Sweep the pointer along a line; whether the hand showed at each step.
+    let sweep = |cx: &mut VisualTestContext, block: &'static str| -> Vec<bool> {
+        let line = cx.debug_bounds(block).expect("the line");
+        let y = line.center().y;
+        let mut hand = Vec::new();
+        let mut x = line.left() + px(1.);
+        while x < line.right() {
+            cx.simulate_mouse_move(gpui::point(x, y), None, Modifiers::none());
+            cx.run_until_parked();
+            hand.push(cx.debug_bounds("editor-link-hover").is_some());
+            x += px(2.);
+        }
+        hand
+    };
+
+    // The hand shows over "example.com" only - one stretch, after "See ",
+    // well before the line's end.
+    let hand = sweep(cx, "block-p0");
     let first = hand.iter().position(|h| *h).expect("a hand over the link");
     let last = hand.iter().rposition(|h| *h).unwrap();
     assert!(first > 3, "not over \"See \"");
     assert!(hand[first..=last].iter().all(|h| *h), "one stretch: the link");
     assert!(last + 20 < hand.len(), "and none past the text");
+
+    // A link ending in "↗": the hand over the whole line, and none with the
+    // pointer past its end (beyond its last, multi-byte character) - where
+    // the app used to crash.
+    let hand = sweep(cx, "block-p1");
+    let first = hand.iter().position(|h| *h).expect("a hand over the link");
+    let last = hand.iter().rposition(|h| *h).unwrap();
+    assert!(hand[first..=last].iter().all(|h| *h), "one stretch: the whole line");
+    assert!(last + 20 < hand.len(), "and none past the arrow");
 }
