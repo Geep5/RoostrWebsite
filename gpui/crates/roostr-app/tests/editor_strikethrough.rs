@@ -207,7 +207,18 @@ fn cmd_shift_s_strikes_the_selection_through_and_back(cx: &mut TestAppContext) {
         let style = cx.debug_bounds("block-menu-sub-Style").expect("Style in the block menu");
         cx.simulate_mouse_move(style.center(), None, Modifiers::none());
         settle(cx);
+        // It is last, under the block styles: the flyout scrolls to it.
         let row = cx.debug_bounds("block-menu-strike").expect("Strikethrough in the Style submenu");
+        let first = cx.debug_bounds("block-menu-style-0").expect("the first style");
+        cx.simulate_event(gpui::ScrollEvent {
+            position: first.center(),
+            delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.), px(-2000.))),
+            modifiers: Modifiers::none(),
+            touch_phase: gpui::TouchPhase::Moved,
+            ..Default::default()
+        });
+        settle(cx);
+        let row = cx.debug_bounds("block-menu-strike").unwrap_or(row);
         cx.simulate_click(row.center(), Modifiers::none());
         settle(cx);
     };

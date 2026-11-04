@@ -701,33 +701,12 @@ impl BlockMenu {
             match kind {
                 SubKind::Style => {
                     let Some(t) = &t else { return m };
-                    // A text style first, above the block styles (the list
-                    // scrolls): the whole block struck through.
-                    let spans = crate::marks::spans_from_marks(&t.text, t.marks.as_deref().unwrap_or(&[]));
-                    let struck = !t.text.is_empty()
-                        && crate::marks::covers(&spans, 0, t.text.len(), roostr_core::types::mark::STRIKETHROUGH);
-                    m = m.item(
-                        PopupMenuItem::element(move |_, _| {
-                            Self::fly_row("fly-strike", struck)
-                                .debug_selector(|| "block-menu-strike".to_string())
-                                .child(
-                                    div()
-                                        .w(px(34.))
-                                        .flex()
-                                        .justify_center()
-                                        .child(Icon::new(Glyph::Strikethrough).size(px(16.))),
-                                )
-                                .child(div().text_size(px(13.)).line_through().child("Strikethrough"))
-                        })
-                        .checked(struck)
-                        .on_click(on(Fired::Action(MenuAction::Strikethrough))),
-                    );
-                    m = m.separator();
                     for (i, (label, value, desc, preview, cls)) in STYLES.iter().enumerate() {
                         let active = t.style == *value;
                         m = m.item(
                             PopupMenuItem::element(move |_, _| {
                                 Self::fly_row(("fly-style", i), active)
+                                    .debug_selector(move || format!("block-menu-style-{i}"))
                                     .child(
                                         preview_tile(preview, *cls, px(34.), px(30.), theme::bg())
                                             .text_color(if *cls == Preview::P {
@@ -755,6 +734,41 @@ impl BlockMenu {
                             .on_click(on(Fired::Action(MenuAction::Style(*value)))),
                         );
                     }
+                    m = m.separator();
+                    // Last, under the block styles: a text mark (the whole
+                    // block struck through), on or off over any style.
+                    let spans = crate::marks::spans_from_marks(&t.text, t.marks.as_deref().unwrap_or(&[]));
+                    let struck = !t.text.is_empty()
+                        && crate::marks::covers(&spans, 0, t.text.len(), roostr_core::types::mark::STRIKETHROUGH);
+                    m = m.item(
+                        PopupMenuItem::element(move |_, _| {
+                            Self::fly_row("fly-strike", struck)
+                                .debug_selector(|| "block-menu-strike".to_string())
+                                // Laid out as the styles below: a tile showing
+                                // the effect, the name, a one-line description.
+                                .child(
+                                    preview_tile("S", Preview::P, px(34.), px(30.), theme::bg())
+                                        .text_color(theme::fg())
+                                        .line_through(),
+                                )
+                                .child(
+                                    div()
+                                        .flex()
+                                        .flex_col()
+                                        .gap(px(1.))
+                                        .min_w_0()
+                                        .child(div().text_size(px(13.)).child("Strikethrough"))
+                                        .child(
+                                            div()
+                                                .text_size(px(11.))
+                                                .text_color(theme::muted())
+                                                .child("Cross out the whole block"),
+                                        ),
+                                )
+                        })
+                        .checked(struck)
+                        .on_click(on(Fired::Action(MenuAction::Strikethrough))),
+                    );
                 }
                 SubKind::Align => {
                     for (i, (label, value)) in ALIGNS.iter().enumerate() {
