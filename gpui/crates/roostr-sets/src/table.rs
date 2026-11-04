@@ -10,6 +10,7 @@ use std::rc::Rc;
 
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Escape as InputEscape, Input, InputEvent, InputState};
+use gpui_kit::component::scroll::{Scrollbar, ScrollbarMode};
 use gpui_kit::component::{Icon, IconName, Sizable as _};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -69,6 +70,8 @@ const ROW_H_GUESS: f32 = 33.;
 /// Rows drawn beyond the window, as a share of its height on each side: a
 /// wheel step or a fling between frames lands on rows already drawn.
 const OVERSCAN: f32 = 1.;
+/// Room under the last row for the horizontal scrollbar of a too-wide table.
+const TABLE_SCROLLBAR_ROOM: f32 = 10.;
 /// What every row draws whatever the columns - and its space (`channel`):
 /// a cell's editor offers and creates linked objects in the row's space.
 const ROW_FIELDS: &[&str] = &[
@@ -2191,6 +2194,9 @@ impl Render for SetTable {
         // Registered every frame (cheap no-ops when idle) so a press and the
         // moves that follow it are tracked even before the next frame paints.
         let active_gesture = true;
+        // The table overflows its pane sideways: its columns, as laid out
+        // for this pane width, are wider than the pane.
+        let too_wide = avail > 0. && table_w > avail + 0.5;
         let mut root = div()
             .relative()
             .flex()
@@ -2201,11 +2207,31 @@ impl Render for SetTable {
                     .relative()
                     .child(track_bounds(&self.scroll_bounds))
                     .child(
+                        // Wider than the pane: a scrollbar along the bottom,
+                        // always shown, with room under the last row for it.
                         div()
-                            .id("set-table-scroll")
-                            .overflow_x_scroll()
-                            .track_scroll(&self.scroll)
-                            .child(table),
+                            .relative()
+                            .child(
+                                div()
+                                    .id("set-table-scroll")
+                                    .overflow_x_scroll()
+                                    .track_scroll(&self.scroll)
+                                    .when(too_wide, |d| d.pb(px(TABLE_SCROLLBAR_ROOM)))
+                                    .child(table),
+                            )
+                            .when(too_wide, |d| {
+                                d.child(
+                                    div()
+                                        .absolute()
+                                        .inset_0()
+                                        .debug_selector(|| "set-table-scrollbar".into())
+                                        .child(
+                                            Scrollbar::horizontal(&self.scroll)
+                                                .id("set-table-scrollbar")
+                                                .mode(ScrollbarMode::Always),
+                                        ),
+                                )
+                            }),
                     )
                     .child(plus),
             )
