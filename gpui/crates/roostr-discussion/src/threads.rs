@@ -27,10 +27,11 @@ impl ObjectAgentOption {
     }
 }
 
-/// Who may be @-addressed on `object`: the agents on its guest list (its
-/// `agent` property), each as an endpoint on this object. A space's guest
-/// list is its own agents; an agent's own page tags the agent (its home
-/// endpoint). `records` are the agent objects to name.
+/// Who may be @-addressed on `object`: every agent of its space (spawned
+/// helpers aside), each as an endpoint on this object - its default agents
+/// (its `agent` property) only decide who the composer starts tagged
+/// (`seed_tags`). An agent's own page tags the agent (its home endpoint).
+/// `records` are the agent objects to name.
 pub(crate) fn object_agent_options(
     object_id: &str,
     type_key: &str,
@@ -38,19 +39,23 @@ pub(crate) fn object_agent_options(
     records: &[QueryRow],
     name_of: impl Fn(&str) -> String,
 ) -> Vec<ObjectAgentOption> {
+    let space = if type_key == "channel" {
+        object_id
+    } else {
+        roostr_core::field_str(fields, "channel")
+    };
+    let in_space = records
+        .iter()
+        .filter(|r| {
+            roostr_core::field_str(&r.fields, "channel") == space
+                && roostr_core::field_str(&r.fields, "spawn_parent").is_empty()
+        })
+        .map(|r| r.id.clone());
     let guests: Vec<String> = match type_key {
-        "channel" => records
-            .iter()
-            .filter(|r| {
-                roostr_core::field_str(&r.fields, "channel") == object_id
-                    && roostr_core::field_str(&r.fields, "spawn_parent").is_empty()
-            })
-            .map(|r| r.id.clone())
-            .collect(),
         "agent" => std::iter::once(object_id.to_string())
             .chain(guest_agents(fields))
             .collect(),
-        _ => guest_agents(fields),
+        _ => guest_agents(fields).into_iter().chain(in_space).collect(),
     };
     let mut seen = HashSet::new();
     let mut out = Vec::new();
@@ -84,6 +89,53 @@ pub(crate) fn object_agent_options(
             .then_with(|| a.endpoint.agent_id.cmp(&b.endpoint.agent_id))
     });
     out
+}
+
+/// Who the composer starts tagged: the tags of the message just sent, else
+/// every agent the newest person's message that tagged anyone tagged (in
+/// the order written), else the object's default agents (`defaults`, in
+/// property order). `person_messages` are chronological. Empty when none
+/// of them is an option here.
+pub(crate) fn seed_tags(
+    options: &[ObjectAgentOption],
+    person_messages: &[&str],
+    defaults: &[String],
+    just_sent: Vec<ObjectAgentOption>,
+) -> Vec<ObjectAgentOption> {
+    if !just_sent.is_empty() {
+        return just_sent;
+    }
+    for text in person_messages.iter().rev() {
+        let mut tagged: Vec<(usize, &ObjectAgentOption)> = options
+            .iter()
+            .filter_map(|o| tag_at(text, &o.agent_name).map(|at| (at, o)))
+            .collect();
+        if !tagged.is_empty() {
+            tagged.sort_by_key(|(at, _)| *at);
+            return tagged.into_iter().map(|(_, o)| o.clone()).collect();
+        }
+    }
+    defaults
+        .iter()
+        .filter_map(|id| options.iter().find(|o| &o.endpoint.agent_id == id))
+        .cloned()
+        .collect()
+}
+
+/// Where `text` first @-tags `name` as a whole name ("@Ann" is not in "@Anne").
+fn tag_at(text: &str, name: &str) -> Option<usize> {
+    if name.is_empty() {
+        return None;
+    }
+    let label = format!("@{name}");
+    text.match_indices(&label)
+        .find(|(at, _)| {
+            !text[at + label.len()..]
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_alphanumeric() || c == '_')
+        })
+        .map(|(at, _)| at)
 }
 
 /// `localeCompare` for names: case-insensitive first, then exact.
@@ -218,45 +270,76 @@ mod tests {
         }
     }
 
-    #[test]
-    fn addressable_agents_are_the_guest_list_and_a_space_lists_its_own_agents() {
-        let agents = [
+    fn agents() -> [QueryRow; 4] {
+        [
             agent("zed", "Zed", &[]),
             agent("amy", "Amy", &[]),
             agent("sub", "Sub", &[("spawn_parent", "amy")]),
             agent("foreign", "Foreign", &[("channel", "elsewhere")]),
-        ];
-        let list = fields(serde_json::json!({
-            "agent": { "valuesValue": { "items": [{ "stringValue": "zed" }, { "stringValue": "amy" }, { "stringValue": "missing" }] } },
-        }));
-        let named: Vec<(String, String)> = options("obj", "task", &list, &agents)
-            .into_iter()
-            .map(|o| (o.endpoint.object_id, o.agent_name))
-            .collect();
-        assert_eq!(
-            named,
-            [("obj".into(), "Amy".into()), ("obj".into(), "Zed".into())]
-        );
-        // The pre-list single string still reads as a one-agent guest list.
-        let single = fields(serde_json::json!({ "agent": { "stringValue": "zed" } }));
-        let endpoints: Vec<AgentEndpoint> = options("obj", "task", &single, &agents)
+        ]
+    }
+
+    #[test]
+    fn every_agent_of_the_space_is_addressable_on_every_object() {
+        let agents = agents();
+        let ids = |id: &str, type_key: &str, f: &Fields| -> Vec<String> {
+            options(id, type_key, f, &agents)
+                .into_iter()
+                .map(|o| o.endpoint.agent_id)
+                .collect()
+        };
+        // No default agent: still everyone of the space, never a helper or another space's.
+        let plain = fields(serde_json::json!({ "channel": { "stringValue": "space" } }));
+        assert_eq!(ids("obj", "task", &plain), ["amy", "zed"]);
+        let endpoints: Vec<AgentEndpoint> = options("obj", "task", &plain, &agents)
             .into_iter()
             .map(|o| o.endpoint)
             .collect();
-        assert_eq!(endpoints, [endpoint("obj", "zed")]);
-        // No guests → nobody to address; nothing falls back to a space default.
-        assert!(options("obj", "task", &Fields::new(), &agents).is_empty());
-        // A space's roster is its own non-sub agents, addressed on the space.
-        let roster: Vec<String> = options("space", "channel", &Fields::new(), &agents)
-            .into_iter()
-            .map(|o| o.endpoint.agent_id)
-            .collect();
-        assert_eq!(roster, ["amy", "zed"]);
-        // An agent's own page addresses the agent at home, with no Agent property needed.
+        assert_eq!(endpoints, [endpoint("obj", "amy"), endpoint("obj", "zed")]);
+        // A default agent is listed once, and a missing one not at all.
+        let defaults = fields(serde_json::json!({
+            "channel": { "stringValue": "space" },
+            "agent": { "valuesValue": { "items": [{ "stringValue": "zed" }, { "stringValue": "missing" }] } },
+        }));
+        assert_eq!(ids("obj", "task", &defaults), ["amy", "zed"]);
+        // The space page: its own agents.
+        assert_eq!(ids("space", "channel", &Fields::new()), ["amy", "zed"]);
+        // An agent's own page addresses the agent at home.
         let home: Vec<AgentEndpoint> = options("amy", "agent", &Fields::new(), &agents)
             .into_iter()
             .map(|o| o.endpoint)
             .collect();
         assert_eq!(home, [endpoint("amy", "amy")]);
+    }
+
+    #[test]
+    fn the_composer_starts_with_what_was_just_sent_then_the_last_tags_then_the_default_agents() {
+        let agents = [
+            agent("ann", "Ann", &[]),
+            agent("anne", "Anne", &[]),
+            agent("zed", "Zed", &[]),
+        ];
+        let plain = fields(serde_json::json!({ "channel": { "stringValue": "space" } }));
+        let opts = options("obj", "task", &plain, &agents);
+        let ids = |tags: Vec<ObjectAgentOption>| -> Vec<String> {
+            tags.into_iter().map(|o| o.endpoint.agent_id).collect()
+        };
+        let defaults = ["zed".to_string(), "ann".to_string()];
+        // Nothing said yet: every default agent, in property order.
+        assert_eq!(
+            ids(seed_tags(&opts, &[], &defaults, Vec::new())),
+            ["zed", "ann"]
+        );
+        // A person's tags win over the defaults, all of them, in the order written; "@Anne" is not "@Ann".
+        let said = ["@Zed hi", "thanks", "@Anne and @Zed, look"];
+        assert_eq!(
+            ids(seed_tags(&opts, &said, &defaults, Vec::new())),
+            ["anne", "zed"]
+        );
+        // The message just sent wins over both.
+        let sent = vec![opts[0].clone()];
+        assert_eq!(ids(seed_tags(&opts, &said, &defaults, sent)), ["ann"]);
+        // No default agent and no tags: an empty composer.
+        assert!(seed_tags(&opts, &["hello"], &[], Vec::new()).is_empty());
     }
 }

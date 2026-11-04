@@ -50,7 +50,7 @@ use crate::chat::{
 };
 use crate::drafts::{load_draft, save_draft};
 use crate::md::{MdTheme, render_markdown};
-use crate::threads::{ObjectAgentOption, endpoint_name, load_object_agents};
+use crate::threads::{ObjectAgentOption, endpoint_name, load_object_agents, seed_tags};
 
 /// How a discussion is shown.
 #[derive(Clone, Debug)]
@@ -1405,10 +1405,10 @@ impl Discussion {
         out
     }
 
-    /// The composer opens already addressed: `@Name `, tagged, caret after.
-    /// Name = the agent last @-tagged in this chat (by a person, not an
-    /// agent), else on an agent's own page that agent, else the object's only
-    /// agent; otherwise it starts empty. Only ever fills an empty draft.
+    /// The composer opens already addressed: `@Name `, tagged, caret after
+    /// (`seed_tags`: what was just sent, else the agents a person last
+    /// @-tagged here, else the object's default agents - on an agent's own
+    /// page that agent). Only ever fills an empty draft.
     /// `just_sent` is the tags of the message just posted.
     fn seed_default_agent(&mut self, just_sent: Vec<ObjectAgentOption>, cx: &mut Context<Self>) {
         if !self.draft.is_empty() || self.read_only || self.is_exchange {
@@ -1443,47 +1443,26 @@ impl Discussion {
         let Some(object) = self.object.clone() else {
             return;
         };
-        let store = Store::global(cx);
-        let last_tagged = {
-            let store = store.read(cx);
-            let mut found = None;
-            for m in self.messages.iter().rev() {
-                if store.agent(&m.author).is_some() {
-                    continue;
-                }
-                let mut best: Option<(&ObjectAgentOption, usize)> = None;
-                for option in &options {
-                    if let Some(at) = m.text.rfind(&format!("@{}", option.agent_name))
-                        && best.is_none_or(|(_, b)| at > b)
-                    {
-                        best = Some((option, at));
-                    }
-                }
-                if let Some((option, _)) = best {
-                    found = Some(option.clone());
-                    break;
-                }
-            }
-            found
-        };
-        let assigned = if object.type_key == "agent" {
+        let defaults = if object.type_key == "agent" {
             vec![object.id.clone()]
         } else {
             guest_agents(&object.fields)
         };
-        let sole = if assigned.len() == 1 {
-            options
+        let store = Store::global(cx);
+        let person_messages: Vec<&str> = {
+            let store = store.read(cx);
+            self.messages
                 .iter()
-                .find(|o| o.endpoint.agent_id == assigned[0])
-                .cloned()
-        } else {
-            None
+                .filter(|m| store.agent(&m.author).is_none())
+                .map(|m| m.text.as_str())
+                .collect()
         };
-        let Some(pick) = just_sent.last().cloned().or(last_tagged).or(sole) else {
+        let tags = seed_tags(&options, &person_messages, &defaults, just_sent);
+        if tags.is_empty() {
             return;
-        };
-        let text = format!("@{} ", pick.agent_name);
-        self.tagged = vec![pick];
+        }
+        let text: String = tags.iter().map(|t| format!("@{} ", t.agent_name)).collect();
+        self.tagged = tags;
         let caret = text.len();
         let window = self.window;
         let this = cx.entity().downgrade();
