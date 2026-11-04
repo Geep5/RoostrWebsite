@@ -1627,6 +1627,26 @@ impl Editor {
         cx.notify();
     }
 
+    /// Whether a link or mention is under `position` in text block `id` - on
+    /// its characters, not past the end of its line.
+    pub(crate) fn link_under(&self, id: &str, position: Point<Pixels>) -> bool {
+        let (text, spans) = self.live(id);
+        let layouts = self.layouts.borrow();
+        let Some(layout) = layouts.get(id) else { return false };
+        if text.is_empty() || !layout.bounds.contains(&position) {
+            return false;
+        }
+        let index = layout.index_for_point(position);
+        let probe = if index > 0 && index == text.len() { index - 1 } else { index };
+        let marked = marks::mark_at(&spans, probe, mark::LINK).is_some()
+            || marks::mark_at(&spans, probe, mark::MENTION).is_some();
+        // Past a line's last character nothing is under the pointer (the
+        // character's end is on its row, or the next row when it wraps).
+        let end = text[probe..].chars().next().map_or(probe, |c| probe + c.len_utf8());
+        let (start_at, end_at) = (layout.position_for_index(probe), layout.position_for_index(end));
+        marked && (position.x <= end_at.x + px(1.) || end_at.y > start_at.y)
+    }
+
     /// A plain click on a mention opens its object; on a web link opens the
     /// URL in the browser (only http(s), mailto and tel).
     fn mention_click(&mut self, id: &str, position: Point<Pixels>, cx: &mut Context<Self>) {

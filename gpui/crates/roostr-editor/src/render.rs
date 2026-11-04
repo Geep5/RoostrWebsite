@@ -436,10 +436,33 @@ impl Editor {
         };
         let down = id.to_string();
         let right = id.to_string();
+        let moved = id.to_string();
+        let on_link = self.link_hover.as_deref() == Some(id);
         div()
             .id(Self::row_id("text", id))
             .w_full()
             .when(!self.read_only, |d| d.cursor(CursorStyle::IBeam))
+            // A link or mention under the pointer: a click opens it.
+            .when(on_link, |d| {
+                d.cursor(CursorStyle::PointingHand)
+                    .debug_selector(|| "editor-link-hover".into())
+            })
+            .on_mouse_move(cx.listener(move |this, ev: &MouseMoveEvent, _, cx| {
+                let over = ev.pressed_button.is_none() && this.link_under(&moved, ev.position);
+                if over != (this.link_hover.as_deref() == Some(moved.as_str())) {
+                    this.link_hover = over.then(|| moved.clone());
+                    cx.notify();
+                }
+            }))
+            .on_hover(cx.listener({
+                let id = id.to_string();
+                move |this, hovered: &bool, _, cx| {
+                    if !*hovered && this.link_hover.as_deref() == Some(id.as_str()) {
+                        this.link_hover = None;
+                        cx.notify();
+                    }
+                }
+            }))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, ev: &MouseDownEvent, window, cx| {

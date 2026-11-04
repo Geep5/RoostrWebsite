@@ -176,6 +176,8 @@ pub struct Editor {
     pub(crate) autoscroll: Option<Task<()>>,
     /// Text drag-selection inside one block: (block, moved).
     pub(crate) text_drag: Option<(String, bool)>,
+    /// The text block whose link or mention is under the pointer (a pointing hand).
+    pub(crate) link_hover: Option<String>,
     // Popups.
     pub(crate) toolbar: Option<Toolbar>,
     pub(crate) slash: Option<Slash>,
@@ -309,6 +311,7 @@ impl Editor {
             sel_rect: None,
             autoscroll: None,
             text_drag: None,
+            link_hover: None,
             toolbar: None,
             slash: None,
             block_menu: None,
