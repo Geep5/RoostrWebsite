@@ -1,9 +1,9 @@
 {
   "abiVersion": 2,
-  "compiler": "/opt/homebrew/bin/odin version dev-2026-07:819fdc7a8",
+  "compiler": "/opt/homebrew/bin/odin version dev-2026-08:8412dc37a",
   "target": "js_wasm32",
   "artifact": "engine.wasm",
-  "sha256": "ecd53cda47e3b71fba4b4c7cde37f8bbee352a18f6e1dfb3f1af0e47ab68e97b",
+  "sha256": "5139c2cc48397f5b4f65511828b4bdf9998d0b9c5e88232f7c4a326f675699a0",
   "sourceFingerprint": "53c318d52d8c80a3c338f25e868eb0b64d72a37fc3eea057d35c63ef657a6120",
   "sourceFiles": {
     "abi/abi.odin": "34d035764a9dabadcd1a6ad474a36c27ba2a3a39d32273375af93e2d316b3507",
