@@ -1,5 +1,9 @@
-// Modified for gpui-pre (snapshot of zed@f816e1f): the gpui sources it reads are vendored under `vendor/gpui`.
+// Modified by Longbridge for gpui-fast.
+// Modified for gpui-fast releases: bundle cbindgen inputs inside this package.
 #![allow(clippy::disallowed_methods, reason = "build scripts are exempt")]
+
+#[path = "src/fast/rounded_clip_shader.rs"]
+mod fast_rounded_clip_shader;
 
 fn main() {
     #[cfg(any(target_os = "macos", target_os = "ios"))]
@@ -103,7 +107,7 @@ mod apple_build {
     /// build-script runtime against this crate's manifest dir, so no checkout
     /// path is baked into a compiled artifact (which corgi rejects).
     fn find_gpui_crate_dir() -> PathBuf {
-        PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap()).join("vendor/gpui")
+        PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap()).join("src/fast/release_gpui")
     }
 
     /// To enable runtime compilation, we need to "stitch" the shaders file with the generated header
@@ -112,7 +116,8 @@ mod apple_build {
     fn emit_stitched_shaders(header_path: &Path) {
         fn stitch_header(header: &Path, shader_path: &Path) -> std::io::Result<PathBuf> {
             let header_contents = std::fs::read_to_string(header)?;
-            let shader_contents = std::fs::read_to_string(shader_path)?;
+            let shader_contents =
+                crate::fast_rounded_clip_shader::source(&std::fs::read_to_string(shader_path)?);
             let stitched_contents = format!("{header_contents}\n{shader_contents}");
             let out_path =
                 PathBuf::from(env::var("OUT_DIR").unwrap()).join("stitched_shaders.metal");
@@ -168,7 +173,7 @@ mod apple_build {
         // location is the build's canonical output directory, never the
         // checkout (corgi rejects artifacts that embed the build path).
         let staged_shader_path = out_dir.join("shaders.metal");
-        std::fs::copy(shader_path, &staged_shader_path).unwrap();
+        crate::fast_rounded_clip_shader::stage(shader_path, &staged_shader_path);
 
         // When targeting macOS 12+, both `metal` and `metallib` also record
         // their working directory in the metallib. Run them from OUT_DIR so

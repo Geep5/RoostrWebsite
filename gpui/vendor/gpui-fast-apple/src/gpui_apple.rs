@@ -1,3 +1,4 @@
+// Modified by Longbridge for gpui-fast.
 #![cfg(any(target_os = "macos", target_os = "ios"))]
 //! Shared Apple rendering, task dispatch, and system services for GPUI.
 //!
@@ -7,6 +8,7 @@
 
 mod dispatcher;
 pub mod display_link;
+mod fast;
 pub mod keychain;
 mod metal_atlas;
 pub mod metal_renderer;

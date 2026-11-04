@@ -234,7 +234,7 @@ fn start(backend: ReplicaBackend, signals: Signals, cx: &mut App) {
 
 /// Make the bundled Twemoji known to CoreText by name, before GPUI loads
 /// any font: every font's cascade falls back to it on iOS
-/// (vendor/gpui-pre-apple).
+/// (vendor/gpui-fast-apple).
 fn register_emoji_font() {
     use std::ffi::c_void;
     #[link(name = "CoreText", kind = "framework")]

@@ -154,7 +154,7 @@ pub mod fonts {
 static INTER_TTF: &[u8] = include_bytes!("../../../../static/fonts/Inter.ttf");
 static ARCHIVO_BLACK_TTF: &[u8] = include_bytes!("../../../../static/fonts/ArchivoBlack.ttf");
 /// The color emoji on iOS: the browser build's Twemoji, embedded. GPUI's
-/// iOS text system falls back to it (vendor/gpui-pre-apple) instead of the
+/// iOS text system falls back to it (vendor/gpui-fast-apple) instead of the
 /// system's Apple Color Emoji, which it cannot always load there.
 #[cfg(target_os = "ios")]
 static EMOJI_TTF_IOS: &[u8] = include_bytes!("../fonts/TwemojiMozilla.ttf");

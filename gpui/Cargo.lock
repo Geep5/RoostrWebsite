@@ -2823,8 +2823,6 @@ dependencies = [
 [[package]]
 name = "gpui-fast-apple"
 version = "0.1.13"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6cdf402e4a795abb27cd9545a6b519f123f4f2b8050fc7f6e7e25e376f34867d"
 dependencies = [
  "anyhow",
  "async-task",
@@ -3106,44 +3104,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "gpui-pre-apple"
-version = "0.3.11"
-dependencies = [
- "anyhow",
- "async-task",
- "block2 0.6.2",
- "cbindgen",
- "core-foundation 0.10.1",
- "core-foundation-sys",
- "core-graphics 0.24.0",
- "core-text",
- "dispatch2",
- "etagere",
- "futures",
- "gpui-pre",
- "gpui-pre-collections",
- "gpui-pre-util",
- "image",
- "libc",
- "log",
- "mach2",
- "objc2 0.6.5",
- "objc2-core-foundation",
- "objc2-core-graphics",
- "objc2-core-text",
- "objc2-core-video",
- "objc2-foundation 0.3.2",
- "objc2-metal 0.3.2",
- "objc2-quartz-core 0.3.2",
- "objc2-security",
- "parking_lot",
- "pathfinder_geometry",
- "smallvec",
- "thiserror 2.0.21",
- "zed-font-kit",
-]
-
-[[package]]
 name = "gpui-pre-bench-metrics"
 version = "0.3.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3215,8 +3175,8 @@ dependencies = [
  "anyhow",
  "block2 0.6.2",
  "futures",
+ "gpui-fast-apple",
  "gpui-pre",
- "gpui-pre-apple",
  "log",
  "objc2 0.6.5",
  "objc2-core-foundation",

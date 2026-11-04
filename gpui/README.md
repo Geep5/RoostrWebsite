@@ -365,8 +365,10 @@ window - an alert, closing a dialog - did nothing). It also takes over a
 window scene UIKit restores with another app's scene delegate: an update
 over the SwiftUI app restores that app's scene session, whose SwiftUI
 `AppSceneDelegate` would show a black screen and crash on backgrounding.
-`vendor/gpui-pre-apple` (patched in for every target through
-`[patch.crates-io]`) changes iOS only: every font
+`vendor/gpui-fast-apple` (patched in for every target through
+`[patch.crates-io]`) is the Metal renderer and text system the iOS platform
+draws with: GPUI Fast's own, which draws its rounded overflow clips (an
+older renderer left their content blank). It changes iOS only: every font
 falls back to the bundled Twemoji (`crates/roostr-core/fonts/TwemojiMozilla.ttf`,
 the web build's emoji), drawn in color. Both mark their changes `roostr:`.
 

@@ -1,3 +1,4 @@
+// Modified by Longbridge for gpui-fast.
 use crate::metal_atlas::MetalAtlas;
 use anyhow::{Context as _, Result};
 use block2::RcBlock;
@@ -58,6 +59,10 @@ pub fn new_renderer(
     MetalRenderer::new(context, transparent, use_display_p3)
 }
 
+pub fn new_overlay_renderer(context: self::Context, base: &Renderer) -> Result<Renderer> {
+    crate::fast::composition::new_overlay_renderer(context, base)
+}
+
 pub struct InstanceBufferPool {
     buffer_size: usize,
     buffers: Vec<InstanceBuffer>,
@@ -72,7 +77,7 @@ impl Default for InstanceBufferPool {
     }
 }
 
-struct InstanceBuffer {
+pub(crate) struct InstanceBuffer {
     metal_buffer: Retained<ProtocolObject<dyn MTLBuffer>>,
     size: usize,
 }
@@ -86,7 +91,7 @@ impl InstanceBufferPool {
         self.buffers.clear();
     }
 
-    fn acquire(
+    pub(crate) fn acquire(
         &mut self,
         device: &ProtocolObject<dyn MTLDevice>,
         unified_memory: bool,
@@ -111,7 +116,7 @@ impl InstanceBufferPool {
         })
     }
 
-    fn release(&mut self, buffer: InstanceBuffer) {
+    pub(crate) fn release(&mut self, buffer: InstanceBuffer) {
         if buffer.size == self.buffer_size {
             self.buffers.push(buffer)
         }
@@ -126,34 +131,35 @@ enum DisplayLinkMode {
 }
 
 pub struct MetalRenderer {
-    device: Retained<ProtocolObject<dyn MTLDevice>>,
-    layer: Option<Retained<CAMetalLayer>>,
+    pub(crate) device: Retained<ProtocolObject<dyn MTLDevice>>,
+    pub(crate) layer: Option<Retained<CAMetalLayer>>,
     is_apple_gpu: bool,
-    is_unified_memory: bool,
+    pub(crate) is_unified_memory: bool,
     presents_with_transaction: bool,
     display_link_mode: DisplayLinkMode,
     /// For headless rendering, tracks whether output should be opaque
-    opaque: bool,
-    command_queue: Retained<ProtocolObject<dyn MTLCommandQueue>>,
-    paths_rasterization_pipeline_state: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
+    pub(crate) opaque: bool,
+    pub(crate) command_queue: Retained<ProtocolObject<dyn MTLCommandQueue>>,
+    pub(crate) paths_rasterization_pipeline_state: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
     path_sprites_pipeline_state: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
     shadows_pipeline_state: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
     quads_pipeline_state: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
     underlines_pipeline_state: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
     monochrome_sprites_pipeline_state: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
-    polychrome_sprites_pipeline_state: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
+    pub(crate) polychrome_sprites_pipeline_state: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
     surfaces_pipeline_state: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
-    unit_vertices: Retained<ProtocolObject<dyn MTLBuffer>>,
-    instance_buffer_pool: Arc<Mutex<InstanceBufferPool>>,
-    sprite_atlas: Arc<MetalAtlas>,
+    pub(crate) unit_vertices: Retained<ProtocolObject<dyn MTLBuffer>>,
+    pub(crate) instance_buffer_pool: Arc<Mutex<InstanceBufferPool>>,
+    pub(crate) sprite_atlas: Arc<MetalAtlas>,
     core_video_texture_cache: CFRetained<CVMetalTextureCache>,
-    path_intermediate_texture: Option<Retained<ProtocolObject<dyn MTLTexture>>>,
-    path_intermediate_msaa_texture: Option<Retained<ProtocolObject<dyn MTLTexture>>>,
+    pub(crate) path_intermediate_texture: Option<Retained<ProtocolObject<dyn MTLTexture>>>,
+    pub(crate) path_intermediate_msaa_texture: Option<Retained<ProtocolObject<dyn MTLTexture>>>,
     path_sample_count: u32,
     /// Offscreen render target reused across `render_scene` calls when
     /// rendering headlessly without reading pixels back.
     #[cfg(any(test, feature = "bench-support", feature = "test-support"))]
     headless_render_target: Option<Retained<ProtocolObject<dyn MTLTexture>>>,
+    pub(crate) fast_layers: crate::fast::layers::TileCache,
 }
 
 #[repr(C)]
@@ -191,7 +197,7 @@ impl MetalRenderer {
         Self::new_internal(device, Some(layer), !transparent, instance_buffer_pool)
     }
 
-    fn configure_layer(
+    pub(crate) fn configure_layer(
         layer: &CAMetalLayer,
         device: &ProtocolObject<dyn MTLDevice>,
         transparent: bool,
@@ -267,7 +273,7 @@ impl MetalRenderer {
         MTLCreateSystemDefaultDevice().context("accessing a compatible Metal device")
     }
 
-    fn new_internal(
+    pub(crate) fn new_internal(
         device: Retained<ProtocolObject<dyn MTLDevice>>,
         layer: Option<Retained<CAMetalLayer>>,
         opaque: bool,
@@ -440,6 +446,7 @@ impl MetalRenderer {
             path_sample_count: PATH_SAMPLE_COUNT,
             #[cfg(any(test, feature = "bench-support", feature = "test-support"))]
             headless_render_target: None,
+            fast_layers: crate::fast::layers::TileCache::default(),
         })
     }
 
@@ -512,9 +519,10 @@ impl MetalRenderer {
         if let Err(error) = self.update_path_intermediate_textures(size) {
             log::error!("failed to resize path textures: {error:#}");
         }
+        crate::fast::layers::TileCache::clear(&mut self.fast_layers);
     }
 
-    fn update_path_intermediate_textures(&mut self, size: Size<DevicePixels>) -> Result<()> {
+    pub(crate) fn update_path_intermediate_textures(&mut self, size: Size<DevicePixels>) -> Result<()> {
         // We are uncertain when this happens, but sometimes size can be 0 here. Most likely before
         // the layout pass on window creation. Zero-sized texture creation causes SIGABRT.
         // https://github.com/zed-industries/zed/issues/36229
@@ -646,7 +654,7 @@ impl MetalRenderer {
         }
     }
 
-    fn render_frame(
+    pub(crate) fn render_frame(
         &mut self,
         scene: &Scene,
         texture: &ProtocolObject<dyn MTLTexture>,
@@ -655,6 +663,7 @@ impl MetalRenderer {
         if self.path_intermediate_texture.is_none() {
             self.update_path_intermediate_textures(viewport_size)?;
         }
+        crate::fast::layers::raster::rasterize_tiles(self, scene);
         let mut writer = InstanceBufferWriter::new(
             &self.device,
             &self.instance_buffer_pool,
@@ -850,6 +859,17 @@ impl MetalRenderer {
         viewport_size: Size<DevicePixels>,
         surface_textures: &mut Vec<CFRetained<CVMetalTexture>>,
     ) -> Result<Retained<ProtocolObject<dyn MTLCommandBuffer>>> {
+        if let Some(command_buffer) = crate::fast::paths::draw_primitives_to_texture(
+            self,
+            scene,
+            instance_bindings,
+            writer,
+            texture,
+            viewport_size,
+            surface_textures,
+        )? {
+            return Ok(command_buffer);
+        }
         let command_queue = self.command_queue.clone();
         let command_buffer = command_queue
             .commandBuffer()
@@ -947,7 +967,7 @@ impl MetalRenderer {
         Ok(command_buffer)
     }
 
-    fn draw_paths_to_intermediate(
+    pub(crate) fn draw_paths_to_intermediate(
         &self,
         paths: &[Path<ScaledPixels>],
         writer: &mut InstanceBufferWriter,
@@ -1031,7 +1051,7 @@ impl MetalRenderer {
         Ok(true)
     }
 
-    fn draw_shadows(
+    pub(crate) fn draw_shadows(
         &self,
         shadows: Range<usize>,
         instance_bindings: &InstanceBindings,
@@ -1076,7 +1096,7 @@ impl MetalRenderer {
         }
     }
 
-    fn draw_quads(
+    pub(crate) fn draw_quads(
         &self,
         quads: Range<usize>,
         instance_bindings: &InstanceBindings,
@@ -1121,7 +1141,7 @@ impl MetalRenderer {
         }
     }
 
-    fn draw_paths_from_intermediate(
+    pub(crate) fn draw_paths_from_intermediate(
         &self,
         paths: &[Path<ScaledPixels>],
         writer: &mut InstanceBufferWriter,
@@ -1198,7 +1218,7 @@ impl MetalRenderer {
         Ok(())
     }
 
-    fn draw_underlines(
+    pub(crate) fn draw_underlines(
         &self,
         underlines: Range<usize>,
         instance_bindings: &InstanceBindings,
@@ -1243,7 +1263,7 @@ impl MetalRenderer {
         }
     }
 
-    fn draw_monochrome_sprites(
+    pub(crate) fn draw_monochrome_sprites(
         &self,
         texture_id: AtlasTextureId,
         sprites: Range<usize>,
@@ -1305,7 +1325,7 @@ impl MetalRenderer {
         }
     }
 
-    fn draw_polychrome_sprites(
+    pub(crate) fn draw_polychrome_sprites(
         &self,
         texture_id: AtlasTextureId,
         sprites: Range<usize>,
@@ -1314,6 +1334,16 @@ impl MetalRenderer {
         command_encoder: &ProtocolObject<dyn MTLRenderCommandEncoder>,
     ) {
         if sprites.is_empty() {
+            return;
+        }
+        if crate::fast::layers::composite::draw_tiles(
+            self,
+            texture_id,
+            &sprites,
+            instance_bindings,
+            viewport_size,
+            command_encoder,
+        ) {
             return;
         }
 
@@ -1367,7 +1397,7 @@ impl MetalRenderer {
         }
     }
 
-    fn draw_surfaces(
+    pub(crate) fn draw_surfaces(
         &mut self,
         surfaces: &[PaintSurface],
         first_surface: usize,
@@ -1482,7 +1512,7 @@ impl MetalRenderer {
     }
 }
 
-fn new_command_encoder_for_texture(
+pub(crate) fn new_command_encoder_for_texture(
     command_buffer: &ProtocolObject<dyn MTLCommandBuffer>,
     texture: &ProtocolObject<dyn MTLTexture>,
     viewport_size: Size<DevicePixels>,
@@ -1515,6 +1545,7 @@ fn new_command_encoder_for_texture(
         znear: 0.0,
         zfar: 1.0,
     });
+    crate::fast::rounded_clip::default_mask(&command_encoder);
     Ok(command_encoder)
 }
 
@@ -1661,21 +1692,21 @@ fn build_path_rasterization_pipeline_state(
 }
 
 #[derive(Clone)]
-struct InstanceBinding {
-    buffer: Retained<ProtocolObject<dyn MTLBuffer>>,
-    offset: usize,
+pub(crate) struct InstanceBinding {
+    pub(crate) buffer: Retained<ProtocolObject<dyn MTLBuffer>>,
+    pub(crate) offset: usize,
 }
 
-struct InstanceBindings {
-    quads: InstanceBinding,
-    shadows: InstanceBinding,
-    underlines: InstanceBinding,
-    monochrome_sprites: InstanceBinding,
-    polychrome_sprites: InstanceBinding,
-    surfaces: InstanceBinding,
+pub(crate) struct InstanceBindings {
+    pub(crate) quads: InstanceBinding,
+    pub(crate) shadows: InstanceBinding,
+    pub(crate) underlines: InstanceBinding,
+    pub(crate) monochrome_sprites: InstanceBinding,
+    pub(crate) polychrome_sprites: InstanceBinding,
+    pub(crate) surfaces: InstanceBinding,
 }
 
-fn write_instances(scene: &Scene, writer: &mut InstanceBufferWriter) -> Result<InstanceBindings> {
+pub(crate) fn write_instances(scene: &Scene, writer: &mut InstanceBufferWriter) -> Result<InstanceBindings> {
     Ok(InstanceBindings {
         quads: writer.write(&scene.quads)?,
         shadows: writer.write(&scene.shadows)?,
@@ -1689,7 +1720,7 @@ fn write_instances(scene: &Scene, writer: &mut InstanceBufferWriter) -> Result<I
     })
 }
 
-struct InstanceBufferWriter {
+pub(crate) struct InstanceBufferWriter {
     device: Retained<ProtocolObject<dyn MTLDevice>>,
     pool: Arc<Mutex<InstanceBufferPool>>,
     unified_memory: bool,
@@ -1699,7 +1730,7 @@ struct InstanceBufferWriter {
 }
 
 impl InstanceBufferWriter {
-    fn new(
+    pub(crate) fn new(
         device: &ProtocolObject<dyn MTLDevice>,
         pool: &Arc<Mutex<InstanceBufferPool>>,
         unified_memory: bool,
@@ -1742,7 +1773,7 @@ impl InstanceBufferWriter {
         Ok((binding, values))
     }
 
-    fn write<T>(&mut self, values: &[T]) -> Result<InstanceBinding> {
+    pub(crate) fn write<T>(&mut self, values: &[T]) -> Result<InstanceBinding> {
         let (binding, destination) = self.allocate::<T>(values.len())?;
         // SAFETY: The disjoint source and destination hold the same number of T values, and the destination stays MaybeUninit.
         unsafe {
@@ -1755,7 +1786,7 @@ impl InstanceBufferWriter {
         Ok(binding)
     }
 
-    fn write_iter<T>(
+    pub(crate) fn write_iter<T>(
         &mut self,
         values: impl ExactSizeIterator<Item = T>,
     ) -> Result<InstanceBinding> {
@@ -1792,7 +1823,7 @@ impl InstanceBufferWriter {
         Ok(())
     }
 
-    fn finish(self) -> InstanceBuffer {
+    pub(crate) fn finish(self) -> InstanceBuffer {
         let Self {
             unified_memory,
             filled,
@@ -1848,7 +1879,7 @@ enum UnderlineInputIndex {
 }
 
 #[repr(C)]
-enum SpriteInputIndex {
+pub(crate) enum SpriteInputIndex {
     Vertices = 0,
     Sprites = 1,
     ViewportSize = 2,
@@ -1867,7 +1898,7 @@ enum SurfaceInputIndex {
 }
 
 #[repr(C)]
-enum PathRasterizationInputIndex {
+pub(crate) enum PathRasterizationInputIndex {
     Vertices = 0,
     ViewportSize = 1,
 }

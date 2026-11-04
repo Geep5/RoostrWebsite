@@ -76,8 +76,8 @@ lto = "fat"
 codegen-units = 1
 strip = true
 
-# The iOS app's emoji fallback and color rasterization (iOS-only changes; see
-# vendor/gpui-pre-apple/Cargo.toml), the iOS platform's additions (see
+# The iOS app's renderer, emoji fallback and color rasterization (see
+# vendor/gpui-fast-apple/Cargo.toml), the iOS platform's additions (see
 # vendor/gpui-pre-ios/Cargo.toml; gpui-fast-platform names it on iOS, so the
 # vendored copy replaces it there too), the browser's touch hover (see
 # vendor/gpui-fast-web/Cargo.toml), gpui-motion's clock on wasm (see
@@ -92,7 +92,7 @@ gpui-pre-platform = { path = "vendor/compat/gpui-pre-platform" }
 gpui-pre-web = { path = "vendor/compat/gpui-pre-web" }
 gpui-fast = { path = "vendor/gpui-fast" }
 gpui-fast-web = { path = "vendor/gpui-fast-web" }
-gpui-pre-apple = { path = "vendor/gpui-pre-apple" }
+gpui-fast-apple = { path = "vendor/gpui-fast-apple" }
 gpui-pre-ios = { path = "vendor/gpui-pre-ios" }
 gpui-motion-kit = { path = "vendor/gpui-motion-kit" }
 gpui-ce-motion = { path = "vendor/gpui-ce-motion" }

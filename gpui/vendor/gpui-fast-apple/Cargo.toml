@@ -1,32 +1,43 @@
-# Zed's `gpui_apple` as published in gpui-pre-apple 0.3.11, vendored (and
-# patched in through the workspace's [patch.crates-io]) for the iOS app's
-# emoji: GPUI's text system resolves emoji through CoreText's system cascade,
-# which on iOS can name an Apple Color Emoji file the process cannot load, and
-# it rasterizes in color only for Apple Color Emoji. On iOS it now falls back
-# to Twemoji Mozilla (which roostr-ios registers with CoreText) and draws it
-# in color. The changes are marked `roostr:` in src/open_type.rs and
+# GPUI Fast's `gpui_apple` as published in gpui-fast-apple 0.1.13, vendored
+# (and patched in through the workspace's [patch.crates-io]) for the iOS app:
+# the iOS platform (vendor/gpui-pre-ios) draws with this renderer, which
+# understands GPUI Fast's scene (rounded overflow clips travel as clip groups
+# that an older renderer drops, leaving clipped content blank). Its emoji:
+# GPUI's text system resolves emoji through CoreText's system cascade, which
+# on iOS can name an Apple Color Emoji file the process cannot load, and it
+# rasterizes in color only for Apple Color Emoji. On iOS it falls back to
+# Twemoji Mozilla (which roostr-ios registers with CoreText) and draws it in
+# color. The changes are marked `roostr:` in src/open_type.rs and
 # src/text_system.rs and are iOS-only; macOS behaves as published.
 
 [package]
 edition = "2024"
-name = "gpui-pre-apple"
-version = "0.3.11"
-build = "build.rs"
+name = "gpui-fast-apple"
+version = "0.1.13"
 publish = false
+authors = ["Longbridge"]
+build = "build.rs"
+include = [
+    "/src/**",
+    "/resources/**",
+    "/build.rs",
+    "/Cargo.toml",
+    "/README.md",
+    "/LICENSE",
+    "/NOTICE",
+]
 autolib = false
 autobins = false
 autoexamples = false
 autotests = false
 autobenches = false
-description = "Zed's `gpui_apple` crate (gpui-pre snapshot of zed@f816e1f)"
-readme = false
+description = "gpui_apple: GPUI with gpui-fast rendering and layout optimizations"
+homepage = "https://github.com/longbridge/gpui-fast"
+documentation = "https://docs.rs/gpui-fast-apple/0.1.13/gpui_apple/"
+readme = "README.md"
 license = "Apache-2.0"
-repository = "https://github.com/zed-industries/zed"
-
-[package.metadata.gpui-pre]
-zed-crate = "gpui_apple"
-zed-version = "0.1.0"
-zed-rev = "f816e1f9263e3a8ef63c4baaa02e1441ce1c6038"
+repository = "https://github.com/longbridge/gpui-fast"
+resolver = "2"
 
 [features]
 bench-support = ["gpui/bench-support"]
@@ -46,9 +57,9 @@ path = "src/gpui_apple.rs"
 doctest = false
 
 [dependencies.gpui]
-version = "=0.3.11"
+version = "^0.1.13"
 default-features = false
-package = "gpui-pre"
+package = "gpui-fast"
 
 [target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies.anyhow]
 version = "1.0.86"
@@ -137,7 +148,7 @@ version = "0.6"
 version = "0.6"
 
 [target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies.objc2-core-foundation]
-version = "0.3.2"
+version = "=0.3.2"
 features = [
     "std",
     "CFData",
@@ -150,7 +161,7 @@ features = [
 default-features = false
 
 [target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies.objc2-core-graphics]
-version = "0.3.2"
+version = "=0.3.2"
 features = [
     "CGDirectDisplay",
     "CGColorSpace",
@@ -168,7 +179,7 @@ optional = true
 default-features = false
 
 [target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies.objc2-core-video]
-version = "0.3.2"
+version = "=0.3.2"
 features = [
     "CVBuffer",
     "CVImageBuffer",
@@ -182,7 +193,7 @@ features = [
 default-features = false
 
 [target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies.objc2-foundation]
-version = "0.3.2"
+version = "=0.3.2"
 features = [
     "NSArray",
     "NSAttributedString",
@@ -209,7 +220,6 @@ features = [
     "NSThread",
     "NSNotification",
     "NSOperation",
-    "NSProcessInfo",
     "block2",
 ]
 default-features = false
@@ -240,7 +250,7 @@ features = [
 default-features = false
 
 [target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies.objc2-quartz-core]
-version = "0.3.2"
+version = "=0.3.2"
 features = [
     "std",
     "CALayer",
@@ -249,7 +259,6 @@ features = [
     "objc2-metal",
     "objc2-core-foundation",
     "objc2-core-graphics",
-    "objc2-metal",
 ]
 default-features = false
 
@@ -282,23 +291,6 @@ version = "2.0.12"
 [target.'cfg(any(target_os = "macos", target_os = "ios"))'.build-dependencies.cbindgen]
 version = "0.28.0"
 default-features = false
-
-[lints.clippy]
-dbg_macro = "deny"
-declare_interior_mutable_const = "deny"
-disallowed_methods = "deny"
-large_enum_variant = "allow"
-let_underscore_future = "allow"
-nonminimal_bool = "allow"
-redundant_clone = "deny"
-single_range_in_vec_init = "allow"
-todo = "deny"
-too_many_arguments = "allow"
-type_complexity = "allow"
-
-[lints.clippy.style]
-level = "allow"
-priority = -1
 
 [lints.rust.unexpected_cfgs]
 level = "allow"

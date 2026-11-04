@@ -1,3 +1,4 @@
+// Modified by Longbridge for gpui-fast.
 use anyhow::anyhow;
 use collections::{HashMap, HashSet};
 use core_foundation::{
@@ -77,6 +78,7 @@ struct AppleTextSystemState {
     font_ids_by_postscript_name: HashMap<String, FontId>,
     font_ids_by_font_key: HashMap<FontKey, SmallVec<[FontId; 4]>>,
     postscript_names_by_font_id: HashMap<FontId, String>,
+    sized_fonts: crate::fast::text_system::SizedFonts,
 }
 
 impl AppleTextSystem {
@@ -90,6 +92,7 @@ impl AppleTextSystem {
             font_ids_by_postscript_name: HashMap::default(),
             font_ids_by_font_key: HashMap::default(),
             postscript_names_by_font_id: HashMap::default(),
+            sized_fonts: crate::fast::text_system::SizedFonts::default(),
         }))
     }
 }
@@ -608,7 +611,12 @@ impl AppleTextSystemState {
                     string.set_attribute(
                         cf_range,
                         kCTFontAttributeName,
-                        &font.native_font().clone_with_font_size(font_size.into()),
+                        &crate::fast::text_system::SizedFonts::get(
+                            &mut self.sized_fonts,
+                            run.font_id,
+                            font,
+                            font_size,
+                        ),
                     );
                 }
                 if length > 0 {
@@ -681,52 +689,6 @@ impl AppleTextSystemState {
             len: text.len(),
         }
     }
-}
-
-/// Remove U+FE0F / U+FE0E glyphs and close the gap they left: every later
-/// glyph (in visual order) moves left by the dropped advance.
-#[cfg(target_os = "ios")]
-fn drop_variation_selectors(text: &str, runs: &mut [ShapedRun], width: &mut f32) {
-    let is_selector = |ix: usize| {
-        text.get(ix..)
-            .and_then(|s| s.chars().next())
-            .is_some_and(|c| c == '\u{FE0F}' || c == '\u{FE0E}')
-    };
-    if !runs.iter().flat_map(|r| &r.glyphs).any(|g| is_selector(g.index)) {
-        return;
-    }
-    // Every glyph's x, in visual order, to find each selector's advance.
-    let mut xs: Vec<f32> = runs
-        .iter()
-        .flat_map(|r| r.glyphs.iter().map(|g| f32::from(g.position.x)))
-        .collect();
-    xs.sort_by(|a, b| a.total_cmp(b));
-    let next_x = |x: f32| {
-        xs.iter()
-            .copied()
-            .find(|&n| n > x)
-            .unwrap_or(*width)
-    };
-    let mut gaps: Vec<(f32, f32)> = Vec::new(); // (x of the selector, its advance)
-    for run in runs.iter_mut() {
-        run.glyphs.retain(|g| {
-            if is_selector(g.index) {
-                let x = f32::from(g.position.x);
-                gaps.push((x, (next_x(x) - x).max(0.)));
-                false
-            } else {
-                true
-            }
-        });
-    }
-    for run in runs.iter_mut() {
-        for g in &mut run.glyphs {
-            let x = f32::from(g.position.x);
-            let shift: f32 = gaps.iter().filter(|(gx, _)| *gx < x).map(|(_, a)| a).sum();
-            g.position.x = px(x - shift);
-        }
-    }
-    *width -= gaps.iter().map(|(_, a)| a).sum::<f32>();
 }
 
 #[derive(Debug, Clone)]
@@ -863,6 +825,52 @@ mod lenient_font_attributes {
             TCFType::wrap_under_create_rule(reference)
         }
     }
+}
+
+/// Remove U+FE0F / U+FE0E glyphs and close the gap they left: every later
+/// glyph (in visual order) moves left by the dropped advance.
+#[cfg(target_os = "ios")]
+fn drop_variation_selectors(text: &str, runs: &mut [ShapedRun], width: &mut f32) {
+    let is_selector = |ix: usize| {
+        text.get(ix..)
+            .and_then(|s| s.chars().next())
+            .is_some_and(|c| c == '\u{FE0F}' || c == '\u{FE0E}')
+    };
+    if !runs.iter().flat_map(|r| &r.glyphs).any(|g| is_selector(g.index)) {
+        return;
+    }
+    // Every glyph's x, in visual order, to find each selector's advance.
+    let mut xs: Vec<f32> = runs
+        .iter()
+        .flat_map(|r| r.glyphs.iter().map(|g| f32::from(g.position.x)))
+        .collect();
+    xs.sort_by(|a, b| a.total_cmp(b));
+    let next_x = |x: f32| {
+        xs.iter()
+            .copied()
+            .find(|&n| n > x)
+            .unwrap_or(*width)
+    };
+    let mut gaps: Vec<(f32, f32)> = Vec::new(); // (x of the selector, its advance)
+    for run in runs.iter_mut() {
+        run.glyphs.retain(|g| {
+            if is_selector(g.index) {
+                let x = f32::from(g.position.x);
+                gaps.push((x, (next_x(x) - x).max(0.)));
+                false
+            } else {
+                true
+            }
+        });
+    }
+    for run in runs.iter_mut() {
+        for g in &mut run.glyphs {
+            let x = f32::from(g.position.x);
+            let shift: f32 = gaps.iter().filter(|(gx, _)| *gx < x).map(|(_, a)| a).sum();
+            g.position.x = px(x - shift);
+        }
+    }
+    *width -= gaps.iter().map(|(_, a)| a).sum::<f32>();
 }
 
 #[cfg(test)]
