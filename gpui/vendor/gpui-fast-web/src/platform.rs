@@ -685,6 +685,9 @@ impl Platform for WebPlatform {
             // Fire-and-forget; called synchronously inside the user's input
             // event, which satisfies the browser's user-activation requirement.
             drop(window.navigator().clipboard().write_text(&text));
+            // The browser keeps only the text; the item (its metadata - an
+            // app's copied blocks) comes back when that text is pasted here.
+            LAST_COPY.with(|last| *last.borrow_mut() = Some(item));
         }
     }
 
@@ -843,4 +846,19 @@ fn set_body_cursor(browser_window: &web_sys::Window, css_cursor: &str) {
     {
         log::warn!("Failed to set cursor style: {error:?}");
     }
+}
+
+thread_local! {
+    /// The last item this app wrote to the clipboard, metadata included.
+    static LAST_COPY: RefCell<Option<ClipboardItem>> = const { RefCell::new(None) };
+}
+
+/// What a paste of `text` is: the item this app last copied when the
+/// clipboard still holds its text (so its metadata survives the browser's
+/// text-only clipboard), else that text alone.
+pub(crate) fn copied_item(text: String) -> ClipboardItem {
+    LAST_COPY
+        .with(|last| last.borrow().clone())
+        .filter(|item| item.text().as_deref() == Some(text.as_str()))
+        .unwrap_or_else(|| ClipboardItem::new_string(text))
 }

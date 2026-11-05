@@ -1117,7 +1117,7 @@ impl WebWindowInner {
             if image_files.is_empty() {
                 if let Some(text) = text {
                     this.with_input_handler(|handler| {
-                        handler.paste(ClipboardItem::new_string(text));
+                        handler.paste(crate::platform::copied_item(text));
                     });
                 }
                 return;
