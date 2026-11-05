@@ -128,11 +128,21 @@ fn folder_note(text: &'static str) -> Label {
 
 impl Render for ProjectFolder {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let Some(object) = Store::global(cx).read(cx).object(&self.object_id) else {
-            return div();
+        let (is_agent, path, served_by) = {
+            let store = Store::global(cx).read(cx);
+            let Some(object) = store.object(&self.object_id) else {
+                return div();
+            };
+            // The computer the folder must be on: the agent's own, or for any
+            // other object the computer its agents run on.
+            let served_by =
+                folder_computer(&object, |id| store.agent(id).map(|a| a.served_by.clone()));
+            (
+                object.type_key == "agent",
+                field_str(&object.fields, "repo_path").trim().to_string(),
+                served_by,
+            )
         };
-        let path = field_str(&object.fields, "repo_path").trim().to_string();
-        let served_by = field_str(&object.fields, "served_by").to_string();
         let local = !self.here.is_empty() && self.here == served_by;
         if !local || path.is_empty() {
             if !self.checked.is_empty() || self.status.is_some() {
@@ -170,9 +180,15 @@ impl Render for ProjectFolder {
                         })),
                     )
                 } else if !served_by.is_empty() {
-                    d.child(folder_note("The folder must be on this agent's computer; it checks it there, and a problem shows on its Error."))
-                } else {
+                    d.child(folder_note(if is_agent {
+                        "The folder must be on this agent's computer; it checks it there, and a problem shows on its Error."
+                    } else {
+                        "The folder must be on the computer this object's agents run on; it's checked there, and a problem shows on this object's Error."
+                    }))
+                } else if is_agent {
                     d.child(folder_note("Set Served by first - the folder must be on that computer."))
+                } else {
+                    d.child(folder_note("Its agents need a Served by first - the folder must be on that computer."))
                 }
             })
             .when_some(self.status.clone(), |d, (ok, text)| {
@@ -186,6 +202,27 @@ impl Render for ProjectFolder {
                     .text_size(px(12.)),
                 )
             })
-            .child(folder_note("Optional. When set, the agent works there: it's told the folder is its project (and its git repo), reads its AGENTS.md, and its shell starts there."))
+            .child(folder_note(if is_agent {
+                "Optional. When set, the agent works there: it's told the folder is its project (and its git repo), reads its AGENTS.md, and its shell starts there."
+            } else {
+                "Optional. When set, this object's agents work there for it, instead of their own Project folder: they're told it's the project (and its git repo), read its AGENTS.md, and their shell starts there."
+            }))
     }
+}
+
+/// The computer an object's Project folder must be on: its own Served by,
+/// else (an object agents work on) the first of its agents that has one.
+pub(crate) fn folder_computer(
+    object: &roostr_core::types::Object,
+    agent_served_by: impl Fn(&str) -> Option<String>,
+) -> String {
+    let own = field_str(&object.fields, "served_by");
+    if !own.is_empty() || object.type_key == "agent" {
+        return own.to_string();
+    }
+    roostr_core::types::guest_agents(&object.fields)
+        .iter()
+        .filter_map(|id| agent_served_by(id))
+        .find(|s| !s.is_empty())
+        .unwrap_or_default()
 }

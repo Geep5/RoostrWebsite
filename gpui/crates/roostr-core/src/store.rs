@@ -56,6 +56,8 @@ pub struct AgentRef {
     pub channel: String,
     /// `#RRGGBB`; "" = the default grey bubble.
     pub chat_color: String,
+    /// The computer that runs it (its `served_by` machine id); "" = none.
+    pub served_by: String,
 }
 
 #[derive(Clone, Debug)]
@@ -657,6 +659,7 @@ async fn fetch_agents(backend: Arc<dyn Backend>) -> Result<Vec<AgentRef>> {
             icon: field_str(&r.fields, "iconEmoji").to_string(),
             channel: field_str(&r.fields, "channel").to_string(),
             chat_color: normalize_hex(field_str(&r.fields, "chat_color")).unwrap_or_default(),
+            served_by: field_str(&r.fields, "served_by").to_string(),
             id: r.id,
         })
         .collect())

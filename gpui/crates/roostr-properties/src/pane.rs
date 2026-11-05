@@ -725,6 +725,8 @@ impl PropertiesPane {
                     "error" => object.type_key != "template",
                     _ if type_key == "channel" => k == "agent",
                     "keep_all_files" | "autostart" => type_key == "machine" || has(k),
+                    // Where its agents work on it: shown once it has an agent.
+                    "repo_path" => !roostr_core::types::guest_agents(fields).is_empty() || has(k),
                     "served_by" => machine_bound || has(k),
                     "credentials" | "skills" | "tools" => has(k),
                     "check_first" => repeating || has(k),
@@ -962,7 +964,7 @@ impl PropertiesPane {
                 let id = object.id.clone();
                 self.capability_status = Some(cx.new(|cx| CapabilityStatus::new(id, cx)));
             }
-            if key == "repo_path" && object.type_key == "agent" {
+            if key == "repo_path" {
                 let id = object.id.clone();
                 let target = object.id.clone();
                 self.project_folder = Some(cx.new(|cx| {
@@ -2213,7 +2215,6 @@ impl PropertiesPane {
                 }),
             );
             if key == "repo_path"
-                && object.type_key == "agent"
                 && let Some(f) = &self.project_folder
             {
                 pop = pop.child(f.clone());
