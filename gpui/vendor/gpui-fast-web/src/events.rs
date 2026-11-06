@@ -1349,15 +1349,25 @@ fn command_as_secondary(dom: Modifiers, is_mac: bool) -> Modifiers {
 }
 
 /// roostr: the modifiers of the keystroke GPUI matches for `key` pressed
-/// with `dom` held: [`command_as_secondary`], except that Command-V (with
-/// Shift too) stays as the DOM reports it, unbound, so it remains the
-/// browser's paste. Its `paste` event hands the text and images to the
-/// focused input (`register_paste`) with no permission prompt, where GPUI's
-/// Paste would read `navigator.clipboard` (a prompt) or, in the editor, the
-/// synchronous clipboard, always empty in a browser.
+/// with `dom` held: [`command_as_secondary`], except that the paste chord -
+/// Command-V on a Mac, Control-V elsewhere (with Shift too) - matches no
+/// binding, so it remains the browser's paste. Its `paste` event hands the
+/// text and images to the focused input (`register_paste`) with no
+/// permission prompt, where GPUI's Paste would read `navigator.clipboard` (a
+/// prompt) or, in the editor, the synchronous clipboard, always empty in a
+/// browser. On a Mac the chord stays as the DOM reports it (Command, which
+/// nothing binds on wasm); elsewhere its Control is reported as the
+/// platform key, which nothing binds either.
 pub fn keystroke_modifiers(dom: Modifiers, key: &str, is_mac: bool) -> Modifiers {
-    if is_mac && key == "v" && dom.platform && !dom.control {
+    if key == "v" && is_mac && dom.platform && !dom.control {
         return dom;
+    }
+    if key == "v" && !is_mac && dom.control && !dom.platform && !dom.alt {
+        return Modifiers {
+            control: false,
+            platform: true,
+            ..dom
+        };
     }
     command_as_secondary(dom, is_mac)
 }

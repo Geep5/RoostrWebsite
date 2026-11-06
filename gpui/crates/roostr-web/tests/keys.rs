@@ -88,3 +88,18 @@ fn secondary_is_control_for_a_browser() {
         control()
     );
 }
+
+/// Elsewhere (Windows, Linux) Control-V is the paste chord, and it too
+/// matches nothing: bound to the editor's Paste it swallowed the key, and
+/// that Paste reads a clipboard a browser never lends synchronously - field
+/// report: pasting did nothing on Windows. Control-C and the rest still fire.
+#[wasm_bindgen_test]
+fn control_v_stays_the_browsers_paste_elsewhere() {
+    assert!(!fires("secondary-v", control(), "v", false));
+    assert!(fires("secondary-c", control(), "c", false));
+    let shift_control = Modifiers {
+        shift: true,
+        ..control()
+    };
+    assert!(!fires("secondary-shift-v", shift_control, "v", false));
+}
