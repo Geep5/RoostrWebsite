@@ -811,6 +811,10 @@ pub struct RepeatRule {
     pub tz: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub anchor_ms: Option<i64>,
+    /// A quiet timer: each run `interval` x `freq` (minute/hour/day) after the
+    /// newest message in the object's chat; every message restarts it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub after: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -843,6 +847,8 @@ pub struct Repeat {
     pub slots: Vec<Vec<u32>>,
     pub window: Option<[u32; 2]>,
     pub tz: String,
+    /// A quiet timer ([`RepeatRule::after`]).
+    pub after: bool,
     /// Local-day index the cadence counts from.
     pub anchor: i64,
     /// Epoch ms of the current occurrence.
@@ -866,6 +872,7 @@ pub fn repeat_of(fields: &Fields) -> Option<Repeat> {
             .unwrap_or_default()
     };
     let freq = RepeatFreq::parse(&str_("freq")?)?;
+    let after = e.get("after").and_then(|v| v.bool_value) == Some(true);
     let anchor = int("anchor")?;
     let next = int("next")?;
     let times: Vec<u32> = match e.get("times") {
@@ -873,11 +880,11 @@ pub fn repeat_of(fields: &Fields) -> Option<Repeat> {
         // Rules stored before `times` carry a single `time`.
         None => int("time").map(|t| vec![t as u32]).unwrap_or_default(),
     };
-    if !freq.is_sub_daily() && times.is_empty() {
+    if !freq.is_sub_daily() && !after && times.is_empty() {
         return None;
     }
     let span = ints(e.get("window"));
-    let window = (freq.is_sub_daily() && span.len() == 2).then(|| [span[0] as u32, span[1] as u32]);
+    let window = ((freq.is_sub_daily() || after) && span.len() == 2).then(|| [span[0] as u32, span[1] as u32]);
     let last_run = e.get("last_run").and_then(Value::entries).and_then(|run| {
         let at = run.get("at")?.int_value?;
         let s = |k: &str| run.get(k).and_then(|v| v.string_value.clone());
@@ -927,6 +934,7 @@ pub fn repeat_of(fields: &Fields) -> Option<Repeat> {
             .unwrap_or_default(),
         window,
         tz: str_("tz").unwrap_or_default(),
+        after,
         anchor,
         next,
         fired_for: int("fired_for"),

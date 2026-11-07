@@ -15,8 +15,8 @@ use gpui_kit::component::{FocusableExt as _, Sizable as _};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use roostr_core::repeat::{
-    DAY, DAY_MINUTES, RepeatDraft, WD, describe_draft, draft_slots, fit_more, ordinal_of,
-    period_name, slotted, sod, sorted_times, to_draft,
+    DAY, DAY_MINUTES, RepeatDraft, WD, after_next, describe_draft, draft_slots, fit_more,
+    last_message_ms, ordinal_of, period_name, slotted, sod, sorted_times, to_draft,
 };
 use roostr_core::types::{guest_agents, repeat_of};
 use roostr_core::{Fields, Glyph, Object, RepeatFreq, RepeatRule, Store, Value, api, theme, ui};
@@ -45,8 +45,12 @@ fn freq_word(freq: RepeatFreq, plural: bool) -> String {
     }
 }
 
-fn max_interval(freq: RepeatFreq) -> u32 {
-    if freq == RepeatFreq::Hour { 23 } else { 999 }
+/// The units a quiet timer waits in.
+const AFTER_FREQS: [RepeatFreq; 3] = [RepeatFreq::Minute, RepeatFreq::Hour, RepeatFreq::Day];
+
+/// The largest interval: hourly calendar rules stay within a day; a wait does not.
+fn max_interval(freq: RepeatFreq, after: bool) -> u32 {
+    if freq == RepeatFreq::Hour && !after { 23 } else { 999 }
 }
 
 fn date_of(ms: i64) -> NaiveDate {
@@ -207,9 +211,13 @@ fn day_times(d: &RepeatDraft, ms: i64) -> Vec<u32> {
     (from..=until).step_by(period.max(1) as usize).collect()
 }
 
-/// The next five occurrences from now.
-fn preview(d: &RepeatDraft) -> Vec<i64> {
+/// The next five occurrences from now; a quiet timer's one next run, the wait
+/// after the newest message (`last_message`) or now, whichever is later.
+fn preview(d: &RepeatDraft, last_message: i64) -> Vec<i64> {
     let now = chrono::Utc::now().timestamp_millis();
+    if d.after {
+        return vec![after_next(d, last_message.max(now))];
+    }
     let mut out = Vec::new();
     let mut day = if day_fits(d, d.anchor) {
         d.anchor
@@ -248,6 +256,7 @@ fn same_rule(a: &RepeatDraft, b: &RepeatDraft) -> bool {
         && sorted_times(&a.times) == sorted_times(&b.times)
         && draft_slots(a) == draft_slots(b)
         && a.window == b.window
+        && a.after == b.after
         && aw == bw
 }
 
@@ -335,6 +344,7 @@ fn seed() -> RepeatDraft {
         times: vec![9 * 60],
         more: Vec::new(),
         window: None,
+        after: false,
     }
 }
 
@@ -354,7 +364,7 @@ impl RepeatView {
                 if matches!(ev, InputEvent::Change) {
                     let raw = input.read(cx).value().to_string();
                     let n = raw.trim().parse::<f64>().unwrap_or(1.).floor().max(1.) as u32;
-                    this.draft.interval = n.min(max_interval(this.draft.freq));
+                    this.draft.interval = n.min(max_interval(this.draft.freq, this.draft.after));
                     // Every 3 days: a time slot for each of Day 1, 2, 3.
                     this.fit_slots(window, cx);
                     cx.notify();
@@ -513,11 +523,35 @@ impl RepeatView {
             };
         }
         self.draft.freq = freq;
-        self.draft.interval = self.draft.interval.min(max_interval(freq));
+        self.draft.interval = self.draft.interval.min(max_interval(freq, self.draft.after));
         let n = self.draft.interval.to_string();
         self.interval.update(cx, |s, cx| s.set_value(n, window, cx));
         self.fit_slots(window, cx);
         cx.notify();
+    }
+
+    /// On a schedule, or a quiet timer after the last message: the wait keeps
+    /// a minute/hour/day unit (a day from a longer calendar unit).
+    fn set_after(&mut self, after: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if after == self.draft.after {
+            return;
+        }
+        self.draft.after = after;
+        if after {
+            if !AFTER_FREQS.contains(&self.draft.freq) {
+                self.draft.freq = RepeatFreq::Day;
+            }
+            self.draft.weekdays.clear();
+            self.set_freq(self.draft.freq, window, cx);
+        } else {
+            let freq = self.draft.freq;
+            self.draft.weekdays = if freq.is_sub_daily() { vec![] } else { vec![weekday(self.draft.anchor)] };
+            if freq == RepeatFreq::Day && self.draft.times.is_empty() {
+                self.draft.times = vec![9 * 60];
+            }
+            self.set_freq(freq, window, cx);
+        }
+        self.sync_inputs(window, cx);
     }
 
     /// One time slot per period of the cycle (Day 1 … Day N); a resize keeps
@@ -591,7 +625,10 @@ impl RepeatView {
     fn invalid(&self) -> &'static str {
         let d = &self.draft;
         match d.window {
-            Some([a, b]) if d.freq.is_sub_daily() && a > b => "The window ends before it starts.",
+            Some([a, b]) if (d.freq.is_sub_daily() || d.after) && a > b => {
+                "The window ends before it starts."
+            }
+            _ if d.after => "",
             _ if !d.freq.is_sub_daily() && d.times.is_empty() && !slotted(d) => {
                 "Give at least one period a time."
             }
@@ -660,6 +697,32 @@ impl RepeatView {
             return;
         }
         let d = self.draft.clone();
+        if d.after {
+            let rule = RepeatRule {
+                freq: d.freq,
+                interval: d.interval,
+                weekdays: vec![],
+                monthly: d.monthly.clone(),
+                times: vec![],
+                slots: vec![],
+                window: d.window,
+                tz: iana_time_zone::get_timezone().unwrap_or_default(),
+                anchor_ms: None,
+                after: true,
+            };
+            let set = api::repeat::set(&object.id, &rule, cx);
+            self.run(
+                cx.background_spawn(async move {
+                    if let Some(a) = assignee {
+                        a.await?;
+                    }
+                    set.await?;
+                    Ok(())
+                }),
+                cx,
+            );
+            return;
+        }
         let sub = d.freq.is_sub_daily();
         let rule = RepeatRule {
             freq: d.freq,
@@ -681,6 +744,7 @@ impl RepeatView {
             tz: iana_time_zone::get_timezone().unwrap_or_default(),
             // Noon, so the engine lands on the same wall-clock day across DST.
             anchor_ms: Some(d.anchor + DAY / 2),
+            after: false,
         };
         let set = api::repeat::set(&object.id, &rule, cx);
         self.run(
@@ -877,7 +941,7 @@ impl Render for RepeatView {
             .is_some();
         let open_run = rule
             .as_ref()
-            .is_some_and(|r| r.fired_for == Some(r.next) && !r.freq.is_sub_daily());
+            .is_some_and(|r| r.fired_for == Some(r.next) && !r.freq.is_sub_daily() && !r.after);
         let store = Store::global(cx).read(cx);
         let guests: Vec<_> = guest_agents(&object.fields)
             .iter()
@@ -963,7 +1027,9 @@ impl Render for RepeatView {
 
         // ── The editor popover ──
         let d = self.draft.clone();
-        let sub = d.freq.is_sub_daily();
+        // A quiet timer has no calendar: only its wait and its hours.
+        let after = d.after;
+        let sub = d.freq.is_sub_daily() && !after;
         let mut pop = div()
             // `.pop`: 360px; `min(360px, calc(100vw - 32px))` at ≤720px.
             .w(if roostr_core::layout::is_mobile(window) {
@@ -1016,9 +1082,31 @@ impl Render for RepeatView {
                 180.,
             )));
 
-            // Every N <freq>
+            // On a schedule | After the last message
+            let when = [!after, after];
+            pop = pop.child(
+                fieldrow().child(lbl("When")).child(
+                    seg_group("when")
+                        .child(seg("on-schedule", "On a schedule", when[0]))
+                        .child(
+                            seg("after-message", "After last message", when[1]).tooltip(
+                                "Wait after the newest message in this object's chat, anyone's; every message starts the wait again",
+                            ),
+                        )
+                        .on_click(cx.listener(move |this, next: &Vec<bool>, window, cx| {
+                            match clicked(&when, next) {
+                                Some(0) => this.set_after(false, window, cx),
+                                Some(_) => this.set_after(true, window, cx),
+                                None => {}
+                            }
+                            cx.notify();
+                        })),
+                ),
+            );
+
+            // Every N <freq>, or Wait N <unit> after the last message
             let plural = d.interval != 1;
-            let freqs: Vec<Choice> = FREQS
+            let freqs: Vec<Choice> = (if after { &AFTER_FREQS[..] } else { &FREQS[..] })
                 .iter()
                 .map(|&f| Choice {
                     value: roostr_core::repeat::freq_name(f).to_string(),
@@ -1029,7 +1117,7 @@ impl Render for RepeatView {
                 .sync(freqs, roostr_core::repeat::freq_name(d.freq), window, cx);
             pop = pop.child(
                 fieldrow()
-                    .child(lbl("Every"))
+                    .child(lbl(if after { "Wait" } else { "Every" }))
                     .child(
                         div()
                             .debug_selector(|| "repeat-every".into())
@@ -1038,7 +1126,7 @@ impl Render for RepeatView {
                     .child(choice_select(&self.freq_picker.select, "freq-select", 140.)),
             );
 
-            if !sub {
+            if !sub && !after {
                 let date = date_of(d.anchor).format("%m/%d/%Y").to_string();
                 let mut starts =
                     div().relative().child(date_button("anchor", date).on_click(
@@ -1050,7 +1138,7 @@ impl Render for RepeatView {
                 pop = pop.child(fieldrow().child(lbl("Starts")).child(starts));
             }
 
-            if sub {
+            if sub || after {
                 let before = [d.window.is_none(), d.window.is_some()];
                 pop = pop.child(
                     fieldrow().child(lbl("Hours")).child(
@@ -1086,7 +1174,7 @@ impl Render for RepeatView {
                 }
             }
 
-            if d.freq == RepeatFreq::Week || sub {
+            if !after && (d.freq == RepeatFreq::Week || sub) {
                 let before: Vec<bool> = (0..WD.len())
                     .map(|i| d.weekdays.contains(&(i as u8)))
                     .collect();
@@ -1126,7 +1214,7 @@ impl Render for RepeatView {
                 pop = pop.child(row);
             }
 
-            if d.freq == RepeatFreq::Month {
+            if !after && d.freq == RepeatFreq::Month {
                 let anchor = date_of(d.anchor);
                 let ord = ["", "First", "Second", "Third", "Fourth", "Last"][ordinal_of(d.anchor)];
                 let before = [d.monthly == "date", d.monthly == "weekday"];
@@ -1160,7 +1248,7 @@ impl Render for RepeatView {
                 );
             }
 
-            if !sub {
+            if !sub && !after {
                 // One row of times per period of the cycle: "At" for a plain
                 // rule, Day 1 … Day N when the interval is 2 or more.
                 let cycle = self.slot_inputs.len() > 1;
@@ -1249,13 +1337,16 @@ impl Render for RepeatView {
             }
 
             let invalid = self.invalid();
-            let next = preview(&d);
+            let next = preview(&d, last_message_ms(&object));
             let mut nexts = div().flex().flex_wrap().gap_x(px(10.)).gap_y(px(4.));
             for (i, p) in next.iter().enumerate() {
                 nexts = nexts
                     .child(note(fmt_long(*p), 11.5).when(i == 0, |e| e.text_color(theme::fg())));
             }
-            nexts = nexts.child(note("…", 11.5));
+            nexts = nexts.child(note(
+                if after { "Each new message in the chat starts the wait again." } else { "…" },
+                11.5,
+            ));
             pop = pop.child(
                 div()
                     .flex()

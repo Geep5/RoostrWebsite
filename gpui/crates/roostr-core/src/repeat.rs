@@ -29,8 +29,11 @@ pub struct RepeatDraft {
     /// Day/week/month/year, interval >= 2: the times of the cycle's other
     /// periods (Day 2 … Day N), [] = off. All off is the plain rule.
     pub more: Vec<Vec<u32>>,
-    /// Minute/hour: the minutes the grid runs in; `None` = the whole day.
+    /// Minute/hour, or a quiet timer: the minutes it runs in; `None` = the whole day.
     pub window: Option<[u32; 2]>,
+    /// A quiet timer: each run `interval` x `freq` after the newest chat
+    /// message, every message restarting it ([`crate::RepeatRule::after`]).
+    pub after: bool,
 }
 
 pub fn freq_name(freq: RepeatFreq) -> &'static str {
@@ -185,6 +188,7 @@ pub fn to_draft(r: &Repeat) -> RepeatDraft {
         more,
         // The engine stores the whole day as [0, 1439]: that is no window.
         window: r.window.filter(|w| w[0] > 0 || w[1] < DAY_MINUTES - 1),
+        after: r.after,
     };
     fit_more(&mut d);
     d
@@ -204,7 +208,59 @@ fn day_list(weekdays: &[u8]) -> String {
     }
 }
 
+/// The newest message (epoch ms) in the object's human chat, 0 when it has none: where a quiet timer's wait starts.
+pub fn last_message_ms(object: &crate::Object) -> i64 {
+    let Some(root) = object.blocks.iter().find(|b| b.id == "__discussion__") else {
+        return 0;
+    };
+    object
+        .blocks
+        .iter()
+        .filter(|b| root.children_ids.contains(&b.id))
+        .filter_map(|b| b.content.custom.as_ref())
+        .filter(|c| c.content_type == "chat")
+        .filter_map(|c| c.meta.as_ref()?.get("ts")?.parse::<i64>().ok())
+        .max()
+        .unwrap_or(0)
+}
+
+/// A quiet timer's next run (epoch ms): its wait after `from_ms`, moved to
+/// the start of its window when it lands outside it (`repeat_after_next`).
+pub fn after_next(d: &RepeatDraft, from_ms: i64) -> i64 {
+    let unit: i64 = match d.freq {
+        RepeatFreq::Day => DAY,
+        RepeatFreq::Hour => 3_600_000,
+        _ => 60_000,
+    };
+    let at = from_ms + d.interval.max(1) as i64 * unit;
+    let Some([from, until]) = d.window else {
+        return at;
+    };
+    let day = sod(at);
+    let clock = local(at);
+    let minute = clock.hour() * 60 + clock.minute();
+    let start = |day: i64| {
+        let naive = local(day).date_naive().and_hms_opt(from / 60, from % 60, 0).expect("valid time");
+        Local.from_local_datetime(&naive).earliest().map_or(day, |x| x.timestamp_millis())
+    };
+    if minute < from {
+        start(day)
+    } else if minute > until {
+        start(day + DAY + DAY / 2)
+    } else {
+        at
+    }
+}
+
 pub fn describe_draft(d: &RepeatDraft) -> String {
+    if d.after {
+        let unit = freq_name(d.freq);
+        let span = d.window.map_or(String::new(), |w| {
+            format!(", {}–{}", fmt_time(w[0]), fmt_time(w[1]))
+        });
+        let s = if d.interval == 1 { "" } else { "s" };
+        return format!("{} {unit}{s} after the last message{span}", d.interval);
+    }
     let every = if d.interval == 1 {
         "Every".to_string()
     } else {
@@ -279,7 +335,7 @@ pub fn describe_draft(d: &RepeatDraft) -> String {
 
 /// A table cell's words: the rule, when it next runs, and why that run moved.
 pub fn describe_repeat(rule: &Repeat) -> String {
-    let when = if many_a_day(rule.freq, &rule.times) {
+    let when = if rule.after || many_a_day(rule.freq, &rule.times) {
         format!("{}, {}", fmt(rule.next), fmt_clock(rule.next))
     } else {
         fmt(rule.next)
@@ -300,6 +356,7 @@ mod tests {
         // 2026-10-14 is a Wednesday.
         let anchor = midnight(NaiveDate::from_ymd_opt(2026, 10, 14).unwrap());
         RepeatDraft {
+            after: false,
             freq,
             interval,
             weekdays: weekdays.to_vec(),
@@ -309,6 +366,29 @@ mod tests {
             more: Vec::new(),
             window: None,
         }
+    }
+
+    #[test]
+    fn quiet_timer_waits_into_its_window() {
+        let mut d = draft(RepeatFreq::Hour, 3, &[], &[]);
+        d.after = true;
+        assert_eq!(describe_draft(&d), "3 hours after the last message");
+        let at = |h: u32, m: u32| {
+            let naive = NaiveDate::from_ymd_opt(2026, 11, 6).unwrap().and_hms_opt(h, m, 0).unwrap();
+            Local.from_local_datetime(&naive).earliest().unwrap().timestamp_millis()
+        };
+        // 10:00 + 3h = 13:00, inside the whole day.
+        assert_eq!(after_next(&d, at(10, 0)), at(13, 0));
+        // Only 9:00-18:00: 17:00 + 3h lands at 20:00, so it waits for the next 9:00.
+        d.window = Some([540, 1080]);
+        assert_eq!(describe_draft(&d), "3 hours after the last message, 9:00 AM–6:00 PM");
+        let next_morning = {
+            let naive = NaiveDate::from_ymd_opt(2026, 11, 7).unwrap().and_hms_opt(9, 0, 0).unwrap();
+            Local.from_local_datetime(&naive).earliest().unwrap().timestamp_millis()
+        };
+        assert_eq!(after_next(&d, at(17, 0)), next_morning);
+        // 4:00 + 3h = 7:00, before the window opens: that day's 9:00.
+        assert_eq!(after_next(&d, at(4, 0)), at(9, 0));
     }
 
     #[test]
