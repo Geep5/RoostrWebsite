@@ -483,7 +483,9 @@ pub(crate) fn view(s: &State, cx: &mut Cx<State>) -> El {
                 shell.height = r[3];
             }
         });
-    if cfg!(not(target_family = "wasm")) {
+    // A desktop window's strip: a browser tab has none, and the iOS window's content starts
+    // below the status bar (the host keeps it inside the safe area).
+    if cfg!(not(any(target_family = "wasm", target_os = "ios"))) {
         root = root.child(titlebar(t));
     }
     roostr_ui::root(root.child(content), layer)

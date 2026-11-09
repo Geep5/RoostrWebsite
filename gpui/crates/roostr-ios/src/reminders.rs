@@ -16,7 +16,6 @@ use std::time::Duration;
 use block2::{DynBlock, RcBlock};
 use futures::channel::{mpsc, oneshot};
 use futures::{FutureExt as _, StreamExt as _};
-use gpui_kit::{App, Task};
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, Bool, ProtocolObject};
 use objc2::{AnyThread, DefinedClass, define_class, msg_send};
@@ -28,8 +27,8 @@ use objc2_user_notifications::{
     UNUserNotificationCenter, UNUserNotificationCenterDelegate,
 };
 use parking_lot::Mutex;
-use roostr_core::Backend as _;
 use roostr_core::backend::BackendEvent;
+use roostr_core::{Backend as _, Cx, State};
 use roostr_replica::{Occurrence, ReplicaBackend};
 
 const PREFIX: &str = "repeat:";
@@ -199,14 +198,15 @@ fn now_ms() -> i64 {
         .map_or(0, |since| since.as_millis() as i64)
 }
 
-/// Follow `backend`: reschedule after start and after every burst of commits.
-pub fn follow(backend: ReplicaBackend, cx: &mut App) -> Task<()> {
-    cx.spawn(async move |cx| {
+/// Follow `backend` for the life of the state: reschedule after start and after every burst
+/// of commits.
+pub fn follow(backend: ReplicaBackend, s: &mut State) {
+    s.rt.spawn(async move |cx| {
         let center = center();
         let mut authorized = false;
         let mut events = backend.events();
         loop {
-            reschedule(&backend, &center, &mut authorized, cx).await;
+            reschedule(&backend, &center, &mut authorized, &cx).await;
             loop {
                 match events.next().await {
                     None => return,
@@ -217,19 +217,18 @@ pub fn follow(backend: ReplicaBackend, cx: &mut App) -> Task<()> {
                 }
             }
             // A sync pass commits in bursts; one reschedule covers each.
-            cx.background_executor()
-                .timer(Duration::from_millis(500))
-                .await;
+            cx.timer(Duration::from_millis(500)).await;
             while let Some(Some(_)) = events.next().now_or_never() {}
         }
     })
+    .detach();
 }
 
 async fn reschedule(
     backend: &ReplicaBackend,
     center: &UNUserNotificationCenter,
     authorized: &mut bool,
-    cx: &gpui_kit::AsyncApp,
+    cx: &Cx,
 ) {
     if !backend.has_key() {
         // Logged out: nothing of the old identity may fire.
@@ -239,8 +238,7 @@ async fn reschedule(
     let now = now_ms();
     let upcoming = {
         let backend = backend.clone();
-        cx.background_executor()
-            .spawn(async move { backend.upcoming_occurrences(now, LIMIT).await })
+        cx.background(async move { backend.upcoming_occurrences(now, LIMIT).await })
             .await
     };
     let upcoming = match upcoming {

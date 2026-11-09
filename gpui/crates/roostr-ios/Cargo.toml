@@ -1,6 +1,6 @@
 [package]
 name = "roostr-ios"
-description = "Roostr on iPhone and iPad: the desktop app's views over this device's replica, on GPUI's UIKit platform"
+description = "Roostr on iPhone and iPad: the desktop app's Rune views over this device's replica, in a UIKit window"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
@@ -10,54 +10,37 @@ publish.workspace = true
 [lib]
 crate-type = ["staticlib", "rlib"]
 
-# Everything is iOS-only; on other targets this crate is empty.
+# Everything is iOS-only; on other targets this crate is empty except for its
+# tests (the keyboard bridge's model and the deep links run on the host).
 [target.'cfg(target_os = "ios")'.dependencies]
 roostr-core.workspace = true
+roostr-rt.workspace = true
+roostr-ui.workspace = true
+roostr-host.workspace = true
 roostr-app.workspace = true
 roostr-shell.workspace = true
 roostr-engine.workspace = true
 roostr-replica.workspace = true
 roostr-replica-store.workspace = true
-gpui-kit.workspace = true
-# Vendored: see vendor/gpui-pre-ios/Cargo.toml.
-gpui_ios = { package = "gpui-pre-ios", path = "../../vendor/gpui-pre-ios", features = ["runtime_shaders"] }
+rune.workspace = true
 anyhow.workspace = true
 futures.workspace = true
 log.workspace = true
+parking_lot.workspace = true
 serde_json.workspace = true
+unicode-segmentation = "1.13"
 env_logger = "0.11"
 hex = "0.4"
-parking_lot = "0.12"
 security-framework = "3"
 block2 = "0.6"
+dispatch2 = "0.3"
 objc2 = "0.6"
-objc2-foundation = { version = "0.3.2", default-features = false, features = [
-    "std",
-    "block2",
-    "NSArray",
-    "NSDictionary",
-    "NSError",
-    "NSNotification",
-    "NSObject",
-    "NSOperation",
-    "NSString",
-    "NSUserDefaults",
-    "NSValue",
-] }
-objc2-ui-kit = { version = "0.3.2", default-features = false, features = [
-    "std",
-    "UIAccessibility",
-] }
-objc2-user-notifications = { version = "0.3.2", default-features = false, features = [
-    "std",
-    "bitflags",
-    "block2",
-    "UNNotification",
-    "UNNotificationContent",
-    "UNNotificationRequest",
-    "UNNotificationResponse",
-    "UNNotificationSettings",
-    "UNNotificationSound",
-    "UNNotificationTrigger",
-    "UNUserNotificationCenter",
-] }
+objc2-core-foundation = "0.3.2"
+objc2-foundation = "0.3.2"
+objc2-quartz-core = "0.3.2"
+objc2-ui-kit = "0.3.2"
+objc2-user-notifications = "0.3.2"
+
+[dev-dependencies]
+rune.workspace = true
+unicode-segmentation = "1.13"

@@ -1,8 +1,6 @@
 [workspace]
 resolver = "3"
 members = ["crates/*"]
-# The iPhone app stays on GPUI (main branch) until Rune has iOS text input.
-exclude = ["crates/roostr-ios"]
 default-members = ["crates/roostr"]
 
 [workspace.package]
