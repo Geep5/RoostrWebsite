@@ -1,11 +1,11 @@
-# gpui-fast-web 0.1.13 vendored for Roostr's changes, marked `roostr:` in
+# gpui-fast-web 0.1.14 vendored for Roostr's changes, marked `roostr:` in
 # src/events.rs and src/gpui_web.rs (the ones vendor/gpui-pre-web carried):
 # a touch ends hover, and in a Mac browser Command is the `secondary` key.
 
 [package]
 edition = "2024"
 name = "gpui-fast-web"
-version = "0.1.13"
+version = "0.1.14"
 authors = ["Longbridge"]
 build = false
 include = [
@@ -25,7 +25,7 @@ autotests = false
 autobenches = false
 description = "gpui_web: GPUI with gpui-fast rendering and layout optimizations"
 homepage = "https://github.com/longbridge/gpui-fast"
-documentation = "https://docs.rs/gpui-fast-web/0.1.13/gpui_web/"
+documentation = "https://docs.rs/gpui-fast-web/0.1.14/gpui_web/"
 readme = "README.md"
 license = "Apache-2.0"
 repository = "https://github.com/longbridge/gpui-fast"
@@ -66,16 +66,16 @@ version = "0.1.7"
 version = "0.3.34"
 
 [target.'cfg(target_family = "wasm")'.dependencies.gpui]
-version = "^0.1.13"
+version = "^0.1.14"
 default-features = false
 package = "gpui-fast"
 
 [target.'cfg(target_family = "wasm")'.dependencies.gpui_wgpu]
-version = "^0.1.13"
+version = "^0.1.14"
 package = "gpui-fast-wgpu"
 
 [target.'cfg(target_family = "wasm")'.dependencies.http_client]
-version = "=0.3.11"
+version = "=0.3.12"
 package = "gpui-pre-http-client"
 
 [target.'cfg(target_family = "wasm")'.dependencies.js-sys]
@@ -94,7 +94,7 @@ features = ["nightly"]
 version = "0.6"
 
 [target.'cfg(target_family = "wasm")'.dependencies.scheduler]
-version = "=0.3.11"
+version = "=0.3.12"
 package = "gpui-pre-scheduler"
 
 [target.'cfg(target_family = "wasm")'.dependencies.smallvec]

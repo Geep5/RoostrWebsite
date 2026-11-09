@@ -1,4 +1,4 @@
-# Zed's `gpui_ios` as published in gpui-pre-ios 0.3.11, vendored (and
+# Zed's `gpui_ios` as published in gpui-pre-ios 0.3.12, vendored (and
 # patched in through the workspace's [patch.crates-io], since gpui-pre-platform
 # names it on iOS) for Roostr's additions: the clipboard, the edit menu and
 # text presses, iOS WebKit's keyboard rules, the document picker, the active
@@ -11,7 +11,7 @@
 [package]
 edition = "2024"
 name = "gpui-pre-ios"
-version = "0.3.11"
+version = "0.3.12"
 build = false
 publish = false
 autolib = false
@@ -39,7 +39,7 @@ path = "src/gpui_ios.rs"
 doctest = false
 
 [dependencies.gpui]
-version = "=0.3.11"
+version = "=0.3.12"
 default-features = false
 package = "gpui-pre"
 
@@ -53,7 +53,7 @@ version = "0.6"
 version = "0.3.34"
 
 [target.'cfg(target_os = "ios")'.dependencies.gpui_apple]
-version = "=0.1.13"
+version = "=0.1.14"
 features = ["font-kit"]
 package = "gpui-fast-apple"
 

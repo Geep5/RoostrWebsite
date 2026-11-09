@@ -2,8 +2,8 @@
 
 A native port of this repository's Svelte UI — the `/app` workspace and the
 website pages (`/`, `/guide`, `/privacy`, `/j`) — built on
-[GPUI Kit](https://gpui-kit.com) 0.9.0 on
-[GPUI Fast](https://github.com/longbridge/gpui-fast) 0.1.13 (GPUI with
+[GPUI Kit](https://gpui-kit.com) 0.9.1 on
+[GPUI Fast](https://github.com/longbridge/gpui-fast) 0.1.14 (GPUI with
 retained rendering: a frame reuses the views, layout and text that did not
 change). GPUI Kit's `gpui-pre` crates are stand-ins re-exporting it
 (`vendor/compat`). Anything a view's render reads outside entities, globals
@@ -262,7 +262,7 @@ images, a custom icon or avatar) - GPUI's web platform has no file picker;
 dropping files from the desktop. Exports and file downloads are browser
 downloads; "open" shows a file in a new tab.
 
-GPUI's web platform is `vendor/gpui-fast-web`, gpui-fast-web 0.1.13 patched in
+GPUI's web platform is `vendor/gpui-fast-web`, gpui-fast-web 0.1.14 patched in
 through `[patch.crates-io]`, its changes marked `roostr:`. Once the last
 finger lifts, the pointer moves off the canvas, so hover (and a `[data-tip]`
 tooltip) ends with the touch instead of staying on the control last tapped.
@@ -358,7 +358,7 @@ cargo clippy -p roostr-ios --target aarch64-apple-ios-sim
 ```
 
 GPUI's UIKit platform is `vendor/gpui-pre-ios`, a vendored gpui-pre-ios
-0.3.11 (patched in through `[patch.crates-io]`, as gpui-pre-platform names
+0.3.12 (patched in through `[patch.crates-io]`, as gpui-pre-platform names
 it on iOS) that gains a document picker for `prompt_for_paths`. It names its window as the active one (the published
 crate's `active_window` was always none, so what acts on the active
 window - an alert, closing a dialog - did nothing). It also takes over a
@@ -391,7 +391,7 @@ one axis (twice as far) scrolls on that axis alone, so a swipe down that
 drifts sideways leaves the table where it is, while a diagonal one moves
 both. The graph canvas alone pans on both axes (`Window::pan_touch_freely`;
 its wheel listener gets the wheel unrailed). This lives in GPUI's core,
-`vendor/gpui-fast` (GPUI Fast 0.1.13 patched in through `[patch.crates-io]`,
+`vendor/gpui-fast` (GPUI Fast 0.1.14 patched in through `[patch.crates-io]`,
 changes marked `roostr:`): its recognizer already locked each pan, but a
 scroller that scrolls on one axis only took the other axis as its own, under
 a swipe, a wheel and a trackpad alike.

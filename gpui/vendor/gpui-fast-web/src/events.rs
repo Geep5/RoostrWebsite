@@ -1,3 +1,4 @@
+// Modified by Longbridge for gpui-fast.
 use std::{collections::HashMap, rc::Rc};
 
 use gpui::{
@@ -502,7 +503,7 @@ impl WebWindowInner {
     }
 
     /// See [`ImeMirror::schedule_sync`].
-    fn schedule_ime_mirror_sync(self: &Rc<Self>) {
+    pub(crate) fn schedule_ime_mirror_sync(self: &Rc<Self>) {
         ImeMirror::schedule_sync(self);
     }
 
@@ -762,6 +763,10 @@ impl WebWindowInner {
                 return;
             }
 
+            if crate::fast::ime_keys::belongs_to_ime(&this, &event) {
+                return;
+            }
+
             let keystroke = Keystroke {
                 modifiers: keystroke_modifiers(dom_modifiers, &key, this.is_mac),
                 key,
@@ -780,11 +785,6 @@ impl WebWindowInner {
                     this.schedule_ime_mirror_sync();
                     return;
                 }
-            }
-
-            if this.is_composing.get() || event.is_composing() {
-                event.prevent_default();
-                return;
             }
 
             if keystroke_inserts_text(&dom_modifiers, this.is_mac)
@@ -916,6 +916,8 @@ impl WebWindowInner {
                 .count()
                 .min(old_units.len() - suffix_length)
                 .min(new_units.len() - suffix_length);
+            let (prefix_length, suffix_length) =
+                crate::fast::ime_edit::whole_code_points(&new_units, prefix_length, suffix_length);
 
             let inserted_text = String::from_utf16_lossy(
                 &new_units[prefix_length..new_units.len() - suffix_length],
@@ -1156,6 +1158,7 @@ impl WebWindowInner {
         let this = Rc::clone(self);
         self.listen_input("compositionstart", move |_event: JsValue| {
             this.is_composing.set(true);
+            crate::fast::ime_position::follow_input(&this);
         })
     }
 
@@ -1165,6 +1168,7 @@ impl WebWindowInner {
             let event: web_sys::CompositionEvent = event.unchecked_into();
             let data = event.data().unwrap_or_default();
             this.is_composing.set(true);
+            crate::fast::ime_position::follow_input(&this);
             this.with_input_handler(|handler| {
                 handler.replace_and_mark_text_in_range(None, &data, None);
             });

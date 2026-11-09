@@ -23,7 +23,7 @@ roostr-nostr = { path = "crates/roostr-nostr" }
 roostr-engine = { path = "crates/roostr-engine" }
 roostr-replica-store = { path = "crates/roostr-replica-store" }
 roostr-replica = { path = "crates/roostr-replica" }
-gpui-kit = "0.9.0"
+gpui-kit = "0.9.1"
 # Interruptible tweens, springs and presence on gpui-kit; see
 # roostr_core::motion and vendor/gpui-motion-kit.
 gpui-motion-kit = "0.5.0"
@@ -44,7 +44,7 @@ base64 = "0.22"
 regex = "1"
 fancy-regex = "0.16"
 percent-encoding = "2"
-gpui-pre-reqwest-client = "0.3.11"
+gpui-pre-reqwest-client = "0.3.12"
 web-time = "1"
 # Browser build (wasm32-unknown-unknown). wasm-bindgen must match the
 # `wasm-bindgen` CLI that scripts/build-web.sh runs (it reads Cargo.lock).

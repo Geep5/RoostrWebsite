@@ -293,6 +293,7 @@ fn upcoming_occurrences_follow_repeat_next() {
             window: None,
             tz: "UTC".into(),
             anchor_ms: None,
+            after: false,
         };
         let set = backend
             .mutate(
