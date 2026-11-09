@@ -7,11 +7,12 @@
 //! (landing-page body) are bundled everywhere, named by [`ARCHIVO_BLACK`] and [`INTER`].
 //!
 //! Emoji: on the desktop Rune falls back to the system's colour emoji (Apple Color Emoji on a
-//! Mac). The browser build draws Twemoji, fetched beside the module rather than embedded so its
-//! 1.2 MB don't hold up the first frame: on wasm call `app.font_url(EMOJI_FONT_PATH)` on the
-//! `rune::App` (Rune fetches it before the first frame and adds it to the fonts); the
-//! [`FAMILIES`] lists already name it. `scripts/build-web.sh` copies
-//! `crates/roostr-ui/fonts/TwemojiMozilla.ttf` there.
+//! Mac). An iPhone app can't read the system's font files, so iOS embeds Twemoji, as the GPUI
+//! iPhone app did. The browser build draws Twemoji too, fetched beside the module rather than
+//! embedded so its 1.2 MB don't hold up the first frame: on wasm call
+//! `app.font_url(EMOJI_FONT_PATH)` on the `rune::App` (Rune fetches it before the first frame
+//! and adds it to the fonts); the [`FAMILIES`] lists already name it. `scripts/build-web.sh`
+//! copies `crates/roostr-ui/fonts/TwemojiMozilla.ttf` there.
 
 static INTER_TTF: &[u8] = include_bytes!("../../../../static/fonts/Inter.ttf");
 static ARCHIVO_BLACK_TTF: &[u8] = include_bytes!("../../../../static/fonts/ArchivoBlack.ttf");
@@ -19,6 +20,8 @@ static ARCHIVO_BLACK_TTF: &[u8] = include_bytes!("../../../../static/fonts/Archi
 static MONO_TTF: &[u8] = include_bytes!("../fonts/JetBrainsMono-Regular.ttf");
 #[cfg(not(target_os = "macos"))]
 static SYMBOLS_TTF: &[u8] = include_bytes!("../fonts/RoostrSymbols.ttf");
+#[cfg(target_os = "ios")]
+static EMOJI_TTF: &[u8] = include_bytes!("../fonts/TwemojiMozilla.ttf");
 
 /// The UI family (CSS family list).
 #[cfg(target_os = "macos")]
@@ -48,8 +51,10 @@ pub mod family {
 /// The faces every build registers (`AppSpec::fonts`). They replace Rune's built-in Inter.
 #[cfg(target_os = "macos")]
 pub static FONTS: &[&[u8]] = &[INTER_TTF, ARCHIVO_BLACK_TTF];
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "ios")))]
 pub static FONTS: &[&[u8]] = &[INTER_TTF, ARCHIVO_BLACK_TTF, MONO_TTF, SYMBOLS_TTF];
+#[cfg(target_os = "ios")]
+pub static FONTS: &[&[u8]] = &[INTER_TTF, ARCHIVO_BLACK_TTF, MONO_TTF, SYMBOLS_TTF, EMOJI_TTF];
 
 /// The sans and mono slots (`AppSpec::families`).
 pub const FAMILIES: (&str, &str) = (UI, MONO);
