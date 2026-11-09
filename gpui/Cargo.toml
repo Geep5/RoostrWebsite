@@ -13,6 +13,7 @@ publish = false
 [workspace.dependencies]
 roostr-core = { path = "crates/roostr-core" }
 roostr-rt = { path = "crates/roostr-rt" }
+roostr-host = { path = "crates/roostr-host" }
 roostr-ui = { path = "crates/roostr-ui" }
 roostr-properties = { path = "crates/roostr-properties" }
 roostr-editor = { path = "crates/roostr-editor" }

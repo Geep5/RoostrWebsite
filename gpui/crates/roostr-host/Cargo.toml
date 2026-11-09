@@ -1,0 +1,18 @@
+[package]
+name = "roostr-host"
+description = "Runs Roostr's State in a Rune window: the setup and poll hooks, image fetching, and the example runner feature crates use"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+roostr-core.workspace = true
+roostr-rt.workspace = true
+roostr-ui.workspace = true
+rune.workspace = true
+log.workspace = true
+parking_lot.workspace = true
+
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+ureq = { workspace = true, features = ["rustls"] }
+env_logger = "0.11"

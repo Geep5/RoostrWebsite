@@ -118,6 +118,12 @@ impl State {
         self.slots.get(&TypeId::of::<T>())?.downcast_ref()
     }
 
+    /// Stores `value` as the slot of its type, replacing any there: for slot
+    /// values the host builds (Rune's image cache needs the window's waker).
+    pub fn put<T: 'static>(&mut self, value: T) {
+        self.slots.insert(TypeId::of::<T>(), Box::new(value));
+    }
+
     /// Call `f` with every [`StoreEvent`] (what `cx.subscribe(&store, ..)` did).
     pub fn on_store(&mut self, f: fn(&mut State, &StoreEvent)) {
         self.store_listeners.push(f);

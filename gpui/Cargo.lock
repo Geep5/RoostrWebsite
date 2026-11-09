@@ -7264,6 +7264,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "roostr-host"
+version = "0.1.0"
+dependencies = [
+ "env_logger",
+ "log",
+ "parking_lot",
+ "roostr-core",
+ "roostr-rt",
+ "roostr-ui",
+ "rune",
+ "ureq",
+]
+
+[[package]]
 name = "roostr-nostr"
 version = "0.1.0"
 dependencies = [
