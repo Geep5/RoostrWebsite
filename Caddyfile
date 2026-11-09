@@ -6,7 +6,7 @@
 	# key and outbox live in that origin's storage and must not be orphaned.
 	@legacy {
 		header_regexp host Host ^(getroostr\.fly\.dev|www\.roostr\.space)$
-		not path /app /app/* /main.js /roostr_web.js /roostr_web_bg.wasm /engine.wasm /engine-core.json /fonts/*
+		not path /app /app/* /main.js /roostr_web.js /roostr_web_bg.wasm /snippets/* /engine.wasm /engine-core.json /fonts/*
 	}
 	redir @legacy https://roostr.space{uri} permanent
 	# The app was previewed under /gpui/ before it served the whole site.
