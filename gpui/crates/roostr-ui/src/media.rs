@@ -114,12 +114,15 @@ impl Images {
     }
 
     /// The image for `uri`, loading it the first time: `None` for a malformed `data:` URL, an
-    /// unsupported format, or (desktop) a web address whose bytes haven't been
-    /// [`inserted`](Self::insert) yet. A pending image draws nothing until it decodes.
+    /// unsupported format, (desktop) a web address whose bytes haven't been
+    /// [`inserted`](Self::insert) yet, or a key the app supplies itself (a File's bytes under
+    /// `roostr-file:<id>`, say) before it is inserted. Only web addresses are fetched. A pending
+    /// image draws nothing until it decodes.
     pub fn image(&self, uri: &str, size: f32) -> Option<Image> {
         if let Some(hit) = self.entries.borrow().get(uri) {
             return hit.clone();
         }
+        let web = uri.starts_with("https://") || uri.starts_with("http://");
         let loaded = if uri.starts_with("data:") {
             data_url_bytes(uri)
                 .filter(|(mime, _)| supported(mime))
@@ -127,6 +130,8 @@ impl Images {
                     self.cache
                         .load_mime(Arc::<[u8]>::from(bytes), &mime, size, self.scale)
                 })
+        } else if !web {
+            return None;
         } else if cfg!(target_arch = "wasm32") {
             Some(self.cache.url(uri, size, self.scale))
         } else {
@@ -361,5 +366,16 @@ mod tests {
         assert!(images.take_wanted().is_empty());
         assert!(images.image("data:image/png;base64,AAAA", 16.0).is_some());
         assert!(images.image("data:text/plain,hi", 16.0).is_none());
+    }
+
+    #[test]
+    fn app_supplied_keys_are_never_fetched_and_show_once_inserted() {
+        let images = Images::new(Arc::new(|| {}), 2.0);
+        // A cover's File bytes: neither fetched (desktop) nor loaded as a URL (web).
+        assert!(images.image("roostr-file:abc", 200.0).is_none());
+        assert!(images.take_wanted().is_empty());
+        assert!(images.image("roostr-file:abc", 200.0).is_none(), "no broken entry was cached");
+        images.insert("roostr-file:abc", vec![0x89, b'P', b'N', b'G']);
+        assert!(images.image("roostr-file:abc", 200.0).is_some());
     }
 }
