@@ -1,8 +1,8 @@
 //! The data surface the UI needs (`LocalBackend` in `src/lib/local-backend.ts`).
 //!
 //! Every call returns a future. The [`crate::Store`] runs them through
-//! [`crate::io::spawn`]: the desktop's [`crate::daemon::DaemonBackend`]
-//! blocks while polled, on GPUI's background threads; the browser's
+//! [`roostr_rt::Executor::background`]: the desktop's [`crate::daemon::DaemonBackend`]
+//! blocks while polled, on roostr-rt's worker threads; the browser's
 //! [`crate::web::WebDaemonBackend`] fetches on the page's event loop. The
 //! daemon-less replica (`roostr-replica`, the engine linked in) implements
 //! the same trait and adds an on-device [`crate::account::Account`].
@@ -11,8 +11,8 @@ use anyhow::Result;
 use serde_json::{Map, Value as Json};
 
 use crate::account::Account;
-use crate::io::{BoxFuture, BoxStream, MaybeSend, MaybeSync};
 use crate::types::{Object, ObjectSummary, QueryResult, RelationDef, Settings, Space, SyncStatus};
+use roostr_rt::{BoxFuture, BoxStream, MaybeSend, MaybeSync};
 
 pub type JsonMap = Map<String, Json>;
 
@@ -51,7 +51,9 @@ pub trait Backend: MaybeSend + MaybeSync + 'static {
     fn sync_digest(&self) -> BoxFuture<Result<JsonMap>>;
     /// One connection to the commit stream: its events, ending with one `Err`
     /// when the stream fails or closes (the caller reconnects). Dropping the
-    /// stream closes the connection.
+    /// stream closes the connection. On the desktop polling it may block
+    /// (the daemon reads the SSE body over ureq): the [`crate::Store`] reads
+    /// it through [`roostr_rt::background_stream`].
     fn events(&self) -> BoxStream<Result<BackendEvent>>;
     /// The identity this backend holds on the device (the replica); `None`
     /// for a daemon, whose harness serves identity, profile and join requests.

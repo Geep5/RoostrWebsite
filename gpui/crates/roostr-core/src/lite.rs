@@ -12,7 +12,7 @@ use std::collections::HashMap;
 
 use anyhow::Result;
 
-use crate::io::{BoxFuture, MaybeSend, MaybeSync};
+use roostr_rt::{BoxFuture, MaybeSend, MaybeSync};
 
 pub trait LiteControl: MaybeSend + MaybeSync {
     /// Objects per type key in `space_id`, as its directory counts them
@@ -77,11 +77,11 @@ impl VaultEstimate {
 }
 
 /// The running backend's vault controls; `None` with a daemon.
-pub fn lite(cx: &gpui_kit::App) -> Option<std::sync::Arc<dyn LiteControl>> {
-    crate::Store::try_global(cx)?.read(cx).backend().lite()
+pub fn lite(s: &crate::State) -> Option<std::sync::Arc<dyn LiteControl>> {
+    s.store.backend().lite()
 }
 
 /// The running replica is lite (`None`: a daemon or a full replica).
-pub fn status(cx: &gpui_kit::App) -> Option<crate::LiteStatus> {
-    crate::Store::try_global(cx)?.read(cx).status.lite.clone()
+pub fn status(s: &crate::State) -> Option<crate::LiteStatus> {
+    s.store.status.lite.clone()
 }

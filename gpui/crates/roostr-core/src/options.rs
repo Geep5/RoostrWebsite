@@ -2,210 +2,84 @@
 //! system. Options live on the relation object as `{id, text, color, orderId}`;
 //! `color` is a palette name. Field values store the option TEXT, so rename
 //! and delete rewrite every object carrying the value.
+//!
+//! The palette's paint (pill, badge and swatch colours) is the design
+//! system's: it maps each [`Hue`] to the kit's colour scale.
 
 use std::sync::LazyLock;
 
 use anyhow::Result;
-use gpui_kit::component::ColorName;
-use gpui_kit::{App, AppContext as _, Hsla, Rgba, Task};
 use regex::Regex;
+use roostr_rt::Task;
 use serde_json::json;
 
-use crate::api;
 use crate::icons::Glyph;
-use crate::store::Store;
-use crate::theme;
 use crate::types::{Fields, RelationDef, RelationOption, Value};
+use crate::{State, api};
 
-/// One palette entry: a stored option colour `name` and the gpui-kit colour
-/// it paints with. The tag pill is the kit's own `Tag::color` look (dark
-/// theme): fill 950 at 50%, border 800 at 50%, text 300; `hex` is the vivid
-/// 500 tone (swatches, badge icons).
+/// A hue of the kit's colour scales (Tailwind's names).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Hue {
+    Gray,
+    Red,
+    Orange,
+    Amber,
+    Yellow,
+    Lime,
+    Green,
+    Emerald,
+    Teal,
+    Cyan,
+    Sky,
+    Blue,
+    Indigo,
+    Violet,
+    Purple,
+    Fuchsia,
+    Pink,
+    Rose,
+}
+
+/// One palette entry: a stored option colour `name` and the kit hue it
+/// paints with. The tag pill is the kit's own `Tag::color` look (dark
+/// theme): fill 950 at 50%, border 800 at 50%, text 300; the vivid tone is
+/// 500 (swatches, badge icons).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TagColor {
     pub name: &'static str,
-    pub kit: ColorName,
+    pub hue: Hue,
 }
 
-impl TagColor {
-    pub fn hex(&self) -> Hsla {
-        self.kit.scale(500)
-    }
-    pub fn bg(&self) -> Hsla {
-        self.kit.scale(950).opacity(0.5)
-    }
-    pub fn border(&self) -> Hsla {
-        self.kit.scale(800).opacity(0.5)
-    }
-    pub fn text(&self) -> Hsla {
-        self.kit.scale(300)
-    }
-    /// `#rrggbb` of the vivid tone, as the web stores it.
-    pub fn hex_str(&self) -> String {
-        let c = self.hex().to_rgb();
-        let byte = |v: f32| (v.clamp(0., 1.) * 255.).round() as u8;
-        format!("#{:02x}{:02x}{:02x}", byte(c.r), byte(c.g), byte(c.b))
-    }
-}
-
-const fn tc(name: &'static str, kit: ColorName) -> TagColor {
-    TagColor { name, kit }
+const fn tc(name: &'static str, hue: Hue) -> TagColor {
+    TagColor { name, hue }
 }
 
 /// The option palette, in the kit's hue order. The first ten names are
 /// Anytype's (`grey`, `ice` = the kit's Gray and Sky), kept so stored options
 /// keep their colour; the rest are the kit colours Anytype lacks.
 pub const TAG_COLORS: &[TagColor] = &[
-    tc("grey", ColorName::Gray),
-    tc("red", ColorName::Red),
-    tc("orange", ColorName::Orange),
-    tc("amber", ColorName::Amber),
-    tc("yellow", ColorName::Yellow),
-    tc("lime", ColorName::Lime),
-    tc("green", ColorName::Green),
-    tc("emerald", ColorName::Emerald),
-    tc("teal", ColorName::Teal),
-    tc("cyan", ColorName::Cyan),
-    tc("ice", ColorName::Sky),
-    tc("blue", ColorName::Blue),
-    tc("indigo", ColorName::Indigo),
-    tc("violet", ColorName::Violet),
-    tc("purple", ColorName::Purple),
-    tc("fuchsia", ColorName::Fuchsia),
-    tc("pink", ColorName::Pink),
-    tc("rose", ColorName::Rose),
+    tc("grey", Hue::Gray),
+    tc("red", Hue::Red),
+    tc("orange", Hue::Orange),
+    tc("amber", Hue::Amber),
+    tc("yellow", Hue::Yellow),
+    tc("lime", Hue::Lime),
+    tc("green", Hue::Green),
+    tc("emerald", Hue::Emerald),
+    tc("teal", Hue::Teal),
+    tc("cyan", Hue::Cyan),
+    tc("ice", Hue::Sky),
+    tc("blue", Hue::Blue),
+    tc("indigo", Hue::Indigo),
+    tc("violet", Hue::Violet),
+    tc("purple", Hue::Purple),
+    tc("fuchsia", Hue::Fuchsia),
+    tc("pink", Hue::Pink),
+    tc("rose", Hue::Rose),
 ];
 
 pub fn tag_color(name: &str) -> Option<&'static TagColor> {
     TAG_COLORS.iter().find(|c| c.name == name)
-}
-
-/// `colorHex`: the palette's vivid hex for `name`, else `name` itself, else grey's.
-pub fn color_hex(name: &str) -> String {
-    match tag_color(name) {
-        Some(c) => c.hex_str(),
-        None if !name.is_empty() => name.to_string(),
-        None => TAG_COLORS[0].hex_str(),
-    }
-}
-
-/// Tag pill colours for a palette name; `None` = unknown/default
-/// (render [`unknown_tag_bg`] with primary text).
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct TagPaint {
-    pub bg: Hsla,
-    pub fg: Hsla,
-    pub border: Hsla,
-}
-
-/// A tag/status option's pill: an outline in the option's colour - linked
-/// objects are the filled pills ([`object_pill_paint`]), so the two read apart.
-pub fn tag_colors(name: &str) -> Option<TagPaint> {
-    tag_color(name).map(|c| TagPaint {
-        bg: gpui_kit::transparent_black(),
-        fg: c.text(),
-        border: c.text().opacity(0.55),
-    })
-}
-
-/// An option with no (known) colour: a neutral outline, `fg` text.
-pub fn unknown_tag_paint(fg: Hsla) -> TagPaint {
-    TagPaint {
-        bg: gpui_kit::transparent_black(),
-        fg,
-        border: fg.opacity(0.35),
-    }
-}
-
-/// A linked object's pill (its emoji and name): neutral fill, `fg` text.
-pub fn object_pill_paint(fg: Hsla) -> TagPaint {
-    TagPaint {
-        bg: unknown_tag_bg(),
-        fg,
-        border: unknown_tag_bg(),
-    }
-}
-
-/// The kit `Tag::color` look (dark theme) for any colour, e.g. a person's chat
-/// colour: its hue and saturation at the kit's 950 (fill, 50%), 800 (border,
-/// 50%) and 300 (text) lightness.
-pub fn tint_paint(color: Hsla) -> TagPaint {
-    let at = |l: f32, a: f32| Hsla {
-        h: color.h,
-        s: color.s,
-        l,
-        a,
-    };
-    TagPaint {
-        bg: at(0.16, 0.5),
-        border: at(0.32, 0.5),
-        fg: at(0.8, 1.),
-    }
-}
-
-/// An `@Agent` tag in that agent's own chat colour (the one its replies use),
-/// neutral grey when it has none. `name` is matched against the agents of
-/// `space` first, then any space.
-pub fn agent_tag_paint(store: &Store, name: &str, space: &str) -> TagPaint {
-    let color = store
-        .agents
-        .iter()
-        .filter(|a| a.name == name)
-        .max_by_key(|a| a.channel == space)
-        .and_then(|a| crate::color::hex(&a.chat_color));
-    match color {
-        Some(c) => tint_paint(c),
-        None => object_pill_paint(theme::fg()),
-    }
-}
-
-/// The pill background of an option with no (known) color: `rgba(255,255,255,0.09)`.
-pub fn unknown_tag_bg() -> Hsla {
-    Hsla {
-        h: 0.,
-        s: 0.,
-        l: 1.,
-        a: 0.09,
-    }
-}
-
-/// Property badge colors (`badgeStyle`).
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct BadgeColors {
-    pub bg: Hsla,
-    pub fg: Hsla,
-    pub icon: Hsla,
-}
-
-/// `color-mix(in srgb, a p, b)`: per-channel interpolation in gamma sRGB.
-pub fn mix_srgb(a: Hsla, p: f32, b: Hsla) -> Hsla {
-    let a = a.to_rgb();
-    let b = b.to_rgb();
-    let m = |x: f32, y: f32| x * p + y * (1. - p);
-    Rgba {
-        r: m(a.r, b.r),
-        g: m(a.g, b.g),
-        b: m(a.b, b.b),
-        a: m(a.a, b.a),
-    }
-    .into()
-}
-
-/// Soft tint of the option's vivid tone over the panel (18%), its pale label,
-/// and the vivid tone for the icon. Unknown → muted 14% over panel, fg, muted.
-pub fn badge_colors(name: &str) -> BadgeColors {
-    match tag_color(name) {
-        Some(c) => BadgeColors {
-            bg: mix_srgb(c.hex(), 0.18, theme::panel()),
-            fg: c.text(),
-            icon: c.hex(),
-        },
-        None => BadgeColors {
-            bg: mix_srgb(theme::muted(), 0.14, theme::panel()),
-            fg: theme::fg(),
-            icon: theme::muted(),
-        },
-    }
 }
 
 /// Status option text → badge glyph by keyword, so "Approved" and "done"
@@ -267,21 +141,17 @@ pub fn options_value(options: &[RelationOption]) -> Value {
     )
 }
 
-fn refresh(cx: &mut App) {
-    Store::global(cx).update(cx, |store, cx| store.refresh_all(cx));
-}
-
-fn save(relation_id: &str, options: &[RelationOption], cx: &mut App) -> Task<Result<()>> {
-    let set = api::note::set_field(relation_id, "options", options_value(options), cx);
-    cx.spawn(async move |cx| {
+fn save(relation_id: &str, options: &[RelationOption], s: &mut State) -> Task<Result<()>> {
+    let set = api::note::set_field(relation_id, "options", options_value(options), s);
+    s.rt.spawn(async move |cx| {
         set.await?;
-        cx.update(refresh);
+        cx.update(|s| s.store.refresh_all());
         Ok(())
     })
 }
 
 /// Create an option with a random palette color (`addOption`).
-pub fn add_option(rel: &RelationDef, text: &str, cx: &mut App) -> Task<Result<RelationOption>> {
+pub fn add_option(rel: &RelationDef, text: &str, s: &mut State) -> Task<Result<RelationOption>> {
     let pick = uuid::Uuid::new_v4().as_bytes()[0] as usize % TAG_COLORS.len();
     let option = RelationOption {
         id: uuid::Uuid::new_v4().to_string(),
@@ -291,8 +161,8 @@ pub fn add_option(rel: &RelationDef, text: &str, cx: &mut App) -> Task<Result<Re
     };
     let mut all = rel.options.clone();
     all.push(option.clone());
-    let save = save(&rel.id, &all, cx);
-    cx.background_spawn(async move {
+    let save = save(&rel.id, &all, s);
+    s.rt.spawn(async move |_| {
         save.await?;
         Ok(option)
     })
@@ -302,7 +172,7 @@ pub fn set_option_color(
     rel: &RelationDef,
     id: &str,
     color: &str,
-    cx: &mut App,
+    s: &mut State,
 ) -> Task<Result<()>> {
     let all: Vec<RelationOption> = rel
         .options
@@ -318,7 +188,7 @@ pub fn set_option_color(
             }
         })
         .collect();
-    save(&rel.id, &all, cx)
+    save(&rel.id, &all, s)
 }
 
 /// Rewrite `rel.key` on every object whose value contains `text`, then save `next`.
@@ -327,16 +197,16 @@ fn rewrite(
     text: String,
     replace: Option<String>,
     next: Vec<RelationOption>,
-    cx: &mut App,
+    s: &mut State,
 ) -> Task<Result<()>> {
     // "in" = value-list intersects the set; "equal" would miss multi-tag objects.
     let query = api::query(
         json!({ "filters": [{ "key": rel.key, "condition": "in", "value": [text] }], "limit": 500 }),
-        cx,
+        s,
     );
     let key = rel.key.clone();
     let rel_id = rel.id.clone();
-    cx.spawn(async move |cx| {
+    s.rt.spawn(async move |cx| {
         for row in query.await?.records {
             let items = row
                 .fields
@@ -359,16 +229,16 @@ fn rewrite(
                     .filter(|i| i.string_value.as_deref() != Some(text.as_str()))
                     .collect(),
             };
-            cx.update(|cx| api::note::set_field(&row.id, &key, Value::values(items), cx))
+            cx.update(|s| api::note::set_field(&row.id, &key, Value::values(items), s))
                 .await?;
         }
-        cx.update(|cx| save(&rel_id, &next, cx)).await
+        cx.update(|s| save(&rel_id, &next, s)).await
     })
 }
 
 /// Rename an option and rewrite the value on every carrying object. No-op
 /// for an unknown id, blank or unchanged text.
-pub fn rename_option(rel: &RelationDef, id: &str, next: &str, cx: &mut App) -> Task<Result<()>> {
+pub fn rename_option(rel: &RelationDef, id: &str, next: &str, s: &mut State) -> Task<Result<()>> {
     let clean = next.trim().to_string();
     let Some(prev) = rel.options.iter().find(|o| o.id == id) else {
         return Task::ready(Ok(()));
@@ -390,16 +260,16 @@ pub fn rename_option(rel: &RelationDef, id: &str, next: &str, cx: &mut App) -> T
             }
         })
         .collect();
-    rewrite(rel, prev.text.clone(), Some(clean), all, cx)
+    rewrite(rel, prev.text.clone(), Some(clean), all, s)
 }
 
 /// Delete an option and strip it from every carrying object.
-pub fn delete_option(rel: &RelationDef, id: &str, cx: &mut App) -> Task<Result<()>> {
+pub fn delete_option(rel: &RelationDef, id: &str, s: &mut State) -> Task<Result<()>> {
     let Some(prev) = rel.options.iter().find(|o| o.id == id) else {
         return Task::ready(Ok(()));
     };
     let all = rel.options.iter().filter(|o| o.id != id).cloned().collect();
-    rewrite(rel, prev.text.clone(), None, all, cx)
+    rewrite(rel, prev.text.clone(), None, all, s)
 }
 
 #[cfg(test)]
@@ -415,27 +285,6 @@ mod tests {
         assert_eq!(status_icon("Not started"), Glyph::BadgeDashed);
         assert_eq!(status_icon("doneness"), Glyph::BadgeDot);
         assert_eq!(status_icon("Something"), Glyph::BadgeDot);
-    }
-
-    #[test]
-    fn badge_mix_is_srgb_interpolation() {
-        let red = tag_color("red").unwrap().hex().to_rgb();
-        let panel = theme::panel().to_rgb();
-        let c = badge_colors("red").bg.to_rgb();
-        // 0.18 * vivid red + 0.82 * panel
-        let want = |v: f32, p: f32| v * 0.18 + p * 0.82;
-        assert!((c.r - want(red.r, panel.r)).abs() < 0.003);
-        assert!((c.g - want(red.g, panel.g)).abs() < 0.003);
-        assert!((c.b - want(red.b, panel.b)).abs() < 0.003);
-        assert_eq!(badge_colors("nope").fg, theme::fg());
-    }
-
-    #[test]
-    fn color_hex_falls_back() {
-        let teal = color_hex("teal");
-        assert!(teal.len() == 7 && teal.starts_with('#'), "{teal}");
-        assert_eq!(color_hex("#123456"), "#123456");
-        assert_eq!(color_hex(""), color_hex("grey"));
     }
 
     #[test]

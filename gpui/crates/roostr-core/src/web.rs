@@ -26,8 +26,8 @@ use web_sys::{AbortController, AbortSignal, RequestCredentials, RequestInit, Req
 use crate::backend::{
     Backend, BackendEvent, JsonMap, SseParser, encode_path_segment, mutate_result,
 };
-use crate::io::{BoxFuture, BoxStream};
 use crate::types::{Object, ObjectSummary, QueryResult, RelationDef, Settings, Space};
+use roostr_rt::{BoxFuture, BoxStream};
 
 /// The daemon on the visitor's computer.
 pub const LOCAL_API: &str = "http://127.0.0.1:7333";

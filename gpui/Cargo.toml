@@ -1,6 +1,8 @@
 [workspace]
 resolver = "3"
 members = ["crates/*"]
+# The iPhone app stays on GPUI (main branch) until Rune has iOS text input.
+exclude = ["crates/roostr-ios"]
 default-members = ["crates/roostr"]
 
 [workspace.package]
@@ -10,6 +12,8 @@ publish = false
 
 [workspace.dependencies]
 roostr-core = { path = "crates/roostr-core" }
+roostr-rt = { path = "crates/roostr-rt" }
+roostr-ui = { path = "crates/roostr-ui" }
 roostr-properties = { path = "crates/roostr-properties" }
 roostr-editor = { path = "crates/roostr-editor" }
 roostr-sets = { path = "crates/roostr-sets" }
@@ -23,6 +27,9 @@ roostr-nostr = { path = "crates/roostr-nostr" }
 roostr-engine = { path = "crates/roostr-engine" }
 roostr-replica-store = { path = "crates/roostr-replica-store" }
 roostr-replica = { path = "crates/roostr-replica" }
+# Rune is pre-release: pin a `dev` rev (dev is fast-forward only).
+rune = { git = "https://github.com/anomalyco/rune", rev = "8e3fc8e" }
+rune-kit = { git = "https://github.com/anomalyco/rune", rev = "8e3fc8e" }
 gpui-kit = "0.9.1"
 # Interruptible tweens, springs and presence on gpui-kit; see
 # roostr_core::motion and vendor/gpui-motion-kit.
@@ -35,6 +42,7 @@ dirs = "6"
 log = "0.4"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 futures = "0.3"
+parking_lot = "0.12"
 # debug-embed: compile the assets in for every profile. Without it a debug
 # build reads them from the source tree at run time, which a browser tab
 # (`build-web.sh --debug`) or a phone cannot: every icon drew blank.

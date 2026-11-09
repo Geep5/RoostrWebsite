@@ -8,8 +8,7 @@
 //! and never stored its open flag or tab, so with no stored state both
 //! columns start expanded; the old width (`disc-drawer-w`) is the Chat width.
 
-use gpui_kit::{AnyView, App, AppContext as _, Context, Entity, Global};
-
+use crate::State;
 use crate::ui_state::UiState;
 
 const CHAT_WIDTH_KEY: &str = "disc-drawer-w";
@@ -56,12 +55,10 @@ impl PaneTab {
     }
 
     /// The tab's icon: the chat type's (of the current space), the puzzle piece.
-    pub fn icon(self, cx: &App) -> String {
+    pub fn icon(self, s: &State) -> String {
         match self {
             Self::Chat => {
-                let space = crate::Navigator::global(cx).read(cx).space().to_string();
-                let icon =
-                    crate::objects::type_icon(crate::Store::global(cx).read(cx), "chat", &space);
+                let icon = crate::objects::type_icon(&s.store, "chat", s.nav.space());
                 if icon.is_empty() { "•".into() } else { icon }
             }
             Self::Properties => "🧩".into(),
@@ -126,26 +123,9 @@ impl PaneLayout {
     }
 }
 
-/// The views a page publishes for its pane (see `roostr_shell::set_pane`).
-#[derive(Clone)]
-pub struct PaneViews {
-    /// The phone's sheet: a Chat / Properties switch over the active one.
-    pub sheet: AnyView,
-    /// The desktop Chat column; `None` for an object without a discussion.
-    pub chat: Option<AnyView>,
-    /// The desktop Properties column.
-    pub properties: AnyView,
-}
-
-impl PaneViews {
-    pub fn column(&self, tab: PaneTab) -> Option<AnyView> {
-        match tab {
-            PaneTab::Chat => self.chat.clone(),
-            PaneTab::Properties => Some(self.properties.clone()),
-        }
-    }
-}
-
+/// The pane as the object page last published it, and the persisted
+/// column state ([`crate::State::pane`]). Methods that persist take the
+/// state's [`crate::State::ui`].
 pub struct PaneState {
     /// Desktop: the Chat column is expanded (else a strip). Persisted.
     pub chat_open: bool,
@@ -169,40 +149,26 @@ pub struct PaneState {
     pub conv_count: usize,
 }
 
-struct GlobalPane(Entity<PaneState>);
-
-impl Global for GlobalPane {}
-
 impl PaneState {
     /// Read from [`UiState`] (also when a new app starts on the same file).
-    pub fn init(cx: &mut App) -> Entity<Self> {
-        let width = |cx: &App, key, default| {
-            UiState::get::<f32>(cx, key)
+    pub fn new(ui: &UiState) -> Self {
+        let width = |key, default| {
+            ui.get::<f32>(key)
                 .unwrap_or(default)
                 .clamp(MIN_WIDTH, MAX_WIDTH)
         };
-        let chat_width = width(cx, CHAT_WIDTH_KEY, DEFAULT_WIDTH);
-        let props_width = width(cx, PROPS_WIDTH_KEY, DEFAULT_PROPS_WIDTH);
-        let chat_open = UiState::get::<bool>(cx, CHAT_OPEN_KEY).unwrap_or(true);
-        let props_open = UiState::get::<bool>(cx, PROPS_OPEN_KEY).unwrap_or(true);
-        let pane = cx.new(|_| Self {
-            chat_open,
-            props_open,
-            chat_width,
-            props_width,
+        Self {
+            chat_open: ui.get::<bool>(CHAT_OPEN_KEY).unwrap_or(true),
+            props_open: ui.get::<bool>(PROPS_OPEN_KEY).unwrap_or(true),
+            chat_width: width(CHAT_WIDTH_KEY, DEFAULT_WIDTH),
+            props_width: width(PROPS_WIDTH_KEY, DEFAULT_PROPS_WIDTH),
             last: PaneTab::Chat,
             sheet: false,
             available: false,
             chat: false,
             count: 0,
             conv_count: 0,
-        });
-        cx.set_global(GlobalPane(pane.clone()));
-        pane
-    }
-
-    pub fn global(cx: &App) -> Entity<Self> {
-        cx.global::<GlobalPane>().0.clone()
+        }
     }
 
     pub fn is_open(&self, tab: PaneTab) -> bool {
@@ -234,8 +200,7 @@ impl PaneState {
     }
 
     /// Expand (or collapse) a desktop column; expanding makes it [`Self::last`].
-    pub fn set_open(&mut self, tab: PaneTab, open: bool, cx: &mut Context<Self>) {
-        let changed = self.is_open(tab) != open || (open && self.last != tab);
+    pub fn set_open(&mut self, tab: PaneTab, open: bool, ui: &mut UiState) {
         if open {
             self.last = tab;
         }
@@ -245,18 +210,15 @@ impl PaneState {
                 PaneTab::Properties => (&mut self.props_open, PROPS_OPEN_KEY),
             };
             *field = open;
-            UiState::set(cx, key, &open);
-        }
-        if changed {
-            cx.notify();
+            ui.set(key, &open);
         }
     }
 
     /// Both columns at once (the edge drawer tab).
-    pub fn set_all(&mut self, open: bool, cx: &mut Context<Self>) {
+    pub fn set_all(&mut self, open: bool, ui: &mut UiState) {
         let last = self.last;
-        self.set_open(last.other(), open, cx);
-        self.set_open(last, open, cx);
+        self.set_open(last.other(), open, ui);
+        self.set_open(last, open, ui);
     }
 
     /// Any column of the open object's pane is expanded.
@@ -268,63 +230,45 @@ impl PaneState {
 
     /// Escape on a desktop: collapse the column expanded last if it is open,
     /// else the other one.
-    pub fn collapse_last(&mut self, cx: &mut Context<Self>) {
+    pub fn collapse_last(&mut self, ui: &mut UiState) {
         let last = self.last;
         if let Some(tab) = [last, last.other()]
             .into_iter()
             .find(|tab| self.has(*tab) && self.is_open(*tab))
         {
-            self.set_open(tab, false, cx);
+            self.set_open(tab, false, ui);
         }
     }
 
     /// The phone's sheet.
-    pub fn set_sheet(&mut self, open: bool, cx: &mut Context<Self>) {
-        if self.sheet != open {
-            self.sheet = open;
-            cx.notify();
-        }
+    pub fn set_sheet(&mut self, open: bool) {
+        self.sheet = open;
     }
 
     /// Published by the object page for the object it shows.
-    pub fn publish(
-        &mut self,
-        available: bool,
-        chat: bool,
-        count: usize,
-        conv_count: usize,
-        cx: &mut Context<Self>,
-    ) {
-        let next = (available, chat, count, conv_count);
-        if (self.available, self.chat, self.count, self.conv_count) != next {
-            self.available = available;
-            self.chat = chat;
-            self.count = count;
-            self.conv_count = conv_count;
-            cx.notify();
-        }
+    pub fn publish(&mut self, available: bool, chat: bool, count: usize, conv_count: usize) {
+        self.available = available;
+        self.chat = chat;
+        self.count = count;
+        self.conv_count = conv_count;
     }
 
     /// A column's width while a resizer drags (see [`Self::save_width`]).
-    pub fn set_width(&mut self, tab: PaneTab, width: f32, cx: &mut Context<Self>) {
+    pub fn set_width(&mut self, tab: PaneTab, width: f32) {
         let width = width.clamp(MIN_WIDTH, MAX_WIDTH);
-        let field = match tab {
-            PaneTab::Chat => &mut self.chat_width,
-            PaneTab::Properties => &mut self.props_width,
-        };
-        if *field != width {
-            *field = width;
-            cx.notify();
+        match tab {
+            PaneTab::Chat => self.chat_width = width,
+            PaneTab::Properties => self.props_width = width,
         }
     }
 
     /// Persist a column's width (the resizer let go).
-    pub fn save_width(&self, tab: PaneTab, cx: &mut App) {
+    pub fn save_width(&self, tab: PaneTab, ui: &mut UiState) {
         let key = match tab {
             PaneTab::Chat => CHAT_WIDTH_KEY,
             PaneTab::Properties => PROPS_WIDTH_KEY,
         };
-        UiState::set(cx, key, &self.width(tab));
+        ui.set(key, &self.width(tab));
     }
 
     /// The columns in `room` (the window less the rail and sidebar). A

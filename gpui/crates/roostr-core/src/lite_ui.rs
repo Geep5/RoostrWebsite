@@ -1,20 +1,18 @@
 //! What the UI says and does on a lite replica ([`crate::lite`]): the words
 //! of the "Load this space fully" fallbacks, the vault estimate, the graph's
 //! shadow counts, and the actions behind their buttons. Every feature crate
-//! renders the same notices from here, desktop and mobile alike.
+//! renders the same notices from here ([`Notice`]), desktop and mobile alike.
 //!
 //! An opened query/set (pinned widget or page) over a space not held whole
 //! downloads that space on its own ([`ensure_space`]); everything else
 //! (search, backlinks, counts, agents, the graph) offers the button.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
-use gpui_kit::{AnyElement, App, ElementId, FontWeight, Global, SharedString, div, prelude::*, px};
-
+use crate::State;
 use crate::lite::{self, VaultEstimate};
 use crate::sync_status::count;
 use crate::types::{LiteStatus, SpaceLoad};
-use crate::{Store, io, theme, ui};
 
 pub const LOAD_SPACE: &str = "Load this space fully";
 pub const SPACE_UNREADY: &str = "This space isn't ready for lite yet — load it fully once";
@@ -124,205 +122,211 @@ pub fn shadow_label(n: u64) -> String {
 
 // ---------------------------------------------------------------- actions
 
-/// Spaces whose download this session already asked for, so a re-render
-/// never asks twice.
-#[derive(Default)]
-struct Requested(HashSet<String>);
-impl Global for Requested {}
-
 /// A space's data is all here: not a lite replica, or the space is whole.
-pub fn space_held(space_id: &str, cx: &App) -> bool {
-    lite::status(cx).is_none_or(|s| s.is_full(space_id))
+pub fn space_held(space_id: &str, s: &State) -> bool {
+    lite::status(s).is_none_or(|status| status.is_full(space_id))
 }
 
-/// Download `space_id` whole (once per session); the store refreshes when it lands.
-pub fn load_space(space_id: &str, cx: &mut App) {
-    let Some(control) = lite::lite(cx) else {
+/// Download `space_id` whole (once per session: [`State`] remembers what
+/// it asked for, so a re-render never asks twice); the store refreshes when
+/// it lands.
+pub fn load_space(space_id: &str, s: &mut State) {
+    let Some(control) = lite::lite(s) else {
         return;
     };
-    if !cx
-        .default_global::<Requested>()
-        .0
-        .insert(space_id.to_string())
-    {
+    if !s.lite_requested.insert(space_id.to_string()) {
         return;
     }
     let space = space_id.to_string();
-    let task = io::spawn(cx, async move { control.load_space(&space).await });
+    let task =
+        s.rt.background(async move { control.load_space(&space).await });
     let space = space_id.to_string();
-    cx.spawn(async move |cx| {
+    s.rt.spawn(async move |cx| {
         let result = task.await;
-        cx.update(|cx| {
+        cx.update(|s| {
             if let Err(error) = result {
                 log::warn!("loading space {space} failed: {error:#}");
                 // Let the button try again.
-                cx.default_global::<Requested>().0.remove(&space);
+                s.lite_requested.remove(&space);
             }
-            refresh(cx);
+            s.store.refresh_all();
         });
     })
     .detach();
 }
 
 /// An opened query/set over `space_id`: download the space when lite and not whole.
-pub fn ensure_space(space_id: &str, cx: &mut App) {
-    if let Some(status) = lite::status(cx)
+pub fn ensure_space(space_id: &str, s: &mut State) {
+    if let Some(status) = lite::status(s)
         && !status.is_full(space_id)
         && status.loading(space_id).is_none()
     {
-        load_space(space_id, cx);
+        load_space(space_id, s);
     }
 }
 
 /// Make sure `ids` are held (lite only); the store refreshes after.
-pub fn fetch(ids: Vec<String>, cx: &mut App) {
-    if ids.is_empty() || lite::status(cx).is_none() {
+pub fn fetch(ids: Vec<String>, s: &mut State) {
+    if ids.is_empty() || lite::status(s).is_none() {
         return;
     }
-    let Some(control) = lite::lite(cx) else {
+    let Some(control) = lite::lite(s) else {
         return;
     };
-    let task = io::spawn(cx, async move { control.fetch(ids).await });
-    cx.spawn(async move |cx| {
+    let task = s.rt.background(async move { control.fetch(ids).await });
+    s.rt.spawn(async move |cx| {
         let result = task.await;
-        cx.update(|cx| {
+        cx.update(|s| {
             if let Err(error) = result {
                 log::warn!("fetching objects failed: {error:#}");
             }
-            refresh(cx);
+            s.store.refresh_all();
         });
     })
     .detach();
 }
 
 /// Settings → "Fully sync this device"; progress shows in the sync status line.
-pub fn sync_fully(cx: &mut App) {
-    let Some(control) = lite::lite(cx) else {
+pub fn sync_fully(s: &mut State) {
+    let Some(control) = lite::lite(s) else {
         return;
     };
-    let task = io::spawn(cx, async move { control.sync_fully().await });
-    cx.spawn(async move |cx| {
+    let task = s.rt.background(async move { control.sync_fully().await });
+    s.rt.spawn(async move |cx| {
         if let Err(error) = task.await {
             log::warn!("full sync failed to start: {error:#}");
         }
-        cx.update(refresh);
+        cx.update(|s| s.store.refresh_all());
     })
     .detach();
 }
 
 /// Settings → "Switch to Lite": this device drops its copy and opens again
-/// lite (the browser reloads the page; the app reconnects in place);
-/// `on_error` gets the reason when the replica refuses (changes not sent yet,
-/// a save in progress).
-pub fn switch_to_lite(cx: &mut App, on_error: impl FnOnce(String, &mut App) + 'static) {
-    let Some(control) = lite::lite(cx) else {
+/// lite. The browser reloads the page. The app gets `Ok` (close the dialog
+/// that asked), then reconnects in place; `Err` carries the reason the
+/// replica refused (changes not sent yet, a save in progress).
+pub fn switch_to_lite(
+    s: &mut State,
+    on_result: impl FnOnce(Result<(), String>, &mut State) + 'static,
+) {
+    let Some(control) = lite::lite(s) else {
         return;
     };
-    let task = io::spawn(cx, async move { control.switch_to_lite().await });
-    cx.spawn(async move |cx| match task.await {
+    let task =
+        s.rt.background(async move { control.switch_to_lite().await });
+    s.rt.spawn(async move |cx| match task.await {
         Ok(()) => {
             #[cfg(target_family = "wasm")]
-            if let Some(window) = web_sys::window() {
-                let _ = window.location().reload();
+            {
+                drop((cx, on_result));
+                if let Some(window) = web_sys::window() {
+                    let _ = window.location().reload();
+                }
             }
             #[cfg(not(target_family = "wasm"))]
-            cx.update(|cx| {
-                use gpui_kit::component::WindowExt as _;
-                if let Some(window) = cx.active_window() {
-                    let _ = window.update(cx, |_, window, cx| window.close_dialog(cx));
-                }
-                if let Some(store) = Store::try_global(cx) {
-                    store.update(cx, |store, cx| store.reconnect(cx));
-                }
+            cx.update(|s| {
+                on_result(Ok(()), s);
+                s.store.reconnect();
             });
         }
-        Err(error) => cx.update(|cx| on_error(format!("{error:#}"), cx)),
+        Err(error) => cx.update(|s| on_result(Err(format!("{error:#}")), s)),
     })
     .detach();
 }
 
-fn refresh(cx: &mut App) {
-    if let Some(store) = Store::try_global(cx) {
-        store.update(cx, |store, cx| store.refresh_all(cx));
-    }
+// ---------------------------------------------------------------- notices
+
+/// A lite notice as every view shows it: a muted line, with a button when
+/// there is something to do.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Notice {
+    pub text: String,
+    pub action: Option<NoticeAction>,
 }
 
-// --------------------------------------------------------------- elements
+/// The button of a [`Notice`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum NoticeAction {
+    /// [`LOAD_SPACE`]: [`load_space`] this space.
+    LoadSpace(String),
+    /// "Fully sync this device": [`sync_fully`].
+    SyncFully,
+}
+
+impl NoticeAction {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::LoadSpace(_) => LOAD_SPACE,
+            Self::SyncFully => "Fully sync this device",
+        }
+    }
+
+    /// What the button does.
+    pub fn run(&self, s: &mut State) {
+        match self {
+            Self::LoadSpace(space) => load_space(space, s),
+            Self::SyncFully => sync_fully(s),
+        }
+    }
+}
 
 /// The notice a view over `space_id` shows on a lite replica when it may
 /// see only part of the space: not ready → load once; loading → progress;
 /// not whole → "Load this space fully". `None` when the space is whole (or
-/// not lite). `id` keeps the button unique per view.
-pub fn space_notice(id: impl Into<SharedString>, space_id: &str, cx: &App) -> Option<AnyElement> {
-    let status = lite::status(cx)?;
-    space_notice_for(id.into(), space_id, &status)
+/// not lite).
+pub fn space_notice(space_id: &str, s: &State) -> Option<Notice> {
+    space_notice_for(space_id, &lite::status(s)?)
 }
 
-fn space_notice_for(id: SharedString, space_id: &str, status: &LiteStatus) -> Option<AnyElement> {
+fn space_notice_for(space_id: &str, status: &LiteStatus) -> Option<Notice> {
     if let Some(load) = status.loading(space_id) {
-        return Some(notice_row(loading_text(load), None));
+        return Some(Notice {
+            text: loading_text(load),
+            action: None,
+        });
     }
     if status.is_full(space_id) {
         return None;
     }
-    let text = status.is_unready(space_id).then_some(SPACE_UNREADY);
-    let space = space_id.to_string();
-    let button = ui::outline_button(
-        ElementId::Name(format!("lite-load-{id}").into()),
-        LOAD_SPACE,
-    )
-    .on_click(move |_, _, cx| load_space(&space, cx));
-    Some(notice_row(
-        text.unwrap_or("Showing what this device holds").into(),
-        Some(button.into_any_element()),
-    ))
+    let text = if status.is_unready(space_id) {
+        SPACE_UNREADY
+    } else {
+        "Showing what this device holds"
+    };
+    Some(Notice {
+        text: text.into(),
+        action: Some(NoticeAction::LoadSpace(space_id.to_string())),
+    })
 }
 
 /// The whole-vault notice: `checked && !ready`.
-pub fn vault_notice(cx: &App) -> Option<AnyElement> {
-    let status = lite::status(cx)?;
-    (status.checked && !status.ready).then(|| {
-        let button = ui::outline_button("lite-sync-fully", "Fully sync this device")
-            .on_click(|_, _, cx| sync_fully(cx));
-        notice_row(VAULT_UNREADY.into(), Some(button.into_any_element()))
+pub fn vault_notice(s: &State) -> Option<Notice> {
+    let status = lite::status(s)?;
+    (status.checked && !status.ready).then(|| Notice {
+        text: VAULT_UNREADY.into(),
+        action: Some(NoticeAction::SyncFully),
     })
 }
 
 /// The sidebar/home notice: the vault not ready ([`vault_notice`]), else
 /// `space_id` not ready ("load it fully once"), else its download's
 /// progress. `None` otherwise: lite is quiet where it has what it needs.
-pub fn ready_notice(space_id: &str, cx: &App) -> Option<AnyElement> {
-    if let Some(notice) = vault_notice(cx) {
+pub fn ready_notice(space_id: &str, s: &State) -> Option<Notice> {
+    if let Some(notice) = vault_notice(s) {
         return Some(notice);
     }
-    let status = lite::status(cx)?;
+    let status = lite::status(s)?;
     if status.loading(space_id).is_some() || status.is_unready(space_id) {
-        return space_notice_for("ready".into(), space_id, &status);
+        return space_notice_for(space_id, &status);
     }
     None
 }
 
 /// A progress line alone ("Loading this space · N of M") for compact spots
 /// such as pinned widgets; `None` when nothing loads.
-pub fn loading_line(space_id: &str, cx: &App) -> Option<AnyElement> {
-    let status = lite::status(cx)?;
-    let load = status.loading(space_id)?;
-    Some(notice_row(loading_text(load), None))
-}
-
-fn notice_row(text: String, button: Option<AnyElement>) -> AnyElement {
-    div()
-        .flex()
-        .flex_wrap()
-        .items_center()
-        .gap(px(10.))
-        .py(px(6.))
-        .text_size(px(12.))
-        .font_weight(FontWeight::NORMAL)
-        .text_color(theme::muted())
-        .child(text)
-        .children(button)
-        .into_any_element()
+pub fn loading_line(space_id: &str, s: &State) -> Option<String> {
+    let status = lite::status(s)?;
+    Some(loading_text(status.loading(space_id)?))
 }
 
 #[cfg(test)]

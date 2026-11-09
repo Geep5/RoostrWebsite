@@ -1,0 +1,12 @@
+[package]
+name = "roostr-rt"
+description = "Roostr's async runtime on Rune: UI-thread futures with access to the app state, background threads and timers"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+futures.workspace = true
+parking_lot.workspace = true
+log.workspace = true
+web-time.workspace = true

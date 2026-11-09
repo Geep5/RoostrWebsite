@@ -1,6 +1,6 @@
 //! Plain GETs to the wider web (Blossom servers, relay NIP-11 documents,
 //! oEmbed endpoints): ureq on the desktop (blocking, so run through
-//! [`crate::io::spawn`]), fetch in the browser (where the server's CORS
+//! [`roostr_rt::Executor::background`]), fetch in the browser (where the server's CORS
 //! policy decides).
 
 use std::time::Duration;

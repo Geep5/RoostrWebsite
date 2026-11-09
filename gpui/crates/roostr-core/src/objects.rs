@@ -1,6 +1,12 @@
 //! Object and type icons and names (`src/lib/icons.ts`, `typeGlyph` in
 //! `src/lib/create.ts`): an object shows its own emoji, else its type's.
 
+use std::collections::HashMap;
+use std::sync::{Arc, LazyLock};
+
+use base64::Engine as _;
+use parking_lot::Mutex;
+
 use crate::store::Store;
 
 /// Built-in glyph per type key (Anytype bundle equivalents as emoji).
@@ -116,6 +122,61 @@ pub fn is_image_icon(icon: &str) -> bool {
     icon.starts_with("http://") || icon.starts_with("https://") || icon.starts_with("data:image/")
 }
 
+/// The image formats a `data:` icon or avatar may carry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ImageFormat {
+    Png,
+    Jpeg,
+    Webp,
+    Gif,
+    Svg,
+    Bmp,
+    Tiff,
+    Ico,
+}
+
+/// A `data:image/…` URL's image: its format and encoded bytes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DataImage {
+    pub format: ImageFormat,
+    pub bytes: Vec<u8>,
+}
+
+static DATA_IMAGES: LazyLock<Mutex<HashMap<String, Option<Arc<DataImage>>>>> =
+    LazyLock::new(Default::default);
+
+/// A `data:image/…` URL (base64 or percent-encoded) decoded; cached by URL.
+/// `None` for anything else, or an image format no renderer takes.
+pub fn data_url_image(uri: &str) -> Option<Arc<DataImage>> {
+    if let Some(hit) = DATA_IMAGES.lock().get(uri) {
+        return hit.clone();
+    }
+    let decoded = (|| {
+        let (meta, data) = uri.strip_prefix("data:")?.split_once(',')?;
+        let format = match meta.split(';').next()? {
+            "image/png" => ImageFormat::Png,
+            "image/jpeg" | "image/jpg" => ImageFormat::Jpeg,
+            "image/webp" => ImageFormat::Webp,
+            "image/gif" => ImageFormat::Gif,
+            "image/svg+xml" => ImageFormat::Svg,
+            "image/bmp" => ImageFormat::Bmp,
+            "image/tiff" => ImageFormat::Tiff,
+            "image/x-icon" | "image/vnd.microsoft.icon" => ImageFormat::Ico,
+            _ => return None,
+        };
+        let bytes = if meta.ends_with(";base64") {
+            base64::engine::general_purpose::STANDARD
+                .decode(data.trim())
+                .ok()?
+        } else {
+            percent_encoding::percent_decode_str(data).collect()
+        };
+        Some(Arc::new(DataImage { format, bytes }))
+    })();
+    DATA_IMAGES.lock().insert(uri.to_string(), decoded.clone());
+    decoded
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -125,5 +186,17 @@ mod tests {
         assert_eq!(kind_name("relation"), "Property");
         assert_eq!(kind_name("vanish_log"), "Vanish log");
         assert_eq!(kind_name(""), "");
+    }
+
+    #[test]
+    fn data_urls_decode_base64_and_percent_encoded_images() {
+        let png = data_url_image("data:image/png;base64,iVBORw0K").unwrap();
+        assert_eq!(png.format, ImageFormat::Png);
+        assert_eq!(png.bytes, b"\x89PNG\r\n"[..6].to_vec());
+        let svg = data_url_image("data:image/svg+xml,%3Csvg%2F%3E").unwrap();
+        assert_eq!(svg.format, ImageFormat::Svg);
+        assert_eq!(svg.bytes, b"<svg/>");
+        assert!(data_url_image("data:text/plain,hi").is_none());
+        assert!(data_url_image("https://example.com/a.png").is_none());
     }
 }

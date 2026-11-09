@@ -2,11 +2,15 @@
 //! one global back/forward history (the browser history the web app uses).
 //!
 //! Navigating replaces the active tab's route (browser model); tabs persist
-//! per space in [`UiState`] under `roostr.tabs.spaces`.
+//! per space in [`UiState`] under `roostr.tabs.spaces`. The navigator is
+//! [`crate::State::nav`]; methods that persist take the state's
+//! [`crate::State::ui`] (`s.nav.back(&mut s.ui)`), and what it emits
+//! ([`NavEvent`]) reaches the [`crate::State::on_nav`] listeners at the next
+//! [`crate::State::poll`].
 
 use std::collections::HashMap;
 
-use gpui_kit::{App, AppContext as _, Context, Entity, EventEmitter, Global};
+use crate::State;
 use serde::{Deserialize, Serialize};
 
 use crate::ui_state::UiState;
@@ -166,45 +170,34 @@ pub struct Navigator {
     history: Vec<Route>,
     history_ix: usize,
     next_uid: u64,
+    /// Emitted, not yet handed to the listeners ([`State::poll`]).
+    pub(crate) events: Vec<NavEvent>,
 }
 
-struct GlobalNavigator(Entity<Navigator>);
-
-impl Global for GlobalNavigator {}
-
-impl EventEmitter<NavEvent> for Navigator {}
-
 impl Navigator {
-    /// The global navigator, created once: a browser tab that showed a
-    /// website page before its vault opened keeps that page's navigator.
-    pub fn init(cx: &mut App) -> Entity<Self> {
-        if let Some(existing) = cx.try_global::<GlobalNavigator>() {
-            return existing.0.clone();
-        }
-        let saved: HashMap<String, Saved> = UiState::get(cx, TABS_KEY).unwrap_or_default();
-        let navigator = cx.new(|_| Self {
+    /// A navigator at the space home with the tab strips `ui` saved. The
+    /// [`State`] makes its own; a browser tab that shows a website page
+    /// before its vault opens makes one first and moves it into the state
+    /// (`s.nav = nav`) so the page's history stays.
+    pub fn new(ui: &UiState) -> Self {
+        Self {
             tabs: vec![Tab {
                 uid: 1,
                 route: Route::Home,
             }],
             active: 0,
             space: String::new(),
-            saved,
+            saved: ui.get(TABS_KEY).unwrap_or_default(),
             history: vec![Route::Home],
             history_ix: 0,
             next_uid: 2,
-        });
-        cx.set_global(GlobalNavigator(navigator.clone()));
-        navigator
-    }
-
-    pub fn global(cx: &App) -> Entity<Self> {
-        cx.global::<GlobalNavigator>().0.clone()
+            events: Vec::new(),
+        }
     }
 
     /// The space the app last had open (`glon.channel`).
-    pub fn remembered_space(cx: &App) -> Option<String> {
-        UiState::get(cx, ACTIVE_SPACE_KEY)
+    pub fn remembered_space(ui: &UiState) -> Option<String> {
+        ui.get(ACTIVE_SPACE_KEY)
     }
 
     pub fn route(&self) -> &Route {
@@ -237,81 +230,77 @@ impl Navigator {
     }
 
     /// Go to `route` in the active tab (`goto` + `tabs.sync`).
-    pub fn navigate(&mut self, route: Route, cx: &mut Context<Self>) {
+    pub fn navigate(&mut self, route: Route, ui: &mut UiState) {
         if *self.route() == route {
             return;
         }
         self.history.truncate(self.history_ix + 1);
         self.history.push(route.clone());
         self.history_ix = self.history.len() - 1;
-        self.show(route, cx);
+        self.show(route, ui);
     }
 
-    fn show(&mut self, route: Route, cx: &mut Context<Self>) {
+    fn show(&mut self, route: Route, ui: &mut UiState) {
         self.tabs[self.active].route = route;
-        self.save(cx);
-        cx.emit(NavEvent::Navigated);
-        cx.notify();
+        self.save(ui);
+        self.events.push(NavEvent::Navigated);
     }
 
     /// Show `route` in the active tab in place of the current route, in
     /// history too: Back does not return to what it replaced.
-    pub fn replace(&mut self, route: Route, cx: &mut Context<Self>) {
+    pub fn replace(&mut self, route: Route, ui: &mut UiState) {
         if *self.route() == route {
             return;
         }
         if let Some(entry) = self.history.get_mut(self.history_ix) {
             *entry = route.clone();
         }
-        self.show(route, cx);
+        self.show(route, ui);
     }
 
-    pub fn back(&mut self, cx: &mut Context<Self>) {
+    pub fn back(&mut self, ui: &mut UiState) {
         if self.can_go_back() {
             self.history_ix -= 1;
-            self.show(self.history[self.history_ix].clone(), cx);
+            self.show(self.history[self.history_ix].clone(), ui);
         }
     }
 
-    pub fn forward(&mut self, cx: &mut Context<Self>) {
+    pub fn forward(&mut self, ui: &mut UiState) {
         if self.can_go_forward() {
             self.history_ix += 1;
-            self.show(self.history[self.history_ix].clone(), cx);
+            self.show(self.history[self.history_ix].clone(), ui);
         }
     }
 
     /// `tabs.open(path, background)`.
-    pub fn open_tab(&mut self, route: Route, background: bool, cx: &mut Context<Self>) {
+    pub fn open_tab(&mut self, route: Route, background: bool, ui: &mut UiState) {
         let uid = self.uid();
         self.tabs.push(Tab {
             uid,
             route: route.clone(),
         });
         if background {
-            self.save(cx);
-            cx.notify();
+            self.save(ui);
         } else {
             self.active = self.tabs.len() - 1;
             self.push_history(route);
-            self.save(cx);
-            cx.emit(NavEvent::Navigated);
-            cx.notify();
+            self.save(ui);
+            self.events.push(NavEvent::Navigated);
         }
     }
 
-    pub fn activate(&mut self, index: usize, cx: &mut Context<Self>) {
+    pub fn activate(&mut self, index: usize, ui: &mut UiState) {
         if index >= self.tabs.len() || index == self.active {
             return;
         }
         self.active = index;
         self.push_history(self.route().clone());
-        self.save(cx);
-        cx.emit(NavEvent::Navigated);
-        cx.notify();
+        self.save(ui);
+        self.events.push(NavEvent::Navigated);
     }
 
     /// Reorder: `to` is the index in the list without the moved tab.
-    pub fn move_tab(&mut self, from: usize, to: usize, cx: &mut Context<Self>) {
+    pub fn move_tab(&mut self, from: usize, to: usize, ui: &mut UiState) {
         if from >= self.tabs.len() {
             return;
         }
@@ -324,11 +313,10 @@ impl Navigator {
             .iter()
             .position(|t| t.uid == active_uid)
             .unwrap_or(0);
-        self.save(cx);
-        cx.notify();
+        self.save(ui);
     }
 
-    pub fn close(&mut self, index: usize, cx: &mut Context<Self>) {
+    pub fn close(&mut self, index: usize, ui: &mut UiState) {
         if index >= self.tabs.len() {
             return;
         }
@@ -341,31 +329,30 @@ impl Navigator {
             });
             self.active = 0;
             self.push_history(Route::Home);
-            cx.emit(NavEvent::Navigated);
+            self.events.push(NavEvent::Navigated);
         } else if index < self.active {
             self.active -= 1;
         } else if index == self.active {
             self.active = self.active.min(self.tabs.len() - 1);
             self.push_history(self.route().clone());
-            cx.emit(NavEvent::Navigated);
+            self.events.push(NavEvent::Navigated);
         }
-        self.save(cx);
-        cx.notify();
+        self.save(ui);
     }
 
     /// Switch to `space`, restoring its saved tab strip (`tabs.use`). When it
     /// has none, the strip starts at the space home. A workspace page opened
     /// before any space was picked (a click in the sidebar the shell shows
     /// meanwhile) stays open, in the restored strip's active tab.
-    pub fn use_space(&mut self, space: &str, cx: &mut Context<Self>) {
+    pub fn use_space(&mut self, space: &str, ui: &mut UiState) {
         if self.space == space {
             return;
         }
         let opened = (self.space.is_empty() && self.route().is_workspace_page())
             .then(|| self.route().clone());
-        self.save(cx);
+        self.save(ui);
         self.space = space.to_string();
-        UiState::set(cx, ACTIVE_SPACE_KEY, &space);
+        ui.set(ACTIVE_SPACE_KEY, &space);
         let saved = self.saved.get(space).cloned().unwrap_or_default();
         let mut tabs: Vec<Tab> = Vec::with_capacity(saved.paths.len());
         for path in &saved.paths {
@@ -386,18 +373,17 @@ impl Navigator {
         self.tabs = tabs;
         if let Some(route) = opened {
             self.tabs[self.active].route = route;
-            self.save(cx);
+            self.save(ui);
         }
         self.push_history(self.route().clone());
-        cx.emit(NavEvent::SpaceChanged);
-        cx.emit(NavEvent::Navigated);
-        cx.notify();
+        self.events.push(NavEvent::SpaceChanged);
+        self.events.push(NavEvent::Navigated);
     }
 
     /// Drop a space's saved strip (space deleted or left).
-    pub fn forget(&mut self, space: &str, cx: &mut Context<Self>) {
+    pub fn forget(&mut self, space: &str, ui: &mut UiState) {
         if self.saved.remove(space).is_some() {
-            UiState::set(cx, TABS_KEY, &self.saved);
+            ui.set(TABS_KEY, &self.saved);
         }
     }
 
@@ -410,7 +396,7 @@ impl Navigator {
         self.history_ix = self.history.len() - 1;
     }
 
-    fn save(&mut self, cx: &mut App) {
+    fn save(&mut self, ui: &mut UiState) {
         if self.space.is_empty() {
             return;
         }
@@ -419,25 +405,25 @@ impl Navigator {
             active: self.active,
         };
         self.saved.insert(self.space.clone(), saved);
-        UiState::set(cx, TABS_KEY, &self.saved);
+        ui.set(TABS_KEY, &self.saved);
     }
 }
 
 /// Navigate the active tab from anywhere (`goto`).
-pub fn navigate(route: Route, cx: &mut App) {
-    Navigator::global(cx).update(cx, |nav, cx| nav.navigate(route, cx));
+pub fn navigate(route: Route, s: &mut State) {
+    s.nav.navigate(route, &mut s.ui);
 }
 
 /// Open `route` in a new tab (`tabs.open`).
-pub fn open_tab(route: Route, background: bool, cx: &mut App) {
-    Navigator::global(cx).update(cx, |nav, cx| nav.open_tab(route, background, cx));
+pub fn open_tab(route: Route, background: bool, s: &mut State) {
+    s.nav.open_tab(route, background, &mut s.ui);
 }
 
 /// A space's top pinned object, as its sidebar lists them: what it shows
 /// when nothing is open. Pins with no object here (a section such as All
 /// Objects, or one not synced yet) are skipped, as the sidebar skips them.
-pub fn top_pin(space: &str, cx: &App) -> Option<String> {
-    let store = crate::Store::global(cx).read(cx);
+pub fn top_pin(space: &str, s: &State) -> Option<String> {
+    let store = &s.store;
     store
         .space(space)?
         .pinned_ids

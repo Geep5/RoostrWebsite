@@ -1,0 +1,19 @@
+[package]
+name = "roostr-ui"
+description = "Roostr's design system on Rune: theme, type, fonts, icons, motion and shared components"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+rune.workspace = true
+rune-kit.workspace = true
+base64.workspace = true
+percent-encoding.workspace = true
+chrono.workspace = true
+
+[[example]]
+name = "gallery"
+
+[dev-dependencies]
+ttf-parser = "0.25"

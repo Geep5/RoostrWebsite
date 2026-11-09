@@ -4,16 +4,17 @@
 //! module turns the answer into copy.
 
 use std::collections::HashMap;
-use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::{Arc, LazyLock};
 
 use anyhow::Result;
-use gpui_kit::{App, Task};
+use parking_lot::Mutex;
+use roostr_rt::Task;
 use serde::Deserialize;
 use serde_json::json;
 
+use crate::State;
 use crate::backend::Backend;
-use crate::io;
-use crate::store::{Store, query_all};
+use crate::store::query_all;
 use crate::types::{Fields, QueryRow, field_str};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
@@ -52,8 +53,8 @@ static SKILL_NAMES: LazyLock<Mutex<HashMap<String, String>>> = LazyLock::new(Def
 pub fn skill_label(key: &str) -> String {
     SKILL_NAMES
         .lock()
-        .ok()
-        .and_then(|m| m.get(key).cloned())
+        .get(key)
+        .cloned()
         .filter(|n| !n.is_empty())
         .unwrap_or_else(|| key.to_string())
 }
@@ -67,9 +68,9 @@ pub fn machine_row_of(row: &QueryRow) -> MachineRow {
 }
 
 /// Every machine object, raw and as [`MachineRow`]s.
-pub fn fetch_machines(cx: &App) -> Task<Result<(Vec<QueryRow>, Vec<MachineRow>)>> {
-    let backend = Store::global(cx).read(cx).backend();
-    io::spawn(cx, async move {
+pub fn fetch_machines(s: &State) -> Task<Result<(Vec<QueryRow>, Vec<MachineRow>)>> {
+    let backend = s.store.backend();
+    s.rt.background(async move {
         let rows = query_all(backend, json!({ "type": "machine" })).await?;
         let machines = rows.iter().map(machine_row_of).collect();
         Ok((rows, machines))
@@ -86,9 +87,7 @@ async fn refresh_skill_names(backend: Arc<dyn Backend>) -> Result<()> {
             (!key.is_empty() && !name.is_empty()).then_some((key, name))
         })
         .collect();
-    if let Ok(mut m) = SKILL_NAMES.lock() {
-        *m = names;
-    }
+    *SKILL_NAMES.lock() = names;
     Ok(())
 }
 
@@ -107,10 +106,10 @@ async fn resolve(backend: Arc<dyn Backend>, ids: Vec<String>) -> Result<Vec<Serv
 }
 
 /// Resolve one object against the live machine roster.
-pub fn resolve_serving(object_id: &str, cx: &App) -> Task<Result<(Serving, Vec<MachineRow>)>> {
-    let backend = Store::global(cx).read(cx).backend();
+pub fn resolve_serving(object_id: &str, s: &State) -> Task<Result<(Serving, Vec<MachineRow>)>> {
+    let backend = s.store.backend();
     let ids = vec![object_id.to_string()];
-    io::spawn(cx, async move {
+    s.rt.background(async move {
         let rows = query_all(backend.clone(), json!({ "type": "machine" })).await?;
         let serving = resolve(backend, ids).await?.pop().unwrap_or_default();
         Ok((serving, rows.iter().map(machine_row_of).collect()))
@@ -118,13 +117,13 @@ pub fn resolve_serving(object_id: &str, cx: &App) -> Task<Result<(Serving, Vec<M
 }
 
 /// Resolve many objects in one request; one entry per input id, in order.
-pub fn resolve_many(object_ids: &[String], cx: &App) -> Task<Result<Vec<Serving>>> {
+pub fn resolve_many(object_ids: &[String], s: &State) -> Task<Result<Vec<Serving>>> {
     if object_ids.is_empty() {
         return Task::ready(Ok(vec![]));
     }
-    let backend = Store::global(cx).read(cx).backend();
+    let backend = s.store.backend();
     let ids = object_ids.to_vec();
-    io::spawn(cx, resolve(backend, ids))
+    s.rt.background(resolve(backend, ids))
 }
 
 /// Human name of a machine id: its object's `name`, else the id's first 8 chars + "…".

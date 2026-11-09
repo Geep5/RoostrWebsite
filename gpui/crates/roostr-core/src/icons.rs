@@ -1,170 +1,31 @@
 //! Roostr's icon set (`Icon`, `PropIcon`, `LayoutIcon`, `PaneIcon`,
-//! `GraphIcon`, `CheckboxIcon` from the web app) as SVG assets, and the app's
-//! [`AssetSource`] that serves them alongside gpui-kit's own icons.
-//!
-//! Use a [`Glyph`] anywhere gpui-kit takes an icon: `Icon::new(Glyph::Plus)`,
-//! `Button::new("x").icon(Glyph::Trash)`. SVGs render tinted by the text color.
+//! `GraphIcon`, `CheckboxIcon` from the web app) as SVG assets embedded in
+//! the binary. A [`Glyph`] names one; [`Glyph::asset_path`] is its SVG in
+//! [`Assets`]. SVGs render tinted by the text color.
 
 use std::borrow::Cow;
 
-use anyhow::Result;
-use gpui_kit::component::IconNamed;
-use gpui_kit::{AssetSource, SharedString};
 use rust_embed::RustEmbed;
 
 #[derive(RustEmbed)]
 #[folder = "assets/"]
 struct Embedded;
 
-/// Path prefix of Roostr's own assets.
-const PREFIX: &str = "roostr/";
-
-/// The app's asset source: `roostr/...` from this crate, everything else from gpui-kit.
+/// Roostr's own assets (`icons/<name>.svg`), compiled into the binary.
 pub struct Assets;
 
-/// gpui-kit's own icons. The desktop embeds its default set; in the browser
-/// gpui-kit would fetch each SVG from a web endpoint, so the same default set
-/// (`default-icons.txt` of gpui-kit-assets 0.7.3) is embedded here instead.
-#[cfg(not(target_family = "wasm"))]
-fn kit_assets() -> gpui_kit::assets::Assets {
-    gpui_kit::assets::Assets
-}
-
-#[cfg(target_family = "wasm")]
-gpui_kit::assets::icon_assets!(
-    KitIcons,
-    [
-        ALargeSmall,
-        ArrowDown,
-        ArrowLeft,
-        ArrowRight,
-        ArrowUp,
-        Asterisk,
-        Ban,
-        BatteryCharging,
-        BatteryFull,
-        BatteryLow,
-        BatteryMedium,
-        BatteryWarning,
-        Battery,
-        Bell,
-        BookOpen,
-        Bot,
-        Building2,
-        Calendar,
-        CaseSensitive,
-        ChartPie,
-        Check,
-        ChevronDown,
-        ChevronLeft,
-        ChevronRight,
-        ChevronsRight,
-        ChevronUp,
-        ChevronsUpDown,
-        CircleAlert,
-        CircleCheck,
-        CircleUser,
-        CircleX,
-        Close,
-        Copy,
-        Cpu,
-        Dash,
-        Delete,
-        EllipsisVertical,
-        Ellipsis,
-        ExternalLink,
-        EyeOff,
-        Eye,
-        FileText,
-        File,
-        FolderClosed,
-        FolderOpen,
-        Folder,
-        Frame,
-        GalleryVerticalEnd,
-        Github,
-        Globe,
-        HardDrive,
-        HeartOff,
-        Heart,
-        Inbox,
-        Info,
-        Inspector,
-        LayoutDashboard,
-        LoaderCircle,
-        Loader,
-        Map,
-        Maximize,
-        MemoryStick,
-        Menu,
-        Mic,
-        Minimize,
-        Minus,
-        Moon,
-        Network,
-        Palette,
-        PanelBottomOpen,
-        PanelBottom,
-        PanelLeftClose,
-        PanelLeftOpen,
-        PanelLeft,
-        PanelRightClose,
-        PanelRightOpen,
-        PanelRight,
-        Pause,
-        Play,
-        Plus,
-        Redo2,
-        Redo,
-        RefreshCw,
-        Replace,
-        ResizeCorner,
-        RotateCw,
-        Search,
-        Settings2,
-        Settings,
-        SortAscending,
-        SortDescending,
-        SquareTerminal,
-        Square,
-        StarFill,
-        StarOff,
-        Star,
-        Sun,
-        ThumbsDown,
-        ThumbsUp,
-        TriangleAlert,
-        Undo2,
-        Undo,
-        User,
-        WindowClose,
-        WindowMaximize,
-        WindowMinimize,
-        WindowRestore
-    ]
-);
-
-#[cfg(target_family = "wasm")]
-fn kit_assets() -> KitIcons {
-    KitIcons
-}
-
-impl AssetSource for Assets {
-    fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
-        if let Some(own) = path.strip_prefix(PREFIX) {
-            return Ok(Embedded::get(own).map(|f| f.data));
-        }
-        kit_assets().load(path)
+impl Assets {
+    /// The bytes at `path` (`icons/plus.svg`), if embedded.
+    pub fn get(path: &str) -> Option<Cow<'static, [u8]>> {
+        Embedded::get(path).map(|f| f.data)
     }
 
-    fn list(&self, path: &str) -> Result<Vec<SharedString>> {
-        if let Some(own) = path.strip_prefix(PREFIX) {
-            return Ok(Embedded::iter()
-                .filter(|p| p.starts_with(own))
-                .map(|p| SharedString::from(format!("{PREFIX}{p}")))
-                .collect());
-        }
-        kit_assets().list(path)
+    /// Every embedded path under `prefix`.
+    pub fn list(prefix: &str) -> Vec<String> {
+        Embedded::iter()
+            .filter(|p| p.starts_with(prefix))
+            .map(|p| p.into_owned())
+            .collect()
     }
 }
 
@@ -286,9 +147,10 @@ glyphs! {
     Type => "type",
 }
 
-impl IconNamed for Glyph {
-    fn path(self) -> SharedString {
-        format!("{PREFIX}icons/{}.svg", self.name()).into()
+impl Glyph {
+    /// The icon's SVG in [`Assets`].
+    pub fn asset_path(self) -> String {
+        format!("icons/{}.svg", self.name())
     }
 }
 
@@ -299,11 +161,8 @@ mod tests {
     #[test]
     fn every_glyph_has_an_embedded_svg() {
         for glyph in Glyph::ALL {
-            let path = glyph.path();
-            let bytes = Assets
-                .load(&path)
-                .unwrap()
-                .unwrap_or_else(|| panic!("missing {path}"));
+            let path = glyph.asset_path();
+            let bytes = Assets::get(&path).unwrap_or_else(|| panic!("missing {path}"));
             assert!(bytes.starts_with(b"<svg"), "{path} is not an svg");
             // Compiled into the binary (borrowed), not read from the source
             // tree at run time (owned): a debug build without rust-embed's

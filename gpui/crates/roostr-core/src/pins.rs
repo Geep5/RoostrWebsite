@@ -8,11 +8,11 @@
 use std::collections::HashMap;
 
 use anyhow::Result;
-use gpui_kit::{App, AppContext as _, Task};
+use roostr_rt::Task;
 
-use crate::api;
 use crate::store::Store;
 use crate::types::{Fields, Object, QueryRow, Space, Value, field_str};
+use crate::{State, api};
 
 pub const PIN_KEY: &str = "pin_order";
 /// A pinned object's widget is folded in the sidebar and on the space home.
@@ -151,12 +151,12 @@ pub fn space_of(store: &Store, channel_id: &str) -> Option<Space> {
 }
 
 /// A pinned object's position ("" for none or no object).
-fn pin_key(id: Option<String>, cx: &App) -> Task<String> {
+fn pin_key(id: Option<String>, s: &State) -> Task<String> {
     let Some(id) = id else {
         return Task::ready(String::new());
     };
-    let fetch = Store::global(cx).read(cx).fetch_object(&id, cx);
-    cx.background_spawn(async move {
+    let fetch = s.store.fetch_object(&id);
+    s.rt.spawn(async move |_| {
         fetch
             .await
             .map(|o| o.field_str(PIN_KEY).to_string())
@@ -164,27 +164,23 @@ fn pin_key(id: Option<String>, cx: &App) -> Task<String> {
     })
 }
 
-fn refresh(cx: &mut App) {
-    Store::global(cx).update(cx, |store, cx| store.refresh_all(cx));
-}
-
 /// Pin `object_id` after `space`'s last pin, or unpin it (`togglePin`).
-pub fn set_pinned(object_id: &str, space: &Space, pinned: bool, cx: &mut App) -> Task<Result<()>> {
+pub fn set_pinned(object_id: &str, space: &Space, pinned: bool, s: &mut State) -> Task<Result<()>> {
     let object_id = object_id.to_string();
     if !pinned {
-        let task = api::note::delete_field(&object_id, PIN_KEY, cx);
-        return cx.spawn(async move |cx| {
+        let task = api::note::delete_field(&object_id, PIN_KEY, s);
+        return s.rt.spawn(async move |cx| {
             task.await?;
-            cx.update(refresh);
+            cx.update(|s| s.store.refresh_all());
             Ok(())
         });
     }
-    let last = pin_key(space.pinned_ids.last().cloned(), cx);
-    cx.spawn(async move |cx| {
+    let last = pin_key(space.pinned_ids.last().cloned(), s);
+    s.rt.spawn(async move |cx| {
         let key = key_between(&last.await, None);
-        cx.update(|cx| api::note::set_field(&object_id, PIN_KEY, Value::string(key), cx))
+        cx.update(|s| api::note::set_field(&object_id, PIN_KEY, Value::string(key), s))
             .await?;
-        cx.update(refresh);
+        cx.update(|s| s.store.refresh_all());
         Ok(())
     })
 }
@@ -196,7 +192,7 @@ pub fn move_pin(
     dragged: &str,
     target: &str,
     below: bool,
-    cx: &mut App,
+    s: &mut State,
 ) -> Task<Result<()>> {
     if dragged.is_empty() || target.is_empty() || dragged == target {
         return Task::ready(Ok(()));
@@ -224,8 +220,8 @@ pub fn move_pin(
         None
     };
     let has_after = after_id.is_some();
-    let before = pin_key(before_id, cx);
-    let after = pin_key(after_id, cx);
+    let before = pin_key(before_id, s);
+    let after = pin_key(after_id, s);
     let dragged = dragged.to_string();
     // Show the new order now: the sidebar reads the space's pinned ids, and
     // the write plus the store refresh behind it take a moment. The refresh
@@ -233,18 +229,15 @@ pub fn move_pin(
     let space_id = space.id.clone();
     let mut reordered = ids;
     reordered.insert((at.max(0) as usize).min(reordered.len()), dragged.clone());
-    Store::global(cx).update(cx, |store, cx| {
-        if let Some(s) = store.channels.iter_mut().find(|s| s.id == space_id) {
-            s.pinned_ids = reordered;
-            cx.notify();
-        }
-    });
-    cx.spawn(async move |cx| {
+    if let Some(space) = s.store.channels.iter_mut().find(|c| c.id == space_id) {
+        space.pinned_ids = reordered;
+    }
+    s.rt.spawn(async move |cx| {
         let (before, after) = (before.await, after.await);
         let key = key_between(&before, has_after.then_some(after.as_str()));
-        cx.update(|cx| api::note::set_field(&dragged, PIN_KEY, Value::string(key), cx))
+        cx.update(|s| api::note::set_field(&dragged, PIN_KEY, Value::string(key), s))
             .await?;
-        cx.update(refresh);
+        cx.update(|s| s.store.refresh_all());
         Ok(())
     })
 }

@@ -1,18 +1,37 @@
 //! Chat bubble colors (`src/lib/chat-color.ts`): `#RRGGBB` hex, text inside a
 //! bubble is ink or white, whichever reads better.
 
-use gpui_kit::{Hsla, Rgba, rgb, rgba};
-
 /// Roostr cream: the front page background.
 pub const DEFAULT_CHAT_COLOR: &str = "#EDCF7F";
 pub const INK: &str = "#1B1B1B";
 pub const WHITE: &str = "#FFFFFF";
 
+/// A colour as gamma-encoded sRGB channels and alpha, each 0..=1.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Rgba {
+    pub r: f32,
+    pub g: f32,
+    pub b: f32,
+    pub a: f32,
+}
+
+impl Rgba {
+    /// `0xRRGGBBAA`.
+    pub fn from_u32(n: u32) -> Self {
+        let channel = |shift: u32| ((n >> shift) & 0xff) as f32 / 255.;
+        Self {
+            r: channel(24),
+            g: channel(16),
+            b: channel(8),
+            a: channel(0),
+        }
+    }
+}
+
 /// A colour as upper-case `#RRGGBB` (what a colour picker's choice is saved as).
-pub fn to_hex(color: Hsla) -> String {
-    let rgba = Rgba::from(color);
+pub fn to_hex(color: Rgba) -> String {
     let c = |v: f32| (v.clamp(0., 1.) * 255.).round() as u8;
-    format!("#{:02X}{:02X}{:02X}", c(rgba.r), c(rgba.g), c(rgba.b))
+    format!("#{:02X}{:02X}{:02X}", c(color.r), c(color.g), c(color.b))
 }
 
 /// A #RGB or #RRGGBB hex, normalized to upper-case #RRGGBB; `None` when invalid.
@@ -69,9 +88,9 @@ pub fn ink_for(bg: &str) -> &'static str {
 
 /// Bubble colors for `bg`: background, text, and a tint for code/links.
 pub struct Bubble {
-    pub bg: Hsla,
-    pub ink: Hsla,
-    pub tint: Hsla,
+    pub bg: Rgba,
+    pub ink: Rgba,
+    pub tint: Rgba,
 }
 
 pub fn bubble(bg: &str) -> Bubble {
@@ -80,19 +99,18 @@ pub fn bubble(bg: &str) -> Bubble {
         bg: hex(bg).unwrap_or_else(|| hex(DEFAULT_CHAT_COLOR).expect("valid default")),
         ink: hex(ink).expect("valid ink"),
         tint: if ink == INK {
-            rgba(0x0000001f).into()
+            Rgba::from_u32(0x0000001f)
         } else {
-            rgba(0xffffff38).into()
+            Rgba::from_u32(0xffffff38)
         },
     }
 }
 
-/// Parse `#RGB`/`#RRGGBB` into a color.
-pub fn hex(raw: &str) -> Option<Hsla> {
+/// Parse `#RGB`/`#RRGGBB` into an opaque color.
+pub fn hex(raw: &str) -> Option<Rgba> {
     let h = normalize_hex(raw)?;
     let n = u32::from_str_radix(&h[1..], 16).ok()?;
-    let color: Rgba = rgb(n);
-    Some(color.into())
+    Some(Rgba::from_u32((n << 8) | 0xff))
 }
 
 #[cfg(test)]
@@ -148,8 +166,15 @@ mod tests {
         assert_eq!(light.bg, hex("#EDCF7F").unwrap());
         assert_eq!(light.ink, hex(INK).unwrap());
         // rgba(0, 0, 0, 0.12)
-        assert_eq!(light.tint.l, 0.);
+        assert_eq!((light.tint.r, light.tint.g, light.tint.b), (0., 0., 0.));
         assert!((light.tint.a - 0.12).abs() < 0.005, "{:?}", light.tint);
         assert_eq!(bubble("#000000").ink, hex(WHITE).unwrap());
+    }
+
+    #[test]
+    fn hex_round_trips_through_rgba() {
+        let c = hex("#1e3a8a").unwrap();
+        assert_eq!(c.a, 1.);
+        assert_eq!(to_hex(c), "#1E3A8A");
     }
 }

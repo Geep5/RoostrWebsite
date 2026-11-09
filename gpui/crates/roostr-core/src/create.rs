@@ -5,20 +5,17 @@
 use std::collections::HashSet;
 
 use anyhow::{Result, anyhow};
-#[cfg(not(target_family = "wasm"))]
-use gpui_kit::PathPromptOptions;
-use gpui_kit::{App, AsyncApp, Task};
 use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
+use roostr_rt::Task;
 use serde_json::json;
 
-use crate::api;
 use crate::harness::{self, Harness};
-use crate::io;
 use crate::nav::{Route, navigate};
 use crate::objects::type_glyph;
 use crate::relations::current_space_id;
 use crate::store::Store;
 use crate::types::{Block, Fields, Object, Value, field_str, guest_agents, is_builtin_tool};
+use crate::{Cx, State, api};
 
 /// Legacy fallback until the type objects have loaded.
 pub const CREATABLE_TYPES: &[&str] = &["page", "note", "task", "person", "project", "bookmark"];
@@ -74,9 +71,9 @@ fn capitalize(k: &str) -> String {
 
 /// The New menu's types: the active space's own types (spaces are
 /// self-contained), else the legacy list.
-pub fn creatable_types(cx: &App) -> Vec<CreatableType> {
-    let sid = current_space_id(cx);
-    let store = Store::global(cx).read(cx);
+pub fn creatable_types(s: &State) -> Vec<CreatableType> {
+    let sid = current_space_id(s);
+    let store = &s.store;
     let legacy = || {
         CREATABLE_TYPES
             .iter()
@@ -110,20 +107,19 @@ pub fn creatable_types(cx: &App) -> Vec<CreatableType> {
 
 /// The space's Default type (`default_type` on the space object),
 /// [`FALLBACK_TYPE`] when unset, not defaultable, or gone from the space.
-pub fn default_type_key(space_id: &str, cx: &App) -> Task<String> {
+pub fn default_type_key(space_id: &str, s: &State) -> Task<String> {
     if space_id.is_empty() {
         return Task::ready(FALLBACK_TYPE.into());
     }
-    let fetch = Store::global(cx).read(cx).fetch_object(space_id, cx);
+    let fetch = s.store.fetch_object(space_id);
     let space_id = space_id.to_string();
-    cx.spawn(async move |cx| {
+    s.rt.spawn(async move |cx| {
         let key = fetch
             .await
-            .map(|s| s.field_str("default_type").to_string())
+            .map(|o| o.field_str("default_type").to_string())
             .unwrap_or_default();
-        let known = cx.update(|cx| {
-            Store::global(cx)
-                .read(cx)
+        let known = cx.read(|s| {
+            s.store
                 .types
                 .iter()
                 .any(|t| t.space == space_id && t.key == key)
@@ -170,25 +166,25 @@ fn has_value(v: Option<&Value>) -> bool {
     true
 }
 
-fn fetch(id: &str, cx: &AsyncApp) -> Task<Result<Object>> {
-    cx.update(|cx| Store::global(cx).read(cx).fetch_object(id, cx))
+fn fetch(id: &str, cx: &Cx) -> Task<Result<Object>> {
+    cx.read(|s| s.store.fetch_object(id))
 }
 
 /// Copy a template into an object: its content blocks (ids remapped, the
 /// discussion subtree left behind) and its properties as DEFAULTS - a field
 /// the object already holds wins. The guest list is normalized to links.
-pub fn apply_template(object_id: &str, template_id: &str, cx: &mut App) -> Task<Result<()>> {
+pub fn apply_template(object_id: &str, template_id: &str, s: &mut State) -> Task<Result<()>> {
     let object_id = object_id.to_string();
     let template_id = template_id.to_string();
     // A Lite copy holds only what this device opened: the template may not be
     // here yet (a type's New on roostr.space then made a bare object).
     let held =
-        crate::lite::lite(cx).map(|lite| io::spawn(cx, lite.fetch(vec![template_id.clone()])));
-    cx.spawn(async move |cx| {
+        crate::lite::lite(s).map(|lite| s.rt.background(lite.fetch(vec![template_id.clone()])));
+    s.rt.spawn(async move |cx| {
         if let Some(held) = held {
             held.await?;
         }
-        let (tpl, target) = (fetch(&template_id, cx), fetch(&object_id, cx));
+        let (tpl, target) = (fetch(&template_id, &cx), fetch(&object_id, &cx));
         let (tpl, target) = (tpl.await?, target.await?);
         // Everything reachable from __discussion__ is conversation, not content.
         let mut skip = HashSet::new();
@@ -217,7 +213,7 @@ pub fn apply_template(object_id: &str, template_id: &str, cx: &mut App) -> Task<
                 content: b.content.clone(),
                 ..Block::default()
             };
-            cx.update(|cx| api::note::block_add(&object_id, &block, "", 0, cx))
+            cx.update(|s| api::note::block_add(&object_id, &block, "", 0, s))
                 .await?;
         }
         for (key, value) in &tpl.fields {
@@ -229,7 +225,7 @@ pub fn apply_template(object_id: &str, template_id: &str, cx: &mut App) -> Task<
             } else {
                 value.clone()
             };
-            cx.update(|cx| api::note::set_field(&object_id, key, value, cx))
+            cx.update(|s| api::note::set_field(&object_id, key, value, s))
                 .await?;
         }
         Ok(())
@@ -237,11 +233,11 @@ pub fn apply_template(object_id: &str, template_id: &str, cx: &mut App) -> Task<
 }
 
 /// This computer's machine id from its harness (`GET /machine`), "" when unknown.
-pub fn this_machine_id(cx: &App) -> Task<String> {
-    let Some(harness) = harness::harness(cx) else {
+pub fn this_machine_id(s: &State) -> Task<String> {
+    let Some(harness) = s.harness.clone() else {
         return Task::ready(String::new());
     };
-    io::spawn(cx, async move {
+    s.rt.background(async move {
         harness
             .get_json("/machine")
             .await
@@ -251,13 +247,13 @@ pub fn this_machine_id(cx: &App) -> Task<String> {
     })
 }
 
-fn open(id: &str, cx: &AsyncApp) {
+fn open(id: &str, cx: &Cx) {
     let id = id.to_string();
-    cx.update(|cx| navigate(Route::Object(id), cx));
+    cx.update(|s| navigate(Route::Object(id), s));
 }
 
-fn query_all(body: serde_json::Value, cx: &AsyncApp) -> Task<Result<Vec<crate::types::QueryRow>>> {
-    cx.update(|cx| api::query_all(body, cx))
+fn query_all(body: serde_json::Value, cx: &Cx) -> Task<Result<Vec<crate::types::QueryRow>>> {
+    cx.read(|s| api::query_all(body, s))
 }
 
 /// A new agent in the space, from the agent type's default template there
@@ -269,24 +265,24 @@ pub fn new_agent(
     channel_id: &str,
     name: &str,
     seeds: Fields,
-    cx: &mut App,
+    s: &mut State,
 ) -> Task<Result<String>> {
     let channel_id = channel_id.to_string();
     let name = name.trim().to_string();
-    cx.spawn(async move |cx| {
-        let tpl_id = cx.update(|cx| default_template_of(Store::global(cx).read(cx), "agent", &channel_id));
-        let tpl = if tpl_id.is_empty() { None } else { fetch(&tpl_id, cx).await.ok() };
+    s.rt.spawn(async move |cx| {
+        let tpl_id = cx.read(|s| default_template_of(&s.store, "agent", &channel_id));
+        let tpl = if tpl_id.is_empty() { None } else { fetch(&tpl_id, &cx).await.ok() };
         let has = |k: &str| tpl.as_ref().is_some_and(|t| t.fields.contains_key(k));
         let in_space = |kind: &str| json!({ "type": kind, "filters": [{ "key": "channel", "condition": "equal", "value": channel_id }] });
         let assistant = if has("prompt") {
             None
         } else {
-            query_all(in_space("system_prompt"), cx).await?.into_iter().find(|r| field_str(&r.fields, "name") == "Assistant")
+            query_all(in_space("system_prompt"), &cx).await?.into_iter().find(|r| field_str(&r.fields, "name") == "Assistant")
         };
         let tools = if has("tools") {
             vec![]
         } else {
-            query_all(in_space("tool"), cx)
+            query_all(in_space("tool"), &cx)
                 .await?
                 .into_iter()
                 .filter(|r| is_builtin_tool(&r.fields) && DEFAULT_TOOLS.contains(&field_str(&r.fields, "name")))
@@ -295,7 +291,7 @@ pub fn new_agent(
         let model_cred = if has("credentials") {
             None
         } else {
-            let mut creds: Vec<_> = query_all(in_space("credential"), cx)
+            let mut creds: Vec<_> = query_all(in_space("credential"), &cx)
                 .await?
                 .into_iter()
                 .filter(|r| field_str(&r.fields, "service") == "anthropic")
@@ -322,9 +318,9 @@ pub fn new_agent(
             fields.insert("model".into(), Value::values(vec![Value::string(DEFAULT_AGENT_MODEL)]));
         }
         let name = if name.is_empty() { "New agent".to_string() } else { name };
-        let agent_id = cx.update(|cx| api::note::create(&name, Some("agent"), Some(fields), cx)).await?;
+        let agent_id = cx.update(|s| api::note::create(&name, Some("agent"), Some(fields), s)).await?;
         if let Some(tpl) = &tpl {
-            cx.update(|cx| apply_template(&agent_id, &tpl.id, cx)).await?;
+            cx.update(|s| apply_template(&agent_id, &tpl.id, s)).await?;
         }
         Ok(agent_id)
     })
@@ -338,28 +334,28 @@ pub fn create_typed(
     type_key: &str,
     channel_id: &str,
     name: &str,
-    cx: &mut App,
+    s: &mut State,
 ) -> Task<Result<String>> {
     let key = type_key.trim().to_lowercase();
     let channel_id = channel_id.to_string();
     let name = name.to_string();
     match key.as_str() {
         "agent" => {
-            let task = new_agent(&channel_id, &name, Fields::new(), cx);
-            cx.spawn(async move |cx| {
+            let task = new_agent(&channel_id, &name, Fields::new(), s);
+            s.rt.spawn(async move |cx| {
                 let id = task.await?;
-                open(&id, cx);
+                open(&id, &cx);
                 Ok(id)
             })
         }
-        "machine" => create_machine(cx),
-        "credential" => create_credential(channel_id, name, cx),
-        "file" => create_file(channel_id, cx),
+        "machine" => create_machine(s),
+        "credential" => create_credential(channel_id, name, s),
+        "file" => create_file(channel_id, s),
         _ => {
-            let task = from_type(&name, &key, channel_field(&channel_id), cx);
-            cx.spawn(async move |cx| {
+            let task = from_type(&name, &key, channel_field(&channel_id), s);
+            s.rt.spawn(async move |cx| {
                 let id = task.await?;
-                open(&id, cx);
+                open(&id, &cx);
                 Ok(id)
             })
         }
@@ -370,18 +366,23 @@ pub fn create_typed(
 /// started from the type's default template in that space - every way the
 /// app makes an object of a type goes through here, so a template's agent,
 /// properties and body always come along. Resolves to its id.
-pub fn from_type(name: &str, type_key: &str, fields: Fields, cx: &mut App) -> Task<Result<String>> {
+pub fn from_type(
+    name: &str,
+    type_key: &str,
+    fields: Fields,
+    s: &mut State,
+) -> Task<Result<String>> {
     let channel_id = fields
         .get("channel")
         .and_then(|v| v.string_value.clone())
         .unwrap_or_default();
-    let tpl_id = default_template_of(Store::global(cx).read(cx), type_key, &channel_id);
-    let create = api::note::create(name, Some(type_key), Some(fields), cx);
-    cx.spawn(async move |cx| {
+    let tpl_id = default_template_of(&s.store, type_key, &channel_id);
+    let create = api::note::create(name, Some(type_key), Some(fields), s);
+    s.rt.spawn(async move |cx| {
         let id = create.await?;
         if !tpl_id.is_empty() {
             // The object exists either way; a deleted default template is a no-op.
-            if let Err(error) = cx.update(|cx| apply_template(&id, &tpl_id, cx)).await {
+            if let Err(error) = cx.update(|s| apply_template(&id, &tpl_id, s)).await {
                 log::warn!("template {tpl_id} not applied to {id}: {error:#}");
             }
         }
@@ -391,20 +392,20 @@ pub fn from_type(name: &str, type_key: &str, fields: Fields, cx: &mut App) -> Ta
 
 /// A computer object is a machine's self-publication: adopt this device's
 /// row when its harness already published it, else create nothing ("").
-fn create_machine(cx: &mut App) -> Task<Result<String>> {
-    let machine_id = this_machine_id(cx);
-    cx.spawn(async move |cx| {
+fn create_machine(s: &mut State) -> Task<Result<String>> {
+    let machine_id = this_machine_id(s);
+    s.rt.spawn(async move |cx| {
         let id = machine_id.await;
         if id.is_empty() {
             return Ok(String::new());
         }
-        let rows = query_all(json!({ "type": "machine" }), cx).await?;
+        let rows = query_all(json!({ "type": "machine" }), &cx).await?;
         match rows
             .into_iter()
             .find(|r| field_str(&r.fields, "machine_id") == id)
         {
             Some(mine) => {
-                open(&mine.id, cx);
+                open(&mine.id, &cx);
                 Ok(mine.id)
             }
             None => Ok(String::new()),
@@ -414,9 +415,9 @@ fn create_machine(cx: &mut App) -> Task<Result<String>> {
 
 /// A new credential starts served by this computer, when known; the type's
 /// default template still applies.
-fn create_credential(channel_id: String, name: String, cx: &mut App) -> Task<Result<String>> {
-    let machine_id = this_machine_id(cx);
-    cx.spawn(async move |cx| {
+fn create_credential(channel_id: String, name: String, s: &mut State) -> Task<Result<String>> {
+    let machine_id = this_machine_id(s);
+    s.rt.spawn(async move |cx| {
         let machine_id = machine_id.await;
         let mut fields = channel_field(&channel_id);
         if !machine_id.is_empty() {
@@ -428,15 +429,13 @@ fn create_credential(channel_id: String, name: String, cx: &mut App) -> Task<Res
             name
         };
         let id = cx
-            .update(|cx| api::note::create(&name, Some("credential"), Some(fields), cx))
+            .update(|s| api::note::create(&name, Some("credential"), Some(fields), s))
             .await?;
-        let tpl_id = cx.update(|cx| {
-            default_template_of(Store::global(cx).read(cx), "credential", &channel_id)
-        });
+        let tpl_id = cx.read(|s| default_template_of(&s.store, "credential", &channel_id));
         if !tpl_id.is_empty() {
-            let _ = cx.update(|cx| apply_template(&id, &tpl_id, cx)).await;
+            let _ = cx.update(|s| apply_template(&id, &tpl_id, s)).await;
         }
-        open(&id, cx);
+        open(&id, &cx);
         Ok(id)
     })
 }
@@ -509,38 +508,40 @@ pub fn add_failure_text(error: &anyhow::Error, name: &str) -> String {
 /// A file is its bytes: pick first, then upload through the harness (which
 /// creates the File object) and open it. Cancelled pick → "".
 #[cfg(target_family = "wasm")]
-fn create_file(_channel_id: String, _cx: &mut App) -> Task<Result<String>> {
-    Task::ready(Err(anyhow!(io::NO_FILE_PICKER)))
+fn create_file(_channel_id: String, _s: &mut State) -> Task<Result<String>> {
+    Task::ready(Err(anyhow!(crate::io::NO_FILE_PICKER)))
 }
 
 /// How a picked file becomes a File object (files.ts `uploadFile`): the
-/// editor installs it (`roostr_editor::files::upload_file`, harness or
-/// Blossom); resolves to the new object's id.
+/// editor installs it in [`State::add_file`] (`roostr_editor::files::upload_file`,
+/// harness or Blossom). Called with the file's name, MIME type, bytes and
+/// space; resolves to the new object's id.
 #[derive(Clone)]
 #[allow(clippy::type_complexity)]
 pub struct AddFile(
-    pub std::rc::Rc<dyn Fn(String, String, Vec<u8>, String, &mut App) -> Task<Result<String>>>,
+    pub std::rc::Rc<dyn Fn(String, String, Vec<u8>, String, &mut State) -> Task<Result<String>>>,
 );
 
-impl gpui_kit::Global for AddFile {}
+/// The host's "open a file" dialog, installed by the app in
+/// [`State::pick_file`]: resolves to the chosen file, `None` when cancelled.
+#[derive(Clone)]
+#[allow(clippy::type_complexity)]
+pub struct PickFile(pub std::rc::Rc<dyn Fn(&mut State) -> Task<Option<std::path::PathBuf>>>);
 
 /// A file is its bytes: pick first, then add it (through the harness, or
 /// Blossom on this device's own replica) and open it. Cancelled pick → "".
 #[cfg(not(target_family = "wasm"))]
-fn create_file(channel_id: String, cx: &mut App) -> Task<Result<String>> {
-    let picked = cx.prompt_for_paths(PathPromptOptions {
-        files: true,
-        directories: false,
-        multiple: false,
-        prompt: None,
-    });
-    let harness = harness::harness(cx);
-    let add = cx.try_global::<AddFile>().cloned();
-    cx.spawn(async move |cx| {
-        let Ok(Ok(Some(paths))) = picked.await else {
-            return Ok(String::new());
-        };
-        let Some(path) = paths.into_iter().next() else {
+fn create_file(channel_id: String, s: &mut State) -> Task<Result<String>> {
+    let Some(PickFile(pick)) = s.pick_file.clone() else {
+        return Task::ready(Err(anyhow!(
+            "This app has no file dialog to choose a file with."
+        )));
+    };
+    let picked = pick(s);
+    let harness = s.harness.clone();
+    let add = s.add_file.clone();
+    s.rt.spawn(async move |cx| {
+        let Some(path) = picked.await else {
             return Ok(String::new());
         };
         let name = path
@@ -551,17 +552,17 @@ fn create_file(channel_id: String, cx: &mut App) -> Task<Result<String>> {
         if let Some(AddFile(add)) = add {
             let bytes =
                 std::fs::read(&path).map_err(|e| anyhow!(add_failure_text(&e.into(), &name)))?;
-            let task = cx.update(|cx| add(name.clone(), mime.to_string(), bytes, channel_id, cx));
+            let task = cx.update(|s| add(name.clone(), mime.to_string(), bytes, channel_id, s));
             let id = task
                 .await
                 .map_err(|e| anyhow!(add_failure_text(&e, &name)))?;
-            open(&id, cx);
+            open(&id, &cx);
             return Ok(id);
         }
         let Some(harness) = harness else {
             return Err(anyhow!(NOT_RUNNING_TO_ADD));
         };
-        let upload = io::spawn_async(cx, {
+        let upload = cx.background({
             let name = name.clone();
             async move {
                 let bytes = std::fs::read(&path)?;
@@ -571,31 +572,31 @@ fn create_file(channel_id: String, cx: &mut App) -> Task<Result<String>> {
         let id = upload
             .await
             .map_err(|e| anyhow!(add_failure_text(&e, &name)))?;
-        open(&id, cx);
+        open(&id, &cx);
         Ok(id)
     })
 }
 
 /// A new, empty collection in the space, opened.
-pub fn create_collection(channel_id: &str, cx: &mut App) -> Task<Result<String>> {
+pub fn create_collection(channel_id: &str, s: &mut State) -> Task<Result<String>> {
     let mut fields = channel_field(channel_id);
     fields.insert("collectionIds".into(), Value::values(vec![]));
-    let create = api::note::create("New collection", Some("collection"), Some(fields), cx);
-    cx.spawn(async move |cx| {
+    let create = api::note::create("New collection", Some("collection"), Some(fields), s);
+    s.rt.spawn(async move |cx| {
         let id = create.await?;
-        open(&id, cx);
+        open(&id, &cx);
         Ok(id)
     })
 }
 
 /// A sourceless query, opened (the query page then asks for its source).
-pub fn create_query(channel_id: &str, cx: &mut App) -> Task<Result<String>> {
+pub fn create_query(channel_id: &str, s: &mut State) -> Task<Result<String>> {
     let mut fields = channel_field(channel_id);
     fields.insert("setOf".into(), Value::values(vec![]));
-    let create = api::note::create("New query", Some("query"), Some(fields), cx);
-    cx.spawn(async move |cx| {
+    let create = api::note::create("New query", Some("query"), Some(fields), s);
+    s.rt.spawn(async move |cx| {
         let id = create.await?;
-        open(&id, cx);
+        open(&id, &cx);
         Ok(id)
     })
 }

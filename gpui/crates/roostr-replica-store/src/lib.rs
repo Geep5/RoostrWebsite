@@ -38,7 +38,7 @@ pub use sqlite::SqliteChangeStore;
 #[cfg(not(target_family = "wasm"))]
 mod bounds {
     use super::*;
-    /// `Send` natively, nothing on wasm (same convention as `roostr_core::io`).
+    /// `Send` natively, nothing on wasm (same convention as `roostr_rt`).
     pub trait MaybeSend: Send {}
     impl<T: Send + ?Sized> MaybeSend for T {}
     /// `Sync` natively, nothing on wasm.
@@ -51,7 +51,7 @@ mod bounds {
 #[cfg(target_family = "wasm")]
 mod bounds {
     use super::*;
-    /// `Send` natively, nothing on wasm (same convention as `roostr_core::io`).
+    /// `Send` natively, nothing on wasm (same convention as `roostr_rt`).
     pub trait MaybeSend {}
     impl<T: ?Sized> MaybeSend for T {}
     /// `Sync` natively, nothing on wasm.

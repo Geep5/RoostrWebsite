@@ -1,13 +1,13 @@
 [package]
 name = "roostr-core"
-description = "Shared data layer, navigation and design system for the Roostr GPUI app"
+description = "Roostr's model: wire types, backends and clients, the app State (store, navigation, UI prefs) on roostr-rt"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
 
 [dependencies]
-gpui-kit.workspace = true
-gpui-motion-kit.workspace = true
+roostr-rt.workspace = true
+parking_lot.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true
@@ -27,11 +27,10 @@ sha2.workspace = true
 hex = "0.4"
 url = "2"
 
-# Desktop: blocking HTTP on GPUI's background threads, files in the config dir.
+# Desktop: blocking HTTP on roostr-rt's worker threads, files in the config dir.
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
 ureq = { workspace = true, features = ["rustls"] }
 dirs.workspace = true
-gpui-pre-reqwest-client.workspace = true
 
 # Browser: fetch, localStorage, the JS clock and randomness; the owner key
 # signs the harness's pairing challenge.
@@ -72,6 +71,3 @@ web-sys = { workspace = true, features = [
     "Url",
     "Window",
 ] }
-
-[dev-dependencies]
-ttf-parser = "0.25"

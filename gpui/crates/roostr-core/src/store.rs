@@ -1,8 +1,13 @@
-//! The global reactive data store (`src/lib/data.svelte.ts`): spaces, object
+//! The reactive data store (`src/lib/data.svelte.ts`): spaces, object
 //! summaries, relation/type definitions, agents and the user's preferences,
 //! plus a cache of full object states. Kept live by the backend's commit
 //! stream: every commit refetches the cached object it names and schedules a
 //! throttled refresh of the collections.
+//!
+//! The store is [`crate::State::store`]. Its loads run on the state's
+//! executor and land through `cx.update(|s| s.store..)`; what it emits
+//! ([`StoreEvent`]) reaches the [`crate::State::on_store`] listeners at the
+//! next [`crate::State::poll`].
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -10,12 +15,12 @@ use std::time::Duration;
 
 use anyhow::Result;
 use futures::StreamExt as _;
-use gpui_kit::{App, AppContext as _, Context, Entity, EventEmitter, Global, SharedString, Task};
+use roostr_rt::{BoxFuture, Executor, Task};
 use serde_json::{Value as Json, json};
 
+use crate::State;
 use crate::backend::{Backend, BackendEvent, JsonMap};
 use crate::color::{DEFAULT_CHAT_COLOR, normalize_hex};
-use crate::io;
 use crate::types::{
     Object, ObjectSummary, QueryResult, QueryRow, RelationDef, Settings, Space, SyncPhase,
     SyncStatus, field_str,
@@ -64,7 +69,7 @@ pub struct AgentRef {
 pub enum ObjectSlot {
     Loading,
     Ready(Arc<Object>),
-    Failed(SharedString),
+    Failed(String),
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -73,7 +78,7 @@ pub enum Connection {
     Connecting,
     Ready,
     /// The backend could not be reached or refused us.
-    Failed(SharedString),
+    Failed(String),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -88,6 +93,7 @@ pub enum StoreEvent {
 
 pub struct Store {
     backend: Arc<dyn Backend>,
+    rt: Executor<State>,
     pub connection: Connection,
     pub settings: Option<Settings>,
     pub status: SyncStatus,
@@ -115,55 +121,39 @@ pub struct Store {
     /// refresh, and an empty-looking store must not read as an empty vault.
     bootstrap_held: bool,
     refresh_timer: Option<Task<()>>,
-    _events: Option<Task<()>>,
+    stream: Option<Task<()>>,
+    /// Emitted, not yet handed to the listeners ([`State::poll`]).
+    pub(crate) events: Vec<StoreEvent>,
 }
 
-struct GlobalStore(Entity<Store>);
-
-impl Global for GlobalStore {}
-
-impl EventEmitter<StoreEvent> for Store {}
-
 impl Store {
-    /// Create the store as an app global and start loading + listening.
-    pub fn init(backend: Arc<dyn Backend>, cx: &mut App) -> Entity<Self> {
-        let store = cx.new(|cx| {
-            let mut store = Self {
-                backend,
-                connection: Connection::Connecting,
-                settings: None,
-                status: SyncStatus::default(),
-                channels: Vec::new(),
-                summaries: Vec::new(),
-                relations: Vec::new(),
-                types: Vec::new(),
-                builtin_ids: HashSet::new(),
-                agents: Vec::new(),
-                chat_color: DEFAULT_CHAT_COLOR.to_string(),
-                space_order: HashMap::new(),
-                loaded: false,
-                objects: HashMap::new(),
-                in_flight: HashSet::new(),
-                reload_again: HashSet::new(),
-                refresh_running: false,
-                refresh_again: false,
-                bootstrap_held: false,
-                refresh_timer: None,
-                _events: None,
-            };
-            store.start(cx);
-            store
-        });
-        cx.set_global(GlobalStore(store.clone()));
-        store
-    }
-
-    pub fn global(cx: &App) -> Entity<Self> {
-        cx.global::<GlobalStore>().0.clone()
-    }
-
-    pub fn try_global(cx: &App) -> Option<Entity<Self>> {
-        cx.try_global::<GlobalStore>().map(|g| g.0.clone())
+    /// An empty store over `backend`; [`Self::start`] begins loading.
+    pub(crate) fn new(backend: Arc<dyn Backend>, rt: Executor<State>) -> Self {
+        Self {
+            backend,
+            rt,
+            connection: Connection::Connecting,
+            settings: None,
+            status: SyncStatus::default(),
+            channels: Vec::new(),
+            summaries: Vec::new(),
+            relations: Vec::new(),
+            types: Vec::new(),
+            builtin_ids: HashSet::new(),
+            agents: Vec::new(),
+            chat_color: DEFAULT_CHAT_COLOR.to_string(),
+            space_order: HashMap::new(),
+            loaded: false,
+            objects: HashMap::new(),
+            in_flight: HashSet::new(),
+            reload_again: HashSet::new(),
+            refresh_running: false,
+            refresh_again: false,
+            bootstrap_held: false,
+            refresh_timer: None,
+            stream: None,
+            events: Vec::new(),
+        }
     }
 
     pub fn backend(&self) -> Arc<dyn Backend> {
@@ -172,64 +162,65 @@ impl Store {
 
     /// Settings first (a daemon without identity cannot serve the app), then
     /// the collections, then the commit stream.
-    fn start(&mut self, cx: &mut Context<Self>) {
-        let backend = self.backend.clone();
-        cx.spawn(async move |this, cx| {
-            let settings = io::spawn_async(cx, backend.settings()).await;
-            let _ = this.update(cx, |this, cx| match settings {
-                Ok(settings) if !settings.has_key => {
-                    this.connection = Connection::Failed(
-                        "Set up the daemon identity in its terminal before opening the app.".into(),
-                    );
-                    this.settings = Some(settings);
-                    cx.notify();
-                }
-                Ok(settings) => {
-                    this.settings = Some(settings);
-                    this.refresh_all(cx);
-                    this.listen(cx);
-                }
-                Err(error) => {
-                    this.connection = Connection::Failed(error.to_string().into());
-                    cx.notify();
-                }
-            });
-        })
-        .detach();
+    pub(crate) fn start(&mut self) {
+        let settings = self.rt.background(self.backend.settings());
+        self.rt
+            .spawn(async move |cx| {
+                let settings = settings.await;
+                cx.update(|s| {
+                    let store = &mut s.store;
+                    match settings {
+                        Ok(settings) if !settings.has_key => {
+                            store.connection = Connection::Failed(
+                                "Set up the daemon identity in its terminal before opening the app."
+                                    .into(),
+                            );
+                            store.settings = Some(settings);
+                        }
+                        Ok(settings) => {
+                            store.settings = Some(settings);
+                            store.refresh_all();
+                            store.listen();
+                        }
+                        Err(error) => {
+                            store.connection = Connection::Failed(error.to_string());
+                        }
+                    }
+                });
+            })
+            .detach();
     }
 
     /// Retry from scratch after a failed connection.
-    pub fn reconnect(&mut self, cx: &mut Context<Self>) {
+    pub fn reconnect(&mut self) {
         self.connection = Connection::Connecting;
-        self._events = None;
-        cx.notify();
-        self.start(cx);
+        self.stream = None;
+        self.start();
     }
 
     /// Follow the commit stream for the life of the store, reconnecting
-    /// [`RECONNECT_DELAY`] after each failure.
-    fn listen(&mut self, cx: &mut Context<Self>) {
+    /// [`RECONNECT_DELAY`] after each failure. The stream may block while
+    /// polled (the daemon's SSE body), so it is read on its own thread.
+    fn listen(&mut self) {
         let backend = self.backend.clone();
-        self._events = Some(cx.spawn(async move |this, cx| {
+        self.stream = Some(self.rt.spawn(async move |cx| {
             loop {
-                let mut events = backend.events();
+                let mut events = roostr_rt::background_stream(backend.events());
                 while let Some(event) = events.next().await {
                     let failed = event.is_err();
                     let event = event.map_err(|error| error.to_string());
-                    let Ok(()) = this.update(cx, |this, cx| this.handle_event(event, cx)) else {
-                        return;
-                    };
+                    cx.update(|s| s.store.handle_event(event));
                     if failed {
                         break;
                     }
                 }
                 drop(events);
-                cx.background_executor().timer(RECONNECT_DELAY).await;
+                cx.timer(RECONNECT_DELAY).await;
             }
         }));
     }
 
-    fn handle_event(&mut self, event: Result<BackendEvent, String>, cx: &mut Context<Self>) {
+    fn handle_event(&mut self, event: Result<BackendEvent, String>) {
         match event {
             Ok(BackendEvent::Hello) => {
                 // Daemon connectivity does not prove relay history finished backfilling.
@@ -240,41 +231,39 @@ impl Store {
                 };
                 let cached: Vec<String> = self.objects.keys().cloned().collect();
                 for id in cached {
-                    self.reload_object(&id, cx);
+                    self.reload_object(&id);
                 }
-                self.schedule_refresh(cx);
-                cx.emit(StoreEvent::Reconnected);
-                cx.notify();
+                self.schedule_refresh();
+                self.events.push(StoreEvent::Reconnected);
             }
             Ok(BackendEvent::Committed(id)) => {
                 if self.objects.contains_key(&id) {
-                    self.reload_object(&id, cx);
+                    self.reload_object(&id);
                 }
-                self.schedule_refresh(cx);
-                cx.emit(StoreEvent::Committed(id));
+                self.schedule_refresh();
+                self.events.push(StoreEvent::Committed(id));
             }
             Ok(BackendEvent::Prepared) => {
                 // Every view may show a partial vault: reload as on a reconnect.
                 let cached: Vec<String> = self.objects.keys().cloned().collect();
                 for id in cached {
-                    self.reload_object(&id, cx);
+                    self.reload_object(&id);
                 }
-                self.refresh_all(cx);
-                cx.emit(StoreEvent::Reconnected);
+                self.refresh_all();
+                self.events.push(StoreEvent::Reconnected);
             }
             Ok(BackendEvent::Status(mut status)) => {
                 if status.bootstrapped && !self.status.bootstrapped {
                     status.bootstrapped = false;
                     if !self.bootstrap_held {
                         self.bootstrap_held = true;
-                        self.refresh_all(cx);
+                        self.refresh_all();
                     }
                 } else if !status.bootstrapped {
                     self.bootstrap_held = false;
                 }
                 if self.status != status {
                     self.status = status;
-                    cx.notify();
                 }
             }
             Err(detail) => {
@@ -283,99 +272,111 @@ impl Store {
                     detail: Some(detail),
                     ..self.status.clone()
                 };
-                cx.notify();
             }
         }
     }
 
-    fn schedule_refresh(&mut self, cx: &mut Context<Self>) {
+    fn schedule_refresh(&mut self) {
         if self.refresh_timer.is_some() {
             return;
         }
-        self.refresh_timer = Some(cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(REFRESH_THROTTLE).await;
-            let _ = this.update(cx, |this, cx| {
-                this.refresh_timer = None;
-                this.refresh_all(cx);
+        self.refresh_timer = Some(self.rt.spawn(async move |cx| {
+            cx.timer(REFRESH_THROTTLE).await;
+            cx.update(|s| {
+                s.store.refresh_timer = None;
+                s.store.refresh_all();
             });
         }));
     }
 
     /// `refreshAll`: every collection, in parallel; a commit during a running
     /// refresh queues exactly one more.
-    pub fn refresh_all(&mut self, cx: &mut Context<Self>) {
+    pub fn refresh_all(&mut self) {
         if self.refresh_running {
             self.refresh_again = true;
             return;
         }
         self.refresh_running = true;
         let b = self.backend.clone();
-        let channels = io::spawn(cx, b.channels());
-        let summaries = io::spawn(cx, b.objects());
-        let relations = io::spawn(cx, b.relations());
-        let defs = io::spawn(cx, fetch_defs(b.clone()));
-        let agents = io::spawn(cx, fetch_agents(b.clone()));
-        let prefs = io::spawn(cx, read_prefs(b));
-        cx.spawn(async move |this, cx| {
-            let result: Result<_> = async {
-                Ok((
-                    channels.await?,
-                    summaries.await?,
-                    relations.await?,
-                    defs.await?,
-                    agents.await?,
-                    prefs.await,
-                ))
-            }
-            .await;
-            let _ = this.update(cx, |this, cx| {
-                this.refresh_running = false;
-                match result {
+        let channels = self.rt.background(b.channels());
+        let summaries = self.rt.background(b.objects());
+        let relations = self.rt.background(b.relations());
+        let defs = self.rt.background(fetch_defs(b.clone()));
+        let agents = self.rt.background(fetch_agents(b.clone()));
+        let prefs = self.rt.background(read_prefs(b));
+        self.rt
+            .spawn(async move |cx| {
+                let result: Result<_> = async {
                     Ok((
-                        channels,
-                        summaries,
-                        mut relations,
-                        (types, builtin_ids),
-                        agents,
-                        (chat_color, space_order),
-                    )) => {
-                        for relation in &mut relations {
-                            relation.options.sort_by(|a, b| a.order_id.cmp(&b.order_id));
-                        }
-                        this.channels = channels;
-                        this.summaries = summaries;
-                        this.relations = relations;
-                        this.types = types;
-                        this.builtin_ids = builtin_ids;
-                        this.agents = agents;
-                        this.chat_color = chat_color;
-                        this.space_order = space_order;
-                        this.loaded = true;
-                        if this.bootstrap_held && !this.refresh_again {
-                            this.bootstrap_held = false;
-                            this.status.bootstrapped = true;
-                        }
-                        this.connection = Connection::Ready;
-                        if this.status.phase == SyncPhase::Idle {
-                            this.status.phase = SyncPhase::Live;
-                        }
-                        cx.emit(StoreEvent::Refreshed);
-                    }
-                    Err(error) => {
-                        // The next commit retries; only a never-loaded store shows the failure.
-                        if !this.loaded {
-                            this.connection = Connection::Failed(error.to_string().into());
-                        }
-                        log::warn!("refresh failed: {error:#}");
-                    }
+                        channels.await?,
+                        summaries.await?,
+                        relations.await?,
+                        defs.await?,
+                        agents.await?,
+                        prefs.await,
+                    ))
                 }
-                cx.notify();
-                if std::mem::take(&mut this.refresh_again) {
-                    this.schedule_refresh(cx);
+                .await;
+                cx.update(|s| s.store.refreshed(result));
+            })
+            .detach();
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn refreshed(
+        &mut self,
+        result: Result<(
+            Vec<Space>,
+            Vec<ObjectSummary>,
+            Vec<RelationDef>,
+            (Vec<TypeDef>, HashSet<String>),
+            Vec<AgentRef>,
+            (String, HashMap<String, f64>),
+        )>,
+    ) {
+        self.refresh_running = false;
+        match result {
+            Ok((
+                channels,
+                summaries,
+                mut relations,
+                (types, builtin_ids),
+                agents,
+                (chat_color, space_order),
+            )) => {
+                for relation in &mut relations {
+                    relation.options.sort_by(|a, b| a.order_id.cmp(&b.order_id));
                 }
-            });
-        })
-        .detach();
+                self.channels = channels;
+                self.summaries = summaries;
+                self.relations = relations;
+                self.types = types;
+                self.builtin_ids = builtin_ids;
+                self.agents = agents;
+                self.chat_color = chat_color;
+                self.space_order = space_order;
+                self.loaded = true;
+                if self.bootstrap_held && !self.refresh_again {
+                    self.bootstrap_held = false;
+                    self.status.bootstrapped = true;
+                }
+                self.connection = Connection::Ready;
+                if self.status.phase == SyncPhase::Idle {
+                    self.status.phase = SyncPhase::Live;
+                }
+                self.events.push(StoreEvent::Refreshed);
+            }
+            Err(error) => {
+                // The next commit retries; only a never-loaded store shows the failure.
+                if !self.loaded {
+                    self.connection = Connection::Failed(error.to_string());
+                }
+                log::warn!("refresh failed: {error:#}");
+            }
+        }
+        if std::mem::take(&mut self.refresh_again) {
+            self.schedule_refresh();
+        }
     }
 
     // ---------------------------------------------------------------- objects
@@ -393,61 +394,63 @@ impl Store {
     }
 
     /// Load `id` into the cache unless it is already there or loading.
-    pub fn ensure_object(&mut self, id: &str, cx: &mut Context<Self>) {
+    pub fn ensure_object(&mut self, id: &str) {
         if id.is_empty() || self.objects.contains_key(id) {
             return;
         }
         self.objects.insert(id.to_string(), ObjectSlot::Loading);
-        self.reload_object(id, cx);
+        self.reload_object(id);
     }
 
     /// Refetch `id`, keeping the previous state visible until the new one arrives.
     /// A request while a fetch is in flight queues exactly one more fetch after
     /// it, so a commit that lands mid-fetch is never lost.
-    pub fn reload_object(&mut self, id: &str, cx: &mut Context<Self>) {
+    pub fn reload_object(&mut self, id: &str) {
         if !self.in_flight.insert(id.to_string()) {
             self.reload_again.insert(id.to_string());
             return;
         }
-        let backend = self.backend.clone();
+        let fetch = self.rt.background(self.backend.object(id));
         let id = id.to_string();
-        cx.spawn(async move |this, cx| {
-            let result = io::spawn_async(cx, backend.object(&id)).await;
-            let _ = this.update(cx, |this, cx| {
-                this.in_flight.remove(&id);
-                let slot = match result {
-                    Ok(object) => ObjectSlot::Ready(Arc::new(object)),
-                    Err(error) => match this.objects.get(&id) {
-                        // Keep a good state over a transient failure.
-                        Some(ObjectSlot::Ready(object)) => ObjectSlot::Ready(object.clone()),
-                        _ => ObjectSlot::Failed(error.to_string().into()),
-                    },
-                };
-                this.objects.insert(id.clone(), slot);
-                cx.notify();
-                if this.reload_again.remove(&id) {
-                    this.reload_object(&id, cx);
-                }
-            });
-        })
-        .detach();
+        self.rt
+            .spawn(async move |cx| {
+                let result = fetch.await;
+                cx.update(|s| s.store.reloaded(id, result));
+            })
+            .detach();
+    }
+
+    fn reloaded(&mut self, id: String, result: Result<Object>) {
+        self.in_flight.remove(&id);
+        let slot = match result {
+            Ok(object) => ObjectSlot::Ready(Arc::new(object)),
+            Err(error) => match self.objects.get(&id) {
+                // Keep a good state over a transient failure.
+                Some(ObjectSlot::Ready(object)) => ObjectSlot::Ready(object.clone()),
+                _ => ObjectSlot::Failed(error.to_string()),
+            },
+        };
+        self.objects.insert(id.clone(), slot);
+        if self.reload_again.remove(&id) {
+            self.reload_object(&id);
+        }
     }
 
     /// Fetch `id` fresh (not cached), e.g. for a one-off read.
-    pub fn fetch_object(&self, id: &str, cx: &App) -> Task<Result<Object>> {
-        io::spawn(cx, self.backend.object(id))
+    pub fn fetch_object(&self, id: &str) -> Task<Result<Object>> {
+        self.rt.background(self.backend.object(id))
     }
 
     // ---------------------------------------------------------------- queries
 
     /// `fetchQuery`: one page as the body asks.
-    pub fn query(&self, body: Json, cx: &App) -> Task<Result<QueryResult>> {
-        io::spawn(cx, self.backend.query(&body))
+    pub fn query(&self, body: Json) -> Task<Result<QueryResult>> {
+        self.rt.background(self.backend.query(&body))
     }
 
     /// `fetchAllQuery`: every match, a page at a time.
-    pub fn query_all(&self, body: Json, cx: &App) -> Task<Result<Vec<QueryRow>>> {
-        io::spawn(cx, query_all(self.backend.clone(), body))
+    pub fn query_all(&self, body: Json) -> Task<Result<Vec<QueryRow>>> {
+        self.rt.background(query_all(self.backend.clone(), body))
     }
 
     // -------------------------------------------------------------- mutations
@@ -455,41 +458,31 @@ impl Store {
     /// `/api/mutate` with `now_ms` and the wall-clock offset (`tz_offset_min`)
     /// the planner needs. A cached object named by `object_id` is refetched
     /// right away instead of waiting for its commit event.
-    pub fn mutate(
-        &self,
-        action: &str,
-        mut params: JsonMap,
-        cx: &mut Context<Self>,
-    ) -> Task<Result<JsonMap>> {
+    pub fn mutate(&self, action: &str, mut params: JsonMap) -> Task<Result<JsonMap>> {
         params.insert(
             "now_ms".into(),
             json!(chrono::Utc::now().timestamp_millis()),
         );
         params.insert("tz_offset_min".into(), json!(tz_offset_min()));
-        self.mutate_platform(action, params, cx)
+        self.mutate_platform(action, params)
     }
 
     /// `/api/mutate` exactly as given: the platform actions (`nostr_key_import`,
     /// `nostr_relays_set`) take no planner clock.
-    pub fn mutate_platform(
-        &self,
-        action: &str,
-        params: JsonMap,
-        cx: &mut Context<Self>,
-    ) -> Task<Result<JsonMap>> {
+    pub fn mutate_platform(&self, action: &str, params: JsonMap) -> Task<Result<JsonMap>> {
         let object_id = params
             .get("object_id")
             .and_then(Json::as_str)
             .map(str::to_string);
-        let task = io::spawn(cx, self.backend.mutate(action, params));
-        cx.spawn(async move |this, cx| {
+        let task = self.rt.background(self.backend.mutate(action, params));
+        self.rt.spawn(async move |cx| {
             let result = task.await;
             if result.is_ok()
                 && let Some(id) = object_id
             {
-                let _ = this.update(cx, |this, cx| {
-                    if this.objects.contains_key(&id) {
-                        this.reload_object(&id, cx);
+                cx.update(|s| {
+                    if s.store.objects.contains_key(&id) {
+                        s.store.reload_object(&id);
                     }
                 });
             }
@@ -582,9 +575,10 @@ pub fn tz_offset_min() -> i32 {
     chrono::Local::now().offset().local_minus_utc() / 60
 }
 
-/// `fetchAllQuery`: every match, a page at a time. Run it through [`io::spawn`].
+/// `fetchAllQuery`: every match, a page at a time. Run it through
+/// [`roostr_rt::Executor::background`].
 pub async fn query_all(backend: Arc<dyn Backend>, body: Json) -> Result<Vec<QueryRow>> {
-    let page = |offset: u64| -> io::BoxFuture<Result<QueryResult>> {
+    let page = |offset: u64| -> BoxFuture<Result<QueryResult>> {
         let mut body = body.clone();
         if let Some(map) = body.as_object_mut() {
             map.insert("offset".into(), json!(offset));

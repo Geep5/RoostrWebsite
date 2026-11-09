@@ -5,12 +5,11 @@
 use std::collections::HashMap;
 
 use anyhow::Result;
-use gpui_kit::{App, AppContext as _, Task};
+use roostr_rt::Task;
 use serde_json::json;
 
-use crate::api;
-use crate::store::Store;
 use crate::types::{Fields, Object, QueryRow, Value, field_str};
+use crate::{State, api};
 
 fn str_items(v: Option<&Value>) -> Vec<&str> {
     v.map(|v| {
@@ -44,7 +43,7 @@ fn flag(fields: &Fields, key: &str) -> bool {
 }
 
 /// Why `def` (a type, relation or tool object) can't be deleted, or "" when it can.
-pub fn deletion_blocker(def: &Object, cx: &mut App) -> Task<Result<String>> {
+pub fn deletion_blocker(def: &Object, s: &mut State) -> Task<Result<String>> {
     if def.type_key == "tool" {
         return Task::ready(Ok(if flag(&def.fields, "tool_builtin") {
             "Built into Roostr".into()
@@ -68,7 +67,7 @@ pub fn deletion_blocker(def: &Object, cx: &mut App) -> Task<Result<String>> {
         // A Skill names the property its result is written to ("Writes to").
         api::query_all(
             json!({ "filters": [{ "key": "jev_writes", "condition": "equal", "value": key }, { "key": "channel", "condition": "equal", "value": space }] }),
-            cx,
+            s,
         )
     });
     let kinds = if is_type {
@@ -78,10 +77,10 @@ pub fn deletion_blocker(def: &Object, cx: &mut App) -> Task<Result<String>> {
     };
     let rows = api::query_all(
         json!({ "filters": [{ "key": "typeKey", "condition": "in", "value": kinds }, { "key": "channel", "condition": "equal", "value": space }] }),
-        cx,
+        s,
     );
     let def_id = def.id.clone();
-    cx.background_spawn(async move {
+    s.rt.spawn(async move |_| {
         if let Some(writers) = writers
             && let Some(w) = writers.await?.first()
         {
@@ -117,8 +116,8 @@ pub fn deletion_blocker(def: &Object, cx: &mut App) -> Task<Result<String>> {
 }
 
 /// Blockers for a selection of object ids, keyed by id; absent ids are deletable.
-pub fn blockers_for(ids: &[String], cx: &mut App) -> Task<Result<HashMap<String, String>>> {
-    let store = Store::global(cx).read(cx);
+pub fn blockers_for(ids: &[String], s: &mut State) -> Task<Result<HashMap<String, String>>> {
+    let store = &s.store;
     let defs: Vec<String> = ids
         .iter()
         .filter(|id| {
@@ -126,17 +125,15 @@ pub fn blockers_for(ids: &[String], cx: &mut App) -> Task<Result<HashMap<String,
                 || store
                     .summaries
                     .iter()
-                    .any(|s| &s.id == *id && (s.type_key == "type" || s.type_key == "tool"))
+                    .any(|o| &o.id == *id && (o.type_key == "type" || o.type_key == "tool"))
         })
         .cloned()
         .collect();
-    cx.spawn(async move |cx| {
+    s.rt.spawn(async move |cx| {
         let mut out = HashMap::new();
         for id in defs {
-            let object = cx
-                .update(|cx| Store::global(cx).read(cx).fetch_object(&id, cx))
-                .await?;
-            let why = cx.update(|cx| deletion_blocker(&object, cx)).await?;
+            let object = cx.update(|s| s.store.fetch_object(&id)).await?;
+            let why = cx.update(|s| deletion_blocker(&object, s)).await?;
             if !why.is_empty() {
                 out.insert(id, why);
             }

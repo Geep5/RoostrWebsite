@@ -5,7 +5,7 @@
 //! tools use. Browser tabs pair instead ([`crate::web`]).
 //!
 //! The requests block; [`Backend`] futures run them when polled, which
-//! [`crate::io::spawn`] does on GPUI's background threads.
+//! [`roostr_rt::Executor::background`] does on its worker threads.
 
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
@@ -20,8 +20,8 @@ use ureq::Agent;
 use crate::backend::{
     Backend, BackendEvent, JsonMap, SseParser, encode_path_segment, mutate_result,
 };
-use crate::io::{BoxFuture, BoxStream, boxed, boxed_stream};
 use crate::types::{Object, ObjectSummary, QueryResult, RelationDef, Settings, Space};
+use roostr_rt::{BoxFuture, BoxStream, boxed, boxed_stream};
 
 pub const DEFAULT_API: &str = "http://127.0.0.1:7333";
 /// Objects with long histories serialize large; the default 10 MiB cap is too small.
@@ -242,35 +242,59 @@ impl Backend for DaemonBackend {
         Some(self.run(|c| c.get("/api/records/status")))
     }
 
-    /// A plain thread reads the stream (it blocks for the life of the
-    /// connection) and hands events over a channel; it ends with the
-    /// connection or once the receiver is gone.
+    /// Blocks while polled, for the life of the connection: the store reads
+    /// it through [`roostr_rt::background_stream`], whose thread ends with
+    /// the connection or once the receiver is gone.
     fn events(&self) -> BoxStream<Result<BackendEvent>> {
-        let (tx, rx) = futures::channel::mpsc::unbounded::<Result<BackendEvent>>();
-        let client = self.client.clone();
-        let spawned = std::thread::Builder::new()
-            .name("roostr-events".into())
-            .spawn({
-                let tx = tx.clone();
-                move || {
-                    let result =
-                        client.stream_events(&mut |event| tx.unbounded_send(Ok(event)).is_ok());
-                    if let Err(error) = result {
-                        let _ = tx.unbounded_send(Err(error));
-                    }
-                }
-            });
-        if let Err(error) = spawned {
-            let _ = tx.unbounded_send(Err(anyhow!("could not start the event reader: {error}")));
+        boxed_stream(futures::stream::iter(EventLines {
+            client: self.client.clone(),
+            lines: None,
+            parser: SseParser::default(),
+            done: false,
+        }))
+    }
+}
+
+/// The commit stream read line by line: the connection opens on the first
+/// read, and the stream ends after its one error.
+struct EventLines {
+    client: Arc<Client>,
+    lines: Option<std::io::Lines<BufReader<ureq::BodyReader<'static>>>>,
+    parser: SseParser,
+    done: bool,
+}
+
+impl Iterator for EventLines {
+    type Item = Result<BackendEvent>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.done {
+            return None;
         }
-        boxed_stream(rx)
+        let next = self.read();
+        self.done = next.is_err();
+        Some(next)
+    }
+}
+
+impl EventLines {
+    fn read(&mut self) -> Result<BackendEvent> {
+        let lines = match &mut self.lines {
+            Some(lines) => lines,
+            None => self.lines.insert(self.client.open_events()?.lines()),
+        };
+        for line in lines {
+            if let Some(event) = self.parser.line(&line?) {
+                return Ok(event);
+            }
+        }
+        bail!("The daemon closed the event stream")
     }
 }
 
 impl Client {
-    /// Blocks, delivering commit events until `on_event` returns `false`
-    /// (returns `Ok`) or the stream fails (returns `Err`).
-    fn stream_events(&self, on_event: &mut dyn FnMut(BackendEvent) -> bool) -> Result<()> {
+    /// Connect to `/api/events`; the body blocks between events.
+    fn open_events(&self) -> Result<BufReader<ureq::BodyReader<'static>>> {
         let response = self
             .stream_agent
             .get(self.url("/api/events"))
@@ -282,16 +306,7 @@ impl Client {
         if !status.is_success() {
             bail!("/api/events: {status}");
         }
-        let reader = BufReader::new(response.into_body().into_reader());
-        let mut parser = SseParser::default();
-        for line in reader.lines() {
-            if let Some(event) = parser.line(&line?)
-                && !on_event(event)
-            {
-                return Ok(());
-            }
-        }
-        bail!("The daemon closed the event stream")
+        Ok(BufReader::new(response.into_body().into_reader()))
     }
 }
 

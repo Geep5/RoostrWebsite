@@ -1,19 +1,18 @@
 //! This identity's Nostr profile (name + avatar) through the local harness
 //! (`client-profile.ts` in local mode: `GET`/`POST /profile`), or, in replica
 //! mode, straight from the relays (`engine/profile.ts`). The last answer is
-//! kept in a global entity so Settings and the rail avatar share it; observe
-//! [`ProfileCache::global`] to re-render when it changes.
+//! kept in [`crate::State::profile`] so Settings and the rail avatar share it.
 
 use std::sync::Arc;
 
 use anyhow::{Result, anyhow};
-use gpui_kit::{App, AppContext as _, Entity, Global, Image, Task};
+use roostr_rt::Task;
 use serde::Deserialize;
 use serde_json::{Value as Json, json};
 
-use crate::harness::{HarnessError, harness};
-use crate::io;
-use crate::ui::data_url_image;
+use crate::State;
+use crate::harness::HarnessError;
+use crate::objects::{DataImage, data_url_image};
 
 /// A Nostr kind-0 profile (`Profile` in engine/profile.ts).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
@@ -29,33 +28,10 @@ pub struct Profile {
 #[derive(Default)]
 pub struct ProfileCache {
     profile: Option<Profile>,
-    avatar: Option<Arc<Image>>,
-}
-
-struct GlobalProfile(Entity<ProfileCache>);
-
-impl Global for GlobalProfile {}
-
-/// Install the cache and fetch once when this app has a harness or an
-/// on-device account. Called by [`crate::init`].
-pub fn init(cx: &mut App) {
-    let cache = cx.new(|_| ProfileCache::default());
-    cx.set_global(GlobalProfile(cache));
-    if harness(cx).is_some() || crate::account::account(cx).is_some() {
-        cx.spawn(async move |cx| {
-            if let Err(error) = cx.update(fetch).await {
-                log::debug!("profile: {error:#}");
-            }
-        })
-        .detach();
-    }
+    avatar: Option<Arc<DataImage>>,
 }
 
 impl ProfileCache {
-    pub fn global(cx: &App) -> Entity<Self> {
-        cx.global::<GlobalProfile>().0.clone()
-    }
-
     /// `None` before the first answer.
     pub fn profile(&self) -> Option<&Profile> {
         self.profile.as_ref()
@@ -77,25 +53,21 @@ impl ProfileCache {
             .unwrap_or("")
     }
 
-    /// The avatar decoded, when it is a `data:image/` URL (render web URLs with `img(url)`).
-    pub fn avatar(&self) -> Option<Arc<Image>> {
+    /// The avatar's bytes, when it is a `data:image/` URL (load web URLs by address).
+    pub fn avatar(&self) -> Option<Arc<DataImage>> {
         self.avatar.clone()
     }
 }
 
 /// The profile as last fetched or saved, empty before the first answer.
-pub fn cached(cx: &App) -> Profile {
-    ProfileCache::global(cx)
-        .read(cx)
-        .profile
-        .clone()
-        .unwrap_or_default()
+pub fn cached(s: &State) -> Profile {
+    s.profile.profile.clone().unwrap_or_default()
 }
 
-fn remember(path: &'static str, body: Option<Json>, cx: &mut App) -> Task<Result<Profile>> {
-    let harness = harness(cx);
-    let account = crate::account::account(cx);
-    let request: Task<Result<Profile>> = io::spawn(cx, async move {
+fn remember(path: &'static str, body: Option<Json>, s: &mut State) -> Task<Result<Profile>> {
+    let harness = s.harness.clone();
+    let account = crate::account::account(s);
+    let request: Task<Result<Profile>> = s.rt.background(async move {
         if let Some(account) = account {
             let answer = match body {
                 Some(patch) => account.save_profile(patch).await?,
@@ -114,29 +86,27 @@ fn remember(path: &'static str, body: Option<Json>, cx: &mut App) -> Task<Result
         })?;
         Ok(serde_json::from_value::<Profile>(answer)?)
     });
-    cx.spawn(async move |cx| {
+    s.rt.spawn(async move |cx| {
         let profile = request.await?;
-        cx.update(|cx| {
-            ProfileCache::global(cx).update(cx, |cache, cx| {
-                if cache.profile.as_ref() != Some(&profile) {
-                    cache.avatar = profile.picture.as_deref().and_then(data_url_image);
-                    cache.profile = Some(profile.clone());
-                    cx.notify();
-                }
-            })
+        cx.update(|s| {
+            let cache = &mut s.profile;
+            if cache.profile.as_ref() != Some(&profile) {
+                cache.avatar = profile.picture.as_deref().and_then(data_url_image);
+                cache.profile = Some(profile.clone());
+            }
         });
         Ok(profile)
     })
 }
 
 /// `GET /profile`; updates the cache.
-pub fn fetch(cx: &mut App) -> Task<Result<Profile>> {
-    remember("/profile", None, cx)
+pub fn fetch(s: &mut State) -> Task<Result<Profile>> {
+    remember("/profile", None, s)
 }
 
 /// `POST /profile` with a patch (see [`patch`]); resolves to the merged profile and updates the cache.
-pub fn save(patch: Json, cx: &mut App) -> Task<Result<Profile>> {
-    remember("/profile", Some(patch), cx)
+pub fn save(patch: Json, s: &mut State) -> Task<Result<Profile>> {
+    remember("/profile", Some(patch), s)
 }
 
 /// `{name}` / `{picture}` patches ("" clears).

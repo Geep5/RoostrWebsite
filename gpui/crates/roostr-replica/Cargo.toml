@@ -16,6 +16,7 @@ roostr-core.workspace = true
 roostr-engine.workspace = true
 roostr-nostr.workspace = true
 roostr-replica-store.workspace = true
+roostr-rt.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

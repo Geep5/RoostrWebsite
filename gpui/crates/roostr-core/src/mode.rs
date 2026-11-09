@@ -71,8 +71,8 @@ pub fn save(mode: Mode) {
 }
 
 /// The mode of the running app: a replica holds its account on the device.
-pub fn current(cx: &gpui_kit::App) -> Mode {
-    if crate::account::account(cx).is_some() {
+pub fn current(s: &crate::State) -> Mode {
+    if crate::account::account(s).is_some() {
         Mode::Replica
     } else {
         Mode::Daemon
@@ -84,15 +84,17 @@ pub const REPLICA_FLAG: &str = "--replica";
 pub const DAEMON_FLAG: &str = "--daemon";
 
 /// Switch to `mode` now: remembered, then the page reloads (browser) or the
-/// app relaunches itself in that mode (desktop).
-pub fn switch(mode: Mode, cx: &mut gpui_kit::App) {
+/// app relaunches itself in that mode (desktop). True when the new instance
+/// is running and the caller must quit this one.
+#[must_use]
+pub fn switch(mode: Mode) -> bool {
     save(mode);
     #[cfg(target_family = "wasm")]
     {
-        let _ = cx;
         if let Some(window) = web_sys::window() {
             let _ = window.location().reload();
         }
+        false
     }
     #[cfg(not(target_family = "wasm"))]
     {
@@ -106,8 +108,11 @@ pub fn switch(mode: Mode, cx: &mut gpui_kit::App) {
         let relaunched = std::env::current_exe()
             .and_then(|exe| std::process::Command::new(exe).arg(flag).args(args).spawn());
         match relaunched {
-            Ok(_) => cx.quit(),
-            Err(error) => log::error!("cannot relaunch Roostr: {error}"),
+            Ok(_) => true,
+            Err(error) => {
+                log::error!("cannot relaunch Roostr: {error}");
+                false
+            }
         }
     }
 }

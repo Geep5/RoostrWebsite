@@ -7,7 +7,7 @@ use anyhow::Result;
 use serde_json::Value as Json;
 
 use crate::invite::SpaceJoinLink;
-use crate::io::{BoxFuture, MaybeSend, MaybeSync};
+use roostr_rt::{BoxFuture, MaybeSend, MaybeSync};
 
 pub trait Account: MaybeSend + MaybeSync {
     /// Settings → "Reveal private key": `(nsec, hex)`.
@@ -32,6 +32,6 @@ pub trait Account: MaybeSend + MaybeSync {
 }
 
 /// The running backend's on-device account; `None` with a daemon.
-pub fn account(cx: &gpui_kit::App) -> Option<std::sync::Arc<dyn Account>> {
-    crate::Store::try_global(cx)?.read(cx).backend().account()
+pub fn account(s: &crate::State) -> Option<std::sync::Arc<dyn Account>> {
+    s.store.backend().account()
 }

@@ -6,12 +6,12 @@
 //! ([`crate::types::SYSTEM_TYPE_KEYS`]).
 
 use anyhow::Result;
-use gpui_kit::{App, AppContext as _, Task};
+use roostr_rt::Task;
 use serde_json::json;
 
-use crate::api;
 use crate::backend::JsonMap;
 use crate::types::{QueryRow, field_str};
+use crate::{State, api};
 
 pub const DEVICE_TYPE: &str = "device";
 pub const DEVICE_ID_PREFIX: &str = "__device__:";
@@ -117,22 +117,22 @@ pub fn arrange(
 }
 
 /// Every device record of the account.
-pub fn list(cx: &App) -> Task<Result<Vec<DeviceRecord>>> {
-    let rows = api::query_all(json!({ "type": DEVICE_TYPE }), cx);
-    cx.background_spawn(async move { Ok(rows.await?.iter().map(DeviceRecord::from_row).collect()) })
+pub fn list(s: &State) -> Task<Result<Vec<DeviceRecord>>> {
+    let rows = api::query_all(json!({ "type": DEVICE_TYPE }), s);
+    s.rt.spawn(async move |_| Ok(rows.await?.iter().map(DeviceRecord::from_row).collect()))
 }
 
 /// A person's name for a device (`name_custom`: the device keeps it).
-pub fn rename(record_id: &str, name: &str, cx: &mut App) -> Task<Result<JsonMap>> {
+pub fn rename(record_id: &str, name: &str, s: &mut State) -> Task<Result<JsonMap>> {
     let mut params = JsonMap::new();
     params.insert("object_id".into(), json!(record_id));
     params.insert("name".into(), json!(name));
-    api::mutate("device_rename", params, cx)
+    api::mutate("device_rename", params, s)
 }
 
 /// Remove a device's record; the device writes it again the next time it runs.
-pub fn remove(record_id: &str, cx: &mut App) -> Task<Result<JsonMap>> {
-    api::note::delete(record_id, cx)
+pub fn remove(record_id: &str, s: &mut State) -> Task<Result<JsonMap>> {
+    api::note::delete(record_id, s)
 }
 
 #[cfg(test)]

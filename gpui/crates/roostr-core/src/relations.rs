@@ -2,12 +2,11 @@
 //! creatable formats, per-format empty values, and create-from-scratch.
 
 use anyhow::Result;
-use gpui_kit::{App, Task};
+use roostr_rt::Task;
 
-use crate::api;
-use crate::nav::Navigator;
 use crate::store::Store;
 use crate::types::{Fields, RelationDef, Value, field_str};
+use crate::{State, api};
 
 /// Keys that are never user-facing properties.
 pub const RESERVED_KEYS: &[&str] = &[
@@ -85,16 +84,15 @@ pub fn space_relations<'a>(relations: &'a [RelationDef], space_id: &str) -> Vec<
 }
 
 /// The active space id, falling back to the default (oldest) space.
-pub fn current_space_id(cx: &App) -> String {
-    let space = Navigator::global(cx).read(cx).space().to_string();
+pub fn current_space_id(s: &State) -> String {
+    let space = s.nav.space();
     if !space.is_empty() {
-        return space;
+        return space.to_string();
     }
-    Store::global(cx)
-        .read(cx)
+    s.store
         .channels
         .first()
-        .map(|s| s.id.clone())
+        .map(|c| c.id.clone())
         .unwrap_or_default()
 }
 
@@ -150,10 +148,10 @@ pub fn create_relation(
     format: &str,
     object_types: &[String],
     space_id: &str,
-    cx: &mut App,
+    s: &mut State,
 ) -> Task<Result<RelationDef>> {
     let key = slug_key(name);
-    let store = Store::global(cx).read(cx);
+    let store = &s.store;
     if let Some(existing) = space_relations(&store.relations, space_id)
         .into_iter()
         .find(|r| r.key == key)
@@ -182,7 +180,7 @@ pub fn create_relation(
             Value::values(limits.iter().map(Value::string).collect()),
         );
     }
-    let create = api::note::create(name, Some("relation"), Some(fields), cx);
+    let create = api::note::create(name, Some("relation"), Some(fields), s);
     let def = RelationDef {
         id: String::new(),
         key,
@@ -193,9 +191,9 @@ pub fn create_relation(
         object_types: (!limits.is_empty()).then_some(limits),
         ..RelationDef::default()
     };
-    cx.spawn(async move |cx| {
+    s.rt.spawn(async move |cx| {
         let id = create.await?;
-        cx.update(|cx| Store::global(cx).update(cx, |store, cx| store.refresh_all(cx)));
+        cx.update(|s| s.store.refresh_all());
         Ok(RelationDef { id, ..def })
     })
 }

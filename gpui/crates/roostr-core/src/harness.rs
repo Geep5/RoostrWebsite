@@ -11,17 +11,17 @@
 //! In the browser the tab's pairing session ([`crate::web`]) is already a UI
 //! session for the page's origin, which the browser sends.
 //!
-//! Requests are futures; run them with [`crate::io::spawn`] (they block on
-//! the desktop).
+//! Requests are futures; run them with [`roostr_rt::Executor::background`]
+//! (they block on the desktop). The app's harness is [`crate::State::harness`].
 
-use std::sync::Arc;
 #[cfg(not(target_family = "wasm"))]
-use std::{path::PathBuf, sync::Mutex, time::Duration};
+use std::{path::PathBuf, time::Duration};
 
 use anyhow::Result;
 #[cfg(not(target_family = "wasm"))]
 use anyhow::{Context as _, anyhow, bail};
-use gpui_kit::{App, Global};
+#[cfg(not(target_family = "wasm"))]
+use parking_lot::Mutex;
 #[cfg(not(target_family = "wasm"))]
 use serde::{Deserialize, Serialize};
 use serde_json::Value as Json;
@@ -56,16 +56,6 @@ pub struct Harness {
     session: Mutex<Option<Session>>,
     #[cfg(not(target_family = "wasm"))]
     session_path: Option<PathBuf>,
-}
-
-/// The harness client, when this app talks to a local daemon.
-pub struct GlobalHarness(pub Option<Arc<Harness>>);
-
-impl Global for GlobalHarness {}
-
-/// The harness for this computer, if any (none for a daemon-less backend).
-pub fn harness(cx: &App) -> Option<Arc<Harness>> {
-    cx.try_global::<GlobalHarness>().and_then(|g| g.0.clone())
 }
 
 /// A request that failed because nothing listens on the harness port.
@@ -157,7 +147,7 @@ impl Harness {
     /// A live UI session token, minting one when absent or expired.
     fn session_token(&self, force_new: bool) -> Result<String> {
         let now = chrono::Utc::now().timestamp_millis();
-        let mut guard = self.session.lock().expect("session lock");
+        let mut guard = self.session.lock();
         if !force_new
             && let Some(session) = guard.as_ref()
             && session.expires_at > now + 60_000
@@ -209,7 +199,7 @@ impl Harness {
     }
 
     /// One request with the UI session; a 401 re-mints the session once.
-    /// Blocks: polled on a background thread through [`crate::io::spawn`].
+    /// Blocks: polled on a worker thread through [`roostr_rt::Executor::background`].
     async fn send(
         &self,
         method: &str,

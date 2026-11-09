@@ -17,11 +17,11 @@
 //!   dismisses it.
 
 use anyhow::Result;
-use gpui_kit::{App, AppContext as _, Entity, EventEmitter, Global, Task};
+use roostr_rt::Task;
 use serde_json::json;
 
-use crate::api;
 use crate::types::{Fields, Object, QueryRow, Value, field_str};
+use crate::{State, api};
 
 pub const COVER: &str = "cover";
 pub const COVER_Y: &str = "cover_y";
@@ -115,7 +115,10 @@ pub fn generation(fields: &Fields) -> Option<Generation> {
         _ => None,
     };
     Some(Generation {
-        at: entries.get("at").and_then(Value::as_int).unwrap_or_default(),
+        at: entries
+            .get("at")
+            .and_then(Value::as_int)
+            .unwrap_or_default(),
         status,
         credential: entry_str(entries, "credential"),
         error: entry_str(entries, "error"),
@@ -126,13 +129,18 @@ pub fn generation(fields: &Fields) -> Option<Generation> {
 /// The `at` of the page's pending `cover_request`, if any.
 pub fn pending_request(fields: &Fields) -> Option<i64> {
     let entries = fields.get(REQUEST)?.entries()?;
-    Some(entries.get("at").and_then(Value::as_int).unwrap_or_default())
+    Some(
+        entries
+            .get("at")
+            .and_then(Value::as_int)
+            .unwrap_or_default(),
+    )
 }
 
 /// Ask the space's OpenAI computer for the page's new cover
 /// (`cover_request`): `prompt` painted as written, or "" to have the idea
 /// chosen from the page. The failure of an earlier try goes with it.
-pub fn request(object: &Object, prompt: &str, cx: &mut App) -> Task<Result<()>> {
+pub fn request(object: &Object, prompt: &str, s: &mut State) -> Task<Result<()>> {
     let entries = Fields::from([
         (
             "at".to_string(),
@@ -140,12 +148,12 @@ pub fn request(object: &Object, prompt: &str, cx: &mut App) -> Task<Result<()>> 
         ),
         ("prompt".to_string(), Value::string(prompt.trim())),
     ]);
-    let set = api::note::set_field(&object.id, REQUEST, Value::map(entries), cx);
+    let set = api::note::set_field(&object.id, REQUEST, Value::map(entries), s);
     let failed = object
         .fields
         .contains_key(GENERATION)
-        .then(|| api::note::delete_field(&object.id, GENERATION, cx));
-    cx.background_spawn(async move {
+        .then(|| api::note::delete_field(&object.id, GENERATION, s));
+    s.rt.spawn(async move |_| {
         if let Some(failed) = failed {
             failed.await?;
         }
@@ -154,10 +162,10 @@ pub fn request(object: &Object, prompt: &str, cx: &mut App) -> Task<Result<()>> 
 }
 
 /// Make File `file_id` the page's cover, focused in the middle.
-pub fn set_cover(object_id: &str, file_id: &str, cx: &mut App) -> Task<Result<()>> {
-    let cover = api::note::set_field(object_id, COVER, Value::link(file_id, COVER), cx);
-    let y = api::note::set_field(object_id, COVER_Y, Value::float(DEFAULT_Y as f64), cx);
-    cx.background_spawn(async move {
+pub fn set_cover(object_id: &str, file_id: &str, s: &mut State) -> Task<Result<()>> {
+    let cover = api::note::set_field(object_id, COVER, Value::link(file_id, COVER), s);
+    let y = api::note::set_field(object_id, COVER_Y, Value::float(DEFAULT_Y as f64), s);
+    s.rt.spawn(async move |_| {
         cover.await?;
         y.await?;
         Ok(())
@@ -165,16 +173,16 @@ pub fn set_cover(object_id: &str, file_id: &str, cx: &mut App) -> Task<Result<()
 }
 
 /// Save the cover's vertical focus.
-pub fn set_y(object_id: &str, y: f32, cx: &mut App) -> Task<Result<()>> {
-    let set = api::note::set_field(object_id, COVER_Y, Value::float(y.clamp(0., 1.) as f64), cx);
-    cx.background_spawn(async move { set.await.map(|_| ()) })
+pub fn set_y(object_id: &str, y: f32, s: &mut State) -> Task<Result<()>> {
+    let set = api::note::set_field(object_id, COVER_Y, Value::float(y.clamp(0., 1.) as f64), s);
+    s.rt.spawn(async move |_| set.await.map(|_| ()))
 }
 
 /// Take the cover off the page (its File stays, like any file).
-pub fn remove(object_id: &str, cx: &mut App) -> Task<Result<()>> {
-    let cover = api::note::delete_field(object_id, COVER, cx);
-    let y = api::note::delete_field(object_id, COVER_Y, cx);
-    cx.background_spawn(async move {
+pub fn remove(object_id: &str, s: &mut State) -> Task<Result<()>> {
+    let cover = api::note::delete_field(object_id, COVER, s);
+    let y = api::note::delete_field(object_id, COVER_Y, s);
+    s.rt.spawn(async move |_| {
         cover.await?;
         y.await?;
         Ok(())
@@ -182,16 +190,16 @@ pub fn remove(object_id: &str, cx: &mut App) -> Task<Result<()>> {
 }
 
 /// Dismiss the page's failed run (or stop waiting for one): its fields go.
-pub fn dismiss(object: &Object, cx: &mut App) -> Task<Result<()>> {
+pub fn dismiss(object: &Object, s: &mut State) -> Task<Result<()>> {
     let generation = object
         .fields
         .contains_key(GENERATION)
-        .then(|| api::note::delete_field(&object.id, GENERATION, cx));
+        .then(|| api::note::delete_field(&object.id, GENERATION, s));
     let request = object
         .fields
         .contains_key(REQUEST)
-        .then(|| api::note::delete_field(&object.id, REQUEST, cx));
-    cx.background_spawn(async move {
+        .then(|| api::note::delete_field(&object.id, REQUEST, s));
+    s.rt.spawn(async move |_| {
         for task in [generation, request].into_iter().flatten() {
             task.await?;
         }
@@ -224,15 +232,15 @@ pub fn pick_openai_credential(mut rows: Vec<QueryRow>) -> Option<OpenAiCredentia
 }
 
 /// Look up `space_id`'s OpenAI credential.
-pub fn openai_credential(space_id: &str, cx: &App) -> Task<Result<Option<OpenAiCredential>>> {
+pub fn openai_credential(space_id: &str, s: &State) -> Task<Result<Option<OpenAiCredential>>> {
     let rows = api::query_all(
         json!({
             "type": "credential",
             "filters": [{ "key": "channel", "condition": "equal", "value": space_id }],
         }),
-        cx,
+        s,
     );
-    cx.background_spawn(async move { Ok(pick_openai_credential(rows.await?)) })
+    s.rt.spawn(async move |_| Ok(pick_openai_credential(rows.await?)))
 }
 
 /// The phone's ⋯ menu asks the page showing `object_id` to open its cover menu.
@@ -241,30 +249,19 @@ pub struct CoverAsk {
     pub object_id: String,
 }
 
-/// Carries [`CoverAsk`]s from the shell's menus to the object page.
-pub struct CoverAsks;
-
-impl EventEmitter<CoverAsk> for CoverAsks {}
-
-struct GlobalCoverAsks(Entity<CoverAsks>);
-
-impl Global for GlobalCoverAsks {}
-
-impl CoverAsks {
-    pub fn init(cx: &mut App) {
-        let asks = cx.new(|_| Self);
-        cx.set_global(GlobalCoverAsks(asks));
-    }
-
-    pub fn global(cx: &App) -> Entity<Self> {
-        cx.global::<GlobalCoverAsks>().0.clone()
-    }
+/// Carries [`CoverAsk`]s from the shell's menus to the object page
+/// ([`crate::State::covers`]; listen with [`crate::State::on_cover_ask`]).
+#[derive(Default)]
+pub struct CoverAsks {
+    /// Asked, not yet handed to the listeners ([`State::poll`]).
+    pub(crate) asks: Vec<CoverAsk>,
 }
 
 /// Ask the page showing `object_id` to open its cover menu.
-pub fn ask(object_id: &str, cx: &mut App) {
-    let object_id = object_id.to_string();
-    CoverAsks::global(cx).update(cx, |_, cx| cx.emit(CoverAsk { object_id }));
+pub fn ask(object_id: &str, s: &mut State) {
+    s.covers.asks.push(CoverAsk {
+        object_id: object_id.to_string(),
+    });
 }
 
 #[cfg(test)]
@@ -320,7 +317,9 @@ mod tests {
         assert_eq!(g.error, NEEDS_KEY);
         assert!(!generating(&failed));
         // Asked, unanswered: coming. Answered by a run that paints: coming.
-        let asked = fields(json!({ "cover_request": { "mapValue": { "entries": { "at": { "intValue": 8 } } } } }));
+        let asked = fields(
+            json!({ "cover_request": { "mapValue": { "entries": { "at": { "intValue": 8 } } } } }),
+        );
         assert!(generating(&asked));
         let painting = fields(json!({ "cover_generation": { "mapValue": { "entries": {
             "at": { "intValue": 8 }, "status": { "stringValue": "painting" },
