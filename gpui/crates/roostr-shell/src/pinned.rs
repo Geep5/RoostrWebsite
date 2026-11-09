@@ -939,9 +939,10 @@ fn card(t: &Theme, key: String, current: bool) -> El {
         .cursor(Cursor::Pointer)
         .hover_group();
     if !current {
-        // The hover border, drawn over the resting one while the card is hovered.
+        // The hover border, drawn over the resting one while the card is hovered. It sits
+        // on the card's own edge: one point outside, the fold's clip cut its left side off.
         e = e.child(
-            el().pin(Some(-1.), Some(-1.), Some(-1.), Some(-1.))
+            el().pin(Some(0.), Some(0.), Some(0.), Some(0.))
                 .radius(radius::MENU)
                 .border(1., mix_srgb(t.border, 0.55, t.fg))
                 .group_opacity(0., 1.)

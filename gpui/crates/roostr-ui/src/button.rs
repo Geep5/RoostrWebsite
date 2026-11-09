@@ -748,7 +748,9 @@ impl Button {
                         Some(rems(2.0)),
                     ),
                 };
-                if let Some(h) = h {
+                if let Some(h) = h
+                    && !f.h_auto
+                {
                     e = e.h(h);
                 }
                 e = e.px(px);
