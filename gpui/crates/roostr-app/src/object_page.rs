@@ -318,7 +318,10 @@ pub(crate) fn pane(
 
 /// The window's logical size, as the shell's root last laid out.
 pub(crate) fn window_size(s: &State) -> [f32; 2] {
-    [roostr_shell::window_width(s), roostr_shell::window_height(s)]
+    [
+        roostr_shell::window_width(s),
+        roostr_shell::window_height(s),
+    ]
 }
 
 fn save_name(s: &mut State, id: &str) {
@@ -512,7 +515,7 @@ pub(crate) fn view(
                 let (size, icon_size) = if mobile { (56., 47.25) } else { (80., 72.) };
                 let shown = match images {
                     Some(images) => roostr_ui::emoji_or_image_icon(&icon, icon_size, images),
-                    None => text(icon.clone()).font(ty::ui(icon_size * 0.9).lh(icon_size)),
+                    None => roostr_ui::emoji_text(&icon, ty::ui(icon_size * 0.9).lh(icon_size)),
                 };
                 frame.size(size, size).child(shown)
             }

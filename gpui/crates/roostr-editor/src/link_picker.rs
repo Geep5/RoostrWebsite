@@ -260,7 +260,7 @@ pub(crate) fn link_picker_view(
             None => el()
                 .size(16., 16.)
                 .center()
-                .child(text(icon.clone()).font(ty::ui(16.))),
+                .child(roostr_ui::emoji_text(&icon, ty::ui(16.))),
         };
         let (press_oid, hover_oid, target) = (oid.clone(), oid.clone(), id.clone());
         list = list.child(

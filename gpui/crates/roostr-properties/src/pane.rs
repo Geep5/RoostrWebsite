@@ -744,6 +744,25 @@ fn shown(
     present
 }
 
+/// The "Properties" group: the type's own rows, then the shown rows outside "How it runs",
+/// the system properties first; within a rank they keep the space's relation order (the
+/// backend's list order), as GPUI's pane did.
+fn property_rows(own: &[RelationDef], shown: &[RelationDef]) -> Vec<RelationDef> {
+    let mut props: Vec<RelationDef> = own
+        .iter()
+        .filter(|r| !HOW_KEYS.contains(&r.key.as_str()))
+        .cloned()
+        .collect();
+    let mut rest: Vec<RelationDef> = shown
+        .iter()
+        .filter(|r| !HOW_KEYS.contains(&r.key.as_str()))
+        .cloned()
+        .collect();
+    rest.sort_by_key(|r| prop_rank(&r.key));
+    props.extend(rest);
+    props
+}
+
 fn judged(s: &State, object: &Object, key: &str) -> Option<Judged> {
     let e = object.field("judged")?.entries()?.get(key)?.entries()?;
     let text = if let Some(p) = e.get("probability").and_then(|v| v.float_value) {
@@ -1193,18 +1212,7 @@ pub fn properties_pane(
     how.extend(assignee);
     how.extend(check_first);
     how.extend(error);
-    let mut props: Vec<RelationDef> = own
-        .iter()
-        .filter(|r| !HOW_KEYS.contains(&r.key.as_str()))
-        .cloned()
-        .collect();
-    let mut rest: Vec<RelationDef> = shown
-        .iter()
-        .filter(|r| !HOW_KEYS.contains(&r.key.as_str()))
-        .cloned()
-        .collect();
-    rest.sort_by_key(|r| prop_rank(&r.key));
-    props.extend(rest);
+    let props = property_rows(&own, &shown);
 
     let ctx = RowCx {
         object: &object,
@@ -1591,7 +1599,7 @@ fn render_row(
                 format!("agentchip-{id}"),
                 tone,
                 false,
-                text(icon).font(ty::ui(12.0)),
+                roostr_ui::emoji_text(&icon, ty::ui(12.0)),
                 name,
             );
             // The chip opens the agent; the row around it edits the list.
@@ -2004,6 +2012,67 @@ mod tests {
         assert_eq!(plain_text(Some(&links)), "a, b");
         assert_eq!(plain_text(Some(&Value::float(2.0))), "2");
         assert!(plain_list(Some(&Value::string(""))).is_empty());
+    }
+
+    /// The Properties rows follow the backend's relation order within a rank (system
+    /// properties first), whatever that order is; a duplicate key's lower-id def keeps the
+    /// first one's place. GPUI showed this Matcherino task as Done, Status, Target List,
+    /// Customer, Draft doc, Invovles for the daemon's order below.
+    #[test]
+    fn property_rows_keep_the_backend_relation_order() {
+        let rel = |id: &str, key: &str, space: &str| RelationDef {
+            id: id.into(),
+            key: key.into(),
+            name: key.into(),
+            space: Some(space.into()),
+            ..Default::default()
+        };
+        let backend = vec![
+            rel("f07a", "target_list", "sp"),
+            rel("bundled-done", "done", "sp"),
+            rel("4f7e", "kb_status", "other"),
+            rel("a341", "customer", "sp"),
+            rel("e440", "draft_doc", "sp"),
+            rel("380d", "invovles", "sp"),
+            rel("bundled-status", "status", "sp"),
+            rel("0001", "target_list", "sp"),
+        ];
+        let relations: Vec<RelationDef> = space_relations(&backend, "sp")
+            .into_iter()
+            .cloned()
+            .collect();
+        assert_eq!(
+            relations[0].id, "0001",
+            "the lower id wins in the first one's place"
+        );
+        let mut o = Object {
+            type_key: "task".into(),
+            ..Object::default()
+        };
+        o.fields.insert("customer".into(), Value::string("x"));
+        o.fields.insert("draft_doc".into(), Value::string("x"));
+        let pane = PaneState {
+            view_keys: ["done", "status", "target_list", "invovles"]
+                .map(String::from)
+                .into(),
+            ..PaneState::default()
+        };
+        let shown = shown(&pane, &o, "task", &relations, &HashSet::new());
+        let keys: Vec<String> = property_rows(&[], &shown)
+            .into_iter()
+            .map(|r| r.key)
+            .collect();
+        assert_eq!(
+            keys,
+            [
+                "done",
+                "status",
+                "target_list",
+                "customer",
+                "draft_doc",
+                "invovles"
+            ]
+        );
     }
 
     #[test]

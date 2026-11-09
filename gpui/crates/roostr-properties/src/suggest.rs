@@ -763,7 +763,7 @@ impl TypeSuggest {
                         .child(
                             el().w(20.0)
                                 .center()
-                                .child(text(icon).font(ty::ui(13.0)).color(ink)),
+                                .child(roostr_ui::emoji_text(&icon, ty::ui(13.0)).color(ink)),
                         )
                         .child(
                             text(name)

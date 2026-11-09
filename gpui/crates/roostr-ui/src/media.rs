@@ -181,7 +181,8 @@ impl Images {
 }
 
 /// An object/space icon: an image for a web address or `data:image/` URL (rounded 4, cover),
-/// else the emoji/glyph text at 0.9 × `size` on a `size` line, centred in a `size` square.
+/// else the emoji/glyph text at 0.9 × `size` on a `size` line ([`emoji_text`]), centred in a
+/// `size` square.
 pub fn emoji_or_image_icon(icon: &str, size: f32, images: &Images) -> El {
     if is_image_icon(icon) {
         let frame = el().size(size, size);
@@ -195,16 +196,85 @@ pub fn emoji_or_image_icon(icon: &str, size: f32, images: &Images) -> El {
     row()
         .size(size, size)
         .center()
-        .child(text(icon.to_owned()).font(ty::ui(size * 0.9).lh(size)))
+        .child(emoji_text(icon, ty::ui(size * 0.9).lh(size)))
 }
 
-/// A row icon: an emoji/glyph as plain text in the row's `style`, or a `size` square image for
-/// a web address or `data:image/` URL.
+/// A row icon: an emoji/glyph as text in the row's `style` ([`emoji_text`]), or a `size`
+/// square image for a web address or `data:image/` URL.
 pub fn icon_text(icon: &str, size: f32, style: TextStyle, images: &Images) -> El {
     if is_image_icon(icon) {
         return emoji_or_image_icon(icon, size, images);
     }
-    text(icon.to_owned()).font(style)
+    emoji_text(icon, style)
+}
+
+/// `icon` as text in `style`, a colour emoji at the size macOS draws it in text of that size.
+///
+/// Text in the system font falls back to `.Apple Color Emoji UI`, which CoreText (and so GPUI)
+/// draws optically enlarged: 1.25 × the text size up to 16 pt, `12 + size / 2` up to 24 pt,
+/// the text size from there; the glyph advances about 1.1 × that plus a point. Rune draws
+/// the plain Apple Color Emoji face at 1 em, a fifth smaller than every emoji Roostr showed
+/// before, so an emoji icon is drawn here at the enlarged size in a box of its advance and
+/// `style`'s line height, its ink centred on the line as CoreText's. Other text, and every
+/// icon off macOS (the web's Twemoji is drawn at 1 em in a browser too), is plain `style` text.
+pub fn emoji_text(icon: &str, style: TextStyle) -> El {
+    if !cfg!(target_os = "macos") || !is_color_emoji(icon) {
+        return text(icon.to_owned()).font(style);
+    }
+    let (ink, advance) = (emoji_ink(style.size), emoji_advance(style.size));
+    let line = if style.line_height > 0. {
+        style.line_height
+    } else {
+        style.size * 1.25
+    };
+    // CoreText's ink starts 0.075 em into the advance; Apple Color Emoji's own at 0.
+    row()
+        .w(advance)
+        .h(line)
+        .pl(style.size * 0.075)
+        .center_y()
+        .child(text(icon.to_owned()).font(TextStyle {
+            size: ink,
+            line_height: line,
+            ..style
+        }))
+}
+
+/// The ink size of a colour emoji in macOS text of `size` (see [`emoji_text`]).
+fn emoji_ink(size: f32) -> f32 {
+    (size * 1.25).min(12. + size / 2.).max(size)
+}
+
+/// The advance of a colour emoji in macOS text of `size`, whole points as CoreText's.
+fn emoji_advance(size: f32) -> f32 {
+    (emoji_ink(size) * 1.1 + 1.2).floor()
+}
+
+/// Whether `s` is colour emoji only: every character an emoji presentation character, a
+/// pictograph outside the text planes, or a part of an emoji sequence (variation selector 16,
+/// zero-width joiner, keycap, tag), with at least one that asks for colour. A pictograph with
+/// a text form (`⛏`, `☀` without U+FE0F) stays text, as the system font draws it.
+pub fn is_color_emoji(s: &str) -> bool {
+    use icu_properties::CodePointSetData;
+    use icu_properties::props::{EmojiPresentation, ExtendedPictographic};
+    let presentation = CodePointSetData::new::<EmojiPresentation>();
+    let pictographic = CodePointSetData::new::<ExtendedPictographic>();
+    let keycap = s.contains('\u{20E3}');
+    let mut colour = false;
+    for c in s.chars() {
+        let wide = presentation.contains(c)
+            || c == '\u{FE0F}'
+            || c == '\u{20E3}'
+            || (c as u32 >= 0x1F000 && pictographic.contains(c));
+        colour |= wide;
+        let part = matches!(c, '\u{200D}' | '\u{FE0E}' | '\u{E0020}'..='\u{E007F}')
+            || pictographic.contains(c)
+            || (keycap && matches!(c, '0'..='9' | '#' | '*'));
+        if !wide && !part {
+            return false;
+        }
+    }
+    colour
 }
 
 #[cfg(test)]
@@ -217,6 +287,49 @@ mod tests {
         assert_eq!(prop_icon("whatever"), Glyph::PropText);
         assert_eq!(prop_line_icon("model", "text"), Glyph::PropCpu);
         assert_eq!(prop_line_icon("x", "date"), Glyph::PropDate);
+    }
+
+    #[test]
+    fn colour_emoji_are_told_from_text_glyphs() {
+        for e in [
+            "👑",
+            "🔍",
+            "✅",
+            "✋",
+            "🇺🇸",
+            "👋🏽",
+            "👨\u{200D}👩\u{200D}👧",
+            "❤\u{FE0F}",
+            "1\u{FE0F}\u{20E3}",
+            "🗺",
+        ] {
+            assert!(is_color_emoji(e), "{e}");
+        }
+        for t in ["⛏", "☀", "#", "A", "", "👑 Crown", "→"] {
+            assert!(!is_color_emoji(t), "{t}");
+        }
+    }
+
+    /// CoreText's `.Apple Color Emoji UI` sizes, measured with `CTLine` in the system font.
+    #[test]
+    fn emoji_sizes_follow_coretext() {
+        for (size, ink, advance) in [
+            (11., 13.75, 16.),
+            (12., 15., 17.),
+            (13., 16.25, 19.),
+            (15., 18.75, 21.),
+            (16., 20., 23.),
+            (17., 20.5, 23.),
+            (20., 22., 25.),
+            (24., 24., 27.),
+            (30., 30., 34.),
+        ] {
+            assert_eq!(
+                (emoji_ink(size), emoji_advance(size)),
+                (ink, advance),
+                "{size}"
+            );
+        }
     }
 
     #[test]

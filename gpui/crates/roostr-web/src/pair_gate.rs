@@ -236,7 +236,7 @@ fn key_section(g: &PairGate, t: &Theme) -> El {
     let mut section = col()
         .mt(18.)
         .pt(14.)
-        .border_sides([0., 1., 0., 0.], rgb(0x262628))
+        .border_sides([1., 0., 0., 0.], rgb(0x262628))
         .child(summary);
     if !g.key_open {
         return section;
@@ -244,12 +244,15 @@ fn key_section(g: &PairGate, t: &Theme) -> El {
     let busy = g.key_busy;
     let busy_label = |label: &'static str| if busy { "Pairing…" } else { label };
     let empty = g.key.value().trim().is_empty();
-    section = section.child(el().mt(10.).child(paragraph(
-        "Paste the private key of Roostr on this computer (nsec or 64-char hex): this tab signs a one-use challenge with it to pair. The key never leaves this device. Have desktop Roostr? Settings → Reveal private key.",
-        rgb(HINT),
-        12.,
-        19.,
-    )));
+    section = section.child(
+        paragraph(
+            "Paste the private key of Roostr on this computer (nsec or 64-char hex): this tab signs a one-use challenge with it to pair. The key never leaves this device. Have desktop Roostr? Settings → Reveal private key.",
+            rgb(HINT),
+            12.,
+            19.,
+        )
+        .mt(10.),
+    );
     if g.saved_key {
         section = section.child(
             el().mt(16.).child(
@@ -285,10 +288,7 @@ fn key_section(g: &PairGate, t: &Theme) -> El {
             ),
     );
     if !g.key_error.is_empty() {
-        section = section.child(
-            el().mt(14.)
-                .child(paragraph(&g.key_error, rgb(ALERT), 13.5, 22.)),
-        );
+        section = section.child(paragraph(&g.key_error, rgb(ALERT), 13.5, 22.).mt(14.));
     }
     section
 }
@@ -339,12 +339,18 @@ pub fn view(s: &State, cx: &mut Cx<State>, t: &'static Theme) -> El {
                         .color(rgb(LABEL)),
                 )
                 .child(
-                    el().px(12.)
+                    col()
+                        .px(12.)
                         .py(9.)
                         .radius(8.)
                         .border(1., rgb(0x262628))
                         .fill(rgb(0x121213))
-                        .child(text(shown).font(ty::mono(11.5)).color(rgb(0xe8d9a0))),
+                        .child(
+                            text(shown)
+                                .font(ty::mono(11.5))
+                                .color(rgb(0xe8d9a0))
+                                .wrap_anywhere(),
+                        ),
                 )
                 .child(
                     row()
@@ -425,12 +431,15 @@ pub fn view(s: &State, cx: &mut Cx<State>, t: &'static Theme) -> El {
             ),
     );
     card = card
-        .child(el().mt(16.).child(paragraph(
-            "No daemon? Use Roostr in this browser instead: it keeps its own replica and browser-owned identity, synced over your relays. Pairing never uploads or replaces that identity.",
-            rgb(HINT),
-            12.,
-            19.,
-        )))
+        .child(
+            paragraph(
+                "No daemon? Use Roostr in this browser instead: it keeps its own replica and browser-owned identity, synced over your relays. Pairing never uploads or replaces that identity.",
+                rgb(HINT),
+                12.,
+                19.,
+            )
+            .mt(16.),
+        )
         .child(
             el().mt(10.).child(
                 ghost(t, "use-replica", "Use Roostr in this browser")
@@ -443,10 +452,7 @@ pub fn view(s: &State, cx: &mut Cx<State>, t: &'static Theme) -> El {
         )
         .child(key_section(g, t));
     if !g.error.is_empty() {
-        card = card.child(
-            el().mt(14.)
-                .child(paragraph(&g.error, rgb(ALERT), 13.5, 22.)),
-        );
+        card = card.child(paragraph(&g.error, rgb(ALERT), 13.5, 22.).mt(14.));
     }
 
     let height = cx.layout_with("kit-root", |r| r[3]).unwrap_or(0.);

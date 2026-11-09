@@ -677,7 +677,7 @@ fn m_obj(s: &State, t: &Theme, icon: Option<String>, name: String) -> El {
     let icon = match icon {
         None => glyph(Glyph::Graph, 15.).color(t.fg),
         Some(icon) if is_image_icon(&icon) => emoji_or_image(s, &icon, 18.),
-        Some(icon) => text(icon).font(ty::ui(15.)).color(t.fg),
+        Some(icon) => roostr_ui::emoji_text(&icon, ty::ui(15.)).color(t.fg),
     };
     row()
         .pin(Some(0.), Some(0.), Some(0.), Some(0.))

@@ -252,7 +252,7 @@ pub(crate) fn link_names(s: &State, v: &Value) -> String {
 pub(crate) fn icon(s: &State, icon: &str, style: TextStyle) -> El {
     match s.get::<Images>() {
         Some(images) => icon_text(icon, style.size, style, images),
-        None => text(icon.to_string()).font(style),
+        None => roostr_ui::emoji_text(icon, style),
     }
 }
 

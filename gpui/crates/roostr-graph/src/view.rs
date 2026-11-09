@@ -1331,9 +1331,12 @@ fn world(page: &Page, b: &Built, labels: &Labels, geo: &Geo, sel_geo: &SelGeo) -
     world
 }
 
-/// The graph page for the active tab's `Route::Graph`: fills its parent.
+/// The graph page for the active tab's `Route::Graph`: the window's height
+/// less the header's, at least 400 pt (`GraphView::render`), as the page
+/// sits in the main column's scroll. Outside a window root (a bare host)
+/// it fills its parent.
 pub fn view(s: &State, cx: &mut Cx<State>) -> El {
-    let _ = cx;
+    let window_h = cx.layout_with("kit-root", |r| r[3]);
     let t = Theme::dark();
     let Some(key) = route_key(s) else {
         return el();
@@ -1345,13 +1348,11 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
         .key("graph-stage")
         .pin(Some(0.), Some(0.), Some(0.), Some(0.))
         .on_layout(move |s: &mut State, r| set_stage(s, &k, r));
-    let mut stage = el()
-        .key("graph")
-        .w_full()
-        .h_full()
-        .min_h(400.)
-        .radius(12.)
-        .clip_rounded(12.);
+    let stage = el().key("graph").w_full().radius(12.).clip_rounded(12.);
+    let mut stage = match window_h {
+        Some(h) => stage.h((h - 120.).max(400.)),
+        None => stage.h_full().min_h(400.),
+    };
     let Some(page) = page else {
         return stage.fill(hex(0x0c0e13, 1.)).child(surface);
     };

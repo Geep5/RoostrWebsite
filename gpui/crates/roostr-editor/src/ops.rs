@@ -920,9 +920,10 @@ impl Editor {
     // ───────────────────────────────────────────── spellcheck
 
     pub(crate) fn schedule_spell(&mut self, s: &mut State) {
-        // The web only checks editable text: a read-only body gets no spell marks.
-        // Where the platform checks spelling itself (macOS, Windows), the fields do.
-        if self.read_only || crate::render::NATIVE_SPELLCHECK {
+        // Roostr's bundled dictionary and the user's ignore list mark misspellings on every
+        // platform, as GPUI did; the fields' own (system) spellcheck stays off. Read-only
+        // bodies get no spell marks.
+        if self.read_only {
             return;
         }
         let oid = self.object_id.clone();

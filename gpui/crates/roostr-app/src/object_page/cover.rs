@@ -4,11 +4,11 @@
 //! Upload / Generate tabs, and Reposition / Remove for a page with a cover.
 //! Generating spins on the banner until the new image replaces the cover.
 
+use roostr_core::State;
 use roostr_core::cover;
 use roostr_core::create::add_failure_text;
 use roostr_core::nav::{Route, navigate};
 use roostr_core::types::Object;
-use roostr_core::State;
 use roostr_editor::PickedFile;
 use roostr_ui::overlay::{anchored, dismissable};
 use roostr_ui::ty::Weights as _;

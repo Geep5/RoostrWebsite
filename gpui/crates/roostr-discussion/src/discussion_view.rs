@@ -144,11 +144,7 @@ fn avatar(
     } else {
         frame
     };
-    frame.child(
-        text(icon.to_string())
-            .font(ty::ui(look.emoji).lh(look.size))
-            .color(t.white),
-    )
+    frame.child(roostr_ui::emoji_text(icon, ty::ui(look.emoji).lh(look.size)).color(t.white))
 }
 
 /// `HH:MM AM`, with the date before it when not today.
@@ -1094,7 +1090,7 @@ fn object_row(t: &Theme, images: Option<&Images>, icon: &str, name: &str, opened
             None => icon_el,
         }
     } else {
-        icon_el.child(text(icon.to_string()).font(ty::ui(13.)))
+        icon_el.child(roostr_ui::emoji_text(icon, ty::ui(13.)))
     };
     let mut r = row()
         .grow(1.)

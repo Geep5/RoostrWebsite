@@ -19,6 +19,7 @@
 
 #![cfg(target_family = "wasm")]
 
+mod gamma_canvas;
 mod pair_gate;
 mod router;
 
@@ -86,6 +87,7 @@ pub fn run(base: String) -> Result<(), JsValue> {
     };
     let emoji = format!("{base}/{}", roostr_ui::fonts::EMOJI_FONT_PATH);
     rune::App::new(spec)
+        .compositor(gamma_canvas::GammaCanvas::default())
         .font_url(&emoji)
         .init(move || start(base))
         .try_run()

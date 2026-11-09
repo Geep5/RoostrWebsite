@@ -73,7 +73,7 @@ pub(crate) fn type_limit_picker(
                     .child(
                         el().w(18.0)
                             .center()
-                            .child(text(icon).font(ty::ui(13.0)).color(t.fg)),
+                            .child(roostr_ui::emoji_text(&icon, ty::ui(13.0)).color(t.fg)),
                     )
                     .child(
                         text(name)

@@ -18,11 +18,6 @@ use crate::keys::{self, editor_key, row_key, text_key};
 use crate::look::{self, Look, Squiggle};
 use crate::toggles;
 
-/// Where the platform checks spelling in text fields itself (AppKit, Windows): the fields
-/// do it, with the system's suggestions in their menu. Elsewhere the editor's own
-/// dictionary underlines misspellings (`spellcheck.rs`).
-pub(crate) const NATIVE_SPELLCHECK: bool = cfg!(any(target_os = "macos", target_os = "windows"));
-
 /// How far past the window (in window heights) a long page still builds its blocks.
 const BUILD_MARGIN: f32 = 1.0;
 /// The window position steps that re-run the view while the page scrolls.
@@ -473,7 +468,7 @@ impl Editor {
         if self.read_only {
             return;
         }
-        if !NATIVE_SPELLCHECK && self.texts.contains_key(id) && self.open_spell_menu(id, s) {
+        if self.texts.contains_key(id) && self.open_spell_menu(id, s) {
             return;
         }
         if self.selected.len() > 1 {
@@ -568,7 +563,6 @@ fn rich_text(
     let (ko, ki) = (f.oid(), id.to_string());
     let (co, ci) = (f.oid(), id.to_string());
     let (po, pi) = (f.oid(), id.to_string());
-    let code = e.style_of(id) == Some(style::CODE);
     text_input(&live.edit, look.style)
         .key(text_key(id))
         .w_full()
@@ -578,7 +572,6 @@ fn rich_text(
         .placeholder(placeholder, t.muted.alpha(0.6))
         .rich_style(rich)
         .spans(paints)
-        .spellcheck(NATIVE_SPELLCHECK && !code)
         .on_edit(move |s: &mut State| edit_of(s, &eo, &ei))
         .on_input_key(move |s: &mut State, ev, tx| keys::input_key(s, &ko, &ki, ev, tx))
         .on_input_change(move |s: &mut State, _| keys::input_changed(s, &co, &ci))
@@ -1233,7 +1226,7 @@ fn render_link(block: &Block, meta: &BTreeMap<String, String>, f: &Frame, s: &St
     let images = s.get::<roostr_ui::Images>();
     let icon_el = match images {
         Some(images) => roostr_ui::emoji_or_image_icon(&icon, 18., images),
-        None => text(icon.clone()).font(ty::ui(16.)),
+        None => roostr_ui::emoji_text(&icon, ty::ui(16.)),
     };
     let open = target.id.clone();
     let click = move |s: &mut State, tx: &mut rune::Tx| {

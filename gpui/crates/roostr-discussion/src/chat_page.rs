@@ -60,7 +60,7 @@ pub fn chat_page(
             None => el().size(15., 15.),
         }
     } else {
-        text(icon).font(ty::ui(15.))
+        roostr_ui::emoji_text(&icon, ty::ui(15.))
     };
     // The round back button with the phone's back glyph.
     let back = Button::new("back")

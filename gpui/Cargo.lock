@@ -4275,6 +4275,7 @@ version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "chrono",
+ "icu_properties",
  "percent-encoding",
  "rune",
  "rune-kit",

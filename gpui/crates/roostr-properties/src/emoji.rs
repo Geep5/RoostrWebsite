@@ -377,7 +377,7 @@ impl EmojiPicker {
                 pick_el(
                     format!("emoji-{i}"),
                     emoji.clone(),
-                    text(emoji.clone()).font(ty::ui(19.0)),
+                    roostr_ui::emoji_text(emoji, ty::ui(19.0)),
                     name.clone(),
                 )
             }))

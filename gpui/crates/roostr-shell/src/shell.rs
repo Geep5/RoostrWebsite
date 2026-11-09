@@ -9,7 +9,7 @@ use roostr_core::types::Space;
 use roostr_core::{State, UiState};
 use roostr_rt::Task;
 use roostr_ui::{Glyph, Images, Theme, glyph, ty};
-use rune::{Cursor, El, TextStyle, el, row, text};
+use rune::{Cursor, El, TextStyle, el, row};
 
 use crate::Pages;
 
@@ -202,7 +202,7 @@ pub(crate) fn icon_text(s: &State, icon: &str, size: f32, style: TextStyle) -> E
     match s.get::<Images>() {
         Some(images) => roostr_ui::icon_text(icon, size, style, images),
         None if roostr_ui::is_image_icon(icon) => el().size(size, size),
-        None => text(icon.to_owned()).font(style),
+        None => roostr_ui::emoji_text(icon, style),
     }
 }
 
@@ -214,7 +214,7 @@ pub(crate) fn emoji_or_image(s: &State, icon: &str, size: f32) -> El {
         None => row()
             .size(size, size)
             .center()
-            .child(text(icon.to_owned()).font(ty::ui(size * 0.9).lh(size))),
+            .child(roostr_ui::emoji_text(icon, ty::ui(size * 0.9).lh(size))),
     }
 }
 

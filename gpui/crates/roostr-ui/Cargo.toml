@@ -11,6 +11,8 @@ rune-kit.workspace = true
 base64.workspace = true
 percent-encoding.workspace = true
 chrono.workspace = true
+# Emoji presentation, to draw colour emoji icons at macOS's text size (`media::emoji_text`).
+icu_properties = "2"
 
 [[example]]
 name = "gallery"
