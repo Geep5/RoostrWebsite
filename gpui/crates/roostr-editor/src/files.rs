@@ -6,6 +6,7 @@
 //! the harness (`POST /files`), which also uploads them to Blossom; this
 //! device's own replica encrypts and uploads them itself.
 
+use std::collections::BTreeMap;
 use std::path::Path;
 #[cfg(not(target_family = "wasm"))]
 use std::path::PathBuf;
@@ -14,14 +15,13 @@ use std::sync::Arc;
 #[cfg(not(target_family = "wasm"))]
 use anyhow::Context as _;
 use anyhow::{Result, anyhow};
-use gpui_kit::{App, ClipboardItem, Image, ImageFormat, Task};
-#[cfg(not(target_family = "wasm"))]
-use gpui_kit::{AppContext as _, PathPromptOptions};
-use roostr_core::Store;
+use roostr_core::State;
 use roostr_core::blossom;
 use roostr_core::harness::{self, Harness};
 use roostr_core::io;
 use roostr_core::types::{Fields, Value, field_str};
+use roostr_rt::Task;
+use rune::Tx;
 use serde::Deserialize;
 
 const NOT_RUNNING_TO_VIEW: &str = "Start Roostr on this computer to see this file.";
@@ -130,39 +130,51 @@ pub const CAN_PICK_FILES: bool = !io::WEB;
 /// Open the system file picker (`pickFile`). Resolves `None` when cancelled,
 /// and at once where there is no picker ([`CAN_PICK_FILES`]).
 #[cfg(target_family = "wasm")]
-pub fn pick_file(_cx: &App) -> Task<Option<PickedFile>> {
+pub fn pick_file(_s: &mut State) -> Task<Option<PickedFile>> {
     Task::ready(None)
 }
 
-/// Open the system file picker (`pickFile`). Resolves `None` when cancelled,
-/// and at once where there is no picker ([`CAN_PICK_FILES`]).
+/// Open the system file picker (`pickFile`, the app's [`State::pick_file`]
+/// hook) and read the chosen file. Resolves `None` when cancelled, when the
+/// file can't be read, and at once when the app installed no picker.
 #[cfg(not(target_family = "wasm"))]
-pub fn pick_file(cx: &App) -> Task<Option<PickedFile>> {
-    let rx = cx.prompt_for_paths(PathPromptOptions {
-        files: true,
-        directories: false,
-        multiple: false,
-        prompt: None,
-    });
-    cx.background_spawn(async move {
-        let path: PathBuf = rx.await.ok()?.ok()??.into_iter().next()?;
-        match read_path(&path) {
-            Ok(file) => Some(file),
-            Err(error) => {
-                log::warn!("{error:#}");
-                None
+pub fn pick_file(s: &mut State) -> Task<Option<PickedFile>> {
+    let Some(roostr_core::create::PickFile(pick)) = s.pick_file.clone() else {
+        return Task::ready(None);
+    };
+    let chosen = pick(s);
+    s.rt.spawn(async move |cx| {
+        let path: PathBuf = chosen.await?;
+        cx.background(async move {
+            match read_path(&path) {
+                Ok(file) => Some(file),
+                Err(error) => {
+                    log::warn!("{error:#}");
+                    None
+                }
             }
-        }
+        })
+        .await
     })
 }
 
-/// A pasted clipboard image as a file: screenshots arrive with no real name.
-pub fn pasted_image(image: &Image) -> PickedFile {
+/// The name a pasted image gets: screenshots arrive with no real name.
+fn pasted_name(extension: &str) -> String {
     let stamp = chrono::Local::now().format("%-m/%-d/%Y, %-I:%M:%S %p");
+    format!("Pasted image {stamp}.{extension}")
+}
+
+/// A pasted clipboard image as a file (Rune hands every pasted image over as PNG).
+pub fn pasted_image(image: &rune::ClipboardImage) -> PickedFile {
+    pasted_png(image.png().to_vec())
+}
+
+/// PNG bytes from the clipboard as a file.
+pub fn pasted_png(bytes: Vec<u8>) -> PickedFile {
     PickedFile {
-        name: format!("Pasted image {stamp}.{}", image.format.extension()),
-        mime: image.format.mime_type().to_string(),
-        bytes: image.bytes.clone(),
+        name: pasted_name("png"),
+        mime: "image/png".to_string(),
+        bytes,
     }
 }
 
@@ -193,24 +205,23 @@ pub async fn upload_to_harness(
 /// Add `file` to `space_id` (files.ts `uploadFile`): through this
 /// computer's harness when the app runs on a daemon, else - this device's
 /// own replica - encrypted straight to Blossom (`uploadToBlossom`).
-pub fn upload_file(file: PickedFile, space_id: String, cx: &mut App) -> Task<Result<Uploaded>> {
-    if let Some(harness) = harness::harness(cx) {
-        return io::spawn(cx, async move {
-            upload_to_harness(&harness, &file, &space_id).await
-        });
+pub fn upload_file(file: PickedFile, space_id: String, s: &mut State) -> Task<Result<Uploaded>> {
+    if let Some(harness) = s.harness.clone() {
+        return s
+            .rt
+            .background(async move { upload_to_harness(&harness, &file, &space_id).await });
     }
-    let Some(account) = roostr_core::account::account(cx) else {
+    let Some(account) = roostr_core::account::account(s) else {
         return Task::ready(Err(anyhow::Error::new(harness::Unreachable(
             "no harness".into(),
         ))));
     };
-    let relays = relays(cx);
+    let relays = relays(s);
     let name = file.name.clone();
     let mime = file.mime.clone();
-    let uploaded = io::spawn(cx, async move {
-        upload_to_blossom(&*account, &file, &relays).await
-    });
-    cx.spawn(async move |cx| {
+    let uploaded =
+        s.rt.background(async move { upload_to_blossom(&*account, &file, &relays).await });
+    s.rt.spawn(async move |cx| {
         let blob = uploaded.await?;
         let mut fields = Fields::new();
         fields.insert("file_hash".into(), Value::string(&blob.hash));
@@ -228,7 +239,7 @@ pub fn upload_file(file: PickedFile, space_id: String, cx: &mut App) -> Task<Res
             name.as_str()
         };
         let id = cx
-            .update(|cx| roostr_core::api::note::create(title, Some("file"), Some(fields), cx))
+            .update(|s| roostr_core::api::note::create(title, Some("file"), Some(fields), s))
             .await?;
         Ok(Uploaded {
             id,
@@ -318,146 +329,225 @@ pub async fn fetch_file_blob(
 /// The bytes a File block shows: its File object's, else (the File not
 /// synced here yet) the harness's by the block's hash. Resolves (bytes, mime).
 pub fn file_block_blob(
-    meta: &std::collections::BTreeMap<String, String>,
-    cx: &App,
+    meta: &BTreeMap<String, String>,
+    s: &State,
 ) -> Task<Result<(Vec<u8>, String)>> {
     let file_id = meta.get("fileId").cloned().unwrap_or_default();
     let fallback_hash = meta.get("hash").cloned().unwrap_or_default();
-    let fetch =
-        (!file_id.is_empty()).then(|| Store::global(cx).read(cx).fetch_object(&file_id, cx));
-    let relays = relays(cx);
-    let harness = harness::harness(cx);
-    io::spawn(cx, async move {
+    let fetch = (!file_id.is_empty()).then(|| s.store.fetch_object(&file_id));
+    let relays = relays(s);
+    let harness = s.harness.clone();
+    s.rt.spawn(async move |cx| {
         let fields = match fetch {
             Some(task) => task.await.ok().map(|o| o.fields),
             None => None,
         };
         let fields = fields.unwrap_or_else(|| {
             let mut f = Fields::new();
-            f.insert(
-                "file_hash".into(),
-                roostr_core::types::Value::string(fallback_hash),
-            );
+            f.insert("file_hash".into(), Value::string(fallback_hash));
             f
         });
-        fetch_file_blob(&fields, &relays, harness.as_deref()).await
+        cx.background(async move { fetch_file_blob(&fields, &relays, harness.as_deref()).await })
+            .await
     })
 }
 
-/// A File object's bytes as an image (a page's cover, a generated try):
-/// its fields, then its bytes the usual way.
-pub fn file_image(file_id: &str, cx: &App) -> Task<Result<Arc<Image>>> {
-    let fetch = Store::global(cx).read(cx).fetch_object(file_id, cx);
-    let relays = relays(cx);
-    let harness = harness::harness(cx);
-    io::spawn(cx, async move {
+/// A File object's bytes for an image (a page's cover, a generated try):
+/// its fields, then its bytes the usual way. Resolves (bytes, mime); an
+/// error when the File is not an image.
+pub fn file_image(file_id: &str, s: &State) -> Task<Result<(Vec<u8>, String)>> {
+    let fetch = s.store.fetch_object(file_id);
+    let relays = relays(s);
+    let harness = s.harness.clone();
+    s.rt.spawn(async move |cx| {
         let fields = fetch.await?.fields;
-        let (bytes, mime) = fetch_file_blob(&fields, &relays, harness.as_deref()).await?;
-        let format =
-            ImageFormat::from_mime_type(&mime).ok_or_else(|| anyhow!("{mime} is not an image"))?;
-        Ok(Arc::new(Image::from_bytes(format, bytes)))
+        let (bytes, mime) = cx
+            .background(async move { fetch_file_blob(&fields, &relays, harness.as_deref()).await })
+            .await?;
+        if !mime.to_ascii_lowercase().starts_with("image/") {
+            return Err(anyhow!("{mime} is not an image"));
+        }
+        Ok((bytes, mime))
     })
 }
 
 /// The identity's relays (Blossom server discovery).
-pub fn relays(cx: &App) -> Vec<String> {
-    Store::global(cx)
-        .read(cx)
+pub fn relays(s: &State) -> Vec<String> {
+    s.store
         .settings
         .as_ref()
-        .map(|s| s.relays.clone())
+        .map(|settings| settings.relays.clone())
         .unwrap_or_default()
+}
+
+/// `name`'s MIME type, `application/octet-stream` when unknown.
+#[cfg(target_family = "wasm")]
+fn download_mime(name: &str) -> String {
+    let mime = mime_for(name);
+    if mime.is_empty() {
+        "application/octet-stream".to_string()
+    } else {
+        mime
+    }
 }
 
 /// Save bytes under `name`: the browser's download.
 #[cfg(target_family = "wasm")]
-pub fn save_bytes(bytes: Vec<u8>, name: String, _cx: &App) -> Task<Result<()>> {
-    let mime = mime_for(&name);
-    let mime = if mime.is_empty() {
-        "application/octet-stream"
-    } else {
-        &mime
-    };
-    Task::ready(roostr_core::web::download(&bytes, &name, mime))
+pub fn save_bytes(bytes: Vec<u8>, name: String, _tx: &mut Tx) {
+    if let Err(error) = roostr_core::web::download(&bytes, &name, &download_mime(&name)) {
+        log::error!("{error:#}");
+    }
 }
 
-/// Save bytes under `name` where the person chooses (the browser's download).
+/// Save bytes under `name` where the person chooses: the system's Save
+/// dialog, opened in the Downloads folder with the name filled in.
 #[cfg(not(target_family = "wasm"))]
-pub fn save_bytes(bytes: Vec<u8>, name: String, cx: &App) -> Task<Result<()>> {
+pub fn save_bytes(bytes: Vec<u8>, name: String, tx: &mut Tx) {
+    tx.save_file(
+        save_options(name),
+        move |s: &mut State, result, _| match result {
+            Ok(Some(path)) => {
+                s.rt.background(async move { write_file(&path, &bytes) })
+                    .detach_and_log_err(&s.rt)
+            }
+            Ok(None) => {}
+            Err(error) => log::error!("save dialog: {error}"),
+        },
+    );
+}
+
+/// The Save dialog for a file named `name`, in the Downloads folder (else home).
+#[cfg(not(target_family = "wasm"))]
+fn save_options(name: String) -> rune::FileDialogOptions {
     let dir = dirs::download_dir()
         .or_else(dirs::home_dir)
         .unwrap_or_else(|| PathBuf::from("."));
-    let rx = cx.prompt_for_new_path(&dir, Some(&name));
-    cx.background_spawn(async move {
-        let Some(path) = rx.await.map_err(|_| anyhow!("cancelled"))?? else {
-            return Ok(());
-        };
-        std::fs::write(&path, bytes).with_context(|| format!("Could not save {}", path.display()))
-    })
+    rune::FileDialogOptions {
+        title: "Save".into(),
+        directory: Some(dir),
+        file_name: Some(name),
+        ..Default::default()
+    }
 }
 
-/// Save a File block's bytes under its name (`downloadFileBlock`).
+#[cfg(not(target_family = "wasm"))]
+fn write_file(path: &Path, bytes: &[u8]) -> Result<()> {
+    std::fs::write(path, bytes).with_context(|| format!("Could not save {}", path.display()))
+}
+
+/// Save a File block's bytes under its name (`downloadFileBlock`). The
+/// desktop asks where first (the Save dialog needs this handler's `tx`),
+/// then fetches and writes; the browser fetches, then downloads. A failed
+/// fetch or write reaches `on_error`; a cancelled dialog does nothing.
 pub fn download_file_block(
-    meta: &std::collections::BTreeMap<String, String>,
+    meta: &BTreeMap<String, String>,
     name: String,
-    cx: &mut App,
-) -> Task<Result<()>> {
-    let blob = file_block_blob(meta, cx);
-    cx.spawn(async move |cx| {
-        let (bytes, _) = blob.await?;
-        let save = cx.update(|cx| save_bytes(bytes, name, cx));
-        save.await
-    })
+    s: &mut State,
+    tx: &mut Tx,
+    on_error: impl FnOnce(&mut State, anyhow::Error) + 'static,
+) {
+    #[cfg(not(target_family = "wasm"))]
+    {
+        let _ = &s;
+        let meta = meta.clone();
+        tx.save_file(save_options(name), move |s: &mut State, result, _| {
+            let path = match result {
+                Ok(Some(path)) => path,
+                Ok(None) => return,
+                Err(error) => return on_error(s, anyhow!("{error}")),
+            };
+            let blob = file_block_blob(&meta, s);
+            s.rt.spawn(async move |cx| {
+                let saved = async {
+                    let (bytes, _) = blob.await?;
+                    cx.background(async move { write_file(&path, &bytes) })
+                        .await
+                }
+                .await;
+                if let Err(error) = saved {
+                    cx.update(|s| on_error(s, error));
+                }
+            })
+            .detach();
+        });
+    }
+    #[cfg(target_family = "wasm")]
+    {
+        let _ = tx;
+        let blob = file_block_blob(meta, s);
+        s.rt.spawn(async move |cx| {
+            let saved = blob.await.and_then(|(bytes, _)| {
+                roostr_core::web::download(&bytes, &name, &download_mime(&name))
+            });
+            if let Err(error) = saved {
+                cx.update(|s| on_error(s, error));
+            }
+        })
+        .detach();
+    }
 }
 
-/// Put an image block on the clipboard (`copyImageBlock`).
-pub fn copy_image_block(
-    meta: &std::collections::BTreeMap<String, String>,
-    cx: &mut App,
-) -> Task<Result<()>> {
-    let blob = file_block_blob(meta, cx);
-    cx.spawn(async move |cx| {
-        let (bytes, mime) = blob.await?;
-        let format = ImageFormat::from_mime_type(&mime)
-            .ok_or_else(|| anyhow!("could not convert the image to PNG"))?;
-        cx.update(|cx| {
-            cx.write_to_clipboard(ClipboardItem::new_image(&Image::from_bytes(format, bytes)))
-        });
-        Ok(())
-    })
+/// Put an image's bytes on the clipboard as PNG (`copyImageBlock`): other
+/// formats are decoded and encoded again.
+pub fn copy_image(bytes: &[u8], tx: &mut Tx) -> Result<()> {
+    let png = if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        bytes.to_vec()
+    } else {
+        let image = image::load_from_memory(bytes)
+            .map_err(|_| anyhow!("could not convert the image to PNG"))?;
+        let mut out = std::io::Cursor::new(Vec::new());
+        image
+            .write_to(&mut out, image::ImageFormat::Png)
+            .map_err(|_| anyhow!("could not convert the image to PNG"))?;
+        out.into_inner()
+    };
+    let image = rune::ClipboardImage::from_png(png)
+        .ok_or_else(|| anyhow!("could not convert the image to PNG"))?;
+    tx.copy_rich(rune::ClipboardContent::default().with_image(image));
+    Ok(())
 }
 
 /// Show the bytes in a new browser tab (the browser's viewer stands in for
 /// the system's).
 #[cfg(target_family = "wasm")]
-pub fn open_externally(bytes: Arc<Vec<u8>>, name: &str, _cx: &App) -> Task<Result<()>> {
-    let mime = mime_for(name);
-    let mime = if mime.is_empty() {
-        "application/octet-stream"
-    } else {
-        &mime
-    };
-    Task::ready(roostr_core::web::open_bytes(&bytes, mime))
+pub fn open_externally(bytes: Arc<Vec<u8>>, name: &str, _s: &State) -> Task<Result<()>> {
+    Task::ready(roostr_core::web::open_bytes(&bytes, &download_mime(name)))
 }
 
 /// Write bytes to a temp file named like the file and open it in its default app.
 #[cfg(not(target_family = "wasm"))]
-pub fn open_externally(bytes: Arc<Vec<u8>>, name: &str, cx: &App) -> Task<Result<()>> {
+pub fn open_externally(bytes: Arc<Vec<u8>>, name: &str, s: &State) -> Task<Result<()>> {
     let dir = std::env::temp_dir().join("roostr-files");
     let path = dir.join(sanitize(name));
-    let task = cx.background_spawn({
-        let path = path.clone();
-        async move {
-            std::fs::create_dir_all(&dir)?;
-            std::fs::write(&path, bytes.as_slice())?;
-            anyhow::Ok(())
-        }
-    });
-    cx.spawn(async move |cx| {
-        task.await?;
-        cx.update(|cx| cx.open_with_system(&path));
-        Ok(())
+    s.rt.background(async move {
+        std::fs::create_dir_all(&dir)?;
+        std::fs::write(&path, bytes.as_slice())?;
+        open_with_system(&path)
     })
+}
+
+/// Open `path` in the system's default app for it (Rune's `open_url` takes
+/// only web links, so this asks the platform's opener as GPUI did).
+#[cfg(not(target_family = "wasm"))]
+fn open_with_system(path: &Path) -> Result<()> {
+    #[cfg(target_os = "macos")]
+    let mut command = std::process::Command::new("open");
+    #[cfg(target_os = "windows")]
+    let mut command = {
+        let mut c = std::process::Command::new("cmd");
+        c.args(["/C", "start", ""]);
+        c
+    };
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    let mut command = std::process::Command::new("xdg-open");
+    let status = command
+        .arg(path)
+        .status()
+        .with_context(|| format!("Could not open {}", path.display()))?;
+    if !status.success() {
+        return Err(anyhow!("Could not open {}", path.display()));
+    }
+    Ok(())
 }
 
 #[cfg(not(target_family = "wasm"))]
@@ -511,5 +601,20 @@ mod tests {
         assert_eq!(human_size(1536.), "1.5 KB");
         assert_eq!(human_size(200. * 1024.), "200 KB");
         assert_eq!(human_size(5. * 1024. * 1024.), "5.0 MB");
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    #[test]
+    fn temp_names_stay_in_the_folder() {
+        assert_eq!(sanitize("a/b:c\\d"), "a_b_c_d");
+        assert_eq!(sanitize("  "), "file");
+    }
+
+    #[test]
+    fn pasted_images_are_named_png() {
+        let file = pasted_png(vec![1, 2, 3]);
+        assert!(file.name.starts_with("Pasted image "));
+        assert!(file.name.ends_with(".png"));
+        assert_eq!(file.mime, "image/png");
     }
 }

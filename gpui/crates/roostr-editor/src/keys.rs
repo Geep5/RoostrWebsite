@@ -1,26 +1,30 @@
 //! Keyboard, text input and mouse-in-text handling (`Editor.svelte`
 //! onKeydown / onBeforeInput / onSelect / selection provider).
+//!
+//! Each block's text is a Rune field: Rune types, moves the caret, selects,
+//! composes (IME), copies and cuts. The editor hears a field's keys first
+//! ([`input_key`]: Enter splits, Tab nests, Backspace at the start merges,
+//! arrows at the edges move between blocks, the mark and undo shortcuts),
+//! then every change Rune made ([`input_changed`]: marks follow, "/" opens
+//! the slash menu, "--- " makes a divider, typing saves), and once a frame
+//! where the keyboard is ([`on_poll`]: the block that holds the caret, the
+//! marks toolbar over a selection). With blocks selected the editor's own
+//! element has the keyboard ([`editor_key`]).
 
 use std::collections::HashSet;
-use std::ops::Range;
 
-use gpui_kit::*;
+use roostr_core::State;
 use roostr_core::types::{TextContent, mark, pos, style};
+use rune::{Chord, ClipboardContent, Key, KeyEvent, Tx};
 
 use crate::doc::Op;
 use crate::editor::{
-    DragSel, Editor, SelMode, Slash, StructuralKey, Toolbar, new_id, place, text_block,
-    text_content,
+    DragSel, Editor, Editors, SelMode, Slash, StructuralKey, Toolbar, new_id, place, text_block,
+    text_content, with_editor,
 };
 use crate::marks::{self, Span};
+use crate::text::MENTION_SCHEME;
 use crate::toggles;
-use crate::{
-    Backspace, Bold, CharacterPalette, Delete, DeleteLineLeft, DeleteLineRight, DeleteWordLeft,
-    DeleteWordRight, DocEnd, DocStart, Down, Enter, Escape, InlineCode, Italic, Left, LineEnd,
-    LineStart, Redo, Right, SelectAll, SelectDocEnd, SelectDocStart, SelectDown, SelectLeft,
-    SelectLineEnd, SelectLineStart, SelectRight, SelectUp, SelectWordLeft, SelectWordRight,
-    ShiftEnter, ShiftTab, Strikethrough, Tab, Underline, Undo, Up, WordLeft, WordRight,
-};
 
 const LIST: [u32; 4] = [
     style::BULLET,
@@ -30,123 +34,405 @@ const LIST: [u32; 4] = [
 ];
 const DIVIDERS: [&str; 3] = ["---", "—-", "***"];
 
+/// The element key of block `id`'s text field.
+pub(crate) fn text_key(id: &str) -> String {
+    format!("text-{id}")
+}
+
+/// The element key of block `id`'s row.
+pub(crate) fn row_key(id: &str) -> String {
+    format!("block-{id}")
+}
+
+/// The element key of `object_id`'s editor (it takes the keyboard while blocks are selected).
+pub(crate) fn editor_key(object_id: &str) -> String {
+    format!("ed-{object_id}")
+}
+
+fn chord(spec: &str) -> Chord {
+    Chord::parse(spec).expect("a valid chord")
+}
+
+/// Once a frame (`State::on_poll`): follow the keyboard between blocks in every open editor.
+pub(crate) fn on_poll(s: &mut State) -> bool {
+    let ids: Vec<String> = s
+        .get::<Editors>()
+        .map(|e| e.map.keys().cloned().collect())
+        .unwrap_or_default();
+    let mut changed = false;
+    for id in ids {
+        changed |= with_editor(s, &id, |e, s| e.poll(s)).unwrap_or(false);
+    }
+    changed
+}
+
+/// A key in block `id`'s focused field, before Rune's editing: true when the editor took it.
+pub(crate) fn input_key(s: &mut State, oid: &str, id: &str, ev: &KeyEvent, tx: &mut Tx) -> bool {
+    with_editor(s, oid, |e, s| e.input_key(id, ev, s, tx)).unwrap_or(false)
+}
+
+/// After Rune changed block `id`'s text.
+pub(crate) fn input_changed(s: &mut State, oid: &str, id: &str) {
+    with_editor(s, oid, |e, s| e.text_changed(id, s));
+}
+
+/// A paste into block `id`'s field: true when the editor took it (blocks, images, a URL).
+pub(crate) fn input_paste(
+    s: &mut State,
+    oid: &str,
+    id: &str,
+    content: &ClipboardContent,
+    tx: &mut Tx,
+) -> bool {
+    with_editor(s, oid, |e, s| e.paste_into(id, content, s, tx)).unwrap_or(false)
+}
+
+/// A press on a link or mention in a block's text: a mention opens its object, a web link
+/// opens in the browser (only http(s), mailto and tel).
+pub(crate) fn open_link(s: &mut State, url: &str, tx: &mut Tx) {
+    if let Some(target) = url.strip_prefix(MENTION_SCHEME) {
+        roostr_core::nav::navigate(roostr_core::Route::Object(target.to_string()), s);
+        return;
+    }
+    // The stored param is the URL itself (the web decodes its attribute back to it).
+    let raw = url.trim().to_string();
+    let has_scheme =
+        regex::Regex::new(r"^[a-zA-Z][a-zA-Z0-9+.-]*:").is_ok_and(|re| re.is_match(&raw));
+    let href = if has_scheme {
+        raw
+    } else {
+        format!("https://{raw}")
+    };
+    let lower = href.to_lowercase();
+    if lower.starts_with("http:")
+        || lower.starts_with("https:")
+        || lower.starts_with("mailto:")
+        || lower.starts_with("tel:")
+    {
+        if let Err(error) = tx.open_url(&href) {
+            log::warn!("[editor] could not open {href}: {error}");
+        }
+    }
+}
+
+/// A key while the editor itself has the keyboard (blocks selected, no caret).
+pub(crate) fn editor_keys(s: &mut State, oid: &str, ev: &KeyEvent, tx: &mut Tx) -> bool {
+    with_editor(s, oid, |e, s| e.selection_key(ev, s, tx)).unwrap_or(false)
+}
+
 impl Editor {
-    /// The editor itself (not a menu's input inside it) has keyboard focus.
-    fn keys_here(&self, window: &Window) -> bool {
-        self.focus_handle.is_focused(window)
+    /// A table cell (a text block under a table row): its own keys apply.
+    pub(crate) fn is_cell(&self, id: &str) -> bool {
+        crate::doc::parent_of(&self.blocks, id).is_some_and(|p| p.content.table_row.is_some())
     }
 
     pub(crate) fn composing(&self) -> bool {
         self.active
             .as_ref()
             .and_then(|id| self.texts.get(id))
-            .is_some_and(|t| t.marked.is_some())
+            .is_some_and(|t| t.composing())
     }
 
-    /// A table cell (a text block under a table row): its own keys apply.
-    pub(crate) fn is_cell(&self, id: &str) -> bool {
-        crate::doc::parent_of(&self.blocks, id).is_some_and(|p| p.content.table_row.is_some())
+    // ───────────────────────────────────────────── where the keyboard is
+
+    /// Follow Rune's focus: the block whose field has the keyboard holds the
+    /// caret (leaving a block saves its typing), a ranged selection shows the
+    /// marks toolbar, and a pending caret request lands once its block exists.
+    pub(crate) fn poll(&mut self, s: &mut State) -> bool {
+        let mut changed = false;
+        if let Some((id, offset)) = self.focus_request.clone()
+            && self.texts.contains_key(&id)
+        {
+            self.focus_request = None;
+            self.focus_block(&id, offset, s);
+            changed = true;
+        }
+        let focused = self
+            .texts
+            .iter()
+            .find(|(_, t)| t.focused())
+            .map(|(id, _)| id.clone());
+        if focused != self.active {
+            changed = true;
+            if let Some(old) = self.active.take() {
+                self.flush_save(&old, s);
+            }
+            match focused {
+                Some(id) => {
+                    self.selected.clear();
+                    self.focus_self = false;
+                    self.last_focused = id.clone();
+                    self.active = Some(id);
+                }
+                None => {
+                    // The editor lost the keyboard (the web's blur).
+                    self.toolbar = None;
+                    self.sync_texts();
+                }
+            }
+        }
+        let want = self.active.as_deref().and_then(|id| {
+            let t = self.texts.get(id)?;
+            let sel = t.sel();
+            (!sel.is_empty() && !self.read_only && !self.is_cell(id)).then(|| Toolbar {
+                block: id.to_string(),
+                from: sel.start,
+                to: sel.end,
+            })
+        });
+        if want.is_none() {
+            self.toolbar_dismissed = None;
+        }
+        if want != self.toolbar && (want.is_none() || want != self.toolbar_dismissed) {
+            self.toolbar = want;
+            changed = true;
+        }
+        if let Some(id) = self.active.clone()
+            && let Some(slash) = &self.slash
+            && slash.block == id
+        {
+            let before = (slash.filter.clone(), slash.start);
+            self.update_slash(&id);
+            changed |= self
+                .slash
+                .as_ref()
+                .is_none_or(|sl| (sl.filter.clone(), sl.start) != before);
+        }
+        changed
     }
 
-    /// Run `f` for a key the editor owns; anything else keeps propagating.
-    fn with_key(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-        f: impl FnOnce(&mut Self, &mut Window, &mut Context<Self>),
-    ) {
-        if !self.keys_here(window) || self.read_only {
-            cx.propagate();
+    // ───────────────────────────────────────────── keys in a field
+
+    fn input_key(&mut self, id: &str, ev: &KeyEvent, s: &mut State, tx: &mut Tx) -> bool {
+        if self.read_only {
+            return false;
+        }
+        if self.active.as_deref() != Some(id) {
+            self.active = Some(id.to_string());
+        }
+        let m = ev.mods;
+        let plain = !m.shift && !m.cmd && !m.alt && !m.ctrl;
+        if chord("mod+z").matches_tx(ev, tx) {
+            self.undo_redo(false, s);
+            return true;
+        }
+        if chord("mod+shift+z").matches_tx(ev, tx)
+            || (!cfg!(target_os = "macos") && chord("ctrl+y").matches_tx(ev, tx))
+        {
+            self.undo_redo(true, s);
+            return true;
+        }
+        for (spec, kind) in [
+            ("mod+b", mark::BOLD),
+            ("mod+i", mark::ITALIC),
+            ("mod+u", mark::UNDERLINE),
+            ("mod+shift+s", mark::STRIKETHROUGH),
+            ("mod+e", mark::INLINE_CODE),
+        ] {
+            if chord(spec).matches_tx(ev, tx) {
+                self.apply_mark(id, kind, None, s);
+                return true;
+            }
+        }
+        if self.composing() {
+            return false;
+        }
+        match &ev.key {
+            Key::Enter if plain => {
+                if self.slash_owns_key() {
+                    self.slash_confirm(s);
+                } else {
+                    self.structural(StructuralKey::Enter, s);
+                }
+                self.reveal(tx);
+                true
+            }
+            Key::Tab if !m.cmd && !m.alt && !m.ctrl => {
+                if !m.shift && self.slash_owns_key() {
+                    self.slash_confirm(s);
+                } else {
+                    self.structural(StructuralKey::Tab { shift: m.shift }, s);
+                }
+                self.reveal(tx);
+                true
+            }
+            Key::Backspace => {
+                let Some(t) = self.texts.get(id) else {
+                    return false;
+                };
+                if t.sel() == (0..0) && !self.is_cell(id) {
+                    self.backspace_at_start(id, s);
+                    self.reveal(tx);
+                    return true;
+                }
+                false
+            }
+            Key::Escape => {
+                if self.slash.is_some() {
+                    self.slash = None;
+                    return true;
+                }
+                if self.paste_menu.is_some() || self.spell_menu.is_some() {
+                    self.paste_menu = None;
+                    self.spell_menu = None;
+                    return true;
+                }
+                self.toolbar_dismissed = self.toolbar.take();
+                self.selected.clear();
+                true
+            }
+            Key::Up | Key::Down if !m.cmd && !m.alt && !m.ctrl => {
+                let down = ev.key == Key::Down;
+                if !m.shift && self.slash_owns_key() {
+                    if let Some(k) = self.slash_move(if down { 1 } else { -1 }) {
+                        tx.scroll_into_view(k);
+                    }
+                    return true;
+                }
+                let Some(t) = self.texts.get(id) else {
+                    return false;
+                };
+                let sel = t.sel();
+                let at_edge = if down {
+                    sel.end == t.text().len()
+                } else {
+                    sel.start == 0
+                };
+                if !(at_edge && !m.shift && !self.is_cell(id)) {
+                    return false;
+                }
+                let flat = self.flat_text();
+                let idx = flat.iter().position(|x| x == id).unwrap_or(0);
+                let next = if down {
+                    flat.get(idx + 1)
+                } else {
+                    idx.checked_sub(1).and_then(|i| flat.get(i))
+                };
+                if let Some(next) = next.cloned() {
+                    let offset = if down {
+                        0
+                    } else {
+                        self.texts.get(&next).map_or(0, |t| t.text().len())
+                    };
+                    self.focus_block(&next, offset, s);
+                    tx.scroll_into_view(&row_key(&next));
+                }
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Scroll the block with the caret into view after a key moved it.
+    fn reveal(&self, tx: &mut Tx) {
+        if let Some((id, _)) = &self.focus_request {
+            tx.scroll_into_view(&row_key(id));
+        } else if let Some(id) = &self.active {
+            tx.scroll_into_view(&row_key(id));
+        }
+    }
+
+    /// Rune changed block `id`'s text (typing, IME commit, paste, cut, deletion).
+    fn text_changed(&mut self, id: &str, s: &mut State) {
+        if self.read_only {
             return;
         }
-        f(self, window, cx);
-        self.caret_on = true;
-        cx.notify();
+        let cell = self.is_cell(id);
+        let Some(t) = self.texts.get_mut(id) else {
+            return;
+        };
+        let Some(change) = t.sync() else { return };
+        // A space after ---, —- or *** (the whole line) makes a divider.
+        if change.inserted == " "
+            && !cell
+            && DIVIDERS.contains(&change.before.trim())
+            && self.convert_to_divider(id, &change.before, s)
+        {
+            return;
+        }
+        // The slash menu opens only at the start of a line or after a space,
+        // newline, "(", "[", '"' or "'" - never inside a word ("and/or").
+        let start = change.removed.start;
+        let opens = change.inserted == "/" && !cell && {
+            let before = change.before[..start.min(change.before.len())]
+                .chars()
+                .next_back();
+            self.style_of(id) != Some(style::CODE)
+                && (start == 0 || matches!(before, Some(' ' | '\n' | '(' | '[' | '"' | '\'')))
+        };
+        self.on_input(id, s);
+        if opens {
+            self.slash = Some(Slash {
+                block: id.to_string(),
+                start,
+                filter: String::new(),
+                selected: 0,
+            });
+        }
+    }
+
+    /// After typing: slash filter, debounced save, spelling, lint.
+    pub(crate) fn on_input(&mut self, id: &str, s: &mut State) {
+        if self.composing() {
+            return;
+        }
+        self.update_slash(id);
+        self.toolbar = None;
+        self.schedule_save(id, s);
+        self.schedule_spell(s);
+        self.schedule_lint(s);
+    }
+
+    /// Replace `range` of a block's live text from code: the edit path for menus and paste.
+    pub(crate) fn edit(
+        &mut self,
+        id: &str,
+        range: std::ops::Range<usize>,
+        new: &str,
+        s: &mut State,
+    ) {
+        let Some(t) = self.texts.get_mut(id) else {
+            return;
+        };
+        t.replace(range, new);
+        self.on_input(id, s);
     }
 
     // ───────────────────────────────────────────── structural keys
 
-    pub(crate) fn on_enter(&mut self, _: &Enter, window: &mut Window, cx: &mut Context<Self>) {
-        self.with_key(window, cx, |this, window, cx| {
-            if this.slash_owns_key() {
-                this.slash_confirm(window, cx);
-                return;
-            }
-            if this.active.is_none() || this.composing() {
-                return;
-            }
-            this.structural(StructuralKey::Enter, cx);
-        });
-    }
-
-    pub(crate) fn on_shift_enter(
-        &mut self,
-        _: &ShiftEnter,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.with_key(window, cx, |this, _, cx| {
-            if this.active.is_some() && !this.composing() {
-                this.insert_text(None, "\n", cx);
-            }
-        });
-    }
-
-    pub(crate) fn on_tab(&mut self, _: &Tab, window: &mut Window, cx: &mut Context<Self>) {
-        self.with_key(window, cx, |this, window, cx| {
-            if this.slash_owns_key() {
-                this.slash_confirm(window, cx);
-                return;
-            }
-            if this.active.is_some() && !this.composing() {
-                this.structural(StructuralKey::Tab { shift: false }, cx);
-            }
-        });
-    }
-
-    pub(crate) fn on_shift_tab(
-        &mut self,
-        _: &ShiftTab,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.with_key(window, cx, |this, _, cx| {
-            if this.active.is_some() && !this.composing() {
-                this.structural(StructuralKey::Tab { shift: true }, cx);
-            }
-        });
-    }
-
     /// Enter and Tab reshape the tree: while an async structural op runs, a
     /// key queues and replays (in order) on whatever line has the caret.
-    fn structural(&mut self, key: StructuralKey, cx: &mut Context<Self>) {
+    fn structural(&mut self, key: StructuralKey, s: &mut State) {
         if self.structural_busy {
             self.structural_queue.push_back(key);
             return;
         }
-        self.run_structural(key, cx);
+        self.run_structural(key, s);
     }
 
-    pub(crate) fn run_structural(&mut self, key: StructuralKey, cx: &mut Context<Self>) {
+    pub(crate) fn run_structural(&mut self, key: StructuralKey, s: &mut State) {
         let Some(id) = self.active.clone() else {
             self.structural_queue.clear();
             return;
         };
         if self.is_cell(&id) {
-            self.cell_key(&id, key, cx);
+            self.cell_key(&id, key, s);
             return;
         }
         match key {
-            StructuralKey::Enter => self.enter(&id, cx),
-            StructuralKey::Tab { shift } => self.tab(&id, shift, cx),
+            StructuralKey::Enter => self.enter(&id, s),
+            StructuralKey::Tab { shift } => self.tab(&id, shift, s),
         }
     }
 
     /// TableBlock cellKeydown: Enter commits, Tab / Shift-Tab walk cells row-major.
-    fn cell_key(&mut self, id: &str, key: StructuralKey, cx: &mut Context<Self>) {
+    fn cell_key(&mut self, id: &str, key: StructuralKey, s: &mut State) {
         match key {
             StructuralKey::Enter => {
-                self.flush_save(id, cx);
+                self.flush_save(id, s);
+                if let Some(t) = self.texts.get_mut(id) {
+                    t.edit.focused = false;
+                }
                 self.active = None;
                 self.sync_texts();
             }
@@ -160,7 +446,7 @@ impl Editor {
                 }
                 let (nr, nc) = (flat as usize / cols.len(), flat as usize % cols.len());
                 let next = format!("{}-{}", rows[nr], cols[nc]);
-                self.focus_block(&next, 0, cx);
+                self.focus_block(&next, 0, s);
             }
         }
     }
@@ -181,7 +467,7 @@ impl Editor {
 
     /// Anytype markdown: a line of exactly ---, —- or *** becomes a divider
     /// (*** gives dots), and a fresh paragraph takes the caret.
-    fn convert_to_divider(&mut self, id: &str, text: &str, cx: &mut Context<Self>) -> bool {
+    fn convert_to_divider(&mut self, id: &str, text: &str, s: &mut State) -> bool {
         if !DIVIDERS.contains(&text.trim()) || self.style_of(id) == Some(style::CODE) {
             return false;
         }
@@ -200,16 +486,21 @@ impl Editor {
                 },
             ],
             true,
-            cx,
+            s,
         );
-        self.focus_block(&new, 0, cx);
+        self.focus_block(&new, 0, s);
         true
     }
 
-    fn enter(&mut self, id: &str, cx: &mut Context<Self>) {
+    fn enter(&mut self, id: &str, s: &mut State) {
         // Enter inside a code block inserts a newline, never splits.
         if self.style_of(id) == Some(style::CODE) {
-            self.insert_text(None, "\n", cx);
+            if let Some(t) = self.texts.get_mut(id) {
+                let sel = t.sel();
+                t.edit.set_selection(sel.start, sel.end);
+                t.edit.insert("\n");
+            }
+            self.text_changed(id, s);
             return;
         }
         if self.block(id).is_none() {
@@ -217,13 +508,13 @@ impl Editor {
                 "[editor] block {} vanished from state before the split; re-reading",
                 &id[..id.len().min(8)]
             );
-            self.refresh(cx).detach();
+            self.refresh(s).detach();
             return;
         }
-        let at = self.texts.get(id).map_or(0, |t| t.sel.start);
+        let at = self.texts.get(id).map_or(0, |t| t.sel().start);
         let (text, spans) = self.live(id);
         let at = at.min(text.len());
-        if self.convert_to_divider(id, &text, cx) {
+        if self.convert_to_divider(id, &text, s) {
             return;
         }
         let cur_style = self.style_of(id).unwrap_or(style::PARAGRAPH);
@@ -232,7 +523,7 @@ impl Editor {
         let is_callout = cur_style == style::CALLOUT;
         let is_header = matches!(cur_style, style::HEADER1 | style::HEADER2 | style::HEADER3);
         let can_toggle = cur_style == style::TOGGLE;
-        let is_open = can_toggle && toggles::is_toggle_open(&self.object_id, id, cx);
+        let is_open = can_toggle && toggles::is_toggle_open(&self.object_id, id, &s.ui);
         let kids = self
             .block(id)
             .map(|b| b.children_ids.clone())
@@ -244,8 +535,8 @@ impl Editor {
         // Enter on an EMPTY list/quote/callout item: nested under a list item
         // it outdents; anywhere else it turns into a paragraph in place.
         if text.is_empty() && (is_list || is_quote || is_callout) {
-            if parent_style.is_some_and(|s| LIST.contains(&s))
-                && self.outdent_block(id, 0, "", &[], cx)
+            if parent_style.is_some_and(|ps| LIST.contains(&ps))
+                && self.outdent_block(id, 0, "", &[], s)
             {
                 return;
             }
@@ -260,20 +551,20 @@ impl Editor {
                     content: text_content("", &[], style::PARAGRAPH, false, color),
                 }],
                 true,
-                cx,
+                s,
             );
-            self.focus_block(id, 0, cx);
+            self.focus_block(id, 0, s);
             return;
         }
 
         // A closed toggle never splits: at the end it takes a paragraph below,
         // at the start (with children) one above. A callout at the end too.
         if (can_toggle && !is_open && at_end) || (is_callout && at_end) {
-            self.add_sibling(id, pos::BOTTOM, style::PARAGRAPH, cx);
+            self.add_sibling(id, pos::BOTTOM, style::PARAGRAPH, s);
             return;
         }
         if can_toggle && !is_open && !kids.is_empty() && at == 0 {
-            self.add_sibling(id, pos::TOP, style::PARAGRAPH, cx);
+            self.add_sibling(id, pos::TOP, style::PARAGRAPH, s);
             return;
         }
 
@@ -289,7 +580,7 @@ impl Editor {
                 .unwrap_or_default();
             if nested
                 && siblings.last().map(String::as_str) == Some(id)
-                && self.outdent_block(id, 0, "", &[], cx)
+                && self.outdent_block(id, 0, "", &[], s)
             {
                 return;
             }
@@ -368,10 +659,10 @@ impl Editor {
                     },
                 ],
                 true,
-                cx,
+                s,
             );
             self.set_live(id, tail, tail_marks);
-            self.focus_block(id, 0, cx);
+            self.focus_block(id, 0, s);
             return;
         }
 
@@ -408,10 +699,10 @@ impl Editor {
                 },
             ],
             true,
-            cx,
+            s,
         );
         self.set_live(id, head, head_marks);
-        self.focus_block(&new, 0, cx);
+        self.focus_block(&new, 0, s);
     }
 
     /// Anytype onTabBlock shift: the block becomes the sibling right below its
@@ -422,7 +713,7 @@ impl Editor {
         caret: usize,
         live_text: &str,
         live_spans: &[Span],
-        cx: &mut Context<Self>,
+        s: &mut State,
     ) -> bool {
         let parent = self.parent_id_of(id);
         if parent.is_empty() || parent == "__content__" {
@@ -445,14 +736,14 @@ impl Editor {
                 },
             );
         }
-        self.commit(ops, true, cx);
+        self.commit(ops, true, s);
         self.set_live(id, live_text.to_string(), live_spans.to_vec());
-        self.focus_block(id, caret, cx);
+        self.focus_block(id, caret, s);
         true
     }
 
     /// Anytype blockCreate: an empty text block above/below, caret in it.
-    pub(crate) fn add_sibling(&mut self, id: &str, position: u32, st: u32, cx: &mut Context<Self>) {
+    pub(crate) fn add_sibling(&mut self, id: &str, position: u32, st: u32, s: &mut State) {
         let new = new_id();
         self.cancel_pending(id);
         self.commit(
@@ -461,17 +752,17 @@ impl Editor {
                 at: place(id, position),
             }],
             true,
-            cx,
+            s,
         );
-        self.focus_block(&new, 0, cx);
+        self.focus_block(&new, 0, s);
     }
 
-    fn tab(&mut self, id: &str, shift: bool, cx: &mut Context<Self>) {
-        let at = self.texts.get(id).map_or(0, |t| t.sel.start);
+    fn tab(&mut self, id: &str, shift: bool, s: &mut State) {
+        let at = self.texts.get(id).map_or(0, |t| t.sel().start);
         // A move carries no text: capture the live text into state + the write.
         let (text, spans) = self.live(id);
         if shift {
-            self.outdent_block(id, at, &text, &spans, cx);
+            self.outdent_block(id, at, &text, &spans, s);
             return;
         }
         let parent = self.parent_id_of(id);
@@ -482,7 +773,7 @@ impl Editor {
                 .map(|b| b.children_ids.clone())
                 .unwrap_or_default()
         };
-        let Some(idx) = siblings.iter().position(|s| s == id) else {
+        let Some(idx) = siblings.iter().position(|x| x == id) else {
             return;
         };
         if idx == 0 {
@@ -492,7 +783,7 @@ impl Editor {
         self.cancel_pending(id);
         // Tucking under a closed toggle would make the block vanish.
         if self.style_of(&prev) == Some(style::TOGGLE) {
-            toggles::set_toggle_open(&self.object_id, &prev, true, cx);
+            toggles::set_toggle_open(&self.object_id, &prev, true, &mut s.ui);
         }
         let content = self.content_for(id, &text, &spans);
         self.commit(
@@ -507,136 +798,16 @@ impl Editor {
                 },
             ],
             true,
-            cx,
+            s,
         );
         self.set_live(id, text, spans);
-        self.focus_block(id, at, cx);
+        self.focus_block(id, at, s);
     }
 
     // ───────────────────────────────────────────── deletion
 
-    pub(crate) fn on_backspace(
-        &mut self,
-        _: &Backspace,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.with_key(window, cx, |this, _, cx| {
-            if this.active.is_none() {
-                this.delete_selection_blocks(cx);
-                return;
-            }
-            let id = this.active.clone().unwrap_or_default();
-            let Some(t) = this.texts.get(&id) else { return };
-            if t.sel == (0..0) && !this.is_cell(&id) {
-                this.backspace_at_start(&id, cx);
-                return;
-            }
-            let range = if t.sel.is_empty() {
-                t.prev_boundary(t.sel.start)..t.sel.start
-            } else {
-                t.sel.clone()
-            };
-            this.edit(&id, range, "", cx);
-        });
-    }
-
-    pub(crate) fn on_delete(&mut self, _: &Delete, window: &mut Window, cx: &mut Context<Self>) {
-        self.with_key(window, cx, |this, _, cx| {
-            if this.active.is_none() {
-                this.delete_selection_blocks(cx);
-                return;
-            }
-            let id = this.active.clone().unwrap_or_default();
-            let Some(t) = this.texts.get(&id) else { return };
-            let range = if t.sel.is_empty() {
-                t.sel.start..t.next_boundary(t.sel.start)
-            } else {
-                t.sel.clone()
-            };
-            this.edit(&id, range, "", cx);
-        });
-    }
-
-    pub(crate) fn on_delete_word_left(
-        &mut self,
-        _: &DeleteWordLeft,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.delete_by(window, cx, |t| t.prev_word(t.sel.start)..t.sel.end, true);
-    }
-
-    pub(crate) fn on_delete_line_left(
-        &mut self,
-        _: &DeleteLineLeft,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.delete_by(
-            window,
-            cx,
-            |t| t.text[..t.sel.start].rfind('\n').map_or(0, |i| i + 1)..t.sel.end,
-            true,
-        );
-    }
-
-    pub(crate) fn on_delete_word_right(
-        &mut self,
-        _: &DeleteWordRight,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.delete_by(window, cx, |t| t.sel.start..t.next_word(t.sel.end), false);
-    }
-
-    pub(crate) fn on_delete_line_right(
-        &mut self,
-        _: &DeleteLineRight,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.delete_by(
-            window,
-            cx,
-            |t| {
-                t.sel.start
-                    ..t.text[t.sel.end..]
-                        .find('\n')
-                        .map_or(t.text.len(), |i| t.sel.end + i)
-            },
-            false,
-        );
-    }
-
-    fn delete_by(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-        range: impl FnOnce(&crate::text::TextState) -> Range<usize>,
-        backward: bool,
-    ) {
-        self.with_key(window, cx, |this, _, cx| {
-            let Some(id) = this.active.clone() else {
-                this.delete_selection_blocks(cx);
-                return;
-            };
-            let Some(t) = this.texts.get(&id) else { return };
-            if backward && t.sel == (0..0) && !this.is_cell(&id) {
-                this.backspace_at_start(&id, cx);
-                return;
-            }
-            let r = if t.sel.is_empty() {
-                range(t)
-            } else {
-                t.sel.clone()
-            };
-            this.edit(&id, r, "", cx);
-        });
-    }
-
     /// Backspace at offset 0: first demote the style, then merge into the previous text block.
-    fn backspace_at_start(&mut self, id: &str, cx: &mut Context<Self>) {
+    fn backspace_at_start(&mut self, id: &str, s: &mut State) {
         let Some(cur) = self.text_of(id).cloned() else {
             return;
         };
@@ -655,9 +826,9 @@ impl Editor {
                     ),
                 }],
                 true,
-                cx,
+                s,
             );
-            self.focus_block(id, 0, cx);
+            self.focus_block(id, 0, s);
             return;
         }
         let flat = self.flat_text();
@@ -687,14 +858,14 @@ impl Editor {
                 Op::Remove { id: id.to_string() },
             ],
             true,
-            cx,
+            s,
         );
         self.set_live(&prev_id, merged, merged_spans);
-        self.focus_block(&prev_id, shift, cx);
+        self.focus_block(&prev_id, shift, s);
     }
 
     /// Delete the block selection (Backspace/Delete with blocks selected).
-    pub(crate) fn delete_selection_blocks(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn delete_selection_blocks(&mut self, s: &mut State) {
         if self.selected.is_empty() {
             return;
         }
@@ -706,453 +877,18 @@ impl Editor {
         self.commit(
             tops.into_iter().map(|id| Op::Remove { id }).collect(),
             true,
-            cx,
+            s,
         );
-    }
-
-    /// Replace `range` of a block's live text: the one typing path.
-    pub(crate) fn edit(
-        &mut self,
-        id: &str,
-        range: Range<usize>,
-        new: &str,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(t) = self.texts.get_mut(id) else {
-            return;
-        };
-        t.replace(range, new);
-        t.marked = None;
-        self.on_input(id, cx);
-    }
-
-    /// After typing: slash filter, debounced save, spelling, lint.
-    pub(crate) fn on_input(&mut self, id: &str, cx: &mut Context<Self>) {
-        if self.composing() {
-            return;
-        }
-        self.update_slash(id);
-        self.toolbar = None;
-        self.schedule_save(id, cx);
-        self.schedule_spell(cx);
-        self.schedule_lint(cx);
-        self.restart_blink(cx);
-        cx.notify();
-    }
-
-    /// Insert typed text at the selection (or `range`): "/" may open the
-    /// slash menu, a space after ---/***/—- makes a divider.
-    pub(crate) fn insert_text(
-        &mut self,
-        range_utf16: Option<Range<usize>>,
-        new: &str,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(id) = self.active.clone() else {
-            return;
-        };
-        let cell = self.is_cell(&id);
-        let Some(t) = self.texts.get(&id) else { return };
-        let range = range_utf16
-            .map(|r| t.range_from_utf16(&r))
-            .or(t.marked.clone())
-            .unwrap_or(t.sel.clone());
-        let composing = t.marked.is_some();
-        let text = t.text.clone();
-        if new == " "
-            && !composing
-            && !cell
-            && DIVIDERS.contains(&text.trim())
-            && self.convert_to_divider(&id, &text, cx)
-        {
-            return;
-        }
-        // The slash menu opens only at the start of a line or after a space,
-        // newline, "(", "[", '"' or "'" - never inside a word ("and/or").
-        let opens = new == "/" && !composing && !cell && !self.read_only && {
-            let start = range.start.min(text.len());
-            let before = text[..start].chars().next_back();
-            self.style_of(&id) != Some(style::CODE)
-                && (start == 0 || matches!(before, Some(' ' | '\n' | '(' | '[' | '"' | '\'')))
-        };
-        let start = range.start;
-        self.edit(&id, range, new, cx);
-        if opens {
-            self.slash = Some(Slash {
-                block: id,
-                start,
-                filter: String::new(),
-                pos: None,
-                cmd: None,
-            });
-        }
-    }
-
-    // ───────────────────────────────────────────── caret movement
-
-    fn move_caret(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-        select: bool,
-        to: impl FnOnce(&Self, &str, &crate::text::TextState) -> usize,
-    ) {
-        self.with_key(window, cx, |this, _, cx| {
-            let Some(id) = this.active.clone() else {
-                return;
-            };
-            let Some(t) = this.texts.get(&id) else { return };
-            let target = to(this, &id, t);
-            let t = this.texts.get_mut(&id).expect("active text");
-            if select {
-                t.select_to(target);
-            } else {
-                t.move_to(target);
-            }
-            this.on_selection_changed(&id, cx);
-        });
-    }
-
-    pub(crate) fn on_left(&mut self, _: &Left, window: &mut Window, cx: &mut Context<Self>) {
-        self.move_caret(window, cx, false, |_, _, t| {
-            if t.sel.is_empty() {
-                t.prev_boundary(t.cursor())
-            } else {
-                t.sel.start
-            }
-        });
-    }
-
-    pub(crate) fn on_right(&mut self, _: &Right, window: &mut Window, cx: &mut Context<Self>) {
-        self.move_caret(window, cx, false, |_, _, t| {
-            if t.sel.is_empty() {
-                t.next_boundary(t.cursor())
-            } else {
-                t.sel.end
-            }
-        });
-    }
-
-    pub(crate) fn on_select_left(
-        &mut self,
-        _: &SelectLeft,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.move_caret(window, cx, true, |_, _, t| t.prev_boundary(t.cursor()));
-    }
-
-    pub(crate) fn on_select_right(
-        &mut self,
-        _: &SelectRight,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.move_caret(window, cx, true, |_, _, t| t.next_boundary(t.cursor()));
-    }
-
-    pub(crate) fn on_word_left(
-        &mut self,
-        _: &WordLeft,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.move_caret(window, cx, false, |_, _, t| t.prev_word(t.cursor()));
-    }
-
-    pub(crate) fn on_word_right(
-        &mut self,
-        _: &WordRight,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.move_caret(window, cx, false, |_, _, t| t.next_word(t.cursor()));
-    }
-
-    pub(crate) fn on_select_word_left(
-        &mut self,
-        _: &SelectWordLeft,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.move_caret(window, cx, true, |_, _, t| t.prev_word(t.cursor()));
-    }
-
-    pub(crate) fn on_select_word_right(
-        &mut self,
-        _: &SelectWordRight,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.move_caret(window, cx, true, |_, _, t| t.next_word(t.cursor()));
-    }
-
-    pub(crate) fn on_line_start(
-        &mut self,
-        _: &LineStart,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.move_caret(window, cx, false, |this, id, t| {
-            this.row_edge(id, t.cursor(), false)
-        });
-    }
-
-    pub(crate) fn on_line_end(&mut self, _: &LineEnd, window: &mut Window, cx: &mut Context<Self>) {
-        self.move_caret(window, cx, false, |this, id, t| {
-            this.row_edge(id, t.cursor(), true)
-        });
-    }
-
-    pub(crate) fn on_select_line_start(
-        &mut self,
-        _: &SelectLineStart,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.move_caret(window, cx, true, |this, id, t| {
-            this.row_edge(id, t.cursor(), false)
-        });
-    }
-
-    pub(crate) fn on_select_line_end(
-        &mut self,
-        _: &SelectLineEnd,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.move_caret(window, cx, true, |this, id, t| {
-            this.row_edge(id, t.cursor(), true)
-        });
-    }
-
-    pub(crate) fn on_doc_start(
-        &mut self,
-        _: &DocStart,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.move_caret(window, cx, false, |_, _, _| 0);
-    }
-
-    pub(crate) fn on_doc_end(&mut self, _: &DocEnd, window: &mut Window, cx: &mut Context<Self>) {
-        self.move_caret(window, cx, false, |_, _, t| t.text.len());
-    }
-
-    pub(crate) fn on_select_doc_start(
-        &mut self,
-        _: &SelectDocStart,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.move_caret(window, cx, true, |_, _, _| 0);
-    }
-
-    pub(crate) fn on_select_doc_end(
-        &mut self,
-        _: &SelectDocEnd,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.move_caret(window, cx, true, |_, _, t| t.text.len());
-    }
-
-    pub(crate) fn on_select_all(
-        &mut self,
-        _: &SelectAll,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.with_key(window, cx, |this, _, cx| {
-            let Some(id) = this.active.clone() else {
-                return;
-            };
-            if let Some(t) = this.texts.get_mut(&id) {
-                t.sel = 0..t.text.len();
-                t.reversed = false;
-            }
-            this.on_selection_changed(&id, cx);
-        });
-    }
-
-    /// Start or end of the visual row holding `at`.
-    fn row_edge(&self, id: &str, at: usize, end: bool) -> usize {
-        let layouts = self.layouts.borrow();
-        let Some(layout) = layouts.get(id) else {
-            return if end {
-                self.texts.get(id).map_or(0, |t| t.text.len())
-            } else {
-                0
-            };
-        };
-        let p = layout.position_for_index(at);
-        let x = if end {
-            layout.bounds.right() + px(10_000.)
-        } else {
-            layout.bounds.left() - px(10_000.)
-        };
-        layout.index_for_point(point(x, p.y + layout.line_height / 2.))
-    }
-
-    pub(crate) fn on_up(&mut self, _: &Up, window: &mut Window, cx: &mut Context<Self>) {
-        self.vertical(false, false, window, cx);
-    }
-
-    pub(crate) fn on_down(&mut self, _: &Down, window: &mut Window, cx: &mut Context<Self>) {
-        self.vertical(true, false, window, cx);
-    }
-
-    pub(crate) fn on_select_up(
-        &mut self,
-        _: &SelectUp,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.vertical(false, true, window, cx);
-    }
-
-    pub(crate) fn on_select_down(
-        &mut self,
-        _: &SelectDown,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.vertical(true, true, window, cx);
-    }
-
-    /// ArrowUp/Down: the slash menu owns them while open; at the text's edge
-    /// the caret moves to the previous/next text block, otherwise a row.
-    fn vertical(&mut self, down: bool, select: bool, window: &mut Window, cx: &mut Context<Self>) {
-        self.with_key(window, cx, |this, window, cx| {
-            if !select && this.slash_owns_key() {
-                this.slash_move(if down { 1 } else { -1 }, window, cx);
-                return;
-            }
-            let Some(id) = this.active.clone() else {
-                return;
-            };
-            let Some(t) = this.texts.get(&id) else { return };
-            let at_edge = if down {
-                t.sel.end == t.text.len()
-            } else {
-                t.sel.start == 0
-            };
-            if at_edge && !select && !this.is_cell(&id) {
-                let flat = this.flat_text();
-                let idx = flat.iter().position(|x| *x == id).unwrap_or(0);
-                let next = if down {
-                    flat.get(idx + 1)
-                } else {
-                    idx.checked_sub(1).and_then(|i| flat.get(i))
-                };
-                if let Some(next) = next.cloned() {
-                    let offset = if down {
-                        0
-                    } else {
-                        this.texts.get(&next).map_or(0, |t| t.text.len())
-                    };
-                    this.focus_block(&next, offset, cx);
-                }
-                return;
-            }
-            let cursor = t.cursor();
-            let len = t.text.len();
-            let target = {
-                let layouts = this.layouts.borrow();
-                match layouts.get(&id) {
-                    Some(layout) => {
-                        layout
-                            .vertical(cursor, down)
-                            .unwrap_or(if down { len } else { 0 })
-                    }
-                    None => {
-                        if down {
-                            len
-                        } else {
-                            0
-                        }
-                    }
-                }
-            };
-            let t = this.texts.get_mut(&id).expect("active text");
-            if select {
-                t.select_to(target);
-            } else {
-                t.move_to(target);
-            }
-            this.on_selection_changed(&id, cx);
-        });
-    }
-
-    fn on_selection_changed(&mut self, id: &str, cx: &mut Context<Self>) {
-        self.update_slash(id);
-        self.update_toolbar(id);
-        self.restart_blink(cx);
     }
 
     // ───────────────────────────────────────────── marks
 
-    pub(crate) fn on_bold(&mut self, _: &Bold, window: &mut Window, cx: &mut Context<Self>) {
-        self.with_key(window, cx, |this, _, cx| this.mark_shortcut(mark::BOLD, cx));
-    }
-
-    pub(crate) fn on_italic(&mut self, _: &Italic, window: &mut Window, cx: &mut Context<Self>) {
-        self.with_key(window, cx, |this, _, cx| {
-            this.mark_shortcut(mark::ITALIC, cx)
-        });
-    }
-
-    pub(crate) fn on_underline(
-        &mut self,
-        _: &Underline,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.with_key(window, cx, |this, _, cx| {
-            this.mark_shortcut(mark::UNDERLINE, cx)
-        });
-    }
-
-    pub(crate) fn on_strikethrough(
-        &mut self,
-        _: &Strikethrough,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.with_key(window, cx, |this, _, cx| {
-            this.mark_shortcut(mark::STRIKETHROUGH, cx)
-        });
-    }
-
-    pub(crate) fn on_inline_code(
-        &mut self,
-        _: &InlineCode,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.with_key(window, cx, |this, _, cx| {
-            this.mark_shortcut(mark::INLINE_CODE, cx)
-        });
-    }
-
-    fn mark_shortcut(&mut self, kind: u32, cx: &mut Context<Self>) {
-        if let Some(id) = self.active.clone() {
-            self.apply_mark(&id, kind, None, cx);
-        }
-    }
-
     /// Toggle a mark over the toolbar's (or the live) selection.
-    pub(crate) fn apply_mark(
-        &mut self,
-        id: &str,
-        kind: u32,
-        param: Option<String>,
-        cx: &mut Context<Self>,
-    ) {
+    pub(crate) fn apply_mark(&mut self, id: &str, kind: u32, param: Option<String>, s: &mut State) {
         let range = match &self.toolbar {
             Some(tb) if tb.block == id => tb.from..tb.to,
             _ => match self.texts.get(id) {
-                Some(t) => t.sel.clone(),
+                Some(t) => t.sel(),
                 None => return,
             },
         };
@@ -1169,89 +905,17 @@ impl Editor {
                 content,
             }],
             true,
-            cx,
+            s,
         );
         self.set_live(id, text, next);
         self.toolbar = None;
-        self.focus_block(id, range.end, cx);
+        self.focus_block(id, range.end, s);
     }
 
-    /// Show the marks toolbar over a ranged selection (`onSelect`).
-    pub(crate) fn update_toolbar(&mut self, id: &str) {
-        if self.read_only || self.is_cell(id) {
-            self.toolbar = None;
-            return;
-        }
-        let Some(t) = self.texts.get(id) else { return };
-        if t.sel.is_empty() {
-            self.toolbar = None;
-            return;
-        }
-        let layouts = self.layouts.borrow();
-        let Some(layout) = layouts.get(id) else {
-            return;
-        };
-        let a = layout.position_for_index(t.sel.start);
-        let b = layout.position_for_index(t.sel.end);
-        let (left, right) = if a.y == b.y {
-            (a.x, b.x)
-        } else {
-            (layout.bounds.left(), layout.bounds.right())
-        };
-        let tb = Toolbar {
-            block: id.to_string(),
-            from: t.sel.start,
-            to: t.sel.end,
-            x: (left + right) / 2.,
-            y: a.y,
-        };
-        drop(layouts);
-        self.toolbar = Some(tb);
-    }
+    // ───────────────────────────────────────────── slash
 
-    // ───────────────────────────────────────────── escape / undo
-
-    pub(crate) fn on_escape(&mut self, _: &Escape, window: &mut Window, cx: &mut Context<Self>) {
-        self.with_key(window, cx, |this, _, _| {
-            if this.slash.is_some() {
-                this.slash = None;
-                return;
-            }
-            if this.paste_menu.is_some() || this.spell_menu.is_some() {
-                this.paste_menu = None;
-                this.spell_menu = None;
-                return;
-            }
-            this.toolbar = None;
-            this.selected.clear();
-        });
-    }
-
-    pub(crate) fn on_undo(&mut self, _: &Undo, window: &mut Window, cx: &mut Context<Self>) {
-        self.with_key(window, cx, |this, _, cx| this.undo_redo(false, cx));
-    }
-
-    pub(crate) fn on_redo(&mut self, _: &Redo, window: &mut Window, cx: &mut Context<Self>) {
-        self.with_key(window, cx, |this, _, cx| this.undo_redo(true, cx));
-    }
-
-    pub(crate) fn on_character_palette(
-        &mut self,
-        _: &CharacterPalette,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.keys_here(window) {
-            window.show_character_palette();
-        } else {
-            cx.propagate();
-        }
-    }
-
-    // ───────────────────────────────────────────── slash keys
-
-    fn slash_owns_key(&self) -> bool {
-        matches!((&self.slash, &self.active), (Some(s), Some(a)) if s.block == *a)
+    pub(crate) fn slash_owns_key(&self) -> bool {
+        matches!((&self.slash, &self.active), (Some(sl), Some(a)) if sl.block == *a)
     }
 
     /// Track the filter typed after "/"; close if the slash was deleted.
@@ -1264,126 +928,36 @@ impl Editor {
             self.slash = None;
             return;
         };
-        if t.text.get(slash.start..slash.start + 1) != Some("/") {
+        if t.text().get(slash.start..slash.start + 1) != Some("/") {
             self.slash = None;
             return;
         }
-        let end = t.sel.end;
+        let end = t.sel().end;
         if end <= slash.start {
             self.slash = None;
             return;
         }
-        let filter = t.text.get(slash.start + 1..end).unwrap_or("").to_string();
+        let filter = t.text().get(slash.start + 1..end).unwrap_or("").to_string();
+        if filter == slash.filter {
+            return;
+        }
         let count = self.slash_entries(&filter).len();
-        let slash = self.slash.as_mut().expect("slash");
-        // The highlight lives in the menu's CommandState, which keeps it on
-        // the same row when that row survives the new filter, else the first.
-        slash.filter = filter;
+        self.slash_set_filter(filter);
         // Anytype auto-closes once the filter clearly matches nothing.
-        if count == 0 && slash.filter.chars().count() > 3 {
+        if count == 0
+            && self
+                .slash
+                .as_ref()
+                .is_some_and(|sl| sl.filter.chars().count() > 3)
+        {
             self.slash = None;
         }
     }
 
-    /// The flat index of the highlighted entry, if the menu has one.
-    fn slash_selected(&self, entries: &[crate::slash_menu::SlashEntry], cx: &App) -> Option<usize> {
-        let cmd = self.slash.as_ref()?.cmd.as_ref()?;
-        let ix = cmd.read(cx).selected_index()?;
-        crate::slash_menu::slash_paths(entries)
-            .iter()
-            .position(|p| *p == ix)
-    }
+    // ───────────────────────────────────────────── block selection
 
-    fn slash_move(&mut self, delta: isize, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(slash) = self.slash.as_ref() else {
-            return;
-        };
-        let entries = self.slash_entries(&slash.filter);
-        let n = entries.len() as isize;
-        if n == 0 {
-            return;
-        }
-        let Some(cmd) = slash.cmd.clone() else {
-            return;
-        };
-        let sel = self.slash_selected(&entries, cx).unwrap_or(0) as isize;
-        let next = ((sel + delta + n) % n) as usize;
-        let path = crate::slash_menu::slash_paths(&entries)[next];
-        cmd.update(cx, |cmd, cx| cmd.set_selected_index(Some(path), window, cx));
-    }
-
-    fn slash_confirm(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(slash) = self.slash.clone() else {
-            return;
-        };
-        let entries = self.slash_entries(&slash.filter);
-        let sel = self.slash_selected(&entries, cx).unwrap_or(0);
-        match entries.into_iter().nth(sel) {
-            Some(entry) => self.apply_slash(entry.pick, window, cx),
-            None => self.slash = None,
-        }
-    }
-
-    // ───────────────────────────────────────────── mouse in text
-
-    /// Mouse down on a block's text: caret / word / all, or block selection with modifiers.
-    pub(crate) fn text_mouse_down(
-        &mut self,
-        id: &str,
-        ev: &MouseDownEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.spell_menu = None;
-        self.paste_menu = None;
-        let m = ev.modifiers;
-        if !self.read_only && (m.shift || m.platform || m.control) {
-            let row = self.selection_row_of(id);
-            if m.shift {
-                self.range_select(&row);
-            } else {
-                self.toggle_select(&row);
-            }
-            cx.notify();
-            return;
-        }
-        if self.read_only {
-            self.text_drag = Some((id.to_string(), false));
-            return;
-        }
-        self.selected.clear();
-        self.last_focused = id.to_string();
-        let index = self
-            .layouts
-            .borrow()
-            .get(id)
-            .map(|l| l.index_for_point(ev.position));
-        let index = index.unwrap_or_else(|| self.texts.get(id).map_or(0, |t| t.text.len()));
-        self.focus_block(id, index, cx);
-        window.focus(&self.focus_handle, cx);
-        if let Some(t) = self.texts.get_mut(id) {
-            match ev.click_count {
-                2 => {
-                    let w = t.word_at(index);
-                    t.sel = w;
-                    t.reversed = false;
-                }
-                n if n >= 3 => {
-                    t.sel = 0..t.text.len();
-                    t.reversed = false;
-                }
-                _ => {}
-            }
-        }
-        self.toolbar = None;
-        self.text_drag = Some((id.to_string(), false));
-        // The text drag proceeds - but if it escapes this block it becomes a block selection.
-        self.arm_drag(ev, true, false);
-        cx.notify();
-    }
-
-    /// The selectable row for a text: a table cell selects as its table.
-    fn selection_row_of(&self, id: &str) -> String {
+    /// The selectable row for a block: a table cell selects as its table.
+    pub(crate) fn selection_row_of(&self, id: &str) -> String {
         if !self.is_cell(id) {
             return id.to_string();
         }
@@ -1397,17 +971,17 @@ impl Editor {
         id.to_string()
     }
 
-    pub(crate) fn toggle_select(&mut self, id: &str) {
+    pub(crate) fn toggle_select(&mut self, id: &str, s: &mut State) {
         if let Some(i) = self.selected.iter().position(|x| x == id) {
             self.selected.remove(i);
         } else {
             self.selected.push(id.to_string());
         }
-        self.deactivate_for_selection();
+        self.deactivate_for_selection(s);
     }
 
     /// Anytype shift-click: the contiguous tree-order range from the anchor.
-    pub(crate) fn range_select(&mut self, id: &str) {
+    pub(crate) fn range_select(&mut self, id: &str, s: &mut State) {
         let anchor = self
             .selected
             .first()
@@ -1420,128 +994,102 @@ impl Editor {
             (Some(a), Some(b)) if a != b => self.selected = flat[a.min(b)..=a.max(b)].to_vec(),
             _ => self.selected = vec![id.to_string()],
         }
-        self.deactivate_for_selection();
+        self.deactivate_for_selection(s);
     }
 
     /// Selecting blocks clears text focus (the focused block would eat keys).
-    pub(crate) fn deactivate_for_selection(&mut self) {
+    pub(crate) fn deactivate_for_selection(&mut self, s: &mut State) {
         if self.selected.is_empty() {
             return;
         }
-        self.text_drag = None;
         self.toolbar = None;
         self.slash = None;
-        self.active = None;
-        self.focus_pending = true;
+        self.blur_texts(s);
     }
 
-    pub(crate) fn arm_drag(&mut self, ev: &MouseDownEvent, text_origin: bool, background: bool) {
-        let m = ev.modifiers;
-        let editor_top = self.bounds.get().top();
+    /// A press on a row outside its text, or on the page background: modifiers select, else a
+    /// rubber band arms (`row` None: the background).
+    pub(crate) fn arm_drag(
+        &mut self,
+        row: Option<&str>,
+        at: (f32, f32),
+        mods: rune::Mods,
+        s: &mut State,
+    ) {
+        if self.read_only {
+            return;
+        }
+        self.spell_menu = None;
+        self.paste_menu = None;
+        if let Some(id) = row
+            && (mods.shift || mods.cmd || mods.ctrl)
+        {
+            let row = self.selection_row_of(id);
+            if mods.shift {
+                self.range_select(&row, s);
+            } else {
+                self.toggle_select(&row, s);
+            }
+            return;
+        }
+        if let Some(a) = self.active.take() {
+            self.flush_save(&a, s);
+            if let Some(t) = self.texts.get_mut(&a) {
+                t.edit.focused = false;
+            }
+            self.sync_texts();
+        }
+        self.toolbar = None;
         self.drag_sel = Some(DragSel {
-            anchor: ev.position,
+            anchor: at,
             base: self.selected.clone(),
-            mode: if m.platform || m.control {
+            mode: if mods.cmd || mods.ctrl {
                 SelMode::Toggle
-            } else if m.alt {
+            } else if mods.alt {
                 SelMode::Remove
             } else {
                 SelMode::Replace
             },
             moved: false,
-            text_origin,
-            background,
-            last: ev.position,
-            editor_top,
+            background: row.is_none(),
+            last: at,
         });
     }
 
-    /// Mouse moved with a text drag or rubber band armed.
-    pub(crate) fn drag_mouse_move(
-        &mut self,
-        position: Point<Pixels>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if let Some((id, _)) = self.text_drag.clone() {
-            let index = self
-                .layouts
-                .borrow()
-                .get(&id)
-                .map(|l| l.index_for_point(position));
-            if let Some(index) = index
-                && !self.read_only
-                && let Some(t) = self.texts.get_mut(&id)
-                && self.active.as_deref() == Some(id.as_str())
-            {
-                t.select_to(index);
-                if let Some(drag) = self.text_drag.as_mut() {
-                    drag.1 = true;
-                }
-                cx.notify();
-            }
-        }
-        if let Some(drag) = self.drag_sel.as_mut() {
-            drag.last = position;
-            self.sel_update(position, cx);
-            if self.drag_sel.as_ref().is_some_and(|d| d.moved) && self.autoscroll.is_none() {
-                self.start_autoscroll(window, cx);
-            }
-        }
-    }
-
-    /// Hit-test the rubber band against block rows (Anytype selection provider).
-    pub(crate) fn sel_update(&mut self, cursor: Point<Pixels>, cx: &mut Context<Self>) {
+    /// The rubber band moved to `cursor` (window points): hit-test it against block rows
+    /// (Anytype selection provider).
+    pub(crate) fn sel_update(&mut self, cursor: (f32, f32), s: &mut State) {
         let Some(drag) = self.drag_sel.as_ref() else {
             return;
         };
-        let top_now = self.bounds.get().top();
-        let anchor = point(drag.anchor.x, drag.anchor.y + (top_now - drag.editor_top));
-        let w = (cursor.x - anchor.x).abs();
-        let h = (cursor.y - anchor.y).abs();
+        let anchor = drag.anchor;
+        let w = (cursor.0 - anchor.0).abs();
+        let h = (cursor.1 - anchor.1).abs();
         // Ignore only when BOTH axes are tiny, so a thin drag across one line still selects.
-        if !drag.moved && w < px(20.) && h < px(20.) {
+        if !drag.moved && w < 20. && h < 20. {
             return;
         }
-        let rect = Bounds::new(
-            point(anchor.x.min(cursor.x), anchor.y.min(cursor.y)),
-            size(w, h),
-        );
+        let rect = [anchor.0.min(cursor.0), anchor.1.min(cursor.1), w, h];
         let mut hits = Vec::new();
         for id in self.flat_ids() {
             if self.is_cell(&id) {
                 continue;
             }
-            let Some(geom) = self.rows.borrow().get(&id).copied() else {
+            let Some(geom) = self.rows.get(&id) else {
                 continue;
             };
-            let r = geom.bounds;
-            if r.left() < rect.right()
-                && r.right() > rect.left()
-                && r.top() < rect.bottom()
-                && r.bottom() > rect.top()
+            let [x, y, rw, rh] = geom.bounds;
+            if x < rect[0] + rect[2]
+                && x + rw > rect[0]
+                && y < rect[1] + rect[3]
+                && y + rh > rect[1]
             {
                 hits.push(id);
             }
         }
         let drag = self.drag_sel.as_mut().expect("drag");
-        if drag.text_origin && !drag.moved {
-            // The text selection owns the drag until a second block is hit.
-            if hits.len() < 2 {
-                return;
-            }
-            self.text_drag = None;
-            if let Some(id) = self.active.clone() {
-                self.flush_save(&id, cx);
-                if let Some(t) = self.texts.get_mut(&id) {
-                    let c = t.cursor();
-                    t.move_to(c);
-                }
-            }
-            self.active = None;
-        }
-        let drag = self.drag_sel.as_mut().expect("drag");
         drag.moved = true;
+        drag.last = cursor;
         self.sel_rect = Some(rect);
         let mode = drag.mode;
         let base = drag.base.clone();
@@ -1557,166 +1105,52 @@ impl Editor {
             SelMode::Remove => base.into_iter().filter(|i| !hits.contains(i)).collect(),
             SelMode::Replace => hits,
         };
-        self.deactivate_for_selection();
+        self.deactivate_for_selection(s);
         self.toolbar = None;
-        cx.notify();
     }
 
-    /// Edge autoscroll while the rubber band is out: the pointer parked near
-    /// an edge keeps the page scrolling (a scroll event at the pointer).
-    fn start_autoscroll(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.autoscroll = Some(cx.spawn_in(window, async move |this, cx| {
-            loop {
-                cx.background_executor()
-                    .timer(std::time::Duration::from_millis(50))
-                    .await;
-                let Ok(Some((last, area))) = this.update(cx, |this, _| {
-                    let area = this.visible.get();
-                    this.drag_sel
-                        .as_ref()
-                        .filter(|d| d.moved)
-                        .map(|d| (d.last, area))
-                }) else {
-                    return;
-                };
-                let scrolled = cx
-                    .update(|window, cx| {
-                        let h = window.viewport_size().height;
-                        let b = px(48.);
-                        let dy = if last.y < b {
-                            (f32::from(b - last.y) / 6.).ceil().min(12.)
-                        } else if last.y > h - b {
-                            -(f32::from(last.y - (h - b)) / 6.).ceil().min(12.)
-                        } else {
-                            0.
-                        };
-                        if dy != 0. {
-                            scroll_at(last, dy, area, window, cx);
-                        }
-                        dy != 0.
-                    })
-                    .unwrap_or(false);
-                if scrolled {
-                    let _ = this.update(cx, |this, cx| this.sel_update(last, cx));
-                }
-            }
-        }));
-    }
-
-    /// Mouse released after a text drag or rubber band.
-    pub(crate) fn drag_mouse_up(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
-        if let Some((id, moved)) = self.text_drag.take() {
-            if !self.read_only {
-                self.update_toolbar(&id);
-            }
-            let collapsed = self.texts.get(&id).is_none_or(|t| t.sel.is_empty());
-            if !moved && collapsed {
-                self.mention_click(&id, position, cx);
-            }
-        }
+    /// The rubber band was released at `at` (window points).
+    pub(crate) fn drag_release(&mut self, at: (f32, f32), s: &mut State) {
         if let Some(drag) = self.drag_sel.take() {
-            if !drag.moved && drag.mode == SelMode::Replace && !drag.text_origin {
+            if !drag.moved && drag.mode == SelMode::Replace {
                 self.selected.clear();
             }
             if !drag.moved && drag.background && !self.read_only {
-                self.background_click(position.y, cx);
+                self.background_click(at.1, s);
             }
         }
         self.sel_rect = None;
-        self.autoscroll = None;
-        cx.notify();
     }
 
-    /// Whether a link or mention is under `position` in text block `id` - on
-    /// its characters, not past the end of its line.
-    pub(crate) fn link_under(&self, id: &str, position: Point<Pixels>) -> bool {
-        let (text, spans) = self.live(id);
-        let layouts = self.layouts.borrow();
-        let Some(layout) = layouts.get(id) else { return false };
-        if text.is_empty() || !layout.bounds.contains(&position) {
-            return false;
-        }
-        let index = layout.index_for_point(position);
-        let probe = char_under(&text, index);
-        let marked = marks::mark_at(&spans, probe, mark::LINK).is_some()
-            || marks::mark_at(&spans, probe, mark::MENTION).is_some();
-        // Past a line's last character nothing is under the pointer (the
-        // character's end is on its row, or the next row when it wraps).
-        let end = text[probe..].chars().next().map_or(probe, |c| probe + c.len_utf8());
-        let (start_at, end_at) = (layout.position_for_index(probe), layout.position_for_index(end));
-        marked && (position.x <= end_at.x + px(1.) || end_at.y > start_at.y)
-    }
-
-    /// A plain click on a mention opens its object; on a web link opens the
-    /// URL in the browser (only http(s), mailto and tel).
-    fn mention_click(&mut self, id: &str, position: Point<Pixels>, cx: &mut Context<Self>) {
-        let index = self
-            .layouts
-            .borrow()
-            .get(id)
-            .map(|l| l.index_for_point(position));
-        let Some(index) = index else { return };
-        let (text, spans) = self.live(id);
-        // A click lands between characters; the mark is the one under the pointer.
-        let probe = char_under(&text, index);
-        if let Some(link) = marks::mark_at(&spans, probe, mark::LINK).and_then(|m| m.param.clone())
-        {
-            // The stored param is the URL itself (the web decodes its attribute back to it).
-            let raw = link.trim().to_string();
-            let has_scheme =
-                regex::Regex::new(r"^[a-zA-Z][a-zA-Z0-9+.-]*:").is_ok_and(|re| re.is_match(&raw));
-            let href = if has_scheme {
-                raw
-            } else {
-                format!("https://{raw}")
-            };
-            let lower = href.to_lowercase();
-            if lower.starts_with("http:")
-                || lower.starts_with("https:")
-                || lower.starts_with("mailto:")
-                || lower.starts_with("tel:")
-            {
-                cx.open_url(&href);
-            }
-            return;
-        }
-        if let Some(target) =
-            marks::mark_at(&spans, probe, mark::MENTION).and_then(|m| m.param.clone())
-        {
-            roostr_core::nav::navigate(roostr_core::Route::Object(target), cx);
-        }
-    }
-
-    /// A click on the page's own background: beside the lines the caret goes
-    /// to the end of the nearest one; below them to the last line when it is
-    /// an empty paragraph, else a new line is added.
-    pub(crate) fn background_click(&mut self, y: Pixels, cx: &mut Context<Self>) {
+    /// A click on the page's own background or beside a row: beside the
+    /// lines the caret goes to the end of the nearest one; below them to the
+    /// last line when it is an empty paragraph, else a new line is added.
+    pub(crate) fn background_click(&mut self, y: f32, s: &mut State) {
         let roots: Vec<String> = self
             .root_ids()
             .into_iter()
             .filter(|r| self.texts.contains_key(r))
             .collect();
         if roots.is_empty() {
-            self.append_block(cx);
+            self.append_block(s);
             return;
         }
-        let rows = self.rows.borrow().clone();
         let last_bottom = roots
             .last()
-            .and_then(|r| rows.get(r))
-            .map(|g| g.bounds.bottom());
+            .and_then(|r| self.rows.get(r))
+            .map(|g| g.bounds[1] + g.bounds[3]);
         if let Some(bottom) = last_bottom
             && y < bottom
         {
             let mut best = roots[0].clone();
             let mut gap = f32::INFINITY;
             for r in &roots {
-                let Some(g) = rows.get(r) else { continue };
-                let b = g.bounds;
-                let d = if y < b.top() {
-                    f32::from(b.top() - y)
-                } else if y > b.bottom() {
-                    f32::from(y - b.bottom())
+                let Some(g) = self.rows.get(r) else { continue };
+                let (top, bot) = (g.bounds[1], g.bounds[1] + g.bounds[3]);
+                let d = if y < top {
+                    top - y
+                } else if y > bot {
+                    y - bot
                 } else {
                     0.
                 };
@@ -1725,8 +1159,8 @@ impl Editor {
                     gap = d;
                 }
             }
-            let len = self.texts.get(&best).map_or(0, |t| t.text.len());
-            self.focus_block(&best, len, cx);
+            let len = self.texts.get(&best).map_or(0, |t| t.text().len());
+            self.focus_block(&best, len, s);
             return;
         }
         let all_roots = self.root_ids();
@@ -1737,214 +1171,71 @@ impl Editor {
             && t.text.is_empty()
             && t.style == style::PARAGRAPH
         {
-            self.focus_block(&last, 0, cx);
+            self.focus_block(&last, 0, s);
             return;
         }
-        self.add_sibling(&last, pos::BOTTOM, style::PARAGRAPH, cx);
+        self.add_sibling(&last, pos::BOTTOM, style::PARAGRAPH, s);
     }
 
-    pub(crate) fn append_block(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn append_block(&mut self, s: &mut State) {
         let new = new_id();
-        let add = self.w_block_add(text_block(&new, "", style::PARAGRAPH), "", pos::NONE, cx);
+        let add = self.w_block_add(text_block(&new, "", style::PARAGRAPH), "", pos::NONE, s);
         self.focus_request = Some((new, 0));
-        cx.spawn(async move |this, cx| {
+        let oid = self.object_id.clone();
+        s.rt.spawn(async move |cx| {
             let _ = add.await;
-            let _ = this.update(cx, |this, cx| this.refresh(cx).detach());
+            crate::editor::update_editor(&cx, &oid, |e, s| e.refresh(s).detach());
         })
         .detach();
     }
-}
 
-/// The character under a pointer that lands at byte `index` of `text`: the
-/// one starting there, or past the end the last one - stepped back a whole
-/// character, never into the middle of one ("Open ↗" ends in a 3-byte arrow).
-fn char_under(text: &str, index: usize) -> usize {
-    if index > 0 && index == text.len() {
-        text.char_indices().next_back().map_or(0, |(at, _)| at)
-    } else {
-        index
-    }
-}
+    // ───────────────────────────────────────────── keys with blocks selected
 
-/// Scroll the editor's scrolling ancestor by `dy` (positive = content moves
-/// down), like the web's `scrollBy` on the nearest overflow ancestor. The
-/// pointer may sit outside that ancestor (a frame margin, the title bar), so
-/// the wheel event is aimed inside the editor's visible part `area`, then the
-/// pointer is put back where it really is.
-pub(crate) fn scroll_at(
-    at: Point<Pixels>,
-    dy: f32,
-    area: Bounds<Pixels>,
-    window: &mut Window,
-    cx: &mut App,
-) {
-    if area.size.width <= px(2.) || area.size.height <= px(2.) {
-        return;
-    }
-    let clamp = |v: Pixels, lo: Pixels, hi: Pixels| {
-        px(f32::from(v).clamp(f32::from(lo) + 1., f32::from(hi) - 1.))
-    };
-    let aim = point(
-        clamp(at.x, area.left(), area.right()),
-        clamp(at.y, area.top(), area.bottom()),
-    );
-    window.dispatch_event(
-        PlatformInput::Scroll(ScrollEvent {
-            position: aim,
-            delta: ScrollDelta::Pixels(point(px(0.), px(dy))),
-            modifiers: Modifiers::default(),
-            touch_phase: TouchPhase::Moved,
-            source: ScrollSource::Pointer,
-        }),
-        cx,
-    );
-    if aim != at {
-        window.dispatch_event(
-            PlatformInput::MouseMove(MouseMoveEvent {
-                position: at,
-                pressed_button: Some(MouseButton::Left),
-                modifiers: Modifiers::default(),
-            }),
-            cx,
-        );
-    }
-}
-
-impl EntityInputHandler for Editor {
-    fn text_for_range(
-        &mut self,
-        range_utf16: Range<usize>,
-        actual: &mut Option<Range<usize>>,
-        _: &mut Window,
-        _: &mut Context<Self>,
-    ) -> Option<String> {
-        let t = self.texts.get(self.active.as_ref()?)?;
-        let range = t.range_from_utf16(&range_utf16);
-        actual.replace(t.range_to_utf16(&range));
-        t.text.get(range).map(str::to_string)
-    }
-
-    fn selected_text_range(
-        &mut self,
-        _: bool,
-        _: &mut Window,
-        _: &mut Context<Self>,
-    ) -> Option<UTF16Selection> {
-        let t = self.texts.get(self.active.as_ref()?)?;
-        Some(UTF16Selection {
-            range: t.range_to_utf16(&t.sel),
-            reversed: t.reversed,
-        })
-    }
-
-    fn marked_text_range(&self, _: &mut Window, _: &mut Context<Self>) -> Option<Range<usize>> {
-        let t = self.texts.get(self.active.as_ref()?)?;
-        t.marked.as_ref().map(|r| t.range_to_utf16(r))
-    }
-
-    fn unmark_text(&mut self, _: &mut Window, cx: &mut Context<Self>) {
-        let Some(id) = self.active.clone() else {
-            return;
-        };
-        if let Some(t) = self.texts.get_mut(&id)
-            && t.marked.take().is_some()
+    /// Backspace/Delete remove the selected blocks, Escape clears them,
+    /// ⌘C/⌘X/⌘V copy, cut and paste them, ⌘Z/⇧⌘Z undo and redo.
+    fn selection_key(&mut self, ev: &KeyEvent, s: &mut State, tx: &mut Tx) -> bool {
+        if self.read_only || self.editing().is_some() {
+            return false;
+        }
+        if chord("mod+z").matches_tx(ev, tx) {
+            self.undo_redo(false, s);
+            return true;
+        }
+        if chord("mod+shift+z").matches_tx(ev, tx)
+            || (!cfg!(target_os = "macos") && chord("ctrl+y").matches_tx(ev, tx))
         {
-            // The committed text is now real input: save, slash and spell see it.
-            self.on_input(&id, cx);
+            self.undo_redo(true, s);
+            return true;
         }
-    }
-
-    fn replace_text_in_range(
-        &mut self,
-        range: Option<Range<usize>>,
-        text: &str,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.read_only {
-            return;
+        if chord("mod+c").matches_tx(ev, tx) {
+            self.copy_blocks(false, s, tx);
+            return true;
         }
-        self.insert_text(range, text, cx);
-        self.caret_on = true;
-        cx.notify();
-    }
-
-    /// The browser's own paste (its `paste` event; ⌘V stays the browser's):
-    /// as the Paste action's, so an image becomes a File block and a link
-    /// opens "Paste as" there too, not only the text.
-    fn paste(&mut self, item: ClipboardItem, window: &mut Window, cx: &mut Context<Self>) {
-        if self.read_only {
-            return;
+        if chord("mod+x").matches_tx(ev, tx) {
+            self.copy_blocks(true, s, tx);
+            return true;
         }
-        self.paste_item(item, window, cx);
-    }
-
-    fn replace_and_mark_text_in_range(
-        &mut self,
-        range_utf16: Option<Range<usize>>,
-        new_text: &str,
-        new_selected: Option<Range<usize>>,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.read_only {
-            return;
+        if chord("mod+v").matches_tx(ev, tx) {
+            let oid = self.object_id.clone();
+            tx.read_clipboard(move |s: &mut State, content, _tx| {
+                with_editor(s, &oid, |e, s| e.paste_after_selection(content, s));
+            });
+            return true;
         }
-        let Some(id) = self.active.clone() else {
-            return;
-        };
-        let Some(t) = self.texts.get_mut(&id) else {
-            return;
-        };
-        let range = range_utf16
-            .map(|r| t.range_from_utf16(&r))
-            .or(t.marked.clone())
-            .unwrap_or(t.sel.clone());
-        t.replace(range.clone(), new_text);
-        t.marked = if new_text.is_empty() {
-            None
-        } else {
-            Some(range.start..range.start + new_text.len())
-        };
-        if let Some(sel) = new_selected {
-            let local =
-                marks::utf16_to_byte(new_text, sel.start)..marks::utf16_to_byte(new_text, sel.end);
-            t.sel = range.start + local.start..range.start + local.end;
+        match ev.key {
+            Key::Backspace | Key::Delete if !self.selected.is_empty() => {
+                self.delete_selection_blocks(s);
+                true
+            }
+            Key::Escape => {
+                self.slash = None;
+                self.paste_menu = None;
+                self.spell_menu = None;
+                self.toolbar = None;
+                self.selected.clear();
+                true
+            }
+            _ => false,
         }
-        self.caret_on = true;
-        cx.notify();
-    }
-
-    fn bounds_for_range(
-        &mut self,
-        range_utf16: Range<usize>,
-        element_bounds: Bounds<Pixels>,
-        _: &mut Window,
-        _: &mut Context<Self>,
-    ) -> Option<Bounds<Pixels>> {
-        let id = self.active.clone()?;
-        let t = self.texts.get(&id)?;
-        let range = t.range_from_utf16(&range_utf16);
-        let layouts = self.layouts.borrow();
-        let Some(layout) = layouts.get(&id) else {
-            return Some(element_bounds);
-        };
-        let a = layout.position_for_index(range.start);
-        let b = layout.position_for_index(range.end);
-        Some(Bounds::from_corners(
-            a,
-            point(b.x.max(a.x + px(1.)), a.y + layout.line_height),
-        ))
-    }
-
-    fn character_index_for_point(
-        &mut self,
-        point: Point<Pixels>,
-        _: &mut Window,
-        _: &mut Context<Self>,
-    ) -> Option<usize> {
-        let id = self.active.clone()?;
-        let index = self.layouts.borrow().get(&id)?.index_for_point(point);
-        Some(self.texts.get(&id)?.offset_to_utf16(index))
     }
 }

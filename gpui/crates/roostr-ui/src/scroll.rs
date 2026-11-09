@@ -112,6 +112,11 @@ impl ScrollArea {
         self.size.push(Box::new(|e| e.grow(1.0).min_h(0.0)));
         self
     }
+    /// Hear where the viewport is scrolled to ([`El::on_scroll_offset`] on the viewport).
+    pub fn on_scroll_offset(mut self, f: impl Fn(rune::ScrollPos) + 'static) -> Self {
+        self.size.push(Box::new(move |e| e.on_scroll_offset(f)));
+        self
+    }
 
     pub fn build(self, t: &Theme) -> El {
         let style = self.mode.unwrap_or_default().style(t);

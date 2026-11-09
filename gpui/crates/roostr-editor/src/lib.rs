@@ -1,9 +1,10 @@
 //! Block editor, file pages and file blocks: the native port of the web
 //! app's `Editor.svelte` (with BlockNode, BlockMenu, SlashMenu, LinkPicker,
-//! TableBlock, FileBlock, RelationBlock) and `File.svelte`.
-
-// GPUI Fast's macros name `gpui::`, not `::gpui_kit::` as gpui-pre's did.
-extern crate gpui_kit as gpui;
+//! TableBlock, FileBlock, RelationBlock) and `File.svelte`, drawn with Rune.
+//!
+//! The app calls [`register`] once, [`open`] / [`close`] as object pages
+//! come and go, and draws an open body with [`view`]; File objects use
+//! [`open_file`] / [`file_view`]. See `local://roostr-editor-api.md`.
 
 /// The desktop block gutter (drag handle rail) left of every block. The
 /// object page shifts a document left by it, so the text lines up under
@@ -15,6 +16,7 @@ mod codelint;
 mod doc;
 mod editor;
 mod embed;
+mod embed_view;
 mod file_block;
 mod file_view;
 mod files;
@@ -27,157 +29,64 @@ mod render;
 mod slash_menu;
 mod spell;
 mod spellcheck;
+#[cfg(test)]
+mod tests;
 mod text;
 mod toggles;
 mod write_queue;
 
-use gpui_kit::{App, KeyBinding, PromptLevel, actions};
-use roostr_core::ui::secondary_binding;
+use std::rc::Rc;
 
-pub use editor::Editor;
-pub use file_view::FileView;
-pub use files::{CAN_PICK_FILES, PickedFile, file_image, pasted_image, pick_file};
+use roostr_core::State;
+use roostr_core::create::AddFile;
 
-actions!(
-    roostr_editor,
-    [
-        Enter,
-        ShiftEnter,
-        Tab,
-        ShiftTab,
-        Backspace,
-        Delete,
-        DeleteWordLeft,
-        DeleteLineLeft,
-        DeleteWordRight,
-        DeleteLineRight,
-        Left,
-        Right,
-        SelectLeft,
-        SelectRight,
-        WordLeft,
-        WordRight,
-        SelectWordLeft,
-        SelectWordRight,
-        LineStart,
-        LineEnd,
-        SelectLineStart,
-        SelectLineEnd,
-        DocStart,
-        DocEnd,
-        SelectDocStart,
-        SelectDocEnd,
-        Up,
-        Down,
-        SelectUp,
-        SelectDown,
-        SelectAll,
-        Bold,
-        Italic,
-        Underline,
-        Strikethrough,
-        InlineCode,
-        Escape,
-        Undo,
-        Redo,
-        Copy,
-        Cut,
-        Paste,
-        CharacterPalette,
-    ]
-);
+pub use editor::Editors;
+pub use file_view::{FileViews, close_file, file_view, open_file};
+pub use files::{
+    CAN_PICK_FILES, PickedFile, Uploaded, file_image, pasted_image, pasted_png, pick_file,
+    upload_file,
+};
+pub use render::view;
 
-const CONTEXT: &str = "RoostrEditor";
-
-/// Register the editor's keybindings (the web editor's keydown handling).
-pub fn init(cx: &mut App) {
-    // New → File adds through the same upload as file blocks.
-    cx.set_global(roostr_core::create::AddFile(std::rc::Rc::new(
-        |name, mime, bytes, space_id, cx| {
-            let upload = files::upload_file(files::PickedFile { name, mime, bytes }, space_id, cx);
-            cx.spawn(async move |_| upload.await.map(|uploaded| uploaded.id))
-        },
-    )));
-    let c = Some(CONTEXT);
-    cx.bind_keys([
-        KeyBinding::new("enter", Enter, c),
-        KeyBinding::new("shift-enter", ShiftEnter, c),
-        KeyBinding::new("tab", Tab, c),
-        KeyBinding::new("shift-tab", ShiftTab, c),
-        KeyBinding::new("backspace", Backspace, c),
-        KeyBinding::new("shift-backspace", Backspace, c),
-        KeyBinding::new("delete", Delete, c),
-        KeyBinding::new("alt-backspace", DeleteWordLeft, c),
-        KeyBinding::new("alt-delete", DeleteWordRight, c),
-        KeyBinding::new("left", Left, c),
-        KeyBinding::new("right", Right, c),
-        KeyBinding::new("shift-left", SelectLeft, c),
-        KeyBinding::new("shift-right", SelectRight, c),
-        KeyBinding::new("up", Up, c),
-        KeyBinding::new("down", Down, c),
-        KeyBinding::new("shift-up", SelectUp, c),
-        KeyBinding::new("shift-down", SelectDown, c),
-        KeyBinding::new("home", LineStart, c),
-        KeyBinding::new("end", LineEnd, c),
-        KeyBinding::new("shift-home", SelectLineStart, c),
-        KeyBinding::new("shift-end", SelectLineEnd, c),
-        KeyBinding::new("escape", Escape, c),
-        secondary_binding("secondary-a", SelectAll, c, cx),
-        secondary_binding("secondary-b", Bold, c, cx),
-        secondary_binding("secondary-i", Italic, c, cx),
-        secondary_binding("secondary-u", Underline, c, cx),
-        secondary_binding("secondary-shift-s", Strikethrough, c, cx),
-        secondary_binding("secondary-e", InlineCode, c, cx),
-        secondary_binding("secondary-z", Undo, c, cx),
-        secondary_binding("secondary-shift-z", Redo, c, cx),
-        KeyBinding::new("ctrl-y", Redo, c),
-        secondary_binding("secondary-c", Copy, c, cx),
-        secondary_binding("secondary-x", Cut, c, cx),
-        secondary_binding("secondary-v", Paste, c, cx),
-    ]);
-    #[cfg(target_os = "macos")]
-    cx.bind_keys([
-        KeyBinding::new("alt-left", WordLeft, c),
-        KeyBinding::new("alt-right", WordRight, c),
-        KeyBinding::new("shift-alt-left", SelectWordLeft, c),
-        KeyBinding::new("shift-alt-right", SelectWordRight, c),
-        KeyBinding::new("cmd-left", LineStart, c),
-        KeyBinding::new("cmd-right", LineEnd, c),
-        KeyBinding::new("shift-cmd-left", SelectLineStart, c),
-        KeyBinding::new("shift-cmd-right", SelectLineEnd, c),
-        KeyBinding::new("cmd-up", DocStart, c),
-        KeyBinding::new("cmd-down", DocEnd, c),
-        KeyBinding::new("shift-cmd-up", SelectDocStart, c),
-        KeyBinding::new("shift-cmd-down", SelectDocEnd, c),
-        KeyBinding::new("cmd-backspace", DeleteLineLeft, c),
-        KeyBinding::new("cmd-delete", DeleteLineRight, c),
-        KeyBinding::new("ctrl-a", LineStart, c),
-        KeyBinding::new("ctrl-e", LineEnd, c),
-        KeyBinding::new("ctrl-cmd-space", CharacterPalette, c),
-    ]);
-    #[cfg(not(target_os = "macos"))]
-    cx.bind_keys([
-        KeyBinding::new("ctrl-left", WordLeft, c),
-        KeyBinding::new("ctrl-right", WordRight, c),
-        KeyBinding::new("shift-ctrl-left", SelectWordLeft, c),
-        KeyBinding::new("shift-ctrl-right", SelectWordRight, c),
-        KeyBinding::new("ctrl-home", DocStart, c),
-        KeyBinding::new("ctrl-end", DocEnd, c),
-        KeyBinding::new("shift-ctrl-home", SelectDocStart, c),
-        KeyBinding::new("shift-ctrl-end", SelectDocEnd, c),
-        KeyBinding::new("ctrl-backspace", DeleteWordLeft, c),
-        KeyBinding::new("ctrl-delete", DeleteWordRight, c),
-    ]);
+/// Set the editor up for the app: re-read open bodies when the store says
+/// they changed, follow the keyboard between blocks, make picked files into
+/// File objects (`s.add_file`), and start loading the spelling dictionary.
+pub fn register(s: &mut State) {
+    s.on_store(editor::on_store);
+    s.on_poll(keys::on_poll);
+    s.add_file = Some(AddFile(Rc::new(|name, mime, bytes, space, s| {
+        let upload = upload_file(PickedFile { name, mime, bytes }, space, s);
+        s.rt.spawn(async move |_| Ok(upload.await?.id))
+    })));
+    spellcheck::ensure_loaded(s);
 }
 
-/// The web's `alert(text)`: a warning dialog on the active window.
-pub(crate) fn alert(text: String, cx: &mut App) {
-    let Some(window) = cx.active_window() else {
-        log::warn!("{text}");
+/// Open `object_id`'s body (once; later calls keep the open one): it loads
+/// and [`view`] draws it. `read_only` shows the body and never edits it.
+pub fn open(s: &mut State, object_id: &str, read_only: bool) {
+    if is_open(s, object_id) {
         return;
-    };
-    let _ = window.update(cx, |_, window, cx| {
-        // The answer is not needed: the dialog only informs.
-        drop(window.prompt(PromptLevel::Warning, &text, None, &["OK"], cx));
-    });
+    }
+    let editor = editor::Editor::new(object_id.to_string(), read_only, s);
+    s.slot::<Editors>()
+        .map
+        .insert(object_id.to_string(), editor);
+}
+
+/// Whether `object_id`'s body is open.
+pub fn is_open(s: &State, object_id: &str) -> bool {
+    editor::editor(s, object_id).is_some()
+}
+
+/// Close `object_id`'s body: unsaved typing is saved, queued writes still land.
+pub fn close(s: &mut State, object_id: &str) {
+    if let Some(editor) = s.slot::<Editors>().map.remove(object_id) {
+        editor.close(s);
+    }
+}
+
+/// Put the caret at the start of `object_id`'s body (Enter in the page
+/// title): its first line when that is empty, else a new line above it.
+pub fn focus_start(s: &mut State, object_id: &str) {
+    editor::with_editor(s, object_id, |e, s| e.focus_start(s));
 }

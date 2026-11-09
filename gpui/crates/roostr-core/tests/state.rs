@@ -406,3 +406,79 @@ fn navigation_and_cover_asks_reach_their_listeners_at_the_next_poll() {
     assert_eq!(app.s.nav.route(), &Route::Home);
     assert_eq!(app.heard().nav.len(), 2);
 }
+
+/// What the poll listener of the test below saw and asks for.
+#[derive(Default)]
+struct Polled {
+    runs: usize,
+    /// Navigation events heard before the poll listener ran.
+    nav_before: Vec<usize>,
+    report_change: bool,
+}
+
+#[test]
+fn poll_listeners_run_after_dispatch_on_every_poll_and_can_mark_it_updated() {
+    let mut app = App::new();
+    app.s.on_poll(|s| {
+        let heard = s.get::<Heard>().map_or(0, |h| h.nav.len());
+        let polled = s.slot::<Polled>();
+        polled.runs += 1;
+        polled.nav_before.push(heard);
+        polled.report_change
+    });
+    app.s.poll();
+    nav::navigate(Route::Object("o".into()), &mut app.s);
+    app.s.poll();
+    assert_eq!(
+        app.s.slot::<Polled>().nav_before.last(),
+        Some(&1),
+        "events are dispatched before the poll listeners run"
+    );
+    app.s.slot::<Polled>().report_change = true;
+    assert!(app.s.poll().updated);
+    assert_eq!(app.s.slot::<Polled>().runs, 3);
+}
+
+#[test]
+fn an_unopened_state_loads_nothing_until_a_vault_opens() {
+    let mut s = State::unopened();
+    s.poll();
+    assert!(!s.store.loaded);
+    assert!(matches!(
+        s.store.connection,
+        roostr_core::Connection::Connecting
+    ));
+}
+
+#[test]
+fn opening_another_vault_drops_the_old_stream_and_its_late_loads() {
+    let mut app = App::new();
+    app.s.store.ensure_object("a");
+    app.until("the old fetch", |_, f| f.fetches_of("a") == 1);
+    let old = app.fake.clone();
+
+    let fresh = Arc::new(Fake::default());
+    app.s.open(Arc::new(Handle(fresh.clone())), None);
+    app.fake = fresh;
+    app.until("the new vault's refresh and stream", |s, f| {
+        s.store.loaded && f.streams.lock().len() == 1
+    });
+    // The old vault's commits reach no one: its stream went with its store.
+    let _ = old.streams.lock()[0].unbounded_send(Ok(BackendEvent::Committed("x".into())));
+    // Its fetch, answered late, lands nowhere.
+    old.answer("a", 7);
+    app.s.poll();
+    assert!(app.s.store.object_slot("a").is_none());
+
+    // The listeners hear the new vault, and only it.
+    app.fake.commit("b");
+    app.committed(1);
+    let committed: Vec<_> = app
+        .heard()
+        .store
+        .iter()
+        .filter(|e| matches!(e, StoreEvent::Committed(_)))
+        .cloned()
+        .collect();
+    assert_eq!(committed, vec![StoreEvent::Committed("b".into())]);
+}

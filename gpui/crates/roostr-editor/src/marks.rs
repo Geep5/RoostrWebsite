@@ -274,13 +274,6 @@ pub fn shifted(spans: &[Span], by: usize) -> Vec<Span> {
         .collect()
 }
 
-/// The mark of `kind` covering byte `at` (a click on a link or mention).
-pub fn mark_at(spans: &[Span], at: usize, kind: u32) -> Option<&Span> {
-    spans
-        .iter()
-        .find(|m| m.kind == kind && m.from <= at && at < m.to)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1,54 +1,56 @@
 //! The Settings modal (`Settings.svelte`) as the local-mode web app shows
-//! it: profile, chat colour, Nostr identity, relays, the desktop sync check,
-//! the spellcheck dictionary, export, the Claude plan and agent keys.
+//! it: profile, chat colour, appearance, Nostr identity, relays, the desktop
+//! sync check, the spellcheck dictionary, export, the Claude plan and agent
+//! keys.
+//!
+//! The modal's state is one [`Settings`] value in the [`SettingsModal`] slot
+//! while it is open; async work checks the open generation before it writes
+//! back, so a reopened modal never hears an answer meant for the last one.
 
-use std::cell::Cell;
-use std::rc::Rc;
-use std::sync::Arc;
 use std::time::Duration;
 
 use futures::FutureExt as _;
-use gpui_kit::component::Sizable as _;
-use gpui_kit::component::WindowExt as _;
-use gpui_kit::component::avatar::Avatar;
-use gpui_kit::component::color_picker::{ColorPicker, ColorPickerEvent, ColorPickerState};
-use gpui_kit::component::group_box::{GroupBox, GroupBoxVariants as _};
-use gpui_kit::component::input::{InputEvent, InputState};
-use gpui_kit::component::tag::Tag;
-use gpui_kit::prelude::FluentBuilder as _;
-use gpui_kit::*;
-use roostr_core::color::{DEFAULT_CHAT_COLOR, hex, normalize_hex};
+use roostr_core::color::{DEFAULT_CHAT_COLOR, normalize_hex};
 use roostr_core::devices::{self, DEVICE_ID_PREFIX, DeviceRecord};
-use roostr_core::harness::harness;
-use roostr_core::io;
 use roostr_core::lite::VaultEstimate;
+use roostr_core::mode::{self, Mode};
 use roostr_core::profile as nostr_profile;
 use roostr_core::serving::{MachineRow, fetch_machines, machine_name};
 use roostr_core::sync_status::{progress_text, sync_progress};
-use roostr_core::ui::data_url_image;
-use roostr_core::{Glyph, Store, StoreEvent, UiState, api, lite_ui, motion, theme};
+use roostr_core::{State, StoreEvent, SyncPhase, api, io, lite_ui};
+use roostr_rt::Task;
+use roostr_ui::ty::Weights as _;
+use roostr_ui::{
+    ColorPicker, ColorPickerState, Glyph, InputState, SelectState, Theme, ThemePref,
+    parse_color_hex, radius, ty,
+};
+use rune::{
+    Color, Cx, Drag, Effect, El, Phase, ScrollSpec, Spring, SpringPair, Transition, Tx, col, el,
+    row, text,
+};
 use serde_json::{Value as Json, json};
 
 use crate::export::{ExportFormat, export_all};
 use crate::local::{self, AgentAuth, PlanStatus, with_status};
 use crate::profile;
-use crate::section_nav::{self, SectionNav};
+use crate::section_nav::{self, Spy};
 use crate::widgets::{
-    Btn, FieldStyle, Flash, Select, Span, field, h3, hint, rich, spinner, switch,
+    Btn, Field, FieldStyle, SelectOption, Span, flash, h3, hint, rich, select, spinner, switch,
+    sync_select,
 };
 
 /// The editor's "Add to dictionary" list (web localStorage `spell-ignore`).
-const IGNORE_KEY: &str = "spell-ignore";
+pub(crate) const IGNORE_KEY: &str = "spell-ignore";
 /// Gives up on a desktop that doesn't answer, so the check never sits on "Checking…" for good.
 const DESK_TIMEOUT: Duration = Duration::from_secs(15);
 /// Follow a Claude sign-in this often until it finishes.
 const PLAN_POLL: Duration = Duration::from_millis(2000);
 const FLASH: Duration = Duration::from_millis(1500);
 /// The mobile sheet rising into place on open (a soft `ease`).
-const SHEET_ENTER: motion::Tween = motion::Tween::ease(260);
+const SHEET_ENTER: roostr_ui::motion::Tween = roostr_ui::motion::Tween::ease(260);
 const BUILD_STAMP: &str = env!("ROOSTR_BUILD_STAMP");
-/// The scroll area's children before the first section (the error line).
-const FIRST_SECTION: usize = 1;
+/// A pull on the phone sheet past this closes it.
+const SHEET_CLOSE: f32 = 110.0;
 
 /// Relays offered as toggles: ours on by default, public ones off.
 const KNOWN_RELAYS: &[(&str, &str, &str)] = &[
@@ -66,6 +68,13 @@ const KNOWN_RELAYS: &[(&str, &str, &str)] = &[
     ),
 ];
 
+/// The theme choices of the Appearance section.
+const THEMES: [(ThemePref, &str); 3] = [
+    (ThemePref::Dark, "Dark"),
+    (ThemePref::Light, "Light"),
+    (ThemePref::System, "System"),
+];
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Desk {
     Idle,
@@ -75,13 +84,20 @@ enum Desk {
     Offline,
 }
 
-/// The settings panel (the modal's content).
+/// The modal's slot: its state while open, the open generation and the
+/// window size its layer host last measured.
+#[derive(Default)]
+pub struct SettingsModal {
+    open: Option<Box<Settings>>,
+    generation: u64,
+    viewport: [f32; 2],
+}
+
+/// The settings panel's state (the modal's content).
 pub struct Settings {
-    focus: FocusHandle,
-    scroll: ScrollHandle,
-    settings_error: SharedString,
+    settings_error: String,
     desk: Desk,
-    desk_detail: SharedString,
+    desk_detail: String,
 
     // Nostr identity
     npub: String,
@@ -89,59 +105,61 @@ pub struct Settings {
     importing: bool,
     confirm_logout: bool,
     /// Replica mode: the revealed private key ("" = hidden).
-    nsec: SharedString,
-    import_draft: Entity<InputState>,
-    import_error: SharedString,
-    /// The settings scroll area's height the import field was last kept in
-    /// view at, while it has focus (see [`keep_in_view`]).
-    import_in_view: Rc<Cell<Option<Pixels>>>,
-    /// The section navigation beside (phone: above) the scroll area.
-    nav: SectionNav,
+    nsec: String,
+    import_draft: InputState,
+    import_error: String,
+    /// The section navigation's scroll-spy.
+    pub(crate) spy: Spy,
 
     // Relays
     relays: Vec<String>,
-    new_relay: Entity<InputState>,
+    new_relay: InputState,
     save_state: &'static str,
-    save_flash: Flash,
 
     // Agent credentials: `None` while checking, `Some(None)` when unavailable.
     agent_auth: Option<Option<AgentAuth>>,
-    kimi_draft: Entity<InputState>,
+    kimi_draft: InputState,
     agent_saved: &'static str,
-    agent_flash: Flash,
-    login_error: SharedString,
+    login_error: String,
 
     // Claude plan
     plan: Option<PlanStatus>,
     plan_machines: Vec<MachineRow>,
     /// The computer to keep the plan fresh: this one, until changed.
     plan_server: String,
-    plan_code: Entity<InputState>,
-    plan_error: SharedString,
+    plan_server_select: SelectState,
+    plan_code: InputState,
+    plan_error: String,
     plan_busy: bool,
     plan_poll: Option<Task<()>>,
 
     // Profile
     profile_picture: String,
-    profile_image: Option<Arc<Image>>,
-    profile_name: Entity<InputState>,
+    profile_name: InputState,
+    /// The name field changed since it was last saved (saved when it loses focus).
+    name_dirty: bool,
     /// The name as last saved, so an unchanged field never republishes the profile.
     saved_name: String,
     avatar_busy: bool,
-    avatar_state: SharedString,
+    avatar_state: String,
 
     // Chat colour
-    chat_color_draft: Entity<InputState>,
-    chat_color_state: SharedString,
-    swatch: Entity<ColorPickerState>,
+    chat_color_draft: InputState,
+    color_dirty: bool,
+    chat_color_state: String,
+    swatch: ColorPickerState,
+
+    // Appearance
+    theme_select: SelectState,
 
     // Dictionary
     ignored: Vec<String>,
 
     // Export
     export_format: ExportFormat,
+    export_select: SelectState,
     exporting: bool,
-    export_note: SharedString,
+    export_note: String,
 
     // Lite: how much of the vault this device holds (`None` while estimating),
     // and the "Fully sync this device" details sheet.
@@ -159,193 +177,79 @@ pub struct Settings {
     device_id: String,
     show_older_devices: bool,
     renaming_device: Option<String>,
-    device_name_draft: Entity<InputState>,
-    /// The mobile sheet's drag-to-close: how far it is pulled down, where
-    /// the finger started while it drags, its presented offset (entering
-    /// from below, then following the finger 1:1 and settling back over
-    /// `sheet_settle` after a short pull).
-    sheet_y: Pixels,
-    sheet_drag: Option<Pixels>,
-    sheet: Option<motion::ValueState>,
-    sheet_settle: motion::Tween,
-    _subscriptions: Vec<Subscription>,
-}
-
-fn input(window: &mut Window, cx: &mut Context<Settings>, placeholder: &str) -> Entity<InputState> {
-    let placeholder = placeholder.to_string();
-    cx.new(|cx| InputState::new(window, cx).placeholder(placeholder))
+    device_name_draft: InputState,
+    /// The phone sheet's drag-to-close: how far it is pulled down, and
+    /// whether a finger is dragging it (it follows 1:1, else settles back).
+    sheet_y: f32,
+    sheet_drag: bool,
 }
 
 impl Settings {
-    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let cached = nostr_profile::cached(cx);
+    fn new(s: &State) -> Self {
+        let cached = nostr_profile::cached(s);
         let name = cached.name.clone().unwrap_or_default();
-        let chat_color = Store::global(cx).read(cx).chat_color.clone();
-        let import_draft = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("nsec1… or 64-char hex")
-                .masked(true)
-        });
-        let kimi_draft = cx.new(|cx| InputState::new(window, cx).placeholder("sk-…").masked(true));
-        let new_relay = input(window, cx, "wss://relay.example.com");
-        let plan_code = input(window, cx, "Paste the code from claude.ai");
-        let profile_name = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("Your name")
-                .default_value(name.clone())
-        });
-        let chat_color_draft = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder(DEFAULT_CHAT_COLOR)
-                .default_value(chat_color.clone())
-        });
-        let swatch_color = hex(&chat_color)
-            .or_else(|| hex(DEFAULT_CHAT_COLOR))
-            .unwrap_or(theme::white());
-        let swatch = cx.new(|cx| ColorPickerState::new(window, cx).default_value(swatch_color));
-        let device_name_draft = input(window, cx, "Device name");
-
-        let subscriptions = vec![
-            cx.subscribe_in(
-                &import_draft,
-                window,
-                |this, state, event: &InputEvent, _, cx| {
-                    if let InputEvent::PressEnter { .. } = event
-                        && !state.read(cx).value().trim().is_empty()
-                    {
-                        this.import_key(cx);
-                    }
-                },
-            ),
-            cx.subscribe_in(
-                &new_relay,
-                window,
-                |this, _, event: &InputEvent, window, cx| {
-                    if let InputEvent::PressEnter { .. } = event {
-                        this.add_relay(window, cx);
-                    }
-                },
-            ),
-            cx.subscribe_in(
-                &kimi_draft,
-                window,
-                |this, state, event: &InputEvent, window, cx| {
-                    if let InputEvent::PressEnter { .. } = event {
-                        let key = state.read(cx).value().to_string();
-                        if !key.trim().is_empty() {
-                            this.save_agent_key("kimi", key, window, cx);
-                        }
-                    }
-                },
-            ),
-            cx.subscribe_in(
-                &plan_code,
-                window,
-                |this, state, event: &InputEvent, window, cx| {
-                    if let InputEvent::PressEnter { .. } = event {
-                        this.submit_plan_code(state.clone(), window, cx);
-                    }
-                },
-            ),
-            // `onchange`: Enter blurs the field, and leaving it saves.
-            cx.subscribe_in(
-                &profile_name,
-                window,
-                |this, _, event: &InputEvent, window, cx| match event {
-                    InputEvent::PressEnter { .. } => this.focus.focus(window, cx),
-                    InputEvent::Blur => this.save_name(cx),
-                    _ => {}
-                },
-            ),
-            cx.subscribe_in(
-                &chat_color_draft,
-                window,
-                |this, state, event: &InputEvent, window, cx| match event {
-                    InputEvent::PressEnter { .. } => this.focus.focus(window, cx),
-                    InputEvent::Blur => {
-                        let raw = state.read(cx).value().to_string();
-                        this.save_chat_color(raw, window, cx);
-                    }
-                    InputEvent::Change => cx.notify(),
-                    _ => {}
-                },
-            ),
-            cx.subscribe_in(
-                &swatch,
-                window,
-                |this, _, event: &ColorPickerEvent, window, cx| {
-                    if let ColorPickerEvent::Change(Some(color)) = event {
-                        this.save_chat_color(roostr_core::color::to_hex(*color), window, cx);
-                    }
-                },
-            ),
-            // The sync status line under "Fully sync this device" follows the store.
-            cx.observe(&Store::global(cx), |_, _, cx| cx.notify()),
-            cx.subscribe_in(
-                &device_name_draft,
-                window,
-                |this, _, event: &InputEvent, _, cx| {
-                    if let InputEvent::PressEnter { .. } = event {
-                        this.save_device_name(cx);
-                    }
-                },
-            ),
-            cx.subscribe(&Store::global(cx), |this, _, event: &StoreEvent, cx| {
-                let reload = match event {
-                    StoreEvent::Committed(id) => id.starts_with(DEVICE_ID_PREFIX),
-                    StoreEvent::Reconnected => true,
-                    StoreEvent::Refreshed => false,
-                };
-                if reload {
-                    this.load_devices(cx);
-                }
-            }),
-        ];
-
-        let mut this = Self {
-            focus: cx.focus_handle(),
-            scroll: ScrollHandle::new(),
-            settings_error: SharedString::default(),
+        let chat_color = s.store.chat_color.clone();
+        let swatch_color = parse_color_hex(&chat_color)
+            .or_else(|| parse_color_hex(DEFAULT_CHAT_COLOR))
+            .unwrap_or(Color::WHITE);
+        let pref = crate::theme_pref(s);
+        let theme_select = SelectState::new(
+            THEMES
+                .iter()
+                .map(|(p, label)| roostr_ui::SelectItem::new(p.name(), *label))
+                .collect(),
+            THEMES.iter().position(|(p, _)| *p == pref),
+        );
+        let export_select = SelectState::new(
+            vec![
+                roostr_ui::SelectItem::new("markdown", ExportFormat::Markdown.label()),
+                roostr_ui::SelectItem::new("json", ExportFormat::Json.label()),
+            ],
+            Some(0),
+        );
+        Self {
+            settings_error: String::new(),
             desk: Desk::Idle,
-            desk_detail: SharedString::default(),
+            desk_detail: String::new(),
             npub: String::new(),
             copied: "",
             importing: false,
             confirm_logout: false,
-            nsec: SharedString::default(),
-            import_draft,
-            import_error: SharedString::default(),
-            import_in_view: Rc::default(),
-            nav: SectionNav::default(),
+            nsec: String::new(),
+            import_draft: InputState::new().masked(true),
+            import_error: String::new(),
+            spy: Spy::default(),
             relays: Vec::new(),
-            new_relay,
+            new_relay: InputState::new(),
             save_state: "",
-            save_flash: Flash::default(),
             agent_auth: None,
-            kimi_draft,
+            kimi_draft: InputState::new().masked(true),
             agent_saved: "",
-            agent_flash: Flash::default(),
-            login_error: SharedString::default(),
+            login_error: String::new(),
             plan: None,
             plan_machines: Vec::new(),
             plan_server: String::new(),
-            plan_code,
-            plan_error: SharedString::default(),
+            plan_server_select: SelectState::new(Vec::new(), None),
+            plan_code: InputState::new(),
+            plan_error: String::new(),
             plan_busy: false,
             plan_poll: None,
-            profile_image: cached.picture.as_deref().and_then(data_url_image),
             profile_picture: cached.picture.unwrap_or_default(),
-            profile_name,
+            profile_name: InputState::with_value(name.clone()),
+            name_dirty: false,
             saved_name: name,
             avatar_busy: false,
-            avatar_state: SharedString::default(),
-            chat_color_draft,
-            chat_color_state: SharedString::default(),
-            swatch,
-            ignored: Self::read_ignored(cx),
+            avatar_state: String::new(),
+            chat_color_draft: InputState::with_value(chat_color),
+            color_dirty: false,
+            chat_color_state: String::new(),
+            swatch: ColorPickerState::new().default_value(swatch_color),
+            theme_select,
+            ignored: read_ignored(s),
             export_format: ExportFormat::Markdown,
+            export_select,
             exporting: false,
-            export_note: SharedString::default(),
+            export_note: String::new(),
             estimate: None,
             confirm_full: false,
             full_requested: false,
@@ -355,878 +259,454 @@ impl Settings {
             device_id: String::new(),
             show_older_devices: false,
             renaming_device: None,
-            device_name_draft,
-            sheet_y: px(0.),
-            sheet_drag: None,
-            sheet: None,
-            sheet_settle: SHEET_ENTER,
-            _subscriptions: subscriptions,
-        };
-        this.load_profile(window, cx);
-        this.load(cx);
-        this.load_estimate(cx);
-        this.load_devices(cx);
-        this
-    }
-
-    fn paired(cx: &App) -> bool {
-        harness(cx).is_some()
-    }
-
-    /// Clear `field` after the 1.5 s flash.
-    fn flash(cx: &mut Context<Self>, clear: impl FnOnce(&mut Self) + 'static) {
-        cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(FLASH).await;
-            let _ = this.update(cx, |this, cx| {
-                clear(this);
-                cx.notify();
-            });
-        })
-        .detach();
-    }
-
-    // ------------------------------------------------------------- load
-
-    fn load(&mut self, cx: &mut Context<Self>) {
-        self.settings_error = SharedString::default();
-        let backend = Store::global(cx).read(cx).backend();
-        let task = io::spawn(cx, backend.settings());
-        cx.spawn(async move |this, cx| {
-            let result = task.await;
-            let _ = this.update(cx, |this, cx| {
-                match result {
-                    Ok(settings) => {
-                        this.relays = settings.relays;
-                        this.npub = settings.npub.unwrap_or_default();
-                        this.device_id = settings.device_id;
-                    }
-                    Err(error) => this.settings_error = error.to_string().into(),
-                }
-                this.load_agent_auth(cx);
-                this.load_plan(cx);
-                cx.notify();
-            });
-        })
-        .detach();
-    }
-
-    /// "Your devices": the account's device records, reloaded on open, after
-    /// a rename/remove and whenever a device record commits.
-    fn load_devices(&mut self, cx: &mut Context<Self>) {
-        let task = devices::list(cx);
-        cx.spawn(async move |this, cx| {
-            let result = task.await;
-            let _ = this.update(cx, |this, cx| {
-                match result {
-                    Ok(records) => this.devices = records,
-                    Err(error) => log::warn!("device list failed: {error:#}"),
-                }
-                cx.notify();
-            });
-        })
-        .detach();
-    }
-
-    fn start_rename_device(
-        &mut self,
-        record: &DeviceRecord,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.renaming_device = Some(record.id.clone());
-        let name = record.name.clone();
-        self.device_name_draft.update(cx, |s, cx| {
-            s.set_value(name, window, cx);
-            s.focus(window, cx);
-        });
-        cx.notify();
-    }
-
-    fn save_device_name(&mut self, cx: &mut Context<Self>) {
-        let Some(id) = self.renaming_device.clone() else {
-            return;
-        };
-        let name = self.device_name_draft.read(cx).value().trim().to_string();
-        if name.is_empty() {
-            return;
+            device_name_draft: InputState::new(),
+            sheet_y: 0.0,
+            sheet_drag: false,
         }
-        self.renaming_device = None;
-        let task = devices::rename(&id, &name, cx);
-        self.after_device_change(task, cx);
     }
+}
 
-    fn remove_device(&mut self, id: &str, cx: &mut Context<Self>) {
-        let task = devices::remove(id, cx);
-        self.after_device_change(task, cx);
-    }
+// ----------------------------------------------------------------- open / close
 
-    fn after_device_change<T: 'static>(
-        &mut self,
-        task: Task<anyhow::Result<T>>,
-        cx: &mut Context<Self>,
-    ) {
-        self.settings_error = SharedString::default();
-        cx.spawn(async move |this, cx| {
-            let result = task.await;
-            let _ = this.update(cx, |this, cx| {
-                if let Err(error) = result {
-                    this.settings_error = error.to_string().into();
-                }
-                this.load_devices(cx);
-                cx.notify();
-            });
-        })
-        .detach();
-    }
+/// Open Settings over the window (fresh state, its loads started). The app's
+/// view draws it through [`settings_modal`].
+pub fn open_settings(s: &mut State) {
+    let settings = Settings::new(s);
+    let slot = s.slot::<SettingsModal>();
+    slot.generation += 1;
+    slot.open = Some(Box::new(settings));
+    // The column's scroll hook writes here (it exists before the first frame).
+    s.slot::<SpyClock>();
+    load_profile(s);
+    load(s);
+    load_estimate(s);
+    load_devices(s);
+}
 
-    /// Replica only: the vault estimate, computed each time settings opens.
-    fn load_estimate(&mut self, cx: &mut Context<Self>) {
-        let Some(control) = roostr_core::lite::lite(cx) else {
-            return;
-        };
-        let task = io::spawn(cx, async move { control.estimate().await });
-        cx.spawn(async move |this, cx| {
-            let result = task.await;
-            let _ = this.update(cx, |this, cx| {
-                match result {
-                    Ok(estimate) => this.estimate = Some(estimate),
-                    Err(error) => log::warn!("vault estimate failed: {error:#}"),
-                }
-                cx.notify();
-            });
-        })
-        .detach();
-    }
+/// Close Settings (Escape, the dim, ×, a pull down on the phone sheet).
+pub fn close_settings(s: &mut State) {
+    s.slot::<SettingsModal>().open = None;
+}
 
-    fn load_profile(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.avatar_state = SharedString::default();
-        let task = nostr_profile::fetch(cx);
-        cx.spawn_in(window, async move |this, cx| {
-            let result = task.await;
-            let _ = this.update_in(cx, |this, window, cx| {
-                match result {
-                    Ok(p) => this.apply_profile(p, window, cx),
-                    Err(error) => this.avatar_state = error.to_string().into(),
-                }
-                cx.notify();
-            });
-        })
-        .detach();
-    }
+/// Whether Settings is open.
+pub fn settings_open(s: &State) -> bool {
+    s.get::<SettingsModal>().is_some_and(|m| m.open.is_some())
+}
 
-    fn apply_profile(
-        &mut self,
-        p: nostr_profile::Profile,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.profile_picture = p.picture.unwrap_or_default();
-        self.profile_image = data_url_image(&self.profile_picture);
-        self.saved_name = p.name.unwrap_or_default();
-        let name = self.saved_name.clone();
-        self.profile_name
-            .update(cx, |s, cx| s.set_value(name, window, cx));
-    }
+/// The open panel's state.
+pub(crate) fn open_mut(s: &mut State) -> Option<&mut Settings> {
+    s.slot::<SettingsModal>().open.as_deref_mut()
+}
 
-    fn read_ignored(cx: &App) -> Vec<String> {
-        let mut words: Vec<String> = UiState::get(cx, IGNORE_KEY).unwrap_or_default();
-        words.sort();
-        words.dedup();
-        words
-    }
+fn open_ref(s: &State) -> Option<&Settings> {
+    s.get::<SettingsModal>()?.open.as_deref()
+}
 
-    // ------------------------------------------------------------- profile
+fn generation(s: &mut State) -> u64 {
+    s.slot::<SettingsModal>().generation
+}
 
-    fn pick_avatar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if io::WEB {
-            self.avatar_state = io::NO_FILE_PICKER.into();
-            cx.notify();
-            return;
-        }
-        let paths = cx.prompt_for_paths(PathPromptOptions {
-            files: true,
-            directories: false,
-            multiple: false,
-            prompt: None,
-        });
-        cx.spawn_in(window, async move |this, cx| {
-            let Ok(Ok(Some(paths))) = paths.await else {
-                return;
-            };
-            let Some(path) = paths.into_iter().next() else {
-                return;
-            };
-            let _ = this.update(cx, |this, cx| {
-                this.avatar_busy = true;
-                this.avatar_state = "saving…".into();
-                cx.notify();
-            });
-            let picture = cx
-                .background_spawn(async move { profile::image_to_avatar(&path) })
-                .await;
-            let result = match picture {
-                Ok(picture) => match cx.update(|_, cx| {
-                    nostr_profile::save(nostr_profile::patch("picture", &picture), cx)
-                }) {
-                    Ok(task) => task.await,
-                    Err(error) => Err(error),
-                },
-                Err(error) => Err(error),
-            };
-            let _ = this.update_in(cx, |this, window, cx| {
-                match result {
-                    Ok(p) => {
-                        this.apply_profile(p, window, cx);
-                        this.avatar_state = "saved".into();
-                    }
-                    Err(error) => this.avatar_state = error.to_string().into(),
-                }
-                this.avatar_busy = false;
-                cx.notify();
-            });
-        })
-        .detach();
-    }
-
-    fn save_profile(&mut self, patch: Json, saving: bool, cx: &mut Context<Self>) {
-        self.avatar_busy = true;
-        if saving {
-            self.avatar_state = "saving…".into();
-        }
-        cx.notify();
-        let task = nostr_profile::save(patch, cx);
-        cx.spawn(async move |this, cx| {
-            let result = task.await;
-            let _ = this.update(cx, |this, cx| {
-                match result {
-                    Ok(p) => {
-                        this.profile_picture = p.picture.unwrap_or_default();
-                        this.profile_image = data_url_image(&this.profile_picture);
-                        this.saved_name = p.name.unwrap_or_default();
-                        this.avatar_state = "saved".into();
-                    }
-                    Err(error) => this.avatar_state = error.to_string().into(),
-                }
-                this.avatar_busy = false;
-                cx.notify();
-            });
-        })
-        .detach();
-    }
-
-    fn save_name(&mut self, cx: &mut Context<Self>) {
-        let name = self.profile_name.read(cx).value().trim().to_string();
-        if name == self.saved_name {
-            return;
-        }
-        self.save_profile(nostr_profile::patch("name", &name), true, cx);
-    }
-
-    // ------------------------------------------------------------- chat colour
-
-    fn save_chat_color(&mut self, raw: String, window: &mut Window, cx: &mut Context<Self>) {
-        if normalize_hex(&raw).is_none() {
-            self.chat_color_state = "Use a hex color like #EDCF7F".into();
-            cx.notify();
-            return;
-        }
-        self.chat_color_state = "saving…".into();
-        cx.notify();
-        let task = api::user_prefs::set_chat_color(&raw, cx);
-        cx.spawn_in(window, async move |this, cx| {
-            let result = task.await;
-            let _ = this.update_in(cx, |this, window, cx| {
-                match result {
-                    Ok(hex_value) => {
-                        Store::global(cx).update(cx, |store, cx| {
-                            store.chat_color = hex_value.clone();
-                            cx.notify();
-                        });
-                        this.chat_color_draft
-                            .update(cx, |s, cx| s.set_value(hex_value.clone(), window, cx));
-                        if let Some(color) = hex(&hex_value) {
-                            this.swatch
-                                .update(cx, |s, cx| s.set_value(color, window, cx));
-                        }
-                        this.chat_color_state = "saved".into();
-                    }
-                    Err(error) => this.chat_color_state = error.to_string().into(),
-                }
-                cx.notify();
-            });
-        })
-        .detach();
-    }
-
-    /// The section navigation's pick: glide the column to section `ix`.
-    pub(crate) fn go_to_section(&mut self, ix: usize, cx: &mut Context<Self>) {
-        self.nav.pick(ix, FIRST_SECTION, &self.scroll);
-        cx.notify();
-    }
-
-    // ------------------------------------------------------------- identity
-
-    fn copy(&mut self, text: String, label: &'static str, cx: &mut Context<Self>) {
-        cx.write_to_clipboard(ClipboardItem::new_string(text));
-        self.copied = label;
-        cx.notify();
-        Self::flash(cx, |this| this.copied = "");
-    }
-
-    fn import_key(&mut self, cx: &mut Context<Self>) {
-        self.import_error = SharedString::default();
-        let key = self.import_draft.read(cx).value().trim().to_string();
-        let task = api::settings::import_key(&key, cx);
-        cx.spawn(async move |this, cx| {
-            let result = task.await;
-            let _ = this.update(cx, |this, cx| match result {
-                Ok(_) => {
-                    // The web reloads the page: close Settings and reopen the vault under the new identity.
-                    this.importing = false;
-                    if let Some(window) = cx.active_window() {
-                        let _ = window.update(cx, |_, window, cx| window.close_dialog(cx));
-                    }
-                    Store::global(cx).update(cx, |store, cx| store.reconnect(cx));
-                }
-                Err(error) => {
-                    this.import_error = error.to_string().into();
-                    cx.notify();
-                }
-            });
-        })
-        .detach();
-    }
-
-    fn cancel_import(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.importing = false;
-        self.import_draft
-            .update(cx, |s, cx| s.set_value("", window, cx));
-        self.import_error = SharedString::default();
-        cx.notify();
-    }
-
-    /// Replica mode: "Log out on this device" (api.ts `settings.logout`).
-    fn log_out(&mut self, cx: &mut Context<Self>) {
-        self.settings_error = SharedString::default();
-        let Some(account) = roostr_core::account::account(cx) else {
-            return;
-        };
-        let task = io::spawn(cx, account.logout());
-        cx.spawn(async move |this, cx| {
-            let result = task.await;
-            let _ = this.update(cx, |this, cx| match result {
-                Ok(()) => {
-                    if let Some(window) = cx.active_window() {
-                        let _ = window.update(cx, |_, window, cx| window.close_dialog(cx));
-                    }
-                    // No key now: the vault reopens on the sign-in gate.
-                    Store::global(cx).update(cx, |store, cx| store.reconnect(cx));
-                }
-                Err(error) => {
-                    this.settings_error = error.to_string().into();
-                    this.confirm_logout = false;
-                    cx.notify();
-                }
-            });
-        })
-        .detach();
-    }
-
-    /// Replica mode: "Reveal private key" and, revealed, the nsec to copy.
-    fn render_reveal(&self, identity: Div, cx: &mut Context<Self>) -> Div {
-        if self.nsec.is_empty() {
-            return identity.child(div().mt(px(6.)).mb(px(6.)).flex().child(
-                Btn::action("reveal-key", "Reveal private key").on_click(cx.listener(
-                    |this, _, _, cx| {
-                        match roostr_core::account::account(cx).map(|a| a.export_key()) {
-                            Some(Ok((nsec, _))) => this.nsec = nsec.into(),
-                            Some(Err(error)) => this.settings_error = error.to_string().into(),
-                            None => {}
-                        }
-                        cx.notify();
-                    },
-                )),
-            ));
-        }
-        let nsec = self.nsec.to_string();
-        identity
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(8.))
-                    .mt(px(10.))
-                    .mb(px(4.))
-                    .text_size(px(12.))
-                    .font_weight(FontWeight::MEDIUM)
-                    .child("Private key")
-                    .child(
-                        div()
-                            .text_size(px(11.))
-                            .font_weight(FontWeight::NORMAL)
-                            .font_family(theme::fonts::MONO)
-                            .text_color(theme::muted())
-                            .child("nsec"),
-                    )
-                    .child(key_tag("SECRET", theme::red(), theme::red())),
-            )
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(8.))
-                    .mb(px(6.))
-                    .child(
-                        div()
-                            .id("nsec-code")
-                            .flex_1()
-                            .min_w_0()
-                            .overflow_x_scroll()
-                            .px(px(10.))
-                            .py(px(7.))
-                            .rounded(px(8.))
-                            .bg(theme::bg())
-                            .border_1()
-                            .border_color(theme::border())
-                            .font_family(theme::fonts::MONO)
-                            .text_size(px(11.))
-                            .whitespace_nowrap()
-                            .child(self.nsec.clone()),
-                    )
-                    .child(
-                        Btn::small("copy-nsec", if self.copied == "nsec" { "Copied" } else { "Copy" })
-                            .on_click(cx.listener(move |this, _, _, cx| this.copy(nsec.clone(), "nsec", cx))),
-                    ),
-            )
-            .child(p(
-                "Paste this nsec into \"Sign in with existing key\" on another Roostr to log in as you.",
-            ))
-            .child(
-                div().mt(px(6.)).flex().child(
-                    Btn::action("hide-key", "Hide").subtle().on_click(cx.listener(|this, _, _, cx| {
-                        this.nsec = SharedString::default();
-                        cx.notify();
-                    })),
-                ),
-            )
-    }
-
-    /// Replica only: "This device holds about N% of your vault" and, on a
-    /// lite replica, "Fully sync this device" behind a details sheet. After
-    /// confirming, the sync status line shows the download.
-    fn render_holding(&self, vault: Div, window: &Window, cx: &mut Context<Self>) -> Div {
-        let vault = vault
-            .child(self.render_mode_line(cx))
-            .child(self.render_devices(window, cx));
-        if roostr_core::lite::lite(cx).is_none() {
-            return vault;
-        }
-        let lite = roostr_core::lite::status(cx).is_some();
-        // A browser or the iPhone app holding the whole vault can go back to
-        // lite: its copy is dropped and it opens again, still signed in.
-        let vault = if cfg!(any(target_family = "wasm", target_os = "ios")) && !lite {
-            self.render_switch_to_lite(vault, cx)
-        } else {
-            vault
-        };
-        let status = Store::global(cx).read(cx).status.clone();
-        let progress = sync_progress(&status).map(|p| progress_text(&p));
-        vault
-            .child(p(lite_ui::percent_text(self.estimate.as_ref())).mt(px(10.)))
-            .when(lite && !self.confirm_full && !self.full_requested, |d| {
-                d.child(
-                    div().mt(px(6.)).flex().child(
-                        Btn::action("sync-fully", "Fully sync this device")
-                            .subtle()
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.confirm_full = true;
-                                cx.notify();
-                            })),
-                    ),
-                )
-            })
-            .when(lite && self.confirm_full, |d| {
-                let lines = match &self.estimate {
-                    Some(e) => lite_ui::estimate_lines(e),
-                    None => vec!["Estimating what a full sync downloads…".into()],
-                };
-                d.child(
-                    card(
-                        "sync-fully-panel",
-                        StyleRefinement::default()
-                            .p(px(12.))
-                            .rounded(px(8.))
-                            .border_color(theme::border())
-                            .bg(theme::bg())
-                            .gap(px(4.)),
-                    )
-                    .mt(px(8.))
-                    .children(lines.into_iter().map(p))
-                    .child(
-                        div()
-                            .mt(px(6.))
-                            .flex()
-                            .gap(px(8.))
-                            .child(
-                                Btn::action("sync-fully-confirm", "Fully sync this device")
-                                    .armed()
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.confirm_full = false;
-                                        this.full_requested = true;
-                                        lite_ui::sync_fully(cx);
-                                        cx.notify();
-                                    })),
-                            )
-                            .child(Btn::small("sync-fully-cancel", "Cancel").on_click(
-                                cx.listener(|this, _, _, cx| {
-                                    this.confirm_full = false;
-                                    cx.notify();
-                                }),
-                            )),
-                    ),
-                )
-            })
-            .when(self.full_requested, |d| {
-                d.child(
-                    p(progress.unwrap_or_else(|| "Fully syncing this device…".into())).mt(px(6.)),
-                )
-            })
-    }
-
-    /// "Switch to Lite" and its confirm sheet, under the mode line of a full
-    /// replica in a browser or the iPhone app.
-    fn render_switch_to_lite(&self, vault: Div, cx: &mut Context<Self>) -> Div {
-        if !self.confirm_lite {
-            return vault
-                .child(p("This device holds your whole vault. Lite keeps only what you open, which is lighter for a big vault.").mt(px(10.)))
-                .child(
-                    div().mt(px(6.)).flex().child(
-                        Btn::action("switch-lite", "Switch to Lite")
-                            .subtle()
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.confirm_lite = true;
-                                this.lite_error = None;
-                                cx.notify();
-                            })),
-                    ),
-                );
-        }
-        let entity = cx.entity().downgrade();
-        vault.child(
-            card(
-                "switch-lite-panel",
-                StyleRefinement::default()
-                    .p(px(12.))
-                    .rounded(px(8.))
-                    .border_color(theme::border())
-                    .bg(theme::bg())
-                    .gap(px(4.)),
-            )
-            .mt(px(8.))
-            .child(p("This device's copy of your vault is removed and Roostr opens again in Lite: you stay signed in, and objects download as you open them. Nothing is deleted from your vault or your other devices."))
-            .when_some(self.lite_error.clone(), |d, error| {
-                d.child(div().text_size(px(13.)).text_color(theme::red()).child(error))
-            })
-            .child(
-                div()
-                    .mt(px(6.))
-                    .flex()
-                    .gap(px(8.))
-                    .child(
-                        Btn::action("switch-lite-confirm", "Switch to Lite")
-                            .armed()
-                            .on_click(move |_, _, cx| {
-                                let entity = entity.clone();
-                                lite_ui::switch_to_lite(cx, move |error, cx| {
-                                    let _ = entity.update(cx, |this, cx| {
-                                        this.lite_error = Some(error);
-                                        cx.notify();
-                                    });
-                                });
-                            }),
-                    )
-                    .child(Btn::small("switch-lite-cancel", "Cancel").on_click(cx.listener(
-                        |this, _, _, cx| {
-                            this.confirm_lite = false;
-                            this.lite_error = None;
-                            cx.notify();
-                        },
-                    ))),
-            ),
-        )
-    }
-
-    /// One line at the top of "Where your vault lives": which mode this
-    /// device is in (Full via the daemon, Full replica, Lite replica) and
-    /// where its sync stands - so neither has to be inferred from the rest.
-    fn render_mode_line(&self, cx: &mut Context<Self>) -> Div {
-        use roostr_core::SyncPhase;
-        let status = Store::global(cx).read(cx).status.clone();
-        let replica = roostr_core::lite::lite(cx).is_some();
-        let lite = status.lite.is_some();
-        let (mode, mode_color) = match (replica, lite) {
-            (false, _) => ("Full", theme::green()),
-            (true, false) => ("Full", theme::green()),
-            (true, true) => ("Lite", theme::orange()),
-        };
-        let progress = sync_progress(&status).map(|p| progress_text(&p));
-        let (state, state_color) = match status.phase {
-            SyncPhase::Error => (
-                format!(
-                    "Sync error{}",
-                    status
-                        .detail
-                        .as_deref()
-                        .map(|d| format!(": {d}"))
-                        .unwrap_or_default()
-                ),
-                theme::red(),
-            ),
-            _ if progress.is_some() => (progress.unwrap_or_default(), theme::orange()),
-            _ if !replica => (
-                "Holds your whole vault (this computer's engine)".to_string(),
-                theme::green(),
-            ),
-            _ if lite => (
-                match &self.estimate {
-                    Some(e) => format!(
-                        "About {}% on this device · the rest downloads as you open it",
-                        e.percent()
-                    ),
-                    None => "Part of your vault on this device · the rest downloads as you open it"
-                        .to_string(),
-                },
-                theme::muted(),
-            ),
-            SyncPhase::Live if status.bootstrapped => {
-                ("100% synced · up to date".to_string(), theme::green())
+/// Runs `f` on the state when `task` lands, if the modal opened as
+/// `generation` is still open.
+fn after<T: 'static>(s: &mut State, task: Task<T>, f: impl FnOnce(&mut State, T) + 'static) {
+    let generation = generation(s);
+    s.rt.spawn(async move |cx| {
+        let value = task.await;
+        cx.update(|s| {
+            if is_current(s, generation) {
+                f(s, value)
             }
-            SyncPhase::Live | SyncPhase::Backfill => ("Syncing…".to_string(), theme::orange()),
-            SyncPhase::Idle => ("Not connected to a relay".to_string(), theme::muted()),
-        };
-        let pending = status.pending.filter(|n| *n > 0).map(|n| {
-            format!(
-                " · {n} change{} not sent yet",
-                if n == 1 { "" } else { "s" }
-            )
         });
-        div()
-            .mt(px(10.))
-            .flex()
-            .items_center()
-            .gap(px(8.))
-            .flex_wrap()
-            .child(pill(format!("{mode} mode"), mode_color))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .text_size(px(13.))
-                    .text_color(state_color)
-                    .child(format!("{state}{}", pending.unwrap_or_default())),
-            )
-    }
+    })
+    .detach();
+}
 
-    /// "Your devices" under the mode line: this device first, then the most
-    /// recent; devices unseen for 30 days fold under "Older devices".
-    fn render_devices(&self, window: &Window, cx: &mut Context<Self>) -> Div {
-        let list = div()
-            .mt(px(14.))
-            .flex()
-            .flex_col()
-            .gap(px(6.))
-            .child(h3("Your devices"));
-        if self.devices.is_empty() {
-            return list.child(hint("No devices yet"));
-        }
-        let now = chrono::Utc::now().timestamp_millis();
-        let (shown, older) = devices::arrange(self.devices.clone(), &self.device_id, now);
-        let older_count = older.len();
-        let open = self.show_older_devices;
-        let mut list = list.children(shown.iter().map(|r| self.render_device(r, now, window, cx)));
-        if older_count > 0 {
-            list = list.child(
-                div().flex().child(
-                    Btn::action(
-                        "devices-older",
-                        format!(
-                            "{} Older devices ({older_count})",
-                            if open { "▾" } else { "▸" }
-                        ),
-                    )
-                    .subtle()
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.show_older_devices = !this.show_older_devices;
-                        cx.notify();
-                    })),
-                ),
-            );
-            if open {
-                list = list.children(older.iter().map(|r| self.render_device(r, now, window, cx)));
+fn is_current(s: &mut State, generation: u64) -> bool {
+    let slot = s.slot::<SettingsModal>();
+    slot.generation == generation && slot.open.is_some()
+}
+
+/// The open panel; only called where [`is_current`] / [`open_mut`] held.
+fn cur(s: &mut State) -> &mut Settings {
+    open_mut(s).expect("settings are open")
+}
+
+/// Runs `f` on the open panel (a handler's press).
+fn edit(s: &mut State, f: impl FnOnce(&mut Settings)) {
+    if let Some(settings) = open_mut(s) {
+        f(settings)
+    }
+}
+
+/// Clears a flash after 1.5 s.
+fn flash_later(s: &mut State, clear: fn(&mut Settings)) {
+    let timer = s.rt.timer(FLASH);
+    after(s, timer, move |s, ()| clear(cur(s)));
+}
+
+// ----------------------------------------------------------------- listeners
+
+/// "Your devices" reload whenever a device record commits or the stream reconnects.
+pub(crate) fn on_store(s: &mut State, event: &StoreEvent) {
+    let reload = match event {
+        StoreEvent::Committed(id) => id.starts_with(DEVICE_ID_PREFIX),
+        StoreEvent::Reconnected => true,
+        StoreEvent::Refreshed => false,
+    };
+    if reload && settings_open(s) {
+        load_devices(s);
+    }
+}
+
+/// Commit-on-blur (`onchange`): the profile name and the chat colour save
+/// once their field loses focus after a change.
+pub(crate) fn on_poll(s: &mut State) -> bool {
+    let Some(settings) = open_mut(s) else {
+        return false;
+    };
+    let name = settings.name_dirty && !settings.profile_name.is_focused();
+    let color = settings.color_dirty && !settings.chat_color_draft.is_focused();
+    if name {
+        settings.name_dirty = false;
+        save_name(s);
+    }
+    if color {
+        let settings = cur(s);
+        settings.color_dirty = false;
+        let raw = settings.chat_color_draft.value().to_string();
+        save_chat_color(s, raw);
+    }
+    name || color
+}
+
+// ----------------------------------------------------------------- load
+
+fn load(s: &mut State) {
+    cur(s).settings_error.clear();
+    let backend = s.store.backend();
+    let task = s.rt.background(backend.settings());
+    after(s, task, |s, result| {
+        match result {
+            Ok(settings) => {
+                let me = cur(s);
+                me.relays = settings.relays;
+                me.npub = settings.npub.unwrap_or_default();
+                me.device_id = settings.device_id;
             }
+            Err(error) => cur(s).settings_error = error.to_string(),
         }
-        list.child(hint(
-            "Remove deletes a record only - the device adds itself again the next time it runs.",
-        ))
-    }
+        load_agent_auth(s);
+        load_plan(s);
+    });
+}
 
-    fn render_device(
-        &self,
-        record: &DeviceRecord,
-        now: i64,
-        window: &Window,
-        cx: &mut Context<Self>,
-    ) -> GroupBox {
-        let this_device = record.device_id() == self.device_id;
-        let name = if this_device {
-            format!("{} (this device)", record.name)
-        } else {
-            record.name.clone()
-        };
-        let (badge, color) = if record.lite {
-            ("Lite", theme::orange())
-        } else {
-            ("Full", theme::green())
-        };
-        let id = record.id.clone();
-        let renaming = self.renaming_device.as_deref() == Some(record.id.as_str());
-        let surface = StyleRefinement::default()
-            .px(px(10.))
-            .py(px(8.))
-            .rounded(px(8.))
-            .gap(px(6.));
-        let surface = if record.lite {
-            surface
-                .border_color(theme::orange().opacity(0.4))
-                .bg(theme::orange().opacity(0.06))
-        } else {
-            surface.border_color(theme::border())
-        };
-        let row = card(SharedString::from(format!("device-{id}")), surface);
-        if renaming {
-            return row.child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(8.))
-                    .child(field(&self.device_name_draft, modal_field(), window, cx).flex_1())
-                    .child(
-                        Btn::small(SharedString::from(format!("device-save-{id}")), "Save")
-                            .on_click(cx.listener(|this, _, _, cx| this.save_device_name(cx))),
-                    )
-                    .child(
-                        Btn::action(SharedString::from(format!("device-cancel-{id}")), "Cancel")
-                            .subtle()
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.renaming_device = None;
-                                cx.notify();
-                            })),
-                    ),
-            );
+/// "Your devices": the account's device records, reloaded on open, after
+/// a rename/remove and whenever a device record commits.
+fn load_devices(s: &mut State) {
+    let task = devices::list(s);
+    after(s, task, |s, result| match result {
+        Ok(records) => cur(s).devices = records,
+        Err(error) => log::warn!("device list failed: {error:#}"),
+    });
+}
+
+fn start_rename_device(s: &mut State, record: &DeviceRecord) {
+    edit(s, |me| {
+        me.renaming_device = Some(record.id.clone());
+        me.device_name_draft.set_value(record.name.clone());
+        me.device_name_draft.focus();
+    });
+}
+
+fn save_device_name(s: &mut State) {
+    let Some(me) = open_mut(s) else { return };
+    let Some(id) = me.renaming_device.clone() else {
+        return;
+    };
+    let name = me.device_name_draft.value().trim().to_string();
+    if name.is_empty() {
+        return;
+    }
+    me.renaming_device = None;
+    let task = devices::rename(&id, &name, s);
+    after_device_change(s, task);
+}
+
+fn remove_device(s: &mut State, id: &str) {
+    let task = devices::remove(id, s);
+    after_device_change(s, task);
+}
+
+fn after_device_change<T: 'static>(s: &mut State, task: Task<anyhow::Result<T>>) {
+    cur(s).settings_error.clear();
+    after(s, task, |s, result| {
+        if let Err(error) = result {
+            cur(s).settings_error = error.to_string();
         }
-        let rename_record = record.clone();
-        row.child(
-            div()
-                .flex()
-                .items_center()
-                .gap(px(8.))
-                .flex_wrap()
-                .child(div().text_size(px(14.)).text_color(theme::fg()).child(name))
-                .child(pill(badge, color))
-                .when(record.lite, |d| {
-                    d.child(div().text_size(px(13.)).text_color(theme::orange()).child(format!("{}% held", record.percent)))
-                })
-                .child(
-                    div()
-                        .text_size(px(13.))
-                        .text_color(theme::muted())
-                        .child(format!("last seen {}", devices::last_seen_text(now, record.last_seen))),
-                ),
-        )
-        .child(
-            div()
-                .flex()
-                .gap(px(8.))
-                .child(
-                    Btn::action(SharedString::from(format!("device-rename-{id}")), "Rename")
-                        .subtle()
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            this.start_rename_device(&rename_record, window, cx)
-                        })),
-                )
-                .child(
-                    Btn::action(SharedString::from(format!("device-remove-{id}")), "Remove")
-                        .subtle()
-                        .tooltip("Removes this record only - the device adds itself again the next time it runs.")
-                        .on_click(cx.listener(move |this, _, _, cx| this.remove_device(&id, cx))),
-                ),
-        )
+        load_devices(s);
+    });
+}
+
+/// Replica only: the vault estimate, computed each time settings opens.
+fn load_estimate(s: &mut State) {
+    let Some(control) = roostr_core::lite::lite(s) else {
+        return;
+    };
+    let task = s.rt.background(async move { control.estimate().await });
+    after(s, task, |s, result| match result {
+        Ok(estimate) => cur(s).estimate = Some(estimate),
+        Err(error) => log::warn!("vault estimate failed: {error:#}"),
+    });
+}
+
+fn load_profile(s: &mut State) {
+    cur(s).avatar_state.clear();
+    let task = nostr_profile::fetch(s);
+    after(s, task, |s, result| match result {
+        Ok(p) => apply_profile(cur(s), p),
+        Err(error) => cur(s).avatar_state = error.to_string(),
+    });
+}
+
+fn apply_profile(me: &mut Settings, p: nostr_profile::Profile) {
+    me.profile_picture = p.picture.unwrap_or_default();
+    me.saved_name = p.name.unwrap_or_default();
+    me.profile_name.set_value(me.saved_name.clone());
+    me.name_dirty = false;
+}
+
+fn read_ignored(s: &State) -> Vec<String> {
+    let mut words: Vec<String> = s.ui.get(IGNORE_KEY).unwrap_or_default();
+    words.sort();
+    words.dedup();
+    words
+}
+
+// ----------------------------------------------------------------- profile
+
+fn pick_avatar(s: &mut State) {
+    if io::WEB {
+        cur(s).avatar_state = io::NO_FILE_PICKER.into();
+        return;
     }
-
-    // ------------------------------------------------------------- relays
-
-    fn save_relays(&mut self, next: Vec<String>, cx: &mut Context<Self>) {
-        self.settings_error = SharedString::default();
-        let task = api::settings::set_relays(&next, cx);
-        cx.spawn(async move |this, cx| {
-            let result = task.await;
-            let _ = this.update(cx, |this, cx| {
-                match result {
-                    Ok(_) => {
-                        Store::global(cx).update(cx, |store, _| {
-                            if let Some(settings) = store.settings.as_mut() {
-                                settings.relays = next.clone();
-                            }
-                        });
-                        this.relays = next;
-                        this.save_state = "Saved";
-                        Self::flash(cx, |this| this.save_state = "");
-                    }
-                    Err(error) => this.settings_error = error.to_string().into(),
-                }
-                cx.notify();
-            });
-        })
-        .detach();
-    }
-
-    fn add_relay(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let mut v = self.new_relay.read(cx).value().trim().to_string();
-        if v.is_empty() {
+    let Some(roostr_core::create::PickFile(pick)) = s.pick_file.clone() else {
+        cur(s).avatar_state = "This app has no file dialog to choose a picture with.".into();
+        return;
+    };
+    let picked = pick(s);
+    let generation = generation(s);
+    s.rt.spawn(async move |cx| {
+        let Some(path) = picked.await else {
+            return;
+        };
+        let open = cx.update(|s| {
+            let current = is_current(s, generation);
+            if current {
+                let me = cur(s);
+                me.avatar_busy = true;
+                me.avatar_state = "saving…".into();
+            }
+            current
+        });
+        if !open {
             return;
         }
-        if !v.starts_with("wss://") && !v.starts_with("ws://") {
-            v = format!("wss://{v}");
-        }
-        if !self.relays.contains(&v) {
-            let mut next = self.relays.clone();
-            next.push(v);
-            self.save_relays(next, cx);
-        }
-        self.new_relay
-            .update(cx, |s, cx| s.set_value("", window, cx));
+        let picture = cx
+            .background(async move { profile::image_to_avatar(&path) })
+            .await;
+        let result = match picture {
+            Ok(picture) => {
+                let save = cx
+                    .update(|s| nostr_profile::save(nostr_profile::patch("picture", &picture), s));
+                save.await
+            }
+            Err(error) => Err(error),
+        };
+        cx.update(|s| {
+            if !is_current(s, generation) {
+                return;
+            }
+            let me = cur(s);
+            match result {
+                Ok(p) => {
+                    apply_profile(me, p);
+                    me.avatar_state = "saved".into();
+                }
+                Err(error) => me.avatar_state = error.to_string(),
+            }
+            me.avatar_busy = false;
+        });
+    })
+    .detach();
+}
+
+fn save_profile(s: &mut State, patch: Json, saving: bool) {
+    let me = cur(s);
+    me.avatar_busy = true;
+    if saving {
+        me.avatar_state = "saving…".into();
     }
-
-    fn toggle_relay(&mut self, url: &str, on: bool, cx: &mut Context<Self>) {
-        let mut next: Vec<String> = self.relays.iter().filter(|r| *r != url).cloned().collect();
-        if on {
-            next.push(url.to_string());
+    let task = nostr_profile::save(patch, s);
+    after(s, task, |s, result| {
+        let me = cur(s);
+        match result {
+            Ok(p) => {
+                me.profile_picture = p.picture.unwrap_or_default();
+                me.saved_name = p.name.unwrap_or_default();
+                me.avatar_state = "saved".into();
+            }
+            Err(error) => me.avatar_state = error.to_string(),
         }
-        self.save_relays(next, cx);
+        me.avatar_busy = false;
+    });
+}
+
+fn save_name(s: &mut State) {
+    let me = cur(s);
+    let name = me.profile_name.value().trim().to_string();
+    if name == me.saved_name {
+        return;
     }
+    save_profile(s, nostr_profile::patch("name", &name), true);
+}
 
-    // ------------------------------------------------------------- desktop check
+// ----------------------------------------------------------------- chat colour
 
-    /// Compare the vault fingerprint the daemon reports with this app's view
-    /// of it. In native mode both refer to the one daemon.
-    fn check_desktop(&mut self, cx: &mut Context<Self>) {
-        self.desk = Desk::Checking;
-        self.desk_detail = "Asking the desktop for its fingerprint…".into();
-        cx.notify();
-        let backend = Store::global(cx).read(cx).backend();
-        let remote = io::spawn(cx, backend.sync_digest());
-        let timeout = cx.background_executor().timer(DESK_TIMEOUT);
-        cx.spawn(async move |this, cx| {
+fn save_chat_color(s: &mut State, raw: String) {
+    if normalize_hex(&raw).is_none() {
+        cur(s).chat_color_state = "Use a hex color like #EDCF7F".into();
+        return;
+    }
+    cur(s).chat_color_state = "saving…".into();
+    let task = api::user_prefs::set_chat_color(&raw, s);
+    after(s, task, |s, result| match result {
+        Ok(hex_value) => {
+            s.store.chat_color = hex_value.clone();
+            let me = cur(s);
+            me.chat_color_draft.set_value(hex_value.clone());
+            me.color_dirty = false;
+            if let Some(color) = parse_color_hex(&hex_value) {
+                me.swatch.set_value(color);
+            }
+            me.chat_color_state = "saved".into();
+        }
+        Err(error) => cur(s).chat_color_state = error.to_string(),
+    });
+}
+
+// ----------------------------------------------------------------- identity
+
+fn copy(s: &mut State, tx: &mut Tx, text: String, label: &'static str) {
+    tx.copy(text);
+    cur(s).copied = label;
+    flash_later(s, |me| me.copied = "");
+}
+
+fn import_key(s: &mut State) {
+    let me = cur(s);
+    me.import_error.clear();
+    let key = me.import_draft.value().trim().to_string();
+    let task = api::settings::import_key(&key, s);
+    after(s, task, |s, result| match result {
+        Ok(_) => {
+            // The web reloads the page: close Settings and reopen the vault under the new identity.
+            close_settings(s);
+            s.store.reconnect();
+        }
+        Err(error) => cur(s).import_error = error.to_string(),
+    });
+}
+
+fn cancel_import(me: &mut Settings) {
+    me.importing = false;
+    me.import_draft.clear();
+    me.import_error.clear();
+}
+
+/// Replica mode: "Log out on this device" (api.ts `settings.logout`).
+fn log_out(s: &mut State) {
+    cur(s).settings_error.clear();
+    let Some(account) = roostr_core::account::account(s) else {
+        return;
+    };
+    let task = s.rt.background(account.logout());
+    after(s, task, |s, result| match result {
+        Ok(()) => {
+            close_settings(s);
+            // No key now: the vault reopens on the sign-in gate.
+            s.store.reconnect();
+        }
+        Err(error) => {
+            let me = cur(s);
+            me.settings_error = error.to_string();
+            me.confirm_logout = false;
+        }
+    });
+}
+
+// ----------------------------------------------------------------- relays
+
+fn save_relays(s: &mut State, next: Vec<String>) {
+    cur(s).settings_error.clear();
+    let task = api::settings::set_relays(&next, s);
+    after(s, task, move |s, result| match result {
+        Ok(_) => {
+            if let Some(settings) = s.store.settings.as_mut() {
+                settings.relays = next.clone();
+            }
+            let me = cur(s);
+            me.relays = next;
+            me.save_state = "Saved";
+            flash_later(s, |me| me.save_state = "");
+        }
+        Err(error) => cur(s).settings_error = error.to_string(),
+    });
+}
+
+fn add_relay(s: &mut State) {
+    let me = cur(s);
+    let mut v = me.new_relay.value().trim().to_string();
+    if v.is_empty() {
+        return;
+    }
+    if !v.starts_with("wss://") && !v.starts_with("ws://") {
+        v = format!("wss://{v}");
+    }
+    me.new_relay.clear();
+    if !me.relays.contains(&v) {
+        let mut next = me.relays.clone();
+        next.push(v);
+        save_relays(s, next);
+    }
+}
+
+fn toggle_relay(s: &mut State, url: &str, on: bool) {
+    let mut next: Vec<String> = cur(s)
+        .relays
+        .iter()
+        .filter(|r| *r != url)
+        .cloned()
+        .collect();
+    if on {
+        next.push(url.to_string());
+    }
+    save_relays(s, next);
+}
+
+// ----------------------------------------------------------------- desktop check
+
+/// Compare the vault fingerprint the daemon reports with this app's view
+/// of it. In native mode both refer to the one daemon.
+fn check_desktop(s: &mut State) {
+    let me = cur(s);
+    me.desk = Desk::Checking;
+    me.desk_detail = "Asking the desktop for its fingerprint…".into();
+    let backend = s.store.backend();
+    let remote = s.rt.background(backend.sync_digest());
+    let timeout = s.rt.timer(DESK_TIMEOUT);
+    let generation = generation(s);
+    s.rt
+        .spawn(async move |cx| {
             let remote = futures::select! {
                 r = remote.fuse() => r,
                 _ = timeout.fuse() => Err(anyhow::anyhow!(
@@ -1234,34 +714,51 @@ impl Settings {
                     DESK_TIMEOUT.as_secs()
                 )),
             };
-            let num = |m: &serde_json::Map<String, Json>, k: &str| m.get(k).and_then(Json::as_i64).unwrap_or(0);
+            let num = |m: &serde_json::Map<String, Json>, k: &str| {
+                m.get(k).and_then(Json::as_i64).unwrap_or(0)
+            };
             let remote = match remote {
                 Ok(remote) => remote,
                 Err(error) => {
-                    let _ = this.update(cx, |this, cx| {
-                        this.desk = Desk::Offline;
-                        this.desk_detail = error.to_string().into();
-                        cx.notify();
+                    cx.update(|s| {
+                        if is_current(s, generation) {
+                            let me = cur(s);
+                            me.desk = Desk::Offline;
+                            me.desk_detail = error.to_string();
+                        }
                     });
                     return;
                 }
             };
             let (r_objects, r_changes) = (num(&remote, "objects"), num(&remote, "changes"));
-            let _ = this.update(cx, |this, cx| {
-                this.desk_detail = format!("Desktop has {r_changes} changes. Counting this device's…").into();
-                cx.notify();
+            cx.update(|s| {
+                if is_current(s, generation) {
+                    cur(s).desk_detail =
+                        format!("Desktop has {r_changes} changes. Counting this device's…");
+                }
             });
-            let local = io::spawn_async(cx, backend.sync_digest()).await;
-            let _ = this.update(cx, |this, cx| {
+            let local = cx.background(backend.sync_digest()).await;
+            cx.update(|s| {
+                if !is_current(s, generation) {
+                    return;
+                }
+                let me = cur(s);
                 match local {
                     Ok(local) => {
-                        let digest = |m: &serde_json::Map<String, Json>| m.get("digest").and_then(Json::as_str).unwrap_or("").to_string();
-                        let (l_objects, l_changes) = (num(&local, "objects"), num(&local, "changes"));
+                        let digest = |m: &serde_json::Map<String, Json>| {
+                            m.get("digest")
+                                .and_then(Json::as_str)
+                                .unwrap_or("")
+                                .to_string()
+                        };
+                        let (l_objects, l_changes) =
+                            (num(&local, "objects"), num(&local, "changes"));
                         if digest(&local) == digest(&remote) {
-                            this.desk = Desk::Match;
-                            this.desk_detail = format!("identical — {r_objects} objects, {r_changes} changes").into();
+                            me.desk = Desk::Match;
+                            me.desk_detail =
+                                format!("identical — {r_objects} objects, {r_changes} changes");
                         } else {
-                            this.desk = Desk::Differ;
+                            me.desk = Desk::Differ;
                             let who = if l_changes < r_changes {
                                 "this device is behind"
                             } else if l_changes > r_changes {
@@ -1269,709 +766,843 @@ impl Settings {
                             } else {
                                 "same size, different content"
                             };
-                            this.desk_detail = format!(
+                            me.desk_detail = format!(
                                 "desktop {r_objects}/{r_changes} · here {l_objects}/{l_changes} (objects/changes) — {who}"
-                            )
-                            .into();
+                            );
                         }
                     }
                     Err(error) => {
-                        this.desk = Desk::Offline;
-                        this.desk_detail = error.to_string().into();
+                        me.desk = Desk::Offline;
+                        me.desk_detail = error.to_string();
                     }
                 }
-                cx.notify();
             });
         })
         .detach();
-    }
+}
 
-    // ------------------------------------------------------------- dictionary / export
+// ----------------------------------------------------------------- dictionary / export
 
-    fn unignore(&mut self, word: &str, cx: &mut Context<Self>) {
-        let word = word.to_lowercase();
-        let mut words: Vec<String> = UiState::get(cx, IGNORE_KEY).unwrap_or_default();
-        words.retain(|w| *w != word);
-        UiState::set(cx, IGNORE_KEY, &words);
-        self.ignored = Self::read_ignored(cx);
-        cx.notify();
-    }
+fn unignore(s: &mut State, word: &str) {
+    let word = word.to_lowercase();
+    let mut words: Vec<String> = s.ui.get(IGNORE_KEY).unwrap_or_default();
+    words.retain(|w| *w != word);
+    s.ui.set(IGNORE_KEY, &words);
+    let ignored = read_ignored(s);
+    cur(s).ignored = ignored;
+}
 
-    fn run_export(&mut self, cx: &mut Context<Self>) {
-        self.exporting = true;
-        self.export_note = SharedString::default();
-        cx.notify();
-        let backend = Store::global(cx).read(cx).backend();
-        let format = self.export_format;
-        let (tx, mut rx) = futures::channel::mpsc::unbounded::<(usize, usize)>();
-        let task = io::spawn(
-            cx,
-            export_all(backend, format, move |done, total| {
-                let _ = tx.unbounded_send((done, total));
-            }),
-        );
-        cx.spawn(async move |this, cx| {
-            use futures::StreamExt as _;
-            let mut task = task.fuse();
-            let result = loop {
-                futures::select! {
-                    progress = rx.next() => if let Some((done, total)) = progress {
-                        let _ = this.update(cx, |this, cx| {
-                            this.export_note = format!("Preparing {done}/{total}…").into();
-                            cx.notify();
-                        });
-                    },
-                    result = task => break result,
-                }
-            };
-            let _ = this.update(cx, |this, cx| {
-                this.export_note = match result {
-                    Ok(n) => format!("Exported {n} objects.").into(),
-                    Err(error) => error.to_string().into(),
-                };
-                this.exporting = false;
-                cx.notify();
-            });
-        })
-        .detach();
-    }
-
-    // ------------------------------------------------------------- Claude plan
-
-    fn plan_call(
-        &mut self,
-        path: &'static str,
-        body: Option<Json>,
-        cx: &mut Context<Self>,
-    ) -> Task<()> {
-        self.plan_error = SharedString::default();
-        let task: Task<anyhow::Result<PlanStatus>> = match body {
-            Some(body) => local::post(path, body, cx),
-            None => local::get(path, cx),
+fn run_export(s: &mut State) {
+    let me = cur(s);
+    me.exporting = true;
+    me.export_note.clear();
+    let format = me.export_format;
+    let backend = s.store.backend();
+    let (tx, mut rx) = futures::channel::mpsc::unbounded::<(usize, usize)>();
+    let task =
+        s.rt.background(export_all(backend, format, move |done, total| {
+            let _ = tx.unbounded_send((done, total));
+        }));
+    let generation = generation(s);
+    s.rt.spawn(async move |cx| {
+        use futures::StreamExt as _;
+        let mut task = task.fuse();
+        let result = loop {
+            futures::select! {
+                progress = rx.next() => if let Some((done, total)) = progress {
+                    cx.update(|s| if is_current(s, generation) {
+                        cur(s).export_note = format!("Preparing {done}/{total}…");
+                    });
+                },
+                result = task => break result,
+            }
         };
-        cx.spawn(async move |this, cx| {
-            let result = task
-                .await
-                .map_err(|e| with_status(e, |s| format!("Claude plan: {s}")));
-            let _ = this.update(cx, |this, cx| {
-                match result {
-                    Ok(plan) => {
-                        if this.plan_server.is_empty() {
-                            this.plan_server = if plan.served_by.is_empty() {
-                                plan.this_computer.clone()
-                            } else {
-                                plan.served_by.clone()
-                            };
-                        }
-                        // Signing in: follow it until the window finishes (or stops and the paste box takes over).
-                        this.plan_poll = plan.signing_in.then(|| {
-                            cx.spawn(async move |this, cx| {
-                                cx.background_executor().timer(PLAN_POLL).await;
-                                let Ok(task) = this.update(cx, |this, cx| {
-                                    this.plan_call("/claude-plan", None, cx)
-                                }) else {
-                                    return;
-                                };
-                                task.await;
-                            })
-                        });
-                        this.plan = Some(plan);
-                    }
-                    Err(error) => this.plan_error = error.to_string().into(),
-                }
-                cx.notify();
-            });
-        })
-    }
+        cx.update(|s| {
+            if is_current(s, generation) {
+                let me = cur(s);
+                me.export_note = match result {
+                    Ok(n) => format!("Exported {n} objects."),
+                    Err(error) => error.to_string(),
+                };
+                me.exporting = false;
+            }
+        });
+    })
+    .detach();
+}
 
-    fn load_plan(&mut self, cx: &mut Context<Self>) {
-        if !Self::paired(cx) {
-            self.plan = None;
-            return;
-        }
-        let call = self.plan_call("/claude-plan", None, cx);
-        cx.spawn(async move |this, cx| {
-            call.await;
-            let Ok(machines) = this.update(cx, |_, cx| fetch_machines(cx)) else {
+// ----------------------------------------------------------------- Claude plan
+
+fn plan_call(s: &mut State, path: &'static str, body: Option<Json>) -> Task<()> {
+    cur(s).plan_error.clear();
+    let task: Task<anyhow::Result<PlanStatus>> = match body {
+        Some(body) => local::post(path, body, s),
+        None => local::get(path, s),
+    };
+    let generation = generation(s);
+    s.rt.spawn(async move |cx| {
+        let result = task
+            .await
+            .map_err(|e| with_status(e, |s| format!("Claude plan: {s}")));
+        cx.update(|s| {
+            if !is_current(s, generation) {
                 return;
+            }
+            match result {
+                Ok(plan) => {
+                    // Signing in: follow it until the window finishes (or stops and the paste box takes over).
+                    let poll = plan.signing_in.then(|| {
+                        s.rt.spawn(async move |cx| {
+                            cx.timer(PLAN_POLL).await;
+                            let next = cx.update(|s| {
+                                is_current(s, generation)
+                                    .then(|| plan_call(s, "/claude-plan", None))
+                            });
+                            if let Some(next) = next {
+                                next.await;
+                            }
+                        })
+                    });
+                    let me = cur(s);
+                    if me.plan_server.is_empty() {
+                        me.plan_server = if plan.served_by.is_empty() {
+                            plan.this_computer.clone()
+                        } else {
+                            plan.served_by.clone()
+                        };
+                    }
+                    me.plan_poll = poll;
+                    me.plan = Some(plan);
+                    sync_plan_select(me);
+                }
+                Err(error) => cur(s).plan_error = error.to_string(),
+            }
+        });
+    })
+}
+
+/// The "Kept fresh by" select's options and value.
+fn sync_plan_select(me: &mut Settings) {
+    let this_computer = me
+        .plan
+        .as_ref()
+        .map(|p| p.this_computer.clone())
+        .unwrap_or_default();
+    let options: Vec<SelectOption> = me
+        .plan_machines
+        .iter()
+        .map(|m| {
+            let this_one = if m.machine_id == this_computer {
+                " (this computer)"
+            } else {
+                ""
             };
-            let machines = machines.await.map(|(_, m)| m).unwrap_or_default();
-            let _ = this.update(cx, |this, cx| {
-                this.plan_machines = machines;
-                cx.notify();
-            });
+            (m.machine_id.clone(), format!("{}{this_one}", m.name))
         })
-        .detach();
-    }
+        .collect();
+    sync_select(&mut me.plan_server_select, &options, &me.plan_server);
+}
 
-    fn plan_action(
-        &mut self,
-        path: &'static str,
-        body: Option<Json>,
-        cx: &mut Context<Self>,
-    ) -> Task<()> {
-        self.plan_busy = true;
-        cx.notify();
-        let call = self.plan_call(path, body, cx);
-        cx.spawn(async move |this, cx| {
-            call.await;
-            let _ = this.update(cx, |this, cx| {
-                this.plan_busy = false;
-                cx.notify();
-            });
-        })
+fn load_plan(s: &mut State) {
+    if s.harness.is_none() {
+        cur(s).plan = None;
+        return;
     }
-
-    fn submit_plan_code(
-        &mut self,
-        state: Entity<InputState>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let code = state.read(cx).value().trim().to_string();
-        if code.is_empty() {
+    let call = plan_call(s, "/claude-plan", None);
+    let generation = generation(s);
+    s.rt.spawn(async move |cx| {
+        call.await;
+        let machines = cx.update(|s| is_current(s, generation).then(|| fetch_machines(s)));
+        let Some(machines) = machines else {
             return;
+        };
+        let machines = machines.await.map(|(_, m)| m).unwrap_or_default();
+        cx.update(|s| {
+            if is_current(s, generation) {
+                let me = cur(s);
+                me.plan_machines = machines;
+                sync_plan_select(me);
+            }
+        });
+    })
+    .detach();
+}
+
+fn plan_action(s: &mut State, path: &'static str, body: Option<Json>) -> Task<()> {
+    cur(s).plan_busy = true;
+    let call = plan_call(s, path, body);
+    let generation = generation(s);
+    s.rt.spawn(async move |cx| {
+        call.await;
+        cx.update(|s| {
+            if is_current(s, generation) {
+                cur(s).plan_busy = false;
+            }
+        });
+    })
+}
+
+fn submit_plan_code(s: &mut State) {
+    let code = cur(s).plan_code.value().trim().to_string();
+    if code.is_empty() {
+        return;
+    }
+    let action = plan_action(s, "/claude-plan/code", Some(json!({ "code": code })));
+    after(s, action, |s, ()| cur(s).plan_code.clear());
+}
+
+fn plan_computer(me: &Settings, id: &str) -> String {
+    if id.is_empty() {
+        "this computer".into()
+    } else {
+        machine_name(&me.plan_machines, id)
+    }
+}
+
+// ----------------------------------------------------------------- agent keys
+
+fn load_agent_auth(s: &mut State) {
+    cur(s).login_error.clear();
+    if s.harness.is_none() {
+        cur(s).agent_auth = Some(None);
+        return;
+    }
+    let task: Task<anyhow::Result<AgentAuth>> = local::get("/auth/status", s);
+    after(s, task, |s, result| {
+        let me = cur(s);
+        match result.map_err(|e| with_status(e, |s| format!("Agent credentials: {s}"))) {
+            Ok(auth) => me.agent_auth = Some(Some(auth)),
+            Err(error) => {
+                me.agent_auth = Some(None);
+                me.login_error = error.to_string();
+            }
         }
-        let action = self.plan_action("/claude-plan/code", Some(json!({ "code": code })), cx);
-        cx.spawn_in(window, async move |_, cx| {
-            action.await;
-            let _ = cx.update(|window, cx| state.update(cx, |s, cx| s.set_value("", window, cx)));
-        })
-        .detach();
-    }
+    });
+}
 
-    fn plan_computer(&self, id: &str) -> String {
-        if id.is_empty() {
-            "this computer".into()
-        } else {
-            machine_name(&self.plan_machines, id)
+fn save_agent_key(s: &mut State, provider: &'static str, key: String) {
+    cur(s).login_error.clear();
+    let key = key.trim().to_string();
+    let task: Task<anyhow::Result<Json>> =
+        local::post("/auth/key", json!({ "provider": provider, "key": key }), s);
+    after(s, task, move |s, result| {
+        match result.map_err(|e| with_status(e, |s| format!("Credential update failed: {s}"))) {
+            Ok(_) => {
+                cur(s).kimi_draft.clear();
+                load_agent_auth(s);
+                cur(s).agent_saved = if key.is_empty() { "Cleared" } else { "Saved" };
+                flash_later(s, |me| me.agent_saved = "");
+            }
+            Err(error) => cur(s).login_error = error.to_string(),
         }
-    }
-
-    // ------------------------------------------------------------- agent keys
-
-    fn load_agent_auth(&mut self, cx: &mut Context<Self>) {
-        self.login_error = SharedString::default();
-        if !Self::paired(cx) {
-            self.agent_auth = Some(None);
-            return;
-        }
-        let task: Task<anyhow::Result<AgentAuth>> = local::get("/auth/status", cx);
-        cx.spawn(async move |this, cx| {
-            let result = task
-                .await
-                .map_err(|e| with_status(e, |s| format!("Agent credentials: {s}")));
-            let _ = this.update(cx, |this, cx| {
-                match result {
-                    Ok(auth) => this.agent_auth = Some(Some(auth)),
-                    Err(error) => {
-                        this.agent_auth = Some(None);
-                        this.login_error = error.to_string().into();
-                    }
-                }
-                cx.notify();
-            });
-        })
-        .detach();
-    }
-
-    fn save_agent_key(
-        &mut self,
-        provider: &'static str,
-        key: String,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.login_error = SharedString::default();
-        let key = key.trim().to_string();
-        let task: Task<anyhow::Result<Json>> =
-            local::post("/auth/key", json!({ "provider": provider, "key": key }), cx);
-        let draft = self.kimi_draft.clone();
-        cx.spawn_in(window, async move |this, cx| {
-            let result = task
-                .await
-                .map_err(|e| with_status(e, |s| format!("Credential update failed: {s}")));
-            let _ = this.update_in(cx, |this, window, cx| {
-                match result {
-                    Ok(_) => {
-                        draft.update(cx, |s, cx| s.set_value("", window, cx));
-                        this.load_agent_auth(cx);
-                        this.agent_saved = if key.is_empty() { "Cleared" } else { "Saved" };
-                        Self::flash(cx, |this| this.agent_saved = "");
-                    }
-                    Err(error) => this.login_error = error.to_string().into(),
-                }
-                cx.notify();
-            });
-        })
-        .detach();
-    }
+    });
 }
 
-impl Focusable for Settings {
-    fn focus_handle(&self, _: &App) -> FocusHandle {
-        self.focus.clone()
+// ----------------------------------------------------------------- render helpers
+
+/// A section card under its heading, with an optional transient " · Saved".
+fn section(t: &Theme, title: &'static str, flash_text: &str) -> El {
+    let slug = section_nav::slug(title);
+    let mut heading = row().gap(4.0).mb(6.0).child(h3(t, title));
+    if let Some(f) = flash(&format!("settings-flash-{slug}"), flash_text, |s| {
+        h3(t, format!("· {s}"))
+    }) {
+        heading = heading.child(f);
     }
-}
-
-// ----------------------------------------------------------------- render
-
-fn section(title: impl Into<SharedString>) -> Div {
-    section_flash(title, Empty.into_any_element())
-}
-
-/// A section whose heading carries a transient " · Saved" ([`Flash`]).
-fn section_flash(title: impl Into<SharedString>, flash: AnyElement) -> Div {
-    div()
-        .mt(px(14.))
-        .px(px(16.))
-        .pt(px(14.))
-        .pb(px(16.))
-        .rounded(px(10.))
-        .bg(theme::panel())
-        .border_1()
-        .border_color(theme::border())
-        .child(
-            div()
-                .flex()
-                .gap(px(4.))
-                .mb(px(6.))
-                .child(h3(title))
-                .child(flash),
-        )
-}
-
-/// A heading's flash text (`h3 · Saved`).
-fn flash_suffix(text: SharedString) -> Div {
-    h3(format!("· {text}"))
+    col()
+        .key(format!("settings-section-{slug}"))
+        .mt(14.0)
+        .px(17.0)
+        .pt(15.0)
+        .pb(17.0)
+        .radius(10.0)
+        .fill(t.panel)
+        .border(1.0, t.border)
+        .items_stretch()
+        .child(heading)
 }
 
 /// `.hint` with its bottom margin (10px).
-fn p(text: impl Into<SharedString>) -> Div {
-    hint(text).mb(px(10.))
+fn p(t: &Theme, s: impl Into<String>) -> El {
+    hint(t, s).mb(10.0)
 }
 
 /// `.hint.error`: in the web stylesheet `.hint` comes after `.error`, so
 /// these messages draw muted like any hint.
-fn error_p(text: impl Into<SharedString>) -> Div {
-    p(text)
+fn error_p(t: &Theme, s: impl Into<String>) -> El {
+    p(t, s)
 }
 
-/// A bordered settings card (holding confirm, device rows): a kit outline
-/// [`GroupBox`] with the surface restyled by `surface`.
-fn card(id: impl Into<ElementId>, surface: StyleRefinement) -> GroupBox {
-    GroupBox::new().id(id).outline().content_style(surface)
+/// A bordered settings card (holding confirm, device rows): an outline group box.
+fn card(key: impl Into<String>, border: Color, fill: Option<Color>, gap: f32) -> El {
+    let mut c = col()
+        .key(key.into())
+        .px(10.0)
+        .py(8.0)
+        .radius(8.0)
+        .border(1.0, border)
+        .gap(gap)
+        .items_stretch();
+    if let Some(fill) = fill {
+        c = c.fill(fill);
+    }
+    c
 }
 
 /// The small outline label beside a key ("SECRET", "SHAREABLE").
-fn key_tag(text: &'static str, color: Hsla, border: Hsla) -> Tag {
-    Tag::custom(color, color, border)
-        .outline()
-        .rounded_full()
-        .px(px(8.))
-        .py_0()
-        .text_size(px(10.))
-        .line_height(px(16.))
-        .child(text)
+fn key_tag(label: &'static str, color: Color, border: Color) -> El {
+    row()
+        .px(8.0)
+        .radius(999.0)
+        .border(1.0, border)
+        .child(text(label).font(ty::ui(10.0).lh(16.0)).color(color))
 }
 
 /// The rounded outline badge of the mode line ("Full mode") and the device rows.
-fn pill(text: impl Into<SharedString>, color: Hsla) -> gpui_kit::component::tag::Tag {
-    gpui_kit::component::tag::Tag::custom(color, color, color)
-        .outline()
-        .rounded(px(999.))
-        .px(px(8.))
-        .py(px(2.))
-        .text_size(px(12.))
-        .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-        .child(text.into())
+fn pill(label: impl Into<String>, color: Color) -> El {
+    row()
+        .px(8.0)
+        .py(2.0)
+        .radius(999.0)
+        .border(1.0, color)
+        .child(
+            text(label.into())
+                .font(ty::ui(12.0).lh(16.0).weight(ty::SEMIBOLD))
+                .color(color),
+        )
 }
 
-fn modal_field() -> FieldStyle {
-    FieldStyle::modal()
+/// The rich paragraph style of the identity / agent notes (12px, 18px line).
+fn note(t: &Theme, spans: &[Span], color: Color) -> El {
+    rich(t, spans, color, 12.0, 18.0).mb(10.0)
 }
 
-impl Render for Settings {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let paired = Self::paired(cx);
-        let narrow = roostr_core::layout::is_mobile(window);
-        let this = cx.entity();
-
-        let header = div()
-            .relative()
-            .flex()
-            .justify_between()
-            .items_center()
-            .mb(px(8.))
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(6.))
-                    .text_size(px(17.))
-                    .line_height(px(21.))
-                    .font_weight(FontWeight::BOLD)
-                    .child(div().text_size(px(15.)).child("⚙️"))
-                    .child("Settings"),
+/// A key display row: the monospace key in a bordered box and its Copy button.
+fn key_row(t: &Theme, key: &str, value: &str, copied: bool, label: &'static str) -> El {
+    let copy_value = value.to_string();
+    row()
+        .center_y()
+        .gap(8.0)
+        .mb(6.0)
+        .child(
+            row()
+                .key(format!("{key}-code"))
+                .grow(1.0)
+                .min_w(0.0)
+                .scroll_x()
+                .px(11.0)
+                .py(8.0)
+                .radius(8.0)
+                .fill(t.bg)
+                .border(1.0, t.border)
+                .child(text(value.to_string()).font(ty::mono(11.0)).color(t.fg)),
+        )
+        .child(
+            Btn::small(
+                t,
+                format!("copy-{key}"),
+                if copied { "Copied" } else { "Copy" },
             )
-            .when(!narrow, |d| {
-                d.child(Btn::x("close-settings").on_click(|_, window, cx| window.close_dialog(cx)))
-            })
-            .when(narrow, |d| d.child(self.sheet_grip(cx)));
+            .on_press_tx(move |s: &mut State, tx: &mut Tx| copy(s, tx, copy_value.clone(), label))
+            .build(t),
+        )
+}
 
-        // ── Profile
-        let avatar = Avatar::new()
-            .with_size(px(56.))
-            .flex_none()
-            .map(
-                |a| match (&self.profile_image, self.profile_picture.is_empty()) {
-                    (Some(image), _) => a.src(image.clone()),
-                    (None, false) => a.src(SharedString::from(self.profile_picture.clone())),
-                    (None, true) => a.placeholder(Glyph::Settings),
+fn key_heading(t: &Theme, title: &'static str, kind: &'static str, tag: El) -> El {
+    row()
+        .center_y()
+        .gap(8.0)
+        .mt(10.0)
+        .mb(4.0)
+        .child(
+            text(title)
+                .font(ty::ui(12.0).weight(ty::MEDIUM))
+                .color(t.fg),
+        )
+        .child(text(kind).font(ty::mono(11.0)).color(t.muted))
+        .child(tag)
+}
+
+fn btn_row(b: El) -> El {
+    row().mt(6.0).child(b)
+}
+
+// ----------------------------------------------------------------- sections
+
+fn profile_section(s: &State, me: &Settings, t: &Theme) -> El {
+    let image = (!me.profile_picture.is_empty())
+        .then(|| s.get::<roostr_ui::Images>())
+        .flatten()
+        .and_then(|images| images.image(&me.profile_picture, 56.0));
+    let mut avatar = roostr_ui::Avatar::new()
+        .size(roostr_ui::KitSize::Px(56.0))
+        .placeholder(Glyph::Settings);
+    if let Some(image) = image {
+        avatar = avatar.src(image.pixels().clone());
+    }
+    let has_picture = !me.profile_picture.is_empty();
+    let mut controls = row()
+        .flex_wrap()
+        .center_y()
+        .gap(12.0)
+        .child(avatar.build(t))
+        .child(
+            Field::new(
+                "settings-profile-name",
+                &me.profile_name,
+                FieldStyle::modal(t),
+            )
+            .placeholder("Your name")
+            .on_edit(|s: &mut State| &mut me_or_dummy(s).profile_name)
+            .on_change(|s: &mut State, _: &mut Tx| edit(s, |me| me.name_dirty = true))
+            .on_submit(|s: &mut State, _: &mut Tx| {
+                edit(s, |me| {
+                    me.profile_name.edit.focused = false;
+                    me.name_dirty = false;
+                });
+                if settings_open(s) {
+                    save_name(s);
+                }
+            })
+            .build(t)
+            .grow(1.0)
+            .min_w(120.0)
+            .max_w(220.0),
+        )
+        .child(
+            Btn::action(
+                t,
+                "pick-avatar",
+                if has_picture {
+                    "Change picture"
+                } else {
+                    "Upload picture"
                 },
             )
-            .into_any_element();
-        let has_picture = !self.profile_picture.is_empty();
-        let profile = section("Profile")
-            .child(p(
-                "Your name and avatar (your Nostr profile), synced to every device holding this key. The avatar also shows on the Spaces screen.",
-            ))
-            .child(
-                div()
-                    .flex()
-                    .flex_wrap()
-                    .items_center()
-                    .gap(px(12.))
-                    .child(avatar)
-                    .child(field(&self.profile_name, modal_field(), window, cx).flex_1().min_w(px(120.)).max_w(px(220.)))
-                    .child(
-                        Btn::action("pick-avatar", if has_picture { "Change picture" } else { "Upload picture" })
-                            .disabled(self.avatar_busy)
-                            .on_click(cx.listener(|this, _, window, cx| this.pick_avatar(window, cx))),
-                    )
-                    .when(has_picture, |d| {
-                        d.child(
-                            Btn::small("remove-avatar", "Remove")
-                                .disabled(self.avatar_busy)
-                                .on_click(cx.listener(|this, _, _, cx| this.save_profile(nostr_profile::patch("picture", ""), false, cx))),
-                        )
-                    })
-                    .when(!self.avatar_state.is_empty(), |d| d.child(hint(self.avatar_state.clone()).min_w_0())),
-            );
-
-        // ── Chat colour
-        let draft = self.chat_color_draft.read(cx).value().to_string();
-        let not_default = normalize_hex(&draft).as_deref() != Some(DEFAULT_CHAT_COLOR);
-        let chat = section("Chat color")
-            .child(p(
-                "Your message bubbles and send button, on every device holding this key. Text on it switches to dark or white to stay readable.",
-            ))
-            .child(
-                div()
-                    .flex()
-                    .flex_wrap()
-                    .items_center()
-                    .gap(px(12.))
-                    .child(
-                        div()
-                            .flex_none()
-                            .w(px(40.))
-                            .h(px(32.))
-                            .p(px(2.))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded(px(6.))
-                            .bg(theme::panel())
-                            .border_1()
-                            .border_color(theme::border())
-                            .child(ColorPicker::new(&self.swatch).accessibility_label("Chat color picker")),
-                    )
-                    .child(field(&self.chat_color_draft, modal_field(), window, cx).flex_1().max_w(px(220.)))
-                    .when(not_default, |d| {
-                        d.child(Btn::small("reset-color", "Reset").on_click(cx.listener(|this, _, window, cx| {
-                            this.save_chat_color(DEFAULT_CHAT_COLOR.to_string(), window, cx)
-                        })))
-                    })
-                    .when(!self.chat_color_state.is_empty(), |d| d.child(hint(self.chat_color_state.clone()).min_w_0())),
-            );
-
-        // ── Nostr identity
-        let mut identity = section("Nostr identity").child(p(
-            "This key encrypts and signs everything you sync. Anyone holding it has your full identity — export it only to back it up or to log in on another device.",
-        ));
-        if !self.npub.is_empty() {
-            let npub = self.npub.clone();
-            identity = identity
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(8.))
-                        .mt(px(10.))
-                        .mb(px(4.))
-                        .text_size(px(12.))
-                        .font_weight(FontWeight::MEDIUM)
-                        .child("Public key")
-                        .child(
-                            div()
-                                .text_size(px(11.))
-                                .font_weight(FontWeight::NORMAL)
-                                .font_family(theme::fonts::MONO)
-                                .text_color(theme::muted())
-                                .child("npub"),
-                        )
-                        .child(key_tag(
-                            "SHAREABLE",
-                            rgb(0x35b57f).into(),
-                            rgba(0x35b57f73).into(),
-                        )),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(8.))
-                        .mb(px(6.))
-                        .child(
-                            div()
-                                .id("npub-code")
-                                .flex_1()
-                                .min_w_0()
-                                .overflow_x_scroll()
-                                .px(px(10.))
-                                .py(px(7.))
-                                .rounded(px(8.))
-                                .bg(theme::bg())
-                                .border_1()
-                                .border_color(theme::border())
-                                .font_family(theme::fonts::MONO)
-                                .text_size(px(11.))
-                                .whitespace_nowrap()
-                                .child(npub.clone()),
-                        )
-                        .child(
-                            Btn::small(
-                                "copy-npub",
-                                if self.copied == "npub" {
-                                    "Copied"
-                                } else {
-                                    "Copy"
-                                },
-                            )
-                            .on_click(cx.listener(
-                                move |this, _, _, cx| this.copy(npub.clone(), "npub", cx),
-                            )),
-                        ),
-                );
-        }
-        let replica = roostr_core::mode::current(cx) == roostr_core::mode::Mode::Replica;
-        if replica {
-            identity = self.render_reveal(identity, cx);
-        } else {
-            identity = identity.child(
-                div().text_size(px(12.)).line_height(px(18.)).mb(px(10.)).child(rich(
-                    &[
-                        Span::Plain("Back up the native private key only from the operator's terminal on this computer: "),
-                        Span::Code("./glon-odin key-export"),
-                        Span::Plain(
-                            " (run from the native installation directory). Keep the output secret; this app cannot request or reveal it.",
-                        ),
-                    ],
-                    theme::muted(),
-                    window,
-                )),
-            );
-        }
-        if !self.importing {
-            identity = identity
-                .child(
-                    div().mt(px(6.)).flex().child(
-                        Btn::action("import-key", "Sign in with existing key…").subtle().on_click(cx.listener(|this, _, window, cx| {
-                            this.importing = true;
-                            this.import_draft.focus_handle(cx).focus(window, cx);
-                            cx.notify();
-                        })),
-                    ),
-                )
-                .when(!replica, |d| {
-                    d.child(p(
-                        "Replaces this machine's daemon identity for every paired tab; the previous identity's shared-space authority is revoked.",
-                    ))
+            .disabled(me.avatar_busy)
+            .on_press(|s: &mut State| {
+                if settings_open(s) {
+                    pick_avatar(s)
+                }
+            })
+            .build(t),
+        );
+    if has_picture {
+        controls = controls.child(
+            Btn::small(t, "remove-avatar", "Remove")
+                .disabled(me.avatar_busy)
+                .on_press(|s: &mut State| {
+                    if settings_open(s) {
+                        save_profile(s, nostr_profile::patch("picture", ""), false)
+                    }
                 })
-                .child(
-                    div().mt(px(6.)).flex().child(
-                        Btn::action("logout", match (self.confirm_logout, replica, io::WEB) {
-                            (true, true, _) => "Erase local copy & sign out?",
-                            (false, true, _) => "Log out on this device",
-                            (true, false, false) => "Disconnect this app?",
-                            (false, false, false) => "Disconnect this app",
-                            (true, false, true) => "Disconnect this browser?",
-                            (false, false, true) => "Unpair this browser",
-                        })
-                            .subtle()
-                            .when(self.confirm_logout, Btn::armed)
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                if !this.confirm_logout {
-                                    this.confirm_logout = true;
-                                    cx.notify();
-                                    return;
-                                }
-                                if replica {
-                                    this.log_out(cx);
-                                    return;
-                                }
-                                // Disconnecting the only client of a native app is quitting it;
-                                // a browser tab drops its pairing and returns to the pairing gate.
-                                #[cfg(target_family = "wasm")]
-                                roostr_core::web::unpair();
-                                #[cfg(not(target_family = "wasm"))]
-                                cx.quit();
-                            })),
-                    ),
-                )
-                .when(self.confirm_logout, |d| {
-                    d.child(p(match (replica, io::WEB) {
-                        (true, _) => "Removes this device's key and its local replica only after pending changes are published. Your encrypted history stays on your relays — log in with any nsec afterwards.",
-                        (false, true) => "Disconnects this browser only. The native key, local data, and running daemon are not erased.",
-                        (false, false) => "Disconnects this app only. The native key, local data, and running daemon are not erased.",
-                    }))
-                });
-        } else {
-            identity = identity
-                .child(div().text_size(px(12.)).line_height(px(18.)).mb(px(10.)).child(rich(
-                    &[
-                        Span::Bold("Replaces this device's identity."),
-                        Span::Plain(
-                            " Paste the nsec from your other device — after the sync daemon connects, your objects will backfill from the relays.",
-                        ),
-                    ],
-                    theme::muted(),
-                    window,
-                )))
-                .child(
-                    div()
-                        .relative()
-                        .flex()
-                        .gap(px(8.))
-                        .mt(px(6.))
-                        .child(keep_in_view(
-                            self.import_draft.focus_handle(cx),
-                            self.scroll.clone(),
-                            self.import_in_view.clone(),
-                        ))
-                        .child(field(&self.import_draft, modal_field(), window, cx).flex_1())
-                        .child(Btn::small("import-submit", "Import").on_click(cx.listener(|this, _, _, cx| {
-                            if !this.import_draft.read(cx).value().trim().is_empty() {
-                                this.import_key(cx);
-                            }
-                        })))
-                        .child(Btn::small("import-cancel", "Cancel").on_click(cx.listener(|this, _, window, cx| this.cancel_import(window, cx)))),
-                )
-                .when(!self.import_error.is_empty(), |d| d.child(error_p(self.import_error.clone()).mt(px(10.))));
-        }
+                .build(t),
+        );
+    }
+    if !me.avatar_state.is_empty() {
+        controls = controls.child(hint(t, me.avatar_state.clone()));
+    }
+    section(t, "Profile", "")
+        .child(p(
+            t,
+            "Your name and avatar (your Nostr profile), synced to every device holding this key. The avatar also shows on the Spaces screen.",
+        ))
+        .child(controls)
+}
 
-        // ── Relays
-        let save_flash = self
-            .save_flash
-            .render(self.save_state, flash_suffix, window, cx);
-        let mut relays = section_flash("Relays", save_flash).child(p(
-            "Where your encrypted changes sync. Your data stays local until relays are configured.",
-        ));
-        for (ix, (url, label, note)) in KNOWN_RELAYS.iter().enumerate() {
-            let on = self.relays.iter().any(|r| r == url);
-            let row_this = this.clone();
-            relays = relays.child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(10.))
-                    .mb(px(6.))
-                    .px(px(10.))
-                    .py(px(6.))
-                    .rounded(px(8.))
-                    .bg(theme::bg())
-                    .border_1()
-                    .border_color(theme::border())
-                    .font_family(theme::fonts::MONO)
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .flex()
-                            .flex_col()
-                            .gap(px(1.))
-                            .child(div().text_size(px(13.)).line_height(px(16.)).child(*label))
-                            .child(
-                                div()
-                                    .text_size(px(11.))
-                                    .line_height(px(14.))
-                                    .text_color(theme::muted())
-                                    .overflow_hidden()
-                                    .whitespace_nowrap()
-                                    .text_ellipsis()
-                                    .child(format!(
-                                        "{} · {note}",
-                                        url.trim_start_matches("wss://")
-                                    )),
-                            ),
-                    )
-                    .child(switch(("relay-switch", ix), on, move |on, _, cx| {
-                        row_this.update(cx, |this, cx| this.toggle_relay(url, on, cx))
-                    })),
-            );
-        }
-        for r in self
-            .relays
-            .iter()
-            .filter(|r| !KNOWN_RELAYS.iter().any(|(u, _, _)| u == *r))
+fn chat_section(me: &Settings, t: &Theme, layer: &mut Vec<El>) -> El {
+    let draft = me.chat_color_draft.value();
+    let not_default = normalize_hex(draft).as_deref() != Some(DEFAULT_CHAT_COLOR);
+    let picker = ColorPicker::new("settings-chat-swatch", &me.swatch, |s: &mut State| {
+        &mut me_or_dummy(s).swatch
+    })
+    .accessibility_label("Chat color picker")
+    .on_change(|s: &mut State, color: Option<Color>| {
+        if let Some(color) = color
+            && settings_open(s)
         {
-            let url = r.clone();
-            relays = relays.child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .mb(px(6.))
-                    .px(px(10.))
-                    .py(px(6.))
-                    .rounded(px(8.))
-                    .bg(theme::bg())
-                    .border_1()
-                    .border_color(theme::border())
-                    .font_family(theme::fonts::MONO)
-                    .text_size(px(13.))
-                    .child(r.clone())
+            save_chat_color(s, roostr_ui::color_hex(color))
+        }
+    })
+    .build(t, layer);
+    let mut controls = row()
+        .flex_wrap()
+        .center_y()
+        .gap(12.0)
+        .child(
+            row()
+                .w(40.0)
+                .h(32.0)
+                .padding(2.0)
+                .center()
+                .radius(6.0)
+                .fill(t.panel)
+                .border(1.0, t.border)
+                .child(picker),
+        )
+        .child(
+            Field::new(
+                "settings-chat-color",
+                &me.chat_color_draft,
+                FieldStyle::modal(t),
+            )
+            .placeholder(DEFAULT_CHAT_COLOR)
+            .on_edit(|s: &mut State| &mut me_or_dummy(s).chat_color_draft)
+            .on_change(|s: &mut State, _: &mut Tx| edit(s, |me| me.color_dirty = true))
+            .on_submit(|s: &mut State, _: &mut Tx| {
+                let Some(me) = open_mut(s) else { return };
+                me.chat_color_draft.edit.focused = false;
+                me.color_dirty = false;
+                let raw = me.chat_color_draft.value().to_string();
+                save_chat_color(s, raw);
+            })
+            .build(t)
+            .grow(1.0)
+            .max_w(220.0),
+        );
+    if not_default {
+        controls = controls.child(
+            Btn::small(t, "reset-color", "Reset")
+                .on_press(|s: &mut State| {
+                    if settings_open(s) {
+                        save_chat_color(s, DEFAULT_CHAT_COLOR.to_string())
+                    }
+                })
+                .build(t),
+        );
+    }
+    if !me.chat_color_state.is_empty() {
+        controls = controls.child(hint(t, me.chat_color_state.clone()));
+    }
+    section(t, "Chat color", "")
+        .child(p(
+            t,
+            "Your message bubbles and send button, on every device holding this key. Text on it switches to dark or white to stay readable.",
+        ))
+        .child(controls)
+}
+
+fn appearance_section(me: &Settings, t: &Theme, layer: &mut Vec<El>) -> El {
+    section(t, "Appearance", "")
+        .child(p(
+            t,
+            "How Roostr looks on this device. System follows your computer's light or dark setting.",
+        ))
+        .child(
+            row().child(select(
+                t,
+                layer,
+                "settings-theme",
+                &me.theme_select,
+                |s: &mut State| &mut me_or_dummy(s).theme_select,
+                120.0,
+                t.bg,
+                |s: &mut State, value: &str, tx: &mut Tx| {
+                    crate::set_theme_pref(s, tx, ThemePref::from_name(value))
+                },
+            )),
+        )
+}
+
+fn identity_section(s: &State, me: &Settings, t: &Theme) -> El {
+    let mut identity = section(t, "Nostr identity", "").child(p(
+        t,
+        "This key encrypts and signs everything you sync. Anyone holding it has your full identity — export it only to back it up or to log in on another device.",
+    ));
+    if !me.npub.is_empty() {
+        let green = roostr_ui::color::rgb(0x35b57f);
+        identity = identity
+            .child(key_heading(
+                t,
+                "Public key",
+                "npub",
+                key_tag("SHAREABLE", green, green.alpha(0x73 as f32 / 255.0)),
+            ))
+            .child(key_row(t, "npub", &me.npub, me.copied == "npub", "npub"));
+    }
+    let replica = mode::current(s) == Mode::Replica;
+    if replica {
+        identity = reveal(me, t, identity);
+    } else {
+        identity = identity.child(note(
+            t,
+            &[
+                Span::Plain(
+                    "Back up the native private key only from the operator's terminal on this computer: ",
+                ),
+                Span::Code("./glon-odin key-export"),
+                Span::Plain(
+                    " (run from the native installation directory). Keep the output secret; this app cannot request or reveal it.",
+                ),
+            ],
+            t.muted,
+        ));
+    }
+    if !me.importing {
+        identity = identity.child(btn_row(
+            Btn::action(t, "import-key", "Sign in with existing key…")
+                .subtle(t)
+                .on_press(|s: &mut State| {
+                    edit(s, |me| {
+                        me.importing = true;
+                        me.import_draft.focus();
+                    })
+                })
+                .build(t),
+        ));
+        if !replica {
+            identity = identity.child(p(
+                t,
+                "Replaces this machine's daemon identity for every paired tab; the previous identity's shared-space authority is revoked.",
+            ));
+        }
+        let label = match (me.confirm_logout, replica, io::WEB) {
+            (true, true, _) => "Erase local copy & sign out?",
+            (false, true, _) => "Log out on this device",
+            (true, false, false) => "Disconnect this app?",
+            (false, false, false) => "Disconnect this app",
+            (true, false, true) => "Disconnect this browser?",
+            (false, false, true) => "Unpair this browser",
+        };
+        identity = identity.child(btn_row(
+            Btn::action(t, "logout", label)
+                .subtle(t)
+                .when(me.confirm_logout, Btn::armed)
+                .on_press_tx(move |s: &mut State, _tx: &mut Tx| {
+                    let Some(me) = open_mut(s) else { return };
+                    if !me.confirm_logout {
+                        me.confirm_logout = true;
+                        return;
+                    }
+                    if replica {
+                        log_out(s);
+                        return;
+                    }
+                    // Disconnecting the only client of a native app is quitting it;
+                    // a browser tab drops its pairing and returns to the pairing gate.
+                    #[cfg(target_family = "wasm")]
+                    roostr_core::web::unpair();
+                    #[cfg(not(target_family = "wasm"))]
+                    _tx.quit();
+                })
+                .build(t),
+        ));
+        if me.confirm_logout {
+            identity = identity.child(p(
+                t,
+                match (replica, io::WEB) {
+                    (true, _) => {
+                        "Removes this device's key and its local replica only after pending changes are published. Your encrypted history stays on your relays — log in with any nsec afterwards."
+                    }
+                    (false, true) => {
+                        "Disconnects this browser only. The native key, local data, and running daemon are not erased."
+                    }
+                    (false, false) => {
+                        "Disconnects this app only. The native key, local data, and running daemon are not erased."
+                    }
+                },
+            ));
+        }
+    } else {
+        identity = identity
+            .child(note(
+                t,
+                &[
+                    Span::Bold("Replaces this device's identity."),
+                    Span::Plain(
+                        " Paste the nsec from your other device — after the sync daemon connects, your objects will backfill from the relays.",
+                    ),
+                ],
+                t.muted,
+            ))
+            .child(
+                row()
+                    .gap(8.0)
+                    .mt(6.0)
                     .child(
-                        Btn::x(SharedString::from(format!("remove-relay-{r}"))).on_click(
-                            cx.listener(move |this, _, _, cx| {
-                                let next =
-                                    this.relays.iter().filter(|x| **x != url).cloned().collect();
-                                this.save_relays(next, cx);
-                            }),
-                        ),
+                        Field::new("settings-import", &me.import_draft, FieldStyle::modal(t))
+                            .placeholder("nsec1… or 64-char hex")
+                            .on_edit(|s: &mut State| &mut me_or_dummy(s).import_draft)
+                            .on_submit(|s: &mut State, _: &mut Tx| {
+                                if open_ref(s)
+                                    .is_some_and(|me| !me.import_draft.value().trim().is_empty())
+                                {
+                                    import_key(s)
+                                }
+                            })
+                            .build(t)
+                            .grow(1.0),
+                    )
+                    .child(
+                        Btn::small(t, "import-submit", "Import")
+                            .on_press(|s: &mut State| {
+                                if open_ref(s)
+                                    .is_some_and(|me| !me.import_draft.value().trim().is_empty())
+                                {
+                                    import_key(s)
+                                }
+                            })
+                            .build(t),
+                    )
+                    .child(
+                        Btn::small(t, "import-cancel", "Cancel")
+                            .on_press(|s: &mut State| edit(s, cancel_import))
+                            .build(t),
                     ),
             );
+        if !me.import_error.is_empty() {
+            identity = identity.child(error_p(t, me.import_error.clone()).mt(10.0));
         }
-        if self.relays.is_empty() {
-            relays =
-                relays.child(hint("No relays enabled - nothing syncs until one is on.").my(px(4.)));
-        }
+    }
+    identity
+}
+
+/// Replica mode: "Reveal private key" and, revealed, the nsec to copy.
+fn reveal(me: &Settings, t: &Theme, identity: El) -> El {
+    if me.nsec.is_empty() {
+        return identity.child(
+            row().mt(6.0).mb(6.0).child(
+                Btn::action(t, "reveal-key", "Reveal private key")
+                    .on_press(|s: &mut State| {
+                        let exported = roostr_core::account::account(s).map(|a| a.export_key());
+                        edit(s, |me| match exported {
+                            Some(Ok((nsec, _))) => me.nsec = nsec,
+                            Some(Err(error)) => me.settings_error = error.to_string(),
+                            None => {}
+                        })
+                    })
+                    .build(t),
+            ),
+        );
+    }
+    identity
+        .child(key_heading(
+            t,
+            "Private key",
+            "nsec",
+            key_tag("SECRET", t.red, t.red),
+        ))
+        .child(key_row(t, "nsec", &me.nsec, me.copied == "nsec", "nsec"))
+        .child(p(
+            t,
+            "Paste this nsec into \"Sign in with existing key\" on another Roostr to log in as you.",
+        ))
+        .child(btn_row(
+            Btn::action(t, "hide-key", "Hide")
+                .subtle(t)
+                .on_press(|s: &mut State| edit(s, |me| me.nsec.clear()))
+                .build(t),
+        ))
+}
+
+fn relays_section(me: &Settings, t: &Theme) -> El {
+    let mut relays = section(t, "Relays", me.save_state).child(p(
+        t,
+        "Where your encrypted changes sync. Your data stays local until relays are configured.",
+    ));
+    let relay_row = |key: String| {
+        row()
+            .key(key)
+            .center_y()
+            .gap(10.0)
+            .mb(6.0)
+            .px(11.0)
+            .py(7.0)
+            .radius(8.0)
+            .fill(t.bg)
+            .border(1.0, t.border)
+    };
+    for (ix, (url, label, note)) in KNOWN_RELAYS.iter().enumerate() {
+        let on = me.relays.iter().any(|r| r == url);
         relays = relays.child(
-            div()
-                .flex()
-                .gap(px(8.))
-                .mt(px(8.))
-                .child(field(&self.new_relay, modal_field(), window, cx).flex_1())
+            relay_row(format!("relay-{ix}"))
                 .child(
-                    Btn::small("add-relay", "Add")
-                        .on_click(cx.listener(|this, _, window, cx| this.add_relay(window, cx))),
+                    col()
+                        .grow(1.0)
+                        .min_w(0.0)
+                        .gap(1.0)
+                        .child(text(*label).font(ty::mono(13.0).lh(16.0)).color(t.fg))
+                        .child(
+                            text(format!("{} · {note}", url.trim_start_matches("wss://")))
+                                .font(ty::mono(11.0).lh(14.0))
+                                .color(t.muted)
+                                .truncate(),
+                        ),
+                )
+                .child(switch(
+                    t,
+                    format!("relay-switch-{ix}"),
+                    on,
+                    move |s: &mut State, on| {
+                        if settings_open(s) {
+                            toggle_relay(s, url, on)
+                        }
+                    },
+                )),
+        );
+    }
+    for r in me
+        .relays
+        .iter()
+        .filter(|r| !KNOWN_RELAYS.iter().any(|(u, _, _)| u == *r))
+    {
+        let url = r.clone();
+        relays = relays.child(
+            relay_row(format!("relay-{r}"))
+                .justify_between()
+                .child(text(r.clone()).font(ty::mono(13.0)).color(t.fg).min_w(0.0))
+                .child(
+                    Btn::x(t, format!("remove-relay-{r}"))
+                        .on_press(move |s: &mut State| {
+                            let Some(me) = open_mut(s) else { return };
+                            let next = me.relays.iter().filter(|x| **x != url).cloned().collect();
+                            save_relays(s, next);
+                        })
+                        .build(t),
                 ),
         );
+    }
+    if me.relays.is_empty() {
+        relays = relays.child(
+            hint(t, "No relays enabled - nothing syncs until one is on.")
+                .mt(4.0)
+                .mb(4.0),
+        );
+    }
+    relays.child(
+        row()
+            .gap(8.0)
+            .mt(8.0)
+            .child(
+                Field::new("settings-new-relay", &me.new_relay, FieldStyle::modal(t))
+                    .placeholder("wss://relay.example.com")
+                    .on_edit(|s: &mut State| &mut me_or_dummy(s).new_relay)
+                    .on_submit(|s: &mut State, _: &mut Tx| {
+                        if settings_open(s) {
+                            add_relay(s)
+                        }
+                    })
+                    .build(t)
+                    .grow(1.0),
+            )
+            .child(
+                Btn::small(t, "add-relay", "Add")
+                    .on_press(|s: &mut State| {
+                        if settings_open(s) {
+                            add_relay(s)
+                        }
+                    })
+                    .build(t),
+            ),
+    )
+}
 
-        // ── Where the vault lives
-        let vault = section("Where your vault lives")
-            .child(p(if replica {
+fn vault_section(s: &State, me: &Settings, t: &Theme) -> El {
+    let replica = mode::current(s) == Mode::Replica;
+    let vault = section_plain(t, "Where your vault lives")
+        .child(p(
+            t,
+            if replica {
                 if io::WEB {
                     "In this browser: its own replica syncs end-to-end encrypted over your relays, no daemon needed. Roostr running on this computer can be paired instead."
                 } else {
@@ -1981,732 +1612,1217 @@ impl Render for Settings {
                 "Paired with Roostr running on this computer. This browser can keep its own replica instead, synced over your relays without a daemon."
             } else {
                 "Served by the glon-odin daemon on this computer. This app can keep its own replica instead, synced over your relays without a daemon."
-            }))
-            .child(
-                div().mt(px(6.)).flex().child(
-                    Btn::action(
-                        "switch-mode",
-                        match (replica, io::WEB) {
-                            (true, true) => "Pair with Roostr on this computer",
-                            (true, false) => "Use the daemon on this computer",
-                            (false, true) => "Use this browser's own replica",
-                            (false, false) => "Use this device's own replica",
-                        },
-                    )
-                    .subtle()
-                    .on_click(move |_, _, cx| {
-                        roostr_core::mode::switch(
-                            if replica {
-                                roostr_core::mode::Mode::Daemon
-                            } else {
-                                roostr_core::mode::Mode::Replica
-                            },
-                            cx,
-                        )
-                    }),
-                ),
-            );
-        let vault = self.render_holding(vault, window, cx);
-
-        // ── Desktop sync check
-        let checking = self.desk == Desk::Checking;
-        let desk_color = match self.desk {
-            Desk::Match => theme::green(),
-            Desk::Differ => theme::orange(),
-            _ => theme::muted(),
-        };
-        let desk = section("Desktop sync check")
-            .child(p(
-                "Compare the active vault fingerprint with the explicitly paired local daemon. Equal digests mean identical change sets; in native mode both refer to that daemon.",
-            ))
-            .child(
-                div().flex().mt(px(8.)).child(
-                    Btn::small("compare", if checking { "Checking…" } else { "Compare" })
-                        .when(checking, |b| b.leading(spinner(theme::fg())))
-                        .disabled(!paired || checking)
-                        .on_click(cx.listener(|this, _, _, cx| this.check_desktop(cx))),
-                ),
+            },
+        ))
+        .child(btn_row(
+            Btn::action(
+                t,
+                "switch-mode",
+                match (replica, io::WEB) {
+                    (true, true) => "Pair with Roostr on this computer",
+                    (true, false) => "Use the daemon on this computer",
+                    (false, true) => "Use this browser's own replica",
+                    (false, false) => "Use this device's own replica",
+                },
             )
-            .when(!paired, |d| {
-                d.child(p("Pair with a desktop under This machine first - until then there is nothing to compare with.").mt(px(8.)))
-            })
-            .when(paired && self.desk != Desk::Idle, |d| d.child(p(self.desk_detail.clone()).mt(px(8.)).text_color(desk_color)));
-
-        // ── Dictionary
-        let mut dictionary =
-            section("Dictionary").child(p("Words you added to the dictionary from the editor's spellcheck. Remove one to flag it again."));
-        if self.ignored.is_empty() {
-            dictionary =
-                dictionary.child(hint("Nothing added yet — right-click a flagged word and choose \"Add to dictionary\".").my(px(4.)));
-        } else {
-            dictionary = dictionary.child(div().flex().flex_wrap().gap(px(6.)).children(
-                self.ignored.iter().map(|w| {
-                    let word = w.clone();
-                    Tag::custom(theme::bg(), theme::fg(), theme::border())
-                        .rounded_full()
-                        .gap(px(2.))
-                        .pl(px(12.))
-                        .pr(px(4.))
-                        .py(px(2.))
-                        .font_family(theme::fonts::MONO)
-                        .text_size(px(13.))
-                        .child(w.clone())
-                        .child(
-                            Btn::x(SharedString::from(format!("unignore-{w}")))
-                                .tooltip("Remove")
-                                .on_click(
-                                    cx.listener(move |this, _, _, cx| this.unignore(&word, cx)),
-                                ),
-                        )
-                }),
-            ));
-        }
-
-        // ── Export
-        let formats = vec![
-            (
-                "markdown".to_string(),
-                SharedString::from(ExportFormat::Markdown.label()),
-            ),
-            (
-                "json".to_string(),
-                SharedString::from(ExportFormat::Json.label()),
-            ),
-        ];
-        let selected_format = if self.export_format == ExportFormat::Markdown {
-            "markdown"
-        } else {
-            "json"
-        };
-        let export = section("Export")
-            .child(p(
-                "Download everything as a zip — one file per object, grouped by type. Markdown for reading and portability; JSON for a complete structural backup (fields, blocks, provenance).",
-            ))
-            .child(
-                div()
-                    .flex()
-                    .flex_wrap()
-                    .items_center()
-                    .gap(px(10.))
-                    .child(
-                        Select::new("export-format", formats, selected_format)
-                            .on_pick({
-                                let this = this.clone();
-                                move |value, _, cx| {
-                                    this.update(cx, |this, cx| {
-                                        this.export_format = if value == "json" { ExportFormat::Json } else { ExportFormat::Markdown };
-                                        cx.notify();
-                                    })
-                                }
-                            }),
-                    )
-                    .child(
-                        Btn::action("export", if self.exporting { "Exporting…" } else { "Export everything" })
-                            .disabled(self.exporting)
-                            .on_click(cx.listener(|this, _, _, cx| this.run_export(cx))),
-                    )
-                    .when(!self.export_note.is_empty(), |d| d.child(hint(self.export_note.clone()))),
-            );
-
-        // ── Claude plan
-        let mut plan_section = section("Claude plan");
-        if !paired {
-            plan_section = plan_section.child(p("Pair with a computer under This machine first: the Claude sign-in opens in Chrome there."));
-        } else if let Some(plan) = self.plan.clone() {
-            plan_section = plan_section.child(p(
-                "Your Claude plan, on the Anthropic credential of every space you own. Agents use the plan while it works and the credential's API key otherwise.",
-            ));
-            let mut row = div()
-                .flex()
-                .flex_wrap()
-                .items_center()
-                .gap(px(10.))
-                .my(px(6.));
-            if !plan.account.is_empty() {
-                row = row.child(div().text_size(px(13.)).child(rich(
-                    &[Span::Plain("Signed in as "), Span::Bold(&plan.account)],
-                    theme::fg(),
-                    window,
-                )));
-            }
-            if plan.signing_in {
-                row = row.child(
-                    div().flex().items_start().text_size(px(12.)).line_height(px(18.)).text_color(theme::muted()).child(spinner(theme::muted())).child(
-                        format!(
-                            "Sign in to Claude in the browser that opened on {} and press Authorize. If claude.ai shows a code instead, paste it below.",
-                            self.plan_computer(&plan.this_computer)
-                        ),
-                    ),
-                );
-                // The window was closed, or opened in the wrong browser: stop
-                // waiting, or open a fresh sign-in.
-                row = row
-                    .child(
-                        Btn::small("plan-restart", "Open sign-in again")
-                            .subtle()
-                            .disabled(self.plan_busy)
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                let server = this.plan_server.clone();
-                                this.plan_action(
-                                    "/claude-plan/start",
-                                    Some(json!({ "servedBy": server })),
-                                    cx,
-                                )
-                                .detach();
-                            })),
-                    )
-                    .child(
-                        Btn::small("plan-cancel", "Cancel")
-                            .subtle()
-                            .disabled(self.plan_busy)
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.plan_action("/claude-plan/cancel", None, cx).detach()
-                            })),
-                    );
-            } else {
-                row = row.child(
-                    Btn::action(
-                        "plan-sign-in",
-                        if plan.account.is_empty() {
-                            "Sign in with Claude"
-                        } else {
-                            "Sign in again"
-                        },
-                    )
-                    .disabled(self.plan_busy)
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        let server = this.plan_server.clone();
-                        this.plan_action(
-                            "/claude-plan/start",
-                            Some(json!({ "servedBy": server })),
-                            cx,
-                        )
-                        .detach();
-                    })),
-                );
-                if !plan.account.is_empty() {
-                    row = row.child(
-                        Btn::small("plan-sign-out", "Sign out")
-                            .subtle()
-                            .disabled(self.plan_busy)
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.plan_action("/claude-plan/signout", None, cx).detach()
-                            })),
-                    );
+            .subtle(t)
+            .on_press_tx(move |_: &mut State, tx: &mut Tx| {
+                let next = if replica { Mode::Daemon } else { Mode::Replica };
+                if mode::switch(next) {
+                    tx.quit();
                 }
-            }
-            plan_section = plan_section.child(row);
-            let machines: Vec<(String, SharedString)> = self
-                .plan_machines
-                .iter()
-                .map(|m| {
-                    let this_one = if m.machine_id == plan.this_computer {
-                        " (this computer)"
-                    } else {
-                        ""
-                    };
-                    (m.machine_id.clone(), format!("{}{this_one}", m.name).into())
-                })
-                .collect();
-            let has_account = !plan.account.is_empty();
-            plan_section = plan_section.child(
-                div()
-                    .flex()
-                    .flex_wrap()
-                    .items_center()
-                    .gap(px(8.))
-                    .my(px(6.))
-                    .text_size(px(13.))
-                    .child("Kept fresh by")
-                    .child(
-                        Select::new("plan-server", machines, self.plan_server.clone()).on_pick({
-                            let this = this.clone();
-                            move |machine, _, cx| {
-                                let machine = machine.to_string();
-                                this.update(cx, |this, cx| {
-                                    this.plan_server = machine.clone();
-                                    if has_account {
-                                        this.plan_action(
-                                            "/claude-plan/serve",
-                                            Some(json!({ "machine": machine })),
-                                            cx,
-                                        )
-                                        .detach();
-                                    }
-                                    cx.notify();
-                                })
-                            }
-                        }),
-                    )
-                    .child(hint(
-                        "One always-on computer renews the plan for every space.",
-                    )),
-            );
-            if !plan.sign_in_error.is_empty() {
-                plan_section = plan_section.child(error_p(plan.sign_in_error.clone()));
-            }
-            if plan.signing_in || !plan.sign_in_error.is_empty() {
-                // claude.ai shows a code when it can't hand it back by itself: it goes here.
-                let code = self.plan_code.clone();
-                plan_section = plan_section.child(
-                    div()
-                        .flex()
-                        .gap(px(8.))
-                        .mt(px(8.))
-                        .child(field(&self.plan_code, modal_field(), window, cx).flex_1())
-                        .child(
-                            Btn::small("plan-finish", "Finish")
-                                .subtle()
-                                .disabled(self.plan_busy)
-                                .on_click(cx.listener(move |this, _, window, cx| {
-                                    this.submit_plan_code(code.clone(), window, cx)
-                                })),
-                        ),
-                );
-            }
-            if has_account {
-                plan_section = plan_section.child(
-                    div()
-                        .mt(px(8.))
-                        .flex()
-                        .flex_col()
-                        .text_size(px(13.))
-                        .children(plan.spaces.iter().map(|sp| {
-                            let active = sp.status == "active";
-                            let mut state = if active {
-                                if sp.auth == "plan" {
-                                    "Plan".to_string()
-                                } else {
-                                    "API key".to_string()
-                                }
-                            } else {
-                                "Not working".to_string()
-                            };
-                            if !sp.error.is_empty() {
-                                state.push_str(&format!(" - {}", sp.error));
-                            }
-                            div()
-                                .id(SharedString::from(format!("plan-space-{}", sp.id)))
-                                .flex()
-                                .justify_between()
-                                .gap(px(12.))
-                                .py(px(3.))
-                                .border_b_1()
-                                .border_color(theme::border())
-                                .child(sp.name.clone())
-                                // `.hint.error` draws muted (see `error_p`).
-                                .child(hint(state))
-                        })),
-                );
-            }
-            if !self.plan_error.is_empty() {
-                plan_section = plan_section.child(error_p(self.plan_error.clone()));
-            }
-        } else {
-            plan_section = plan_section.child(p(if self.plan_error.is_empty() {
-                SharedString::from("Checking…")
-            } else {
-                self.plan_error.clone()
-            }));
-        }
+            })
+            .build(t),
+        ));
+    holding(s, me, t, vault)
+}
 
-        // ── Agent
-        let agent_flash = self
-            .agent_flash
-            .render(self.agent_saved, flash_suffix, window, cx);
-        let mut agent = section_flash("Agent", agent_flash);
-        match &self.agent_auth {
-            None => agent = agent.child(p("Checking agent daemon…")),
-            Some(None) => {
-                agent = agent.child(p(if paired {
+/// The settings section builder with no flash.
+fn section_plain(t: &Theme, title: &'static str) -> El {
+    section(t, title, "")
+}
+
+/// Replica only: "This device holds about N% of your vault" and, on a
+/// lite replica, "Fully sync this device" behind a details sheet. After
+/// confirming, the sync status line shows the download.
+fn holding(s: &State, me: &Settings, t: &Theme, vault: El) -> El {
+    let vault = vault.child(mode_line(s, me, t)).child(devices_list(me, t));
+    if roostr_core::lite::lite(s).is_none() {
+        return vault;
+    }
+    let lite = roostr_core::lite::status(s).is_some();
+    // A browser or the iPhone app holding the whole vault can go back to
+    // lite: its copy is dropped and it opens again, still signed in.
+    let mut vault = if cfg!(any(target_family = "wasm", target_os = "ios")) && !lite {
+        switch_to_lite(me, t, vault)
+    } else {
+        vault
+    };
+    let progress = sync_progress(&s.store.status).map(|p| progress_text(&p));
+    vault = vault.child(p(t, lite_ui::percent_text(me.estimate.as_ref())).mt(10.0));
+    if lite && !me.confirm_full && !me.full_requested {
+        vault = vault.child(btn_row(
+            Btn::action(t, "sync-fully", "Fully sync this device")
+                .subtle(t)
+                .on_press(|s: &mut State| edit(s, |me| me.confirm_full = true))
+                .build(t),
+        ));
+    }
+    if lite && me.confirm_full {
+        let lines = match &me.estimate {
+            Some(e) => lite_ui::estimate_lines(e),
+            None => vec!["Estimating what a full sync downloads…".into()],
+        };
+        vault = vault.child(
+            card("sync-fully-panel", t.border, Some(t.bg), 4.0)
+                .padding(12.0)
+                .mt(8.0)
+                .children(lines.into_iter().map(|l| p(t, l)))
+                .child(
+                    row()
+                        .mt(6.0)
+                        .gap(8.0)
+                        .child(
+                            Btn::action(t, "sync-fully-confirm", "Fully sync this device")
+                                .armed()
+                                .on_press(|s: &mut State| {
+                                    edit(s, |me| {
+                                        me.confirm_full = false;
+                                        me.full_requested = true;
+                                    });
+                                    lite_ui::sync_fully(s);
+                                })
+                                .build(t),
+                        )
+                        .child(
+                            Btn::small(t, "sync-fully-cancel", "Cancel")
+                                .on_press(|s: &mut State| edit(s, |me| me.confirm_full = false))
+                                .build(t),
+                        ),
+                ),
+        );
+    }
+    if me.full_requested {
+        vault = vault.child(
+            p(
+                t,
+                progress.unwrap_or_else(|| "Fully syncing this device…".into()),
+            )
+            .mt(6.0),
+        );
+    }
+    vault
+}
+
+/// "Switch to Lite" and its confirm sheet, under the mode line of a full
+/// replica in a browser or the iPhone app.
+fn switch_to_lite(me: &Settings, t: &Theme, vault: El) -> El {
+    if !me.confirm_lite {
+        return vault
+            .child(p(t, "This device holds your whole vault. Lite keeps only what you open, which is lighter for a big vault.").mt(10.0))
+            .child(btn_row(
+                Btn::action(t, "switch-lite", "Switch to Lite")
+                    .subtle(t)
+                    .on_press(|s: &mut State| {
+                        edit(s, |me| {
+                            me.confirm_lite = true;
+                            me.lite_error = None;
+                        })
+                    })
+                    .build(t),
+            ));
+    }
+    let mut panel = card("switch-lite-panel", t.border, Some(t.bg), 4.0)
+        .padding(12.0)
+        .mt(8.0)
+        .child(p(t, "This device's copy of your vault is removed and Roostr opens again in Lite: you stay signed in, and objects download as you open them. Nothing is deleted from your vault or your other devices."));
+    if let Some(error) = &me.lite_error {
+        panel = panel.child(text(error.clone()).font(ty::ui(13.0)).color(t.red).wrap());
+    }
+    vault.child(
+        panel.child(
+            row()
+                .mt(6.0)
+                .gap(8.0)
+                .child(
+                    Btn::action(t, "switch-lite-confirm", "Switch to Lite")
+                        .armed()
+                        .on_press(|s: &mut State| {
+                            lite_ui::switch_to_lite(s, |result, s| {
+                                if let Err(error) = result {
+                                    edit(s, |me| me.lite_error = Some(error));
+                                }
+                            })
+                        })
+                        .build(t),
+                )
+                .child(
+                    Btn::small(t, "switch-lite-cancel", "Cancel")
+                        .on_press(|s: &mut State| {
+                            edit(s, |me| {
+                                me.confirm_lite = false;
+                                me.lite_error = None;
+                            })
+                        })
+                        .build(t),
+                ),
+        ),
+    )
+}
+
+/// One line at the top of "Where your vault lives": which mode this
+/// device is in (Full via the daemon, Full replica, Lite replica) and
+/// where its sync stands - so neither has to be inferred from the rest.
+fn mode_line(s: &State, me: &Settings, t: &Theme) -> El {
+    let status = &s.store.status;
+    let replica = roostr_core::lite::lite(s).is_some();
+    let lite = status.lite.is_some();
+    let (mode, mode_color) = match (replica, lite) {
+        (true, true) => ("Lite", t.orange),
+        _ => ("Full", t.green),
+    };
+    let progress = sync_progress(status).map(|p| progress_text(&p));
+    let (state, state_color) = match status.phase {
+        SyncPhase::Error => (
+            format!(
+                "Sync error{}",
+                status
+                    .detail
+                    .as_deref()
+                    .map(|d| format!(": {d}"))
+                    .unwrap_or_default()
+            ),
+            t.red,
+        ),
+        _ if progress.is_some() => (progress.unwrap_or_default(), t.orange),
+        _ if !replica => (
+            "Holds your whole vault (this computer's engine)".to_string(),
+            t.green,
+        ),
+        _ if lite => (
+            match &me.estimate {
+                Some(e) => format!(
+                    "About {}% on this device · the rest downloads as you open it",
+                    e.percent()
+                ),
+                None => "Part of your vault on this device · the rest downloads as you open it"
+                    .to_string(),
+            },
+            t.muted,
+        ),
+        SyncPhase::Live if status.bootstrapped => ("100% synced · up to date".to_string(), t.green),
+        SyncPhase::Live | SyncPhase::Backfill => ("Syncing…".to_string(), t.orange),
+        SyncPhase::Idle => ("Not connected to a relay".to_string(), t.muted),
+    };
+    let pending = status.pending.filter(|n| *n > 0).map(|n| {
+        format!(
+            " · {n} change{} not sent yet",
+            if n == 1 { "" } else { "s" }
+        )
+    });
+    row()
+        .mt(10.0)
+        .center_y()
+        .gap(8.0)
+        .flex_wrap()
+        .child(pill(format!("{mode} mode"), mode_color))
+        .child(
+            text(format!("{state}{}", pending.unwrap_or_default()))
+                .font(ty::ui(13.0))
+                .color(state_color)
+                .wrap()
+                .grow(1.0)
+                .min_w(0.0),
+        )
+}
+
+/// "Your devices" under the mode line: this device first, then the most
+/// recent; devices unseen for 30 days fold under "Older devices".
+fn devices_list(me: &Settings, t: &Theme) -> El {
+    let list = col()
+        .mt(14.0)
+        .gap(6.0)
+        .items_stretch()
+        .child(h3(t, "Your devices"));
+    if me.devices.is_empty() {
+        return list.child(hint(t, "No devices yet"));
+    }
+    let now = chrono::Utc::now().timestamp_millis();
+    let (shown, older) = devices::arrange(me.devices.clone(), &me.device_id, now);
+    let older_count = older.len();
+    let open = me.show_older_devices;
+    let mut list = list.children(shown.iter().map(|r| device(me, t, r, now)));
+    if older_count > 0 {
+        list = list.child(
+            row().child(
+                Btn::action(
+                    t,
+                    "devices-older",
+                    format!(
+                        "{} Older devices ({older_count})",
+                        if open { "▾" } else { "▸" }
+                    ),
+                )
+                .subtle(t)
+                .on_press(|s: &mut State| {
+                    edit(s, |me| me.show_older_devices = !me.show_older_devices)
+                })
+                .build(t),
+            ),
+        );
+        if open {
+            list = list.children(older.iter().map(|r| device(me, t, r, now)));
+        }
+    }
+    list.child(hint(
+        t,
+        "Remove deletes a record only - the device adds itself again the next time it runs.",
+    ))
+}
+
+fn device(me: &Settings, t: &Theme, record: &DeviceRecord, now: i64) -> El {
+    let this_device = record.device_id() == me.device_id;
+    let name = if this_device {
+        format!("{} (this device)", record.name)
+    } else {
+        record.name.clone()
+    };
+    let (badge, color) = if record.lite {
+        ("Lite", t.orange)
+    } else {
+        ("Full", t.green)
+    };
+    let id = record.id.clone();
+    let renaming = me.renaming_device.as_deref() == Some(record.id.as_str());
+    let row_card = if record.lite {
+        card(
+            format!("device-{id}"),
+            t.orange.alpha(0.4),
+            Some(t.orange.alpha(0.06)),
+            6.0,
+        )
+    } else {
+        card(format!("device-{id}"), t.border, None, 6.0)
+    };
+    if renaming {
+        return row_card.child(
+            row()
+                .center_y()
+                .gap(8.0)
+                .child(
+                    Field::new(
+                        format!("device-name-{id}"),
+                        &me.device_name_draft,
+                        FieldStyle::modal(t),
+                    )
+                    .placeholder("Device name")
+                    .on_edit(|s: &mut State| &mut me_or_dummy(s).device_name_draft)
+                    .on_submit(|s: &mut State, _: &mut Tx| {
+                        if settings_open(s) {
+                            save_device_name(s)
+                        }
+                    })
+                    .build(t)
+                    .grow(1.0),
+                )
+                .child(
+                    Btn::small(t, format!("device-save-{id}"), "Save")
+                        .on_press(|s: &mut State| {
+                            if settings_open(s) {
+                                save_device_name(s)
+                            }
+                        })
+                        .build(t),
+                )
+                .child(
+                    Btn::action(t, format!("device-cancel-{id}"), "Cancel")
+                        .subtle(t)
+                        .on_press(|s: &mut State| edit(s, |me| me.renaming_device = None))
+                        .build(t),
+                ),
+        );
+    }
+    let rename_record = record.clone();
+    let mut line = row()
+        .center_y()
+        .gap(8.0)
+        .flex_wrap()
+        .child(text(name).font(ty::ui(14.0)).color(t.fg))
+        .child(pill(badge, color));
+    if record.lite {
+        line = line.child(
+            text(format!("{}% held", record.percent))
+                .font(ty::ui(13.0))
+                .color(t.orange),
+        );
+    }
+    line = line.child(
+        text(format!(
+            "last seen {}",
+            devices::last_seen_text(now, record.last_seen)
+        ))
+        .font(ty::ui(13.0))
+        .color(t.muted),
+    );
+    row_card.child(line).child(
+        row()
+            .gap(8.0)
+            .child(
+                Btn::action(t, format!("device-rename-{id}"), "Rename")
+                    .subtle(t)
+                    .on_press(move |s: &mut State| start_rename_device(s, &rename_record))
+                    .build(t),
+            )
+            .child(
+                Btn::action(t, format!("device-remove-{id}"), "Remove")
+                    .subtle(t)
+                    .tooltip("Removes this record only - the device adds itself again the next time it runs.")
+                    .on_press(move |s: &mut State| {
+                        if settings_open(s) {
+                            remove_device(s, &id)
+                        }
+                    })
+                    .build(t),
+            ),
+    )
+}
+
+fn desk_section(s: &State, me: &Settings, t: &Theme) -> El {
+    let paired = s.harness.is_some();
+    let checking = me.desk == Desk::Checking;
+    let desk_color = match me.desk {
+        Desk::Match => t.green,
+        Desk::Differ => t.orange,
+        _ => t.muted,
+    };
+    let mut desk = section_plain(t, "Desktop sync check")
+        .child(p(
+            t,
+            "Compare the active vault fingerprint with the explicitly paired local daemon. Equal digests mean identical change sets; in native mode both refer to that daemon.",
+        ))
+        .child(
+            row().mt(8.0).child(
+                Btn::small(t, "compare", if checking { "Checking…" } else { "Compare" })
+                    .when(checking, |b| b.leading(spinner(t, t.fg)))
+                    .disabled(!paired || checking)
+                    .on_press(|s: &mut State| {
+                        if settings_open(s) {
+                            check_desktop(s)
+                        }
+                    })
+                    .build(t),
+            ),
+        );
+    if !paired {
+        desk = desk.child(
+            p(t, "Pair with a desktop under This machine first - until then there is nothing to compare with.")
+                .mt(8.0),
+        );
+    }
+    if paired && me.desk != Desk::Idle {
+        desk = desk.child(
+            text(me.desk_detail.clone())
+                .font(ty::ui(12.0).lh(18.0))
+                .color(desk_color)
+                .wrap()
+                .mt(8.0)
+                .mb(10.0),
+        );
+    }
+    desk
+}
+
+fn dictionary_section(me: &Settings, t: &Theme) -> El {
+    let dictionary = section_plain(t, "Dictionary").child(p(
+        t,
+        "Words you added to the dictionary from the editor's spellcheck. Remove one to flag it again.",
+    ));
+    if me.ignored.is_empty() {
+        return dictionary.child(
+            hint(
+                t,
+                "Nothing added yet — right-click a flagged word and choose \"Add to dictionary\".",
+            )
+            .mt(4.0)
+            .mb(4.0),
+        );
+    }
+    dictionary.child(
+        row()
+            .flex_wrap()
+            .gap(6.0)
+            .children(me.ignored.iter().map(|w| {
+                let word = w.clone();
+                row()
+                    .key(format!("ignored-{w}"))
+                    .center_y()
+                    .gap(2.0)
+                    .pl(12.0)
+                    .pr(4.0)
+                    .py(2.0)
+                    .radius(999.0)
+                    .fill(t.bg)
+                    .border(1.0, t.border)
+                    .child(text(w.clone()).font(ty::mono(13.0)).color(t.fg))
+                    .child(
+                        Btn::x(t, format!("unignore-{w}"))
+                            .tooltip("Remove")
+                            .on_press(move |s: &mut State| {
+                                if settings_open(s) {
+                                    unignore(s, &word)
+                                }
+                            })
+                            .build(t),
+                    )
+            })),
+    )
+}
+
+fn export_section(me: &Settings, t: &Theme, layer: &mut Vec<El>) -> El {
+    let mut controls = row()
+        .flex_wrap()
+        .center_y()
+        .gap(10.0)
+        .child(select(
+            t,
+            layer,
+            "export-format",
+            &me.export_select,
+            |s: &mut State| &mut me_or_dummy(s).export_select,
+            0.0,
+            t.bg,
+            |s: &mut State, value: &str, _: &mut Tx| {
+                edit(s, |me| {
+                    me.export_format = if value == "json" {
+                        ExportFormat::Json
+                    } else {
+                        ExportFormat::Markdown
+                    }
+                })
+            },
+        ))
+        .child(
+            Btn::action(
+                t,
+                "export",
+                if me.exporting {
+                    "Exporting…"
+                } else {
+                    "Export everything"
+                },
+            )
+            .disabled(me.exporting)
+            .on_press(|s: &mut State| {
+                if settings_open(s) {
+                    run_export(s)
+                }
+            })
+            .build(t),
+        );
+    if !me.export_note.is_empty() {
+        controls = controls.child(hint(t, me.export_note.clone()));
+    }
+    section_plain(t, "Export")
+        .child(p(
+            t,
+            "Download everything as a zip — one file per object, grouped by type. Markdown for reading and portability; JSON for a complete structural backup (fields, blocks, provenance).",
+        ))
+        .child(controls)
+}
+
+fn plan_section(s: &State, me: &Settings, t: &Theme, layer: &mut Vec<El>) -> El {
+    let paired = s.harness.is_some();
+    let mut plan_section = section_plain(t, "Claude plan");
+    let Some(plan) = me.plan.as_ref().filter(|_| paired) else {
+        return plan_section.child(p(
+            t,
+            if !paired {
+                "Pair with a computer under This machine first: the Claude sign-in opens in Chrome there."
+                    .to_string()
+            } else if me.plan_error.is_empty() {
+                "Checking…".to_string()
+            } else {
+                me.plan_error.clone()
+            },
+        ));
+    };
+    plan_section = plan_section.child(p(
+        t,
+        "Your Claude plan, on the Anthropic credential of every space you own. Agents use the plan while it works and the credential's API key otherwise.",
+    ));
+    let mut line = row().flex_wrap().center_y().gap(10.0).mt(6.0).mb(6.0);
+    if !plan.account.is_empty() {
+        line = line.child(rich(
+            t,
+            &[Span::Plain("Signed in as "), Span::Bold(&plan.account)],
+            t.fg,
+            13.0,
+            16.0,
+        ));
+    }
+    let start = |s: &mut State| {
+        let Some(me) = open_mut(s) else { return };
+        let server = me.plan_server.clone();
+        plan_action(s, "/claude-plan/start", Some(json!({ "servedBy": server }))).detach();
+    };
+    if plan.signing_in {
+        line = line
+            .child(
+                row()
+                    .items_start()
+                    .child(spinner(t, t.muted))
+                    .child(
+                        text(format!(
+                            "Sign in to Claude in the browser that opened on {} and press Authorize. If claude.ai shows a code instead, paste it below.",
+                            plan_computer(me, &plan.this_computer)
+                        ))
+                        .font(ty::ui(12.0).lh(18.0))
+                        .color(t.muted)
+                        .wrap(),
+                    )
+                    .shrink()
+                    .min_w(0.0),
+            )
+            // The window was closed, or opened in the wrong browser: stop
+            // waiting, or open a fresh sign-in.
+            .child(
+                Btn::small(t, "plan-restart", "Open sign-in again")
+                    .subtle(t)
+                    .disabled(me.plan_busy)
+                    .on_press(start)
+                    .build(t),
+            )
+            .child(
+                Btn::small(t, "plan-cancel", "Cancel")
+                    .subtle(t)
+                    .disabled(me.plan_busy)
+                    .on_press(|s: &mut State| {
+                        if settings_open(s) {
+                            plan_action(s, "/claude-plan/cancel", None).detach()
+                        }
+                    })
+                    .build(t),
+            );
+    } else {
+        line = line.child(
+            Btn::action(
+                t,
+                "plan-sign-in",
+                if plan.account.is_empty() {
+                    "Sign in with Claude"
+                } else {
+                    "Sign in again"
+                },
+            )
+            .disabled(me.plan_busy)
+            .on_press(start)
+            .build(t),
+        );
+        if !plan.account.is_empty() {
+            line = line.child(
+                Btn::small(t, "plan-sign-out", "Sign out")
+                    .subtle(t)
+                    .disabled(me.plan_busy)
+                    .on_press(|s: &mut State| {
+                        if settings_open(s) {
+                            plan_action(s, "/claude-plan/signout", None).detach()
+                        }
+                    })
+                    .build(t),
+            );
+        }
+    }
+    plan_section = plan_section.child(line);
+    let has_account = !plan.account.is_empty();
+    plan_section = plan_section.child(
+        row()
+            .flex_wrap()
+            .center_y()
+            .gap(8.0)
+            .mt(6.0)
+            .mb(6.0)
+            .child(text("Kept fresh by").font(ty::ui(13.0)).color(t.fg))
+            .child(select(
+                t,
+                layer,
+                "plan-server",
+                &me.plan_server_select,
+                |s: &mut State| &mut me_or_dummy(s).plan_server_select,
+                0.0,
+                t.bg,
+                move |s: &mut State, machine: &str, _: &mut Tx| {
+                    let Some(me) = open_mut(s) else { return };
+                    me.plan_server = machine.to_string();
+                    if has_account {
+                        plan_action(s, "/claude-plan/serve", Some(json!({ "machine": machine })))
+                            .detach();
+                    }
+                },
+            ))
+            .child(hint(
+                t,
+                "One always-on computer renews the plan for every space.",
+            )),
+    );
+    if !plan.sign_in_error.is_empty() {
+        plan_section = plan_section.child(error_p(t, plan.sign_in_error.clone()));
+    }
+    if plan.signing_in || !plan.sign_in_error.is_empty() {
+        // claude.ai shows a code when it can't hand it back by itself: it goes here.
+        plan_section = plan_section.child(
+            row()
+                .gap(8.0)
+                .mt(8.0)
+                .child(
+                    Field::new("settings-plan-code", &me.plan_code, FieldStyle::modal(t))
+                        .placeholder("Paste the code from claude.ai")
+                        .on_edit(|s: &mut State| &mut me_or_dummy(s).plan_code)
+                        .on_submit(|s: &mut State, _: &mut Tx| {
+                            if settings_open(s) {
+                                submit_plan_code(s)
+                            }
+                        })
+                        .build(t)
+                        .grow(1.0),
+                )
+                .child(
+                    Btn::small(t, "plan-finish", "Finish")
+                        .subtle(t)
+                        .disabled(me.plan_busy)
+                        .on_press(|s: &mut State| {
+                            if settings_open(s) {
+                                submit_plan_code(s)
+                            }
+                        })
+                        .build(t),
+                ),
+        );
+    }
+    if has_account {
+        plan_section = plan_section.child(col().mt(8.0).items_stretch().children(
+            plan.spaces.iter().map(|sp| {
+                let active = sp.status == "active";
+                let mut state = if active {
+                    if sp.auth == "plan" {
+                        "Plan".to_string()
+                    } else {
+                        "API key".to_string()
+                    }
+                } else {
+                    "Not working".to_string()
+                };
+                if !sp.error.is_empty() {
+                    state.push_str(&format!(" - {}", sp.error));
+                }
+                row()
+                    .key(format!("plan-space-{}", sp.id))
+                    .justify_between()
+                    .gap(12.0)
+                    .py(3.0)
+                    .border_sides([0.0, 0.0, 1.0, 0.0], t.border)
+                    .child(text(sp.name.clone()).font(ty::ui(13.0)).color(t.fg))
+                    // `.hint.error` draws muted (see `error_p`).
+                    .child(hint(t, state))
+            }),
+        ));
+    }
+    if !me.plan_error.is_empty() {
+        plan_section = plan_section.child(error_p(t, me.plan_error.clone()));
+    }
+    plan_section
+}
+
+fn agent_section(s: &State, me: &Settings, t: &Theme) -> El {
+    let paired = s.harness.is_some();
+    let mut agent = section(t, "Agent", me.agent_saved);
+    match &me.agent_auth {
+        None => agent = agent.child(p(t, "Checking agent daemon…")),
+        Some(None) => {
+            agent = agent.child(p(
+                t,
+                if paired {
                     "The paired agent daemon is unavailable. Start the local harness to manage credentials."
                 } else {
                     "Pair under This machine to manage agent credentials. Browser data and relay chat remain available without pairing."
-                }));
-                if paired {
-                    agent = agent.child(
-                        div().mt(px(6.)).flex().child(
-                            Btn::action("retry-agent", "Retry agent connection")
-                                .subtle()
-                                .on_click(cx.listener(|this, _, _, cx| this.load_agent_auth(cx))),
-                        ),
-                    );
-                }
-            }
-            Some(Some(auth)) => {
-                agent = agent.child(div().text_size(px(12.)).line_height(px(18.)).mb(px(10.)).child(rich(
-                    &[
-                        Span::Plain("Keys for this computer only ("),
-                        Span::Code("~/.glon/auth.json"),
-                        Span::Plain("), for agents that list no credential of their own. Claude for your spaces is under Claude plan above."),
-                    ],
-                    theme::muted(),
-                    window,
-                )));
-                let mut provider = div().flex().flex_wrap().items_center().gap(px(10.)).py(px(6.)).child(
-                    div()
-                        .flex_none()
-                        .w(px(130.))
-                        .text_size(px(13.))
-                        .child("Kimi (Moonshot)"),
-                );
-                if auth.kimi.mode == "api_key" {
-                    provider = provider
-                        .child(
-                            div()
-                                .min_w_0()
-                                .font_family(theme::fonts::MONO)
-                                .text_size(px(12.))
-                                .text_color(theme::muted())
-                                .child(format!(
-                                    "API key set ({})",
-                                    auth.kimi.masked.clone().unwrap_or_default()
-                                )),
-                        )
-                        .child(Btn::small("clear-kimi", "Clear").on_click(cx.listener(
-                            |this, _, window, cx| {
-                                this.save_agent_key("kimi", String::new(), window, cx)
-                            },
-                        )));
-                } else {
-                    provider = provider.child(
-                        div()
-                            .flex_1()
-                            .flex()
-                            .gap(px(8.))
-                            .child(field(&self.kimi_draft, modal_field(), window, cx).flex_1())
-                            .child(Btn::small("save-kimi", "Save").on_click(cx.listener(
-                                |this, _, window, cx| {
-                                    let key = this.kimi_draft.read(cx).value().to_string();
-                                    if !key.trim().is_empty() {
-                                        this.save_agent_key("kimi", key, window, cx);
-                                    }
-                                },
-                            ))),
-                    );
-                }
-                agent = agent.child(provider);
+                },
+            ));
+            if paired {
+                agent = agent.child(btn_row(
+                    Btn::action(t, "retry-agent", "Retry agent connection")
+                        .subtle(t)
+                        .on_press(|s: &mut State| {
+                            if settings_open(s) {
+                                load_agent_auth(s)
+                            }
+                        })
+                        .build(t),
+                ));
             }
         }
-        if !self.login_error.is_empty() {
-            agent = agent.child(error_p(self.login_error.clone()));
-        }
-
-        // The sections in order, each under the title the navigation lists.
-        let mut sections: Vec<(&'static str, Div)> = vec![
-            ("Profile", profile),
-            ("Chat color", chat),
-            ("Nostr identity", identity),
-            ("Relays", relays),
-        ];
-        // The iOS app is replica-only: there is no daemon to switch to.
-        if !cfg!(target_os = "ios") {
-            sections.push(("Where your vault lives", vault));
-        }
-        sections.extend([
-            ("Desktop sync check", desk),
-            ("Dictionary", dictionary),
-            ("Export", export),
-            ("Claude plan", plan_section),
-            ("Agent", agent),
-        ]);
-        let titles: Vec<&'static str> = sections.iter().map(|(title, _)| *title).collect();
-        let active = self.nav.frame(
-            FIRST_SECTION,
-            titles.len(),
-            &self.scroll,
-            narrow,
-            window,
-            cx,
-        );
-
-        // The scrolling column: the error line, the sections from
-        // [`FIRST_SECTION`] on, the build stamp.
-        let column = div()
-            .id("settings-scroll")
-            .debug_selector(|| "settings-scroll".into())
-            .flex_1()
-            .min_w_0()
-            .min_h_0()
-            .overflow_y_scroll()
-            .track_scroll(&self.scroll)
-            .map(|d| {
-                if narrow {
-                    d.px(px(22.))
-                } else {
-                    d.pl(px(8.)).pr(px(22.))
-                }
-            })
-            .pb(px(22.))
-            .child(div().when(!self.settings_error.is_empty(), |d| {
-                d.child(error_p(self.settings_error.clone()))
-            }))
-            .children(sections.into_iter().map(|(title, card)| {
-                card.debug_selector(move || {
-                    format!("settings-section-{}", section_nav::slug(title))
-                })
-            }))
-            .child(
-                div()
-                    .mt(px(14.))
-                    .mx(px(2.))
-                    .text_size(px(11.))
-                    .text_color(theme::muted())
-                    .opacity(0.7)
-                    .text_center()
-                    .child(format!("Build {BUILD_STAMP}")),
-            );
-        let header = div().flex_none().px(px(22.)).child(header);
-
-        if !narrow {
-            // The header across the top; below it the section panel and
-            // the scrolling column side by side.
-            return div()
-                .id("settings")
-                .track_focus(&self.focus)
-                .key_context("Settings")
-                .w_full()
-                .max_h(roostr_core::layout::viewport(window).height * 0.8)
-                .flex()
-                .flex_col()
-                .text_color(theme::fg())
-                .text_size(px(13.))
-                .child(header.pt(px(18.)))
-                .child(
-                    div()
-                        .flex()
-                        .flex_1()
-                        .min_h_0()
-                        .child(self.nav.panel(&titles, active, cx))
-                        .child(column),
-                )
-                .into_any_element();
-        }
-
-        // ≤720px: a bottom sheet - pinned to the bottom edge, full width,
-        // rounded top, a grabber bar and drag-to-close; the × hides (the
-        // sheet IS the affordance). `max-height: calc(100dvh - max(48px,
-        // env(safe-area-inset-top) + 32px))`, the inset being 0 inside the
-        // host's safe area.
-        let viewport = roostr_core::layout::viewport(window);
-        // Rises from below the window on open; tracks the finger 1:1.
-        let transition = if self.sheet_drag.is_some() {
-            motion::Transition::Instant
-        } else {
-            self.sheet_settle.transition()
-        };
-        let sheet_state = self
-            .sheet
-            .get_or_insert_with(|| motion::ValueState::new(f64::from(viewport.height)));
-        let sheet_top = px(sheet_state
-            .frame(f64::from(self.sheet_y), transition, window, cx)
-            .value() as f32);
-        let sheet = div()
-            .id("settings")
-            .track_focus(&self.focus)
-            .key_context("Settings")
-            .relative()
-            .top(sheet_top)
-            .w_full()
-            .max_h(viewport.height - px(48.))
-            .flex()
-            .flex_col()
-            .bg(theme::panel())
-            .border_t_1()
-            .border_l_1()
-            .border_r_1()
-            .border_color(theme::border())
-            .rounded_t(px(18.))
-            .shadow(roostr_core::ui::modal_shadow())
-            .occlude()
-            .text_color(theme::fg())
-            .text_size(px(13.))
-            // `.grab-zone`: sticky - the grabber never scrolls away with the
-            // content, it IS the close affordance.
-            .child(
-                div()
-                    .relative()
-                    .flex_none()
-                    .flex()
-                    .justify_center()
-                    .pt(px(10.))
-                    .pb(px(6.))
-                    .child(
-                        div()
-                            .w(px(40.))
-                            .h(px(4.))
-                            .rounded(px(2.))
-                            .bg(theme::border()),
-                    )
-                    .child(self.sheet_grip(cx)),
-            )
-            // Pinned above the column with the grab zone: the header and
-            // the section chips.
-            .child(header)
-            .child(self.nav.chips(&titles, active, cx))
-            .child(column);
-        let sheet = sheet.into_any_element();
-        // The dialog lends its backdrop, focus and Escape; the sheet places
-        // itself against the bottom edge of the area the app is laid out in
-        // (inside the iOS safe area, above the keyboard). It escapes the
-        // dialog's empty surface as a deferred layer at the dialog layer's
-        // own priority (gpui-base: 10 + its layer, 0 for Settings): nested
-        // in that layer, it paints after it - over the backdrop's dim - and
-        // still under popups (100) and any dialog opened above it.
-        let visible = window.fully_visible_bounds();
-        div()
-            .child(
-                deferred(
-                    anchored().position(visible.origin).child(
-                        div()
-                            .w(viewport.width)
-                            .h(viewport.height)
-                            .flex()
-                            .flex_col()
-                            .justify_end()
-                            .child(sheet),
+        Some(Some(auth)) => {
+            agent = agent.child(note(
+                t,
+                &[
+                    Span::Plain("Keys for this computer only ("),
+                    Span::Code("~/.glon/auth.json"),
+                    Span::Plain(
+                        "), for agents that list no credential of their own. Claude for your spaces is under Claude plan above.",
                     ),
-                )
-                .with_priority(10),
-            )
-            .into_any_element()
+                ],
+                t.muted,
+            ));
+            let mut provider = row().flex_wrap().center_y().gap(10.0).py(6.0).child(
+                text("Kimi (Moonshot)")
+                    .font(ty::ui(13.0))
+                    .color(t.fg)
+                    .w(130.0),
+            );
+            if auth.kimi.mode == "api_key" {
+                provider = provider
+                    .child(
+                        text(format!(
+                            "API key set ({})",
+                            auth.kimi.masked.clone().unwrap_or_default()
+                        ))
+                        .font(ty::mono(12.0))
+                        .color(t.muted)
+                        .min_w(0.0),
+                    )
+                    .child(
+                        Btn::small(t, "clear-kimi", "Clear")
+                            .on_press(|s: &mut State| {
+                                if settings_open(s) {
+                                    save_agent_key(s, "kimi", String::new())
+                                }
+                            })
+                            .build(t),
+                    );
+            } else {
+                let save = |s: &mut State| {
+                    let Some(me) = open_mut(s) else { return };
+                    let key = me.kimi_draft.value().to_string();
+                    if !key.trim().is_empty() {
+                        save_agent_key(s, "kimi", key);
+                    }
+                };
+                provider = provider.child(
+                    row()
+                        .grow(1.0)
+                        .gap(8.0)
+                        .child(
+                            Field::new("settings-kimi", &me.kimi_draft, FieldStyle::modal(t))
+                                .placeholder("sk-…")
+                                .on_edit(|s: &mut State| &mut me_or_dummy(s).kimi_draft)
+                                .on_submit(move |s: &mut State, _: &mut Tx| save(s))
+                                .build(t)
+                                .grow(1.0),
+                        )
+                        .child(Btn::small(t, "save-kimi", "Save").on_press(save).build(t)),
+                );
+            }
+            agent = agent.child(provider);
+        }
     }
+    if !me.login_error.is_empty() {
+        agent = agent.child(error_p(t, me.login_error.clone()));
+    }
+    agent
+}
+
+/// The open panel for a field lens; a closed modal's late keystroke lands in
+/// a throwaway state instead of panicking.
+fn me_or_dummy(s: &mut State) -> &mut Settings {
+    let slot = s.slot::<SettingsModal>();
+    if slot.open.is_none() {
+        slot.open = Some(Box::new(Settings::new_closed()));
+        slot.generation += 1;
+    }
+    slot.open.as_deref_mut().expect("just ensured")
 }
 
 impl Settings {
-    /// The grab zone and header's touch drag (`sheetStart`/`sheetMove`/
-    /// `sheetEnd`): pull the sheet down past 110px to close it, else it
-    /// springs back. Content scrolling is untouched - the drag starts only
-    /// here.
-    fn sheet_grip(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let this = cx.entity().downgrade();
-        canvas(
-            |bounds, window, _| window.insert_hitbox(bounds, HitboxBehavior::Normal),
-            move |_, hitbox, window, _| {
-                let this = this.clone();
-                window.on_mouse_event(move |ev: &TouchDragEvent, phase, window, cx| {
-                    if phase != DispatchPhase::Bubble {
-                        return;
-                    }
-                    let Some(this) = this.upgrade() else {
-                        return;
-                    };
-                    match ev.phase {
-                        TouchPhase::Started => {
-                            if hitbox.is_hovered(window) {
-                                window.prevent_default();
-                                this.update(cx, |s, cx| {
-                                    s.sheet_drag = Some(ev.start_position.y);
-                                    cx.notify();
-                                });
-                            }
-                        }
-                        TouchPhase::Moved => this.update(cx, |s, cx| {
-                            if let Some(start) = s.sheet_drag {
-                                s.sheet_y = (ev.position.y - start).max(px(0.));
-                                cx.notify();
-                            }
-                        }),
-                        TouchPhase::Ended | TouchPhase::Cancelled => {
-                            let close = this.update(cx, |s, cx| {
-                                if s.sheet_drag.take().is_none() {
-                                    return false;
-                                }
-                                if s.sheet_y > px(110.) {
-                                    return true;
-                                }
-                                // Settles back from a pull short of the threshold (`transform 0.18s ease`).
-                                s.sheet_settle = motion::SHEET_SNAP;
-                                s.sheet_y = px(0.);
-                                cx.notify();
-                                false
-                            });
-                            if close {
-                                window.close_dialog(cx);
-                            }
-                        }
-                    }
-                });
-            },
-        )
-        .absolute()
-        .inset_0()
+    /// A panel no loader writes to (see [`me_or_dummy`]).
+    fn new_closed() -> Self {
+        Self {
+            settings_error: String::new(),
+            desk: Desk::Idle,
+            desk_detail: String::new(),
+            npub: String::new(),
+            copied: "",
+            importing: false,
+            confirm_logout: false,
+            nsec: String::new(),
+            import_draft: InputState::new(),
+            import_error: String::new(),
+            spy: Spy::default(),
+            relays: Vec::new(),
+            new_relay: InputState::new(),
+            save_state: "",
+            agent_auth: None,
+            kimi_draft: InputState::new(),
+            agent_saved: "",
+            login_error: String::new(),
+            plan: None,
+            plan_machines: Vec::new(),
+            plan_server: String::new(),
+            plan_server_select: SelectState::new(Vec::new(), None),
+            plan_code: InputState::new(),
+            plan_error: String::new(),
+            plan_busy: false,
+            plan_poll: None,
+            profile_picture: String::new(),
+            profile_name: InputState::new(),
+            name_dirty: false,
+            saved_name: String::new(),
+            avatar_busy: false,
+            avatar_state: String::new(),
+            chat_color_draft: InputState::new(),
+            color_dirty: false,
+            chat_color_state: String::new(),
+            swatch: ColorPickerState::new(),
+            theme_select: SelectState::new(Vec::new(), None),
+            ignored: Vec::new(),
+            export_format: ExportFormat::Markdown,
+            export_select: SelectState::new(Vec::new(), None),
+            exporting: false,
+            export_note: String::new(),
+            estimate: None,
+            confirm_full: false,
+            full_requested: false,
+            confirm_lite: false,
+            lite_error: None,
+            devices: Vec::new(),
+            device_id: String::new(),
+            show_older_devices: false,
+            renaming_device: None,
+            device_name_draft: InputState::new(),
+            sheet_y: 0.0,
+            sheet_drag: false,
+        }
     }
 }
 
-/// Keeps its parent (a text field's row) inside the scroll area `scroll`
-/// while `focus` has focus, as iOS WebKit kept a focused input in view: once
-/// on focus, and again each time the area changes height - the on-screen
-/// keyboard rising shortens the phone sheet, and would otherwise cover a
-/// field low in it. Scrolls no further than needed; scrolling away while
-/// typing is left alone. `in_view` holds the height last handled.
-fn keep_in_view(
-    focus: FocusHandle,
-    scroll: ScrollHandle,
-    in_view: Rc<Cell<Option<Pixels>>>,
-) -> impl IntoElement {
-    const MARGIN: Pixels = px(12.);
-    canvas(
-        move |bounds, window, _| {
-            if !focus.is_focused(window) {
-                in_view.set(None);
-                return;
-            }
-            let area = scroll.bounds();
-            if in_view.replace(Some(area.size.height)) == Some(area.size.height) {
-                return;
-            }
-            let below = bounds.bottom() + MARGIN - area.bottom();
-            let above = area.top() - (bounds.top() - MARGIN);
-            let mut offset = scroll.offset();
-            if below > px(0.) {
-                offset.y -= below;
-            } else if above > px(0.) {
-                offset.y += above;
-            } else {
-                return;
-            }
-            offset.y = offset.y.clamp(-scroll.max_offset().y, px(0.));
-            scroll.set_offset(offset);
-            window.request_animation_frame();
-        },
-        |_, _, _, _| {},
-    )
-    .absolute()
-    .inset_0()
+// ----------------------------------------------------------------- the modal
+
+/// The modal's sections in order, each under the title the navigation lists.
+fn sections(s: &State, me: &Settings, t: &Theme, layer: &mut Vec<El>) -> Vec<(&'static str, El)> {
+    let mut sections = vec![
+        ("Profile", profile_section(s, me, t)),
+        ("Chat color", chat_section(me, t, layer)),
+        ("Appearance", appearance_section(me, t, layer)),
+        ("Nostr identity", identity_section(s, me, t)),
+        ("Relays", relays_section(me, t)),
+    ];
+    // The iOS app is replica-only: there is no daemon to switch to.
+    if !cfg!(target_os = "ios") {
+        sections.push(("Where your vault lives", vault_section(s, me, t)));
+    }
+    sections.extend([
+        ("Desktop sync check", desk_section(s, me, t)),
+        ("Dictionary", dictionary_section(me, t)),
+        ("Export", export_section(me, t, layer)),
+        ("Claude plan", plan_section(s, me, t, layer)),
+        ("Agent", agent_section(s, me, t)),
+    ]);
+    sections
 }
 
-/// Open Settings as a modal over the window (the 580px column plus the
-/// section panel, never wider than the window allows); at ≤720px, a bottom
-/// sheet (see the narrow branch of its render).
-pub fn open_settings(window: &mut Window, cx: &mut App) {
-    let settings = cx.new(|cx| Settings::new(window, cx));
-    window.open_dialog(cx, move |dialog, window, _| {
-        let dialog = dialog
-            .close_button(false)
-            // Enter in a field submits that field's form (web <form>), never the whole modal.
-            .on_ok(|_, _, _| false)
-            .p_0()
-            .gap_0()
-            .child(settings.clone());
-        if roostr_core::layout::is_mobile(window) {
-            // The sheet draws itself; the dialog's own surface stays empty.
-            dialog
-                .w(px(0.))
-                .min_h(px(0.))
-                .border_0()
-                .bg(transparent_black())
-        } else {
-            // The column keeps its 536px of content: the panel takes the
-            // place of its 14px trimmed left padding and adds the rest.
-            let wide = px(580.) + section_nav::PANEL_W - px(14.);
-            let room = roostr_core::layout::viewport(window).width - px(32.);
-            dialog
-                .w(wide.min(room))
-                .bg(theme::panel())
-                .border_color(theme::border())
-                .rounded(theme::radius::modal())
-                .shadow(roostr_core::ui::modal_shadow())
+/// The Settings modal while open: dimmed backdrop and the panel (desktop),
+/// or a bottom sheet (≤720px wide). Pushes nothing while closed.
+pub fn settings_modal(s: &State, cx: &mut Cx<State>, t: &Theme, layer: &mut Vec<El>) {
+    let Some(modal) = s.get::<SettingsModal>() else {
+        return;
+    };
+    let Some(me) = modal.open.as_deref() else {
+        return;
+    };
+    // The window's size: the layer host below spans it (Rune re-runs the
+    // view in the same commit once it is laid out).
+    let [vw, vh] = cx
+        .layout_size("settings-viewport")
+        .unwrap_or(modal.viewport);
+    let narrow = vw > 0.0 && roostr_ui::layout::is_mobile(vw);
+
+    // Measures the window for the layout below (the layer spans it).
+    layer.push(
+        el().key("settings-viewport")
+            .absolute(0.0, 0.0)
+            .w_full()
+            .h_full()
+            .inert()
+            .on_layout(|s: &mut State, r: [f32; 4]| {
+                s.slot::<SettingsModal>().viewport = [r[2], r[3]];
+            }),
+    );
+
+    let mut overlay = Vec::new();
+    let mut body = sections(s, me, t, &mut overlay);
+    let titles: Vec<&'static str> = body.iter().map(|(title, _)| *title).collect();
+    let count = titles.len();
+    let active = me.spy.active.min(count.saturating_sub(1));
+
+    let header = row().justify_between().center_y().mb(8.0).child(
+        row()
+            .center_y()
+            .gap(6.0)
+            .child(text("⚙️").font(ty::ui(15.0)))
+            .child(
+                text("Settings")
+                    .font(ty::ui(17.0).lh(21.0).weight(ty::BOLD))
+                    .color(t.fg),
+            ),
+    );
+    let header = if narrow {
+        header
+    } else {
+        header.child(
+            Btn::x(t, "close-settings")
+                .on_press(close_settings)
+                .build(t),
+        )
+    };
+
+    // The scrolling column: the error line, the sections, the build stamp.
+    let mut column = col()
+        .key(section_nav::SCROLL_KEY)
+        .shrink()
+        .min_w(0.0)
+        .min_h(0.0)
+        .items_stretch()
+        .scroll(ScrollSpec {
+            stick_bottom: false,
+        })
+        .on_scroll_offset({
+            let offset = s.get::<SpyClock>().map(|c| c.0.clone());
+            move |at| {
+                if let Some(offset) = &offset {
+                    offset.set((at.offset[1], at.max[1]));
+                }
+            }
+        })
+        .on_layout(|s: &mut State, r: [f32; 4]| {
+            let now = s.rt.now();
+            let (offset, max) = scroll_now(s);
+            edit(s, |me| {
+                me.spy.area_at(r[1], now);
+                me.spy.scrolled(offset, max, now);
+            })
+        })
+        .pb(22.0);
+    // Desktop: beside the panel, taking the rest of the width; phone: as
+    // tall as its content, down to what the sheet leaves it.
+    column = if narrow {
+        column.px(22.0)
+    } else {
+        column.grow(1.0).pl(8.0).pr(22.0)
+    };
+    let mut content = col().items_stretch();
+    if !me.settings_error.is_empty() {
+        content = content.child(error_p(t, me.settings_error.clone()));
+    }
+    let chip_keys: std::rc::Rc<[String]> =
+        titles.iter().map(|t| section_nav::chip_key(t)).collect();
+    for (ix, (_, card)) in body.drain(..).enumerate() {
+        let chip_keys = chip_keys.clone();
+        content = content.child(card.on_layout_tx(
+            move |s: &mut State, r: [f32; 4], tx: &mut Tx| card_moved(s, ix, r[1], &chip_keys, tx),
+        ));
+    }
+    content = content.child(
+        text(format!("Build {BUILD_STAMP}"))
+            .font(ty::ui(11.0))
+            .color(t.muted)
+            .opacity(0.7)
+            .align(rune::Align::Center)
+            .mt(14.0)
+            .mx(2.0),
+    );
+    column = column.child(content);
+    let header = row().px(22.0).child(header.grow(1.0));
+
+    if !narrow {
+        // The header across the top; below it the section panel and the
+        // scrolling column side by side.
+        let wide = 580.0 + section_nav::PANEL_W - 14.0;
+        let room = if vw > 0.0 { vw - 32.0 } else { wide };
+        let width = wide.min(room);
+        let max_h = if vh > 0.0 { vh * 0.8 } else { 640.0 };
+        layer.push(
+            el().key("settings-overlay")
+                .absolute(0.0, 0.0)
+                .w_full()
+                .h_full()
+                .fill(t.kit.overlay)
+                .transition(Transition {
+                    insertion: Effect::opacity(0.0),
+                    ..dialog_enter()
+                }),
+        );
+        let surface = col()
+            .key("settings")
+            .role("dialog")
+            .label("Settings")
+            .w(width)
+            .max_h(max_h)
+            .items_stretch()
+            .fill(t.panel)
+            .border(1.0, t.border)
+            .radius(radius::MODAL)
+            .box_shadow(roostr_ui::shadow::modal())
+            .clip_rounded(radius::MODAL)
+            .child(header.pt(18.0))
+            .child(
+                row()
+                    .shrink()
+                    .min_h(0.0)
+                    .items_stretch()
+                    .child(section_nav::panel(t, &titles, active))
+                    .child(column),
+            )
+            .transition(dialog_enter())
+            .instant_changes();
+        let surface = roostr_ui::overlay::dismissable(surface, "settings", close_settings, layer);
+        // A tenth of the window down: one part above, nine below.
+        layer.push(
+            col()
+                .key("settings-host")
+                .absolute(0.0, 0.0)
+                .w_full()
+                .h_full()
+                .px(16.0)
+                .items_center()
+                .child(el().grow(1.0).h(0.0))
+                .child(col().grow(9.0).h(0.0).items_center().child(surface)),
+        );
+        layer.extend(overlay);
+        return;
+    }
+
+    // ≤720px: a bottom sheet - pinned to the bottom edge, full width, rounded
+    // top, a grabber bar and drag-to-close; the × hides (the sheet IS the
+    // affordance).
+    let grab =
+        |e: El| e.on_drag(|s: &mut State, drag: &mut Drag, tx: &mut Tx| sheet_drag(s, drag, tx));
+    let sheet = col()
+        .key("settings")
+        .role("dialog")
+        .label("Settings")
+        .w_full()
+        .max_h((vh - 48.0).max(0.0))
+        .items_stretch()
+        .fill(t.panel)
+        .border_sides([1.0, 1.0, 0.0, 1.0], t.border)
+        .corners([18.0, 18.0, 0.0, 0.0])
+        .box_shadow(roostr_ui::shadow::modal())
+        .offset(0.0, me.sheet_y)
+        .child(grab(
+            row()
+                .key("settings-grab")
+                .justify_center()
+                .pt(10.0)
+                .pb(6.0)
+                .child(el().w(40.0).h(4.0).radius(2.0).fill(t.border)),
+        ))
+        .child(grab(header))
+        .child(section_nav::chips(t, &titles, active))
+        .child(column)
+        .transition(Transition {
+            insertion: Effect {
+                offset: rune::Vec2::new(0.0, vh.max(1.0)),
+                ..Effect::IDENTITY
+            },
+            removal: Effect::opacity(0.0),
+            springs: SpringPair::new(SHEET_ENTER.spring(), Spring::NONE),
+            ..Transition::identity()
+        });
+    let sheet = if me.sheet_drag {
+        sheet
+    } else {
+        sheet.motion(roostr_ui::motion::SHEET_SNAP.spring())
+    };
+    layer.push(
+        el().key("settings-overlay")
+            .absolute(0.0, 0.0)
+            .w_full()
+            .h_full()
+            .fill(t.kit.overlay)
+            .transition(Transition::opacity()),
+    );
+    let sheet = roostr_ui::overlay::dismissable(sheet, "settings", close_settings, layer);
+    layer.push(
+        col()
+            .key("settings-host")
+            .absolute(0.0, 0.0)
+            .w_full()
+            .h_full()
+            .justify_end()
+            .child(sheet),
+    );
+    layer.extend(overlay);
+}
+
+/// The dialog's entrance: down from above while fading in, over 250ms.
+fn dialog_enter() -> Transition {
+    Transition {
+        insertion: Effect {
+            offset: rune::Vec2::new(0.0, -48.0),
+            ..Effect::opacity(0.0)
+        },
+        removal: Effect::IDENTITY,
+        springs: SpringPair::new(Spring::new(0.25, 0.0), Spring::NONE),
+        ..Transition::identity()
+    }
+}
+
+/// The grab zone and header's drag (`sheetStart`/`sheetMove`/`sheetEnd`):
+/// pull the sheet down past 110px to close it, else it springs back.
+fn sheet_drag(s: &mut State, drag: &Drag, tx: &mut Tx) {
+    let Some(me) = open_mut(s) else { return };
+    match drag.phase {
+        Phase::Down => {
+            me.sheet_drag = true;
         }
-    });
+        Phase::Move => {
+            me.sheet_y = drag.dy.max(0.0);
+            tx.instant();
+        }
+        Phase::Up => {
+            me.sheet_drag = false;
+            if me.sheet_y > SHEET_CLOSE {
+                close_settings(s);
+            } else {
+                me.sheet_y = 0.0;
+            }
+        }
+    }
+}
+
+/// The column's scroll position, which its scroll hook writes outside any
+/// handler (it can't change state).
+#[derive(Default)]
+pub(crate) struct SpyClock(std::rc::Rc<std::cell::Cell<(f32, f32)>>);
+
+fn scroll_now(s: &mut State) -> (f32, f32) {
+    s.slot::<SpyClock>().0.get()
+}
+
+/// A section card moved (layout or scroll): update the scroll-spy and keep
+/// the active chip in view.
+fn card_moved(s: &mut State, ix: usize, top: f32, chip_keys: &[String], tx: &mut Tx) {
+    let now = s.rt.now();
+    let (offset, max) = scroll_now(s);
+    let narrow = s
+        .get::<SettingsModal>()
+        .is_some_and(|m| m.viewport[0] > 0.0 && roostr_ui::layout::is_mobile(m.viewport[0]));
+    let Some(me) = open_mut(s) else { return };
+    let before = me.spy.active;
+    me.spy.scrolled(offset, max, now);
+    me.spy.card_at(ix, chip_keys.len(), top, now);
+    let active = me.spy.active;
+    if active != before
+        && narrow
+        && let Some(key) = chip_keys.get(active)
+    {
+        tx.scroll_into_view(key.clone());
+    }
 }

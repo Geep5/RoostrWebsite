@@ -1,28 +1,32 @@
 //! A pinned object's sidebar widget body (`lib/components/PinnedWidget.svelte`):
 //! sets render a mini version of their current view (rows, gallery cards,
 //! kanban group counts, a mini month); any other object lists what it links to.
+//!
+//! Each pin's state lives in the [`Pinned`] slot keyed by object id: Shell's
+//! poll keeps it to the current space's open pins ([`sync`]), store events
+//! reload it ([`register`]), and the sidebar / space home draw [`widget`]
+//! inside their own card.
 
+use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
 use std::ops::Range;
-use std::rc::Rc;
 use std::sync::Arc;
 
 use chrono::{Datelike, Local, NaiveDate, TimeZone};
-use gpui_kit::component::list::ListItem;
-use gpui_kit::component::shimmer::ShimmerText;
-use gpui_kit::component::skeleton::Skeleton;
-use gpui_kit::prelude::FluentBuilder as _;
-use gpui_kit::*;
 use roostr_core::filters::{engine_filters_of, space_filter_of};
-use roostr_core::motion::{self, NumberEffect, NumberMotionState};
-use roostr_core::nav::{Navigator, Route, navigate};
+use roostr_core::nav::{Route, navigate};
 use roostr_core::objects::object_icon;
 use roostr_core::relations::{object_space_id, space_relations};
-use roostr_core::store::Store;
 use roostr_core::types::{Object, QueryRow, RelationDef, field_str};
-use roostr_core::{StoreEvent, lite_ui, theme};
+use roostr_core::{State, StoreEvent, api, lite_ui};
+use roostr_rt::Task;
+use roostr_ui::color::mix_srgb;
+use roostr_ui::ty::{self, Weights as _};
+use roostr_ui::{ShimmerText, Skeleton, Theme, motion, radius};
+use rune::{Cursor, Cx, Edge, El, SpringPair, TextStyle, Transition, col, el, row, text};
 use serde_json::{Value as Json, json};
 
-use crate::rail::mix;
+use crate::shell::{fill, hover_fg, icon_text};
 
 /// Rows a list widget fetches: all of them, short of a query matching thousands.
 const LIST_FETCH: usize = 500;
@@ -30,14 +34,22 @@ const GALLERY_LIMIT: usize = 8;
 const DOW: [&str; 7] = ["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"];
 /// A kanban group's count rolling to a new value.
 const COUNT: motion::Tween = motion::Tween::ease(250);
+/// A list widget's row: the 24px line and the 1px below it.
+const ROW_PITCH: f32 = 25.;
+/// How far past the window a list draws rows, in window heights each way.
+const OVERSCAN: f32 = 1.;
 
-pub(crate) struct PinnedWidget {
-    id: String,
+/// Every pinned widget's state, by pinned object id.
+#[derive(Default)]
+pub(crate) struct Pinned {
+    widgets: HashMap<String, Widget>,
+}
+
+#[derive(Default)]
+struct Widget {
     obj: Option<Arc<Object>>,
     rows: Vec<QueryRow>,
     month_off: i32,
-    /// The sidebar width, set by the shell each frame (gallery column fit).
-    pub(crate) side_width: f32,
     seq: u64,
     /// Lite: the query/set's space, while it is not held whole (its rows
     /// would be partial); it downloads and the widget shows the progress line.
@@ -45,118 +57,164 @@ pub(crate) struct PinnedWidget {
     /// Lite: ids last asked of the relays (collection members, link
     /// targets), so the refresh after the fetch does not ask again.
     fetched: Vec<String>,
-    _subscriptions: Vec<Subscription>,
-    /// A list's first row's top on the window, as the last frame placed it
-    /// (`None` until it was placed): which rows are near enough to draw.
-    rows_top: Rc<std::cell::Cell<Option<f32>>>,
+    /// The running load (dropping the widget cancels it).
+    load: Option<Task<()>>,
 }
 
-impl PinnedWidget {
-    pub(crate) fn new(id: String, cx: &mut Context<Self>) -> Self {
-        let store = Store::global(cx);
-        let subscriptions = vec![
-            // Its rows are other objects: any of them may have synced in or
-            // changed since (a phone's first history walk runs under it), so
-            // every collection refresh - throttled, after commits - reloads it.
-            cx.subscribe(&store, |this, _, event: &StoreEvent, cx| {
-                let reload = match event {
-                    StoreEvent::Committed(oid) => *oid == this.id,
-                    StoreEvent::Refreshed | StoreEvent::Reconnected => true,
-                };
-                if reload {
-                    this.load(cx);
-                }
-            }),
-            cx.observe(&Navigator::global(cx), |_, _, cx| cx.notify()),
-        ];
-        let mut this = Self {
-            id,
-            obj: None,
-            rows: Vec::new(),
-            month_off: 0,
-            side_width: 220.,
-            seq: 0,
-            partial_space: None,
-            fetched: Vec::new(),
-            _subscriptions: subscriptions,
-            rows_top: Rc::new(std::cell::Cell::new(None)),
-        };
-        this.load(cx);
-        this
-    }
+/// Listeners: widgets reload on store events. Their rows are other objects:
+/// any of them may have synced in or changed since (a phone's first history
+/// walk runs under it), so every collection refresh - throttled, after
+/// commits - reloads them all; a commit of the pinned object reloads its own.
+pub(crate) fn register(s: &mut State) {
+    s.on_store(on_store);
+}
 
-    fn load(&mut self, cx: &mut Context<Self>) {
-        self.seq += 1;
-        let seq = self.seq;
-        let fetch = Store::global(cx).read(cx).fetch_object(&self.id, cx);
-        cx.spawn(async move |this, cx| {
-            let object = match fetch.await {
-                Ok(object) => Arc::new(object),
-                Err(_) => {
-                    let _ = this.update(cx, |this, cx| {
-                        if this.seq == seq {
-                            this.obj = None;
-                            cx.notify();
-                        }
-                    });
-                    return;
-                }
-            };
-            let body = cx.update(|cx| {
-                let _ = this.update(cx, |this, cx| this.lite(&object, cx));
-                query_body(&object, cx)
-            });
-            let rows = match body {
-                Some(body) => cx
-                    .update(|cx| roostr_core::api::query(body, cx))
-                    .await
-                    .ok()
-                    .map(|res| res.records),
-                None => Some(Vec::new()),
-            };
-            let _ = this.update(cx, |this, cx| {
-                if this.seq != seq {
-                    return;
-                }
-                match rows {
-                    Some(rows) => {
-                        this.obj = Some(object);
-                        this.rows = rows;
+fn on_store(s: &mut State, event: &StoreEvent) {
+    let ids: Vec<String> = match s.get::<Pinned>() {
+        Some(p) => p
+            .widgets
+            .keys()
+            .filter(|id| match event {
+                StoreEvent::Committed(oid) => oid == *id,
+                StoreEvent::Refreshed | StoreEvent::Reconnected => true,
+            })
+            .cloned()
+            .collect(),
+        None => return,
+    };
+    for id in ids {
+        load(s, &id);
+    }
+}
+
+/// Keep widgets for exactly `ids` (start loading new ones, drop the rest).
+/// True when anything changed.
+pub(crate) fn sync(s: &mut State, ids: &[String]) -> bool {
+    let pinned = s.slot::<Pinned>();
+    let before = pinned.widgets.len();
+    pinned.widgets.retain(|id, _| ids.contains(id));
+    let mut changed = pinned.widgets.len() != before;
+    let new: Vec<String> = ids
+        .iter()
+        .filter(|id| !pinned.widgets.contains_key(*id))
+        .cloned()
+        .collect();
+    for id in new {
+        s.slot::<Pinned>()
+            .widgets
+            .insert(id.clone(), Widget::default());
+        load(s, &id);
+        changed = true;
+    }
+    changed
+}
+
+/// The widget has nothing to preview (no object yet; notes, pages: no rows,
+/// while a calendar always shows its month) and no space downloading: no body
+/// at all.
+pub(crate) fn is_empty(s: &State, id: &str) -> bool {
+    let Some(w) = s.get::<Pinned>().and_then(|p| p.widgets.get(id)) else {
+        return true;
+    };
+    let Some(obj) = &w.obj else {
+        return true;
+    };
+    let calendar = is_set(obj) && obj.field_str("viewType") == "calendar";
+    w.rows.is_empty() && !calendar && w.partial_space.is_none()
+}
+
+/// The widget of `id`, if it is still kept and its load `seq` is the latest.
+fn current<'a>(s: &'a mut State, id: &str, seq: u64) -> Option<&'a mut Widget> {
+    s.slot::<Pinned>()
+        .widgets
+        .get_mut(id)
+        .filter(|w| w.seq == seq)
+}
+
+/// Fetch the pinned object, then its rows.
+fn load(s: &mut State, id: &str) {
+    let fetch = s.store.fetch_object(id);
+    let Some(w) = s.slot::<Pinned>().widgets.get_mut(id) else {
+        return;
+    };
+    w.seq += 1;
+    let seq = w.seq;
+    let id_ = id.to_string();
+    let task = s.rt.spawn(async move |cx| {
+        let object = match fetch.await {
+            Ok(object) => Arc::new(object),
+            Err(_) => {
+                cx.update(|s| {
+                    if let Some(w) = current(s, &id_, seq) {
+                        w.obj = None;
                     }
-                    None => this.obj = None,
-                }
-                cx.notify();
-            });
-        })
-        .detach();
-    }
-
-    /// Lite: a query/set over a space not held whole downloads that space
-    /// (once; the refresh when it lands re-evaluates); a collection or a
-    /// link widget fetches the ids it shows.
-    fn lite(&mut self, o: &Object, cx: &mut Context<Self>) {
-        if roostr_core::lite::status(cx).is_none() {
-            self.partial_space = None;
-            return;
-        }
-        let ids = if o.type_key == "collection" {
-            members(o)
-        } else if is_set(o) {
-            let space = object_space_id(Store::global(cx).read(cx), &o.fields);
-            if lite_ui::space_held(&space, cx) {
-                self.partial_space = None;
-            } else {
-                lite_ui::ensure_space(&space, cx);
-                self.partial_space = Some(space);
+                });
+                return;
             }
-            return;
-        } else {
-            link_targets(o)
         };
-        if !ids.is_empty() && ids != self.fetched {
-            self.fetched = ids.clone();
-            lite_ui::fetch(ids, cx);
+        let body = cx.update(|s| {
+            lite(s, &id_, &object);
+            query_body(s, &object)
+        });
+        let rows = match body {
+            Some(body) => cx
+                .update(|s| api::query(body, s))
+                .await
+                .ok()
+                .map(|res| res.records),
+            None => Some(Vec::new()),
+        };
+        cx.update(|s| {
+            let Some(w) = current(s, &id_, seq) else {
+                return;
+            };
+            match rows {
+                Some(rows) => {
+                    w.obj = Some(object);
+                    w.rows = rows;
+                }
+                None => w.obj = None,
+            }
+        });
+    });
+    if let Some(w) = s.slot::<Pinned>().widgets.get_mut(id) {
+        w.load = Some(task);
+    }
+}
+
+/// Lite: a query/set over a space not held whole downloads that space
+/// (once; the refresh when it lands re-evaluates); a collection or a link
+/// widget fetches the ids it shows.
+fn lite(s: &mut State, id: &str, o: &Object) {
+    if roostr_core::lite::status(s).is_none() {
+        if let Some(w) = s.slot::<Pinned>().widgets.get_mut(id) {
+            w.partial_space = None;
         }
+        return;
+    }
+    let ids = if o.type_key == "collection" {
+        members(o)
+    } else if is_set(o) {
+        let space = object_space_id(&s.store, &o.fields);
+        let partial = if lite_ui::space_held(&space, s) {
+            None
+        } else {
+            lite_ui::ensure_space(&space, s);
+            Some(space)
+        };
+        if let Some(w) = s.slot::<Pinned>().widgets.get_mut(id) {
+            w.partial_space = partial;
+        }
+        return;
+    } else {
+        link_targets(o)
+    };
+    let Some(w) = s.slot::<Pinned>().widgets.get_mut(id) else {
+        return;
+    };
+    if !ids.is_empty() && ids != w.fetched {
+        w.fetched = ids.clone();
+        lite_ui::fetch(ids, s);
     }
 }
 
@@ -164,8 +222,8 @@ fn is_set(o: &Object) -> bool {
     matches!(o.type_key.as_str(), "query" | "set" | "collection")
 }
 
-fn space_rels(store: &Store, o: &Object) -> Vec<RelationDef> {
-    space_relations(&store.relations, &object_space_id(store, &o.fields))
+fn space_rels(s: &State, o: &Object) -> Vec<RelationDef> {
+    space_relations(&s.store.relations, &object_space_id(&s.store, &o.fields))
         .into_iter()
         .cloned()
         .collect()
@@ -214,14 +272,13 @@ fn link_targets(o: &Object) -> Vec<String> {
 }
 
 /// The widget's query (`None` = nothing to ask: no members / no links).
-fn query_body(o: &Object, cx: &App) -> Option<Json> {
-    let store = Store::global(cx).read(cx);
+fn query_body(s: &State, o: &Object) -> Option<Json> {
     if is_set(o) {
         let members = members(o);
-        let mut filters = engine_filters_of(&o.fields, &space_rels(store, o));
+        let mut filters = engine_filters_of(&o.fields, &space_rels(s, o));
         filters.push(space_filter_of(
             &o.fields,
-            store.channels.first().map_or("", |c| c.id.as_str()),
+            s.store.channels.first().map_or("", |c| c.id.as_str()),
         ));
         let mut body = if o.type_key == "collection" {
             if members.is_empty() {
@@ -325,7 +382,7 @@ fn month(rows: &[QueryRow], date_key: &str, month_off: i32) -> (String, i32, Vec
                 .unwrap_or(0),
         }
     };
-    let mut marked = std::collections::HashSet::new();
+    let mut marked = HashSet::new();
     for r in rows {
         let ts = ts_of(r);
         if ts == 0 {
@@ -370,488 +427,529 @@ fn month(rows: &[QueryRow], date_key: &str, month_off: i32) -> (String, i32, Vec
     (first.format("%B").to_string(), y, cells)
 }
 
-fn open(id: String) -> impl Fn(&ClickEvent, &mut Window, &mut App) + 'static {
-    move |_, _, cx| navigate(Route::Object(id.clone()), cx)
+fn open(id: String) -> impl Fn(&mut State) + 'static {
+    move |s: &mut State| navigate(Route::Object(id.clone()), s)
 }
 
-impl PinnedWidget {
-    /// Renders nothing: no object yet, or a preview with no rows (notes,
-    /// pages; a calendar always shows its month) and no space downloading.
-    pub(crate) fn is_empty(&self) -> bool {
-        let Some(obj) = &self.obj else {
-            return true;
-        };
-        let calendar = is_set(obj) && obj.field_str("viewType") == "calendar";
-        self.rows.is_empty() && !calendar && self.partial_space.is_none()
+/// Step the calendar widget of `id` by `delta` months.
+fn step_month(id: String, delta: i32) -> impl Fn(&mut State) + 'static {
+    move |s: &mut State| {
+        if let Some(w) = s.slot::<Pinned>().widgets.get_mut(&id) {
+            w.month_off += delta;
+        }
     }
 }
 
-impl Render for PinnedWidget {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let Some(obj) = self.obj.clone() else {
-            return div();
-        };
-        let set = is_set(&obj);
-        let view_type = if set && !obj.field_str("viewType").is_empty() {
-            obj.field_str("viewType")
-        } else {
-            "table"
-        };
-        // Lite: the space is downloading - its progress (`lite_ui`'s text,
-        // shimmering) over skeleton rows instead of partial rows.
-        if let Some(space) = &self.partial_space {
-            let load = roostr_core::lite::status(cx)
-                .and_then(|status| status.loading(space).map(lite_ui::loading_text));
-            return match load {
-                Some(text) => div()
-                    .px(px(8.))
-                    .flex()
-                    .flex_col()
-                    .gap(px(8.))
-                    .pb(px(6.))
-                    .child(
-                        ShimmerText::new(text)
-                            .id(SharedString::from(format!("pin-load-{}", self.id)))
-                            .py(px(6.))
-                            .text_size(px(12.))
-                            .text_color(theme::muted()),
-                    )
-                    .child(Skeleton::new().h(px(10.)).w(relative(0.8)).rounded(px(5.)))
-                    .child(Skeleton::new().h(px(10.)).w(relative(0.55)).rounded(px(5.))),
-                None => div().px(px(8.)).children(lite_ui::space_notice(
-                    format!("pin-{}", self.id),
-                    space,
-                    cx,
-                )),
-            };
-        }
-        if self.rows.is_empty() && view_type != "calendar" {
-            return div();
-        }
-        let current_id = match Navigator::global(cx).read(cx).route() {
-            Route::Object(id) => id.clone(),
-            _ => String::new(),
-        };
-        let active = Navigator::global(cx).read(cx).space().to_string();
-        let group_key = obj.field_str("viewGroupKey").to_string();
-        let date_key = if obj.field_str("viewDateKey").is_empty() {
-            "createdDate".to_string()
-        } else {
-            obj.field_str("viewDateKey").to_string()
-        };
-        let store = Store::global(cx).read(cx);
-        let group_rel = space_rels(store, &obj)
-            .into_iter()
-            .find(|r| r.key == group_key);
-        let row_icon = |r: &QueryRow| {
-            object_icon(
-                store,
-                field_str(&r.fields, "iconEmoji"),
-                &r.type_key,
-                &active,
-            )
-        };
-        let row_name = |r: &QueryRow| {
-            let n = field_str(&r.fields, "name");
-            if n.is_empty() {
-                "Untitled".to_string()
-            } else {
-                n.to_string()
-            }
-        };
-        let body = div().flex().flex_col().gap(px(1.)).pt(px(2.));
-        let set_id = self.id.clone();
-
-        // `.w-line`: a kit list row, 24px, 12px muted (fg under the pointer
-        // and while current, the current one on `hl-med`).
-        let line = |id: ElementId, current: bool, content: Div| {
-            ListItem::new(id)
-                .group("w-line")
-                .h(px(24.))
-                .px(px(8.))
-                .py_0()
-                .rounded(theme::radius::sm())
-                .text_size(px(12.))
-                .overflow_hidden()
-                .cursor_pointer()
-                .text_color(if current { theme::fg() } else { theme::muted() })
-                .when(current, |d| d.bg(theme::hl_med()))
+/// The widget body of pin `id`, `width` the width of the column the body sits
+/// in (inside its card's padding and border; the gallery fits its columns to it).
+pub(crate) fn widget(
+    s: &State,
+    cx: &mut Cx<State>,
+    t: &Theme,
+    id: &str,
+    width: f32,
+    _layer: &mut Vec<El>,
+) -> El {
+    let Some(w) = s.get::<Pinned>().and_then(|p| p.widgets.get(id)) else {
+        return el();
+    };
+    let Some(obj) = w.obj.clone() else {
+        return el();
+    };
+    let set = is_set(&obj);
+    let view_type = if set && !obj.field_str("viewType").is_empty() {
+        obj.field_str("viewType")
+    } else {
+        "table"
+    };
+    // Lite: the space is downloading - its progress (`lite_ui`'s text,
+    // shimmering) over skeleton rows instead of partial rows.
+    if let Some(space) = &w.partial_space {
+        return match lite_ui::loading_line(space, s) {
+            Some(line) => col()
+                .px(8.)
+                .gap(8.)
+                .pb(6.)
                 .child(
-                    content
-                        .w_full()
-                        .flex()
-                        .items_center()
-                        .gap(px(6.))
-                        .min_w_0()
-                        .group_hover("w-line", |s| s.text_color(theme::fg())),
+                    el().py(6.).child(
+                        ShimmerText::new(format!("pin-load-{id}"), line)
+                            .font(ty::ui(12.))
+                            .color(t.muted)
+                            .build(t),
+                    ),
                 )
+                .child(Skeleton::new().build(t).h(10.).w_frac(0.8).radius(5.))
+                .child(Skeleton::new().build(t).h(10.).w_frac(0.55).radius(5.)),
+            None => {
+                let mut out = col().px(8.);
+                if let Some(notice) = lite_ui::space_notice(space, s) {
+                    out = out.child(crate::sidebar::notice_row(t, notice, &format!("pin-{id}")));
+                }
+                out
+            }
         };
+    }
+    if w.rows.is_empty() && view_type != "calendar" {
+        return el();
+    }
+    let current_id = crate::shell::open_object_id(s).unwrap_or_default();
+    let active = s.nav.space().to_string();
+    let group_key = obj.field_str("viewGroupKey").to_string();
+    let date_key = if obj.field_str("viewDateKey").is_empty() {
+        "createdDate".to_string()
+    } else {
+        obj.field_str("viewDateKey").to_string()
+    };
+    let group_rel = space_rels(s, &obj).into_iter().find(|r| r.key == group_key);
+    let row_icon = |r: &QueryRow| {
+        object_icon(
+            &s.store,
+            field_str(&r.fields, "iconEmoji"),
+            &r.type_key,
+            &active,
+        )
+    };
+    let row_name = |r: &QueryRow| crate::shell::or_untitled(field_str(&r.fields, "name"));
+    let body = col().gap(1.).pt(2.);
 
-        if view_type == "kanban"
-            && let Some(rel) = group_rel
-        {
-            let checkbox = rel.format == "checkbox";
-            let vals_of = |r: &QueryRow| -> Vec<String> {
-                let Some(v) = r.fields.get(&group_key) else {
-                    return vec![];
-                };
-                if checkbox {
-                    return vec![if v.bool_value == Some(true) {
-                        "true".into()
-                    } else {
-                        "false".into()
-                    }];
-                }
-                if let Some(s) = &v.string_value {
-                    return if s.is_empty() {
-                        vec![]
-                    } else {
-                        vec![s.clone()]
-                    };
-                }
-                if v.values_value.is_some() {
-                    return v
-                        .items()
-                        .iter()
-                        .filter_map(|i| i.string_value.clone())
-                        .filter(|s| !s.is_empty())
-                        .collect();
-                }
-                vec![]
-            };
-            let defs: Vec<(String, String)> = if checkbox {
-                vec![
-                    ("false".into(), "Not done".into()),
-                    ("true".into(), "Done".into()),
-                ]
-            } else {
-                let mut d: Vec<(String, String)> = rel
-                    .options
-                    .iter()
-                    .map(|o| (o.text.clone(), o.text.clone()))
-                    .collect();
-                let label = if rel.name.is_empty() {
-                    group_key.clone()
-                } else {
-                    rel.name.clone()
-                };
-                d.push((String::new(), format!("No {label}")));
-                d
-            };
-            let mut body = body;
-            for (i, (gid, name)) in defs.into_iter().enumerate() {
-                let count = self
-                    .rows
-                    .iter()
-                    .filter(|r| {
-                        let vals = vals_of(r);
-                        if checkbox {
-                            vals.first() == Some(&gid) || (gid == "false" && vals.is_empty())
-                        } else if gid.is_empty() {
-                            vals.is_empty()
-                        } else {
-                            vals.contains(&gid)
-                        }
-                    })
-                    .count();
-                if count == 0 {
-                    continue;
-                }
-                // A count rolls to its new value (Svelte swapped the text);
-                // the first render shows it as is.
-                let shown = motion::use_motion(
-                    crate::eid("w-group-count", &gid),
-                    window,
-                    cx,
-                    NumberMotionState::default,
-                );
-                let shown = shown
-                    .read(cx)
-                    .element(crate::eid("w-group-n", &gid), count as i64)
-                    .effect(NumberEffect::Roll)
-                    .transition(COUNT.transition())
-                    .animate_initial(false);
-                body = body.child(
-                    line(
-                        ("w-group", i).into(),
-                        false,
-                        div()
-                            .child(div().flex_1().min_w_0().truncate().child(name))
-                            .child(div().text_size(px(11.)).child(shown)),
-                    )
-                    .on_click(open(set_id.clone())),
-                );
-            }
-            return body;
-        }
-
-        if view_type == "calendar" {
-            let (label, year, cells) = month(&self.rows, &date_key, self.month_off);
-            let weeks = cells.len() / 7;
-            let mut grid = div()
-                .id("w-cal-grid")
-                .flex()
-                .flex_col()
-                .cursor_pointer()
-                .on_click(open(set_id.clone()));
-            let mut head_row = div().flex();
-            for (i, d) in DOW.iter().enumerate() {
-                head_row = head_row.child(
-                    div()
-                        .flex_1()
-                        .py(px(4.))
-                        .flex()
-                        .justify_center()
-                        .text_size(px(11.))
-                        .text_color(theme::muted())
-                        .when(i >= 5, |c| c.bg(theme::hl_light()))
-                        .when(i == 5, |c| c.rounded_tl(px(8.)))
-                        .when(i == 6, |c| c.rounded_tr(px(8.)))
-                        .child(*d),
-                );
-            }
-            grid = grid.child(head_row);
-            for w in 0..weeks {
-                let mut row = div().flex();
-                for (i, c) in cells[w * 7..w * 7 + 7].iter().enumerate() {
-                    let last = w + 1 == weeks;
-                    row = row.child(
-                        div()
-                            .relative()
-                            .flex_1()
-                            .py(px(5.))
-                            .flex()
-                            .justify_center()
-                            .text_size(px(12.5))
-                            .text_color(theme::fg())
-                            .when(i >= 5, |d| d.bg(theme::hl_light()))
-                            .when(last && i == 5, |d| d.rounded_bl(px(8.)))
-                            .when(last && i == 6, |d| d.rounded_br(px(8.)))
-                            .when(!c.cur, |d| d.text_color(theme::muted()).opacity(0.6))
-                            .when(c.today, |d| {
-                                d.text_color(theme::accent()).font_weight(FontWeight::BOLD)
-                            })
-                            .child(c.n.to_string())
-                            .when(c.marked, |d| {
-                                d.child(
-                                    div()
-                                        .absolute()
-                                        .bottom(px(1.))
-                                        .left(relative(0.5))
-                                        .ml(px(-1.5))
-                                        .size(px(3.))
-                                        .rounded_full()
-                                        .bg(theme::accent()),
-                                )
-                            }),
-                    );
-                }
-                grid = grid.child(row);
-            }
-            let nav_btn =
-                |id: &'static str, glyph: &'static str, delta: i32, cx: &mut Context<Self>| {
-                    crate::fill_button(id, transparent_black(), cx)
-                        .h_auto()
-                        .px(px(5.))
-                        .py(px(2.))
-                        .accessibility_label(if delta < 0 {
-                            "Previous month"
-                        } else {
-                            "Next month"
-                        })
-                        .child(div().text_size(px(16.)).line_height(px(16.)).child(glyph))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.month_off += delta;
-                            cx.notify();
-                        }))
-                };
-            return body.child(
-                div()
-                    .pt(px(2.))
-                    .pr(px(8.))
-                    .pb(px(6.))
+    if view_type == "kanban"
+        && let Some(rel) = group_rel
+    {
+        return kanban(t, id, &w.rows, &rel, &group_key, body);
+    }
+    if view_type == "calendar" {
+        return body.child(calendar(t, id, &w.rows, &date_key, w.month_off));
+    }
+    if view_type == "gallery" {
+        let shown: Vec<&QueryRow> = w.rows.iter().take(GALLERY_LIMIT).collect();
+        // Two columns only while every card's content fits half the width
+        // (the grid's 8 pt right padding off the body's column).
+        let inner = width - 8.;
+        let half = (inner - 8.) / 2.;
+        let fits = shown.iter().all(|r| {
+            let need = 2.
+                + 24.
+                + icon_width(&row_icon(r), ty::ui(15.).medium())
+                + 8.
+                + text_width(&row_name(r), ty::ui(13.).medium());
+            need <= half + 0.5
+        });
+        let cols = if fits { 2 } else { 1 };
+        let mut items: Vec<El> = shown
+            .iter()
+            .map(|r| {
+                card(t, format!("w-card:{}", r.id), r.id == current_id)
+                    .child(icon_text(s, &row_icon(r), 15., ty::ui(15.).medium()).color(t.fg))
                     .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .justify_between()
-                            .pt(px(2.))
-                            .pr(px(2.))
-                            .pb(px(6.))
-                            .pl(px(6.))
-                            .child(
-                                crate::fill_button("w-cal-title", transparent_black(), cx)
-                                    .h_auto()
-                                    .text_color(theme::fg())
-                                    .child(
-                                        div()
-                                            .flex()
-                                            .text_size(px(15.))
-                                            .font_weight(FontWeight::BOLD)
-                                            .line_height(relative(1.2))
-                                            .child(label)
-                                            .child(div().ml(px(4.)).child(year.to_string())),
-                                    )
-                                    .on_click(open(set_id.clone())),
-                            )
-                            .child(
-                                div()
-                                    .flex()
-                                    .gap(px(2.))
-                                    .child(nav_btn("w-cal-prev", "‹", -1, cx))
-                                    .child(nav_btn("w-cal-next", "›", 1, cx)),
-                            ),
+                        text(row_name(r))
+                            .font(ty::ui(13.).medium())
+                            .color(t.fg)
+                            .truncate()
+                            .shrink()
+                            .min_w(0.),
                     )
-                    .child(grid),
+                    .on_press(open(r.id.clone()))
+            })
+            .collect();
+        if w.rows.len() > GALLERY_LIMIT {
+            items.push(
+                card(t, "w-card-more".into(), false)
+                    .justify_center()
+                    .border_dash(2., 1.)
+                    .child(
+                        text(format!("+{} more", w.rows.len() - GALLERY_LIMIT))
+                            .font(ty::ui(13.))
+                            .color(t.muted)
+                            .truncate(),
+                    )
+                    .on_press(open(id.to_string())),
             );
         }
-
-        if view_type == "gallery" {
-            let shown: Vec<&QueryRow> = self.rows.iter().take(GALLERY_LIMIT).collect();
-            // Two columns only while every card's content fits half the width.
-            let inner = self.side_width - 6. - 16. - 18. - 8.;
-            let half = (inner - 8.) / 2.;
-            let fits = shown.iter().all(|r| {
-                let need = 2.
-                    + 24.
-                    + text_width(&row_icon(r), 15., FontWeight::MEDIUM, window)
-                    + 8.
-                    + text_width(&row_name(r), 13., FontWeight::MEDIUM, window);
-                need <= half + 0.5
-            });
-            let cols = if fits { 2 } else { 1 };
-            let card = |id: ElementId, current: bool| {
-                div()
-                    .id(id)
-                    .flex()
-                    .items_center()
-                    .gap(px(8.))
-                    .min_w_0()
-                    .flex_1()
-                    .px(px(12.))
-                    .py(px(11.))
-                    .rounded(theme::radius::menu())
-                    .border_1()
-                    .text_size(px(13.))
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(theme::fg())
-                    .overflow_hidden()
-                    .cursor_pointer()
-                    .map(|d| {
-                        if current {
-                            d.bg(theme::hl_med()).border_color(mix(
-                                theme::border(),
-                                0.4,
-                                theme::fg(),
-                            ))
-                        } else {
-                            d.bg(theme::hl_light())
-                                .border_color(theme::border())
-                                .hover(|s| s.border_color(mix(theme::border(), 0.55, theme::fg())))
-                        }
-                    })
-            };
-            let mut items: Vec<AnyElement> = shown
-                .iter()
-                .map(|r| {
-                    card(crate::eid("w-card", &r.id), r.id == current_id)
-                        .child(div().flex_none().text_size(px(15.)).child(row_icon(r)))
-                        .child(div().min_w_0().truncate().child(row_name(r)))
-                        .on_click(open(r.id.clone()))
-                        .into_any_element()
-                })
-                .collect();
-            if self.rows.len() > GALLERY_LIMIT {
-                items.push(
-                    card("w-card-more".into(), false)
-                        .justify_center()
-                        .border_dashed()
-                        .text_color(theme::muted())
-                        .font_weight(FontWeight::NORMAL)
-                        .child(format!("+{} more", self.rows.len() - GALLERY_LIMIT))
-                        .on_click(open(set_id.clone()))
-                        .into_any_element(),
-                );
+        let mut grid = col().gap(8.).pt(4.).pr(8.).pb(6.);
+        let mut items = items.into_iter().peekable();
+        while items.peek().is_some() {
+            let mut line = row().gap(8.);
+            for _ in 0..cols {
+                line = line.child(match items.next() {
+                    Some(item) => row().grow(1.).min_w(0.).child(item),
+                    None => el().grow(1.),
+                });
             }
-            let mut grid = div()
-                .flex()
-                .flex_col()
-                .gap(px(8.))
-                .pt(px(4.))
-                .pr(px(8.))
-                .pb(px(6.));
-            let mut items = items.into_iter().peekable();
-            while items.peek().is_some() {
-                let mut row = div().flex().gap(px(8.));
-                for _ in 0..cols {
-                    match items.next() {
-                        Some(item) => row = row.child(div().flex_1().min_w_0().flex().child(item)),
-                        None => row = row.child(div().flex_1()),
-                    }
-                }
-                grid = grid.child(row);
-            }
-            return body.child(grid);
+            grid = grid.child(line);
         }
+        return body.child(grid);
+    }
 
-        // Only the rows in and near the window are drawn, spacers standing
-        // for the rest: a list of hundreds was laid out whole on every full
-        // redraw, and a click redraws the whole window - so every click
-        // anywhere spent most of its frame on the nav. Until the list has
-        // been placed once, every row is drawn.
-        let n = self.rows.len();
-        let view_h = f32::from(window.viewport_size().height);
-        let drawn = match self.rows_top.get() {
-            Some(top) => rows_near(n, top, view_h, OVERSCAN),
-            None => 0..n,
-        };
-        let rows_top = self.rows_top.clone();
-        let this = cx.entity().downgrade();
-        let shown = drawn.clone();
-        let mut rows = div()
-            .flex()
-            .flex_col()
-            .on_children_prepainted(move |bounds, window, cx| {
-                let Some(spacer) = bounds.first() else {
-                    return;
-                };
-                let top = f32::from(spacer.top());
-                rows_top.set(Some(top));
-                // Rows in view now that this frame did not draw (the nav moved
-                // further than the overscan since): draw them next frame.
-                let visible = rows_near(n, top, f32::from(window.viewport_size().height), 0.);
-                if visible.start < shown.start || visible.end > shown.end {
-                    let this = this.clone();
-                    cx.defer(move |cx| {
-                        let _ = this.update(cx, |_, cx| cx.notify());
-                    });
-                }
-            });
-        rows = rows.child(div().flex_none().h(px(ROW_PITCH * drawn.start as f32)));
-        for r in &self.rows[drawn.clone()] {
-            rows = rows.child(
-                div().flex_none().pb(px(1.)).child(
-                    line(
-                        crate::eid("w-row", &r.id),
-                        r.id == current_id,
-                        div()
-                            .debug_selector(|| format!("w-row-{}", r.id))
-                            .child(div().flex_none().text_size(px(11.)).child(row_icon(r)))
-                            .child(div().min_w_0().truncate().child(row_name(r))),
+    // Only the rows in and near the window are drawn, spacers standing for
+    // the rest: a list of hundreds would be laid out whole on every view
+    // run. The list's window position is read in steps of half a window, so
+    // scrolling re-runs the view only every half window; the drawn rows
+    // (one window of overscan each way) always cover the visible ones. Until
+    // the list has been placed once, every row is drawn.
+    let n = w.rows.len();
+    let list_key = format!("w-rows-{id}");
+    let view_h = crate::window_height(s);
+    let drawn = if view_h > 0. {
+        let step = view_h / 2.;
+        cx.window_layout_with(&list_key, move |r| (r[1] / step).round() as i64)
+            .map_or(0..n, |q| rows_near(n, q as f32 * step, view_h, OVERSCAN))
+    } else {
+        0..n
+    };
+    let mut rows = col()
+        .key(list_key)
+        .child(el().h(ROW_PITCH * drawn.start as f32));
+    for r in &w.rows[drawn.clone()] {
+        let current = r.id == current_id;
+        rows = rows.child(
+            col().pb(1.).child(
+                line(t, format!("w-row-{}", r.id), current)
+                    .child(list_text(
+                        t,
+                        icon_text(s, &row_icon(r), 11., ty::ui(11.)),
+                        current,
+                    ))
+                    .child(
+                        list_text(t, text(row_name(r)).font(ty::ui(12.)), current)
+                            .truncate()
+                            .shrink()
+                            .min_w(0.),
                     )
-                    .on_click(open(r.id.clone())),
-                ),
-            );
-        }
-        rows = rows.child(div().flex_none().h(px(ROW_PITCH * (n - drawn.end) as f32)));
-        body.child(rows)
+                    .on_press(open(r.id.clone())),
+            ),
+        );
+    }
+    rows = rows.child(el().h(ROW_PITCH * (n - drawn.end) as f32));
+    body.child(rows)
+}
+
+/// `.w-line`: a kit list row, 24px, 12px muted (fg under the pointer and
+/// while current, the current one on `hl-med`). Its content goes in as
+/// children (gap 6).
+fn line(t: &Theme, key: String, current: bool) -> El {
+    let mut e = row()
+        .key(key)
+        .role("listitem")
+        .h(24.)
+        .px(8.)
+        .center_y()
+        .gap(6.)
+        .min_w(0.)
+        .radius(radius::SM)
+        .clip_rounded(radius::SM)
+        .cursor(Cursor::Pointer)
+        .hover(t.kit.list_hover)
+        .hover_group();
+    if current {
+        e = e.fill(t.hl_med);
+    }
+    e
+}
+
+/// Text in a [`line`]: muted, fg while the line is hovered or current.
+fn list_text(t: &Theme, e: El, current: bool) -> El {
+    if current {
+        e.color(t.fg)
+    } else {
+        hover_fg(e, t)
     }
 }
 
-/// A list widget's row: the 24px line and the 1px below it.
-const ROW_PITCH: f32 = 25.;
-/// How far past the window a list draws rows, in window heights each way.
-const OVERSCAN: f32 = 1.;
+/// A kanban widget: one line per non-empty group with its count.
+fn kanban(
+    t: &Theme,
+    id: &str,
+    rows: &[QueryRow],
+    rel: &RelationDef,
+    group_key: &str,
+    body: El,
+) -> El {
+    let checkbox = rel.format == "checkbox";
+    let vals_of = |r: &QueryRow| -> Vec<String> {
+        let Some(v) = r.fields.get(group_key) else {
+            return vec![];
+        };
+        if checkbox {
+            return vec![if v.bool_value == Some(true) {
+                "true".into()
+            } else {
+                "false".into()
+            }];
+        }
+        if let Some(s) = &v.string_value {
+            return if s.is_empty() {
+                vec![]
+            } else {
+                vec![s.clone()]
+            };
+        }
+        if v.values_value.is_some() {
+            return v
+                .items()
+                .iter()
+                .filter_map(|i| i.string_value.clone())
+                .filter(|s| !s.is_empty())
+                .collect();
+        }
+        vec![]
+    };
+    let defs: Vec<(String, String)> = if checkbox {
+        vec![
+            ("false".into(), "Not done".into()),
+            ("true".into(), "Done".into()),
+        ]
+    } else {
+        let mut d: Vec<(String, String)> = rel
+            .options
+            .iter()
+            .map(|o| (o.text.clone(), o.text.clone()))
+            .collect();
+        let label = if rel.name.is_empty() {
+            group_key.to_string()
+        } else {
+            rel.name.clone()
+        };
+        d.push((String::new(), format!("No {label}")));
+        d
+    };
+    let mut body = body;
+    for (i, (gid, name)) in defs.into_iter().enumerate() {
+        let count = rows
+            .iter()
+            .filter(|r| {
+                let vals = vals_of(r);
+                if checkbox {
+                    vals.first() == Some(&gid) || (gid == "false" && vals.is_empty())
+                } else if gid.is_empty() {
+                    vals.is_empty()
+                } else {
+                    vals.contains(&gid)
+                }
+            })
+            .count();
+        if count == 0 {
+            continue;
+        }
+        body = body.child(
+            line(t, format!("w-group-{i}"), false)
+                .child(
+                    hover_fg(text(name).font(ty::ui(12.)), t)
+                        .truncate()
+                        .grow(1.)
+                        .shrink()
+                        .min_w(0.),
+                )
+                .child(rolling_count(t, format!("w-group-n:{id}:{gid}"), count))
+                .on_press(open(id.to_string())),
+        );
+    }
+    body
+}
+
+thread_local! {
+    /// Each kanban count's last value and whether its last change fell (the
+    /// way its digits roll), by count key.
+    static COUNTS: RefCell<HashMap<String, (usize, bool)>> = RefCell::new(HashMap::new());
+}
+
+/// A kanban group's count (11px, muted, fg under the line's pointer) whose
+/// changed digits roll to the new value over [`COUNT`]: up as it rises, down
+/// as it falls; unchanged digits hold by decimal place. The first build shows
+/// it as is.
+fn rolling_count(t: &Theme, key: String, n: usize) -> El {
+    let falling = COUNTS.with_borrow_mut(|counts| {
+        if counts.len() > 512 && !counts.contains_key(&key) {
+            counts.clear();
+        }
+        let last = counts.entry(key.clone()).or_insert((n, false));
+        if last.0 != n {
+            *last = (n, n < last.0);
+        }
+        last.1
+    });
+    let font: TextStyle = ty::ui(11.);
+    let spring = COUNT.spring();
+    let push = Transition::push(if falling { Edge::Top } else { Edge::Bottom })
+        .springs(SpringPair::new(spring, spring));
+    // Moving digits are masked: soft clip edges in padding that negative
+    // margins take back out of layout, so resting digits are never faded.
+    let edge = (font.line_px() * 0.12).max(1.);
+    let side = (font.size * 0.3).max(2.);
+    let digits = n.to_string();
+    let len = digits.len();
+    let mut e = row()
+        .key(key)
+        .role("text")
+        .label(digits.clone())
+        .h(font.line_px() + 2. * edge)
+        .px(side)
+        .py(edge)
+        .ml(-side)
+        .mr(-side)
+        .mt(-edge)
+        .mb(-edge)
+        .motion(spring)
+        .width_leads()
+        .clip_fade(side, edge, side, edge)
+        .child_exit(push);
+    for (i, d) in digits.chars().enumerate() {
+        e = e.child(
+            hover_fg(text(d.to_string()).font(font), t)
+                .key(format!("{}:{d}", len - 1 - i))
+                .motion(spring)
+                .a11y_hidden()
+                .transition(push),
+        );
+    }
+    e
+}
+
+/// A mini month: title (opens the set) with ‹ › month steps over the
+/// weekday head and the day grid (weekends shaded, today accent and bold,
+/// days with records dotted).
+fn calendar(t: &Theme, id: &str, rows: &[QueryRow], date_key: &str, month_off: i32) -> El {
+    let (label, year, cells) = month(rows, date_key, month_off);
+    let weeks = cells.len() / 7;
+    let mut grid = col()
+        .key("w-cal-grid")
+        .cursor(Cursor::Pointer)
+        .on_press(open(id.to_string()));
+    let mut head_row = row();
+    for (i, d) in DOW.iter().enumerate() {
+        let mut c = row()
+            .grow(1.)
+            .py(4.)
+            .justify_center()
+            .child(text(*d).font(ty::ui(11.)).color(t.muted));
+        if i >= 5 {
+            c = c.fill(t.hl_light);
+        }
+        if i == 5 {
+            c = c.corners([8., 0., 0., 0.]);
+        }
+        if i == 6 {
+            c = c.corners([0., 8., 0., 0.]);
+        }
+        head_row = head_row.child(c);
+    }
+    grid = grid.child(head_row);
+    for w in 0..weeks {
+        let last = w + 1 == weeks;
+        let mut week = row();
+        for (i, c) in cells[w * 7..w * 7 + 7].iter().enumerate() {
+            let (color, font) = if c.today {
+                (t.accent, ty::ui(12.5).bold())
+            } else if c.cur {
+                (t.fg, ty::ui(12.5))
+            } else {
+                (t.muted, ty::ui(12.5))
+            };
+            let mut cell = row()
+                .grow(1.)
+                .py(5.)
+                .justify_center()
+                .child(text(c.n.to_string()).font(font).color(color));
+            if i >= 5 {
+                cell = cell.fill(t.hl_light);
+            }
+            if last && i == 5 {
+                cell = cell.corners([0., 0., 0., 8.]);
+            }
+            if last && i == 6 {
+                cell = cell.corners([0., 0., 8., 0.]);
+            }
+            if !c.cur {
+                cell = cell.opacity(0.6);
+            }
+            if c.marked {
+                cell = cell.child(
+                    row()
+                        .pin(Some(0.), None, Some(0.), Some(1.))
+                        .justify_center()
+                        .child(el().size(3., 3.).radius(1.5).fill(t.accent)),
+                );
+            }
+            week = week.child(cell);
+        }
+        grid = grid.child(week);
+    }
+    let nav_btn = |key: &'static str, glyph: &'static str, delta: i32| {
+        fill(key, rune::Color::TRANSPARENT)
+            .px(5.)
+            .py(2.)
+            .role("button")
+            .label(if delta < 0 {
+                "Previous month"
+            } else {
+                "Next month"
+            })
+            .child(hover_fg(text(glyph).font(ty::ui(16.).lh(16.)), t))
+            .on_press(step_month(id.to_string(), delta))
+    };
+    let title_font = ty::ui(15.).bold();
+    col()
+        .pt(2.)
+        .pr(8.)
+        .pb(6.)
+        .child(
+            row()
+                .center_y()
+                .justify_between()
+                .pt(2.)
+                .pr(2.)
+                .pb(6.)
+                .pl(6.)
+                .child(
+                    fill("w-cal-title", rune::Color::TRANSPARENT)
+                        .role("button")
+                        .child(text(label).font(title_font).color(t.fg))
+                        .child(text(year.to_string()).font(title_font).color(t.fg).ml(4.))
+                        .on_press(open(id.to_string())),
+                )
+                .child(
+                    row()
+                        .gap(2.)
+                        .child(nav_btn("w-cal-prev", "‹", -1))
+                        .child(nav_btn("w-cal-next", "›", 1)),
+                ),
+        )
+        .child(grid)
+}
+
+/// A gallery card: icon and name on `hl-light` in a 1px border that
+/// strengthens under the pointer (`hl-med` and a stronger border while
+/// current). Callers add the content and the press.
+fn card(t: &Theme, key: String, current: bool) -> El {
+    let (fill_color, border) = if current {
+        (t.hl_med, mix_srgb(t.border, 0.4, t.fg))
+    } else {
+        (t.hl_light, t.border)
+    };
+    let mut e = row()
+        .key(key)
+        .center_y()
+        .gap(8.)
+        .min_w(0.)
+        .grow(1.)
+        .px(12.)
+        .py(11.)
+        .radius(radius::MENU)
+        .fill(fill_color)
+        .border(1., border)
+        .cursor(Cursor::Pointer)
+        .hover_group();
+    if !current {
+        // The hover border, drawn over the resting one while the card is hovered.
+        e = e.child(
+            el().pin(Some(-1.), Some(-1.), Some(-1.), Some(-1.))
+                .radius(radius::MENU)
+                .border(1., mix_srgb(t.border, 0.55, t.fg))
+                .group_opacity(0., 1.)
+                .inert(),
+        );
+    }
+    e
+}
 
 /// The rows of an `n`-row list whose first row's top is at window y `top`
 /// that are on a `view_h` tall window or within `overscan` windows of it.
@@ -862,26 +960,77 @@ fn rows_near(n: usize, top: f32, view_h: f32, overscan: f32) -> Range<usize> {
     first..last
 }
 
-/// Rendered width of `text` in the UI font.
-fn text_width(text: &str, size: f32, weight: FontWeight, window: &mut Window) -> f32 {
+/// Laid-out width of `text` in `font`.
+fn text_width(text: &str, font: TextStyle) -> f32 {
     if text.is_empty() {
         return 0.;
     }
-    let font = Font {
-        family: theme::fonts::UI.into(),
-        weight,
-        ..Font::default()
-    };
-    let run = TextRun {
-        len: text.len(),
-        font,
-        color: theme::fg(),
-        background_color: None,
-        underline: None,
-        strikethrough: None,
-    };
-    let line = window
-        .text_system()
-        .layout_line(text, px(size), &[run], None);
-    f32::from(line.width)
+    rune::text::measure(text, &[], font, None).0
+}
+
+/// Width of a row icon at `font`: an image icon is a `font.size` square.
+fn icon_width(icon: &str, font: TextStyle) -> f32 {
+    if roostr_ui::is_image_icon(icon) {
+        font.size
+    } else {
+        text_width(icon, font)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rows_near_covers_the_window_and_its_overscan() {
+        // 300 rows, list top at the window top, an 800pt window: two windows of rows.
+        assert_eq!(rows_near(300, 0., 800., OVERSCAN), 0..64);
+        assert_eq!(rows_near(300, 0., 800., 0.), 0..32);
+        // Scrolled to the end: the last rows, none above the overscan.
+        let top = 800. - 300. * ROW_PITCH;
+        let near = rows_near(300, top, 800., OVERSCAN);
+        assert_eq!(near.end, 300);
+        assert!(near.start > 200);
+        // Far below the window: nothing.
+        assert_eq!(rows_near(300, 5000., 800., OVERSCAN), 0..0);
+    }
+
+    #[test]
+    fn a_half_window_step_always_covers_the_visible_rows() {
+        let view_h = 800.;
+        let step = view_h / 2.;
+        for top in (-8000..800).step_by(7) {
+            let top = top as f32;
+            let q = (top / step).round();
+            let drawn = rows_near(300, q * step, view_h, OVERSCAN);
+            let visible = rows_near(300, top, view_h, 0.);
+            assert!(
+                drawn.start <= visible.start && drawn.end >= visible.end,
+                "{top}"
+            );
+        }
+    }
+
+    #[test]
+    fn link_targets_skip_the_channel_and_repeats() {
+        use roostr_core::types::{LinkValue, Value};
+        let link = |id: &str| Value {
+            link_value: Some(LinkValue {
+                target_id: id.into(),
+                ..LinkValue::default()
+            }),
+            ..Value::default()
+        };
+        let o = Object {
+            fields: [
+                ("channel".to_string(), link("sp-1")),
+                ("a".to_string(), link("x")),
+                ("b".to_string(), link("x")),
+                ("c".to_string(), link("y")),
+            ]
+            .into(),
+            ..Object::default()
+        };
+        assert_eq!(link_targets(&o), vec!["x".to_string(), "y".to_string()]);
+    }
 }

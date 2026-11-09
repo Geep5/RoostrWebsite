@@ -1,165 +1,145 @@
 //! Shell dev harness: the full workspace (rail, sidebar, tabs, header, search,
-//! New menu, pinned widgets, drawers) against the daemon named by the
-//! environment, with a plain page per route standing in for the real pages.
+//! New menu, pinned widgets, drawers, the phone shell at narrow widths)
+//! against the daemon named by the environment, with a plain page per route
+//! (the object's name and its text blocks) standing in for the real pages.
 //!
 //! ```sh
 //! GLON_DATA=/tmp/roostr-gpui-vault ROOSTR_UI_STATE=/tmp/roostr-ui-shell.json \
-//!   cargo run -p roostr-shell --example shell [-- <object id to open>]
+//!   cargo run -p roostr-shell --example shell [-- /app/object/<id>] [--snap out.png --size 1440x900]
 //! ```
 //!
-//! Object pages publish stand-in pane views so the Chat and Properties
-//! columns, their strips, drawer tab, resizers and the header's pane button
-//! can be exercised too.
+//! Object pages publish a pane, so the Chat and Properties columns, their
+//! strips, drawer tab, resizers and the header's pane button can be
+//! exercised too; the pane parts show what they stand for.
 
-use std::rc::Rc;
-use std::sync::Arc;
+use roostr_core::State;
+use roostr_core::nav::Route;
+use roostr_shell::{Pages, PanePart};
+use roostr_ui::ty;
+use roostr_ui::ty::Weights as _;
+use rune::{Cx, El, col, text};
 
-use gpui_kit::component::TitleBar;
-use gpui_kit::*;
-use roostr_core::daemon::{DaemonBackend, DaemonConfig};
-use roostr_core::harness::Harness;
-use roostr_core::nav::{NavEvent, Navigator, Route};
-use roostr_core::store::Store;
-use roostr_core::{PaneState, PaneViews, theme};
-use roostr_shell::{PageFactory, Workspace};
-
-/// A stand-in page: the route and what the store knows about it.
-struct RoutePage {
-    route: Route,
-    pane: Option<PaneViews>,
+/// A stand-in page: the route's object, its type, and its text blocks.
+fn page(s: &State, cx: &mut Cx<State>, route: &Route, _: &mut Vec<El>) -> El {
+    let t = roostr_shell::theme(s, cx);
+    let (title, detail) = match route {
+        Route::Object(id) => match s.store.summary(id) {
+            Some(o) => (
+                format!("{} {}", o.icon, roostr_name(&o.name)),
+                format!("{} · {}", o.type_key, id),
+            ),
+            None => match s.store.space(id) {
+                Some(sp) => (sp.name.clone(), format!("Space · {id}")),
+                None => ("…".to_string(), id.clone()),
+            },
+        },
+        Route::Home => (
+            "Home".to_string(),
+            "Nothing open in this space yet. Pick something in the sidebar, find anything with \
+             search, or make something new from the New menu."
+                .to_string(),
+        ),
+        other => (other.path(), String::new()),
+    };
+    let mut body = col()
+        .key("example-page")
+        .w_full()
+        .gap(10.)
+        .child(
+            text(title)
+                .font(ty::ui(30.).weight(ty::BOLD))
+                .color(t.fg)
+                .wrap(),
+        )
+        .child(text(detail).font(ty::ui(13.)).color(t.muted));
+    if let Some(object) = route.object_id().and_then(|id| s.store.object(id)) {
+        for block in &object.blocks {
+            let Some(line) = block.content.text.as_ref().map(|c| c.text.clone()) else {
+                continue;
+            };
+            if !line.is_empty() {
+                body = body.child(text(line).font(ty::ui(15.).lh(24.)).color(t.fg).wrap());
+            }
+        }
+    }
+    body
 }
 
-/// A stand-in for one part of the pane: (object id, part).
-struct PanePlaceholder(String, &'static str);
-
-impl Render for PanePlaceholder {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .size_full()
-            .p_4()
-            .text_color(theme::muted())
-            .text_size(px(13.))
-            .child(format!("{} for {}", self.1, self.0))
-    }
+fn roostr_name(name: &str) -> &str {
+    if name.is_empty() { "Untitled" } else { name }
 }
 
-impl RoutePage {
-    fn new(route: Route, cx: &mut Context<Self>) -> Self {
-        cx.observe(&Store::global(cx), |_, _, cx| cx.notify())
-            .detach();
-        let pane = match &route {
-            Route::Object(id) => {
-                let mut part = |name| AnyView::from(cx.new(|_| PanePlaceholder(id.clone(), name)));
-                Some(PaneViews {
-                    sheet: part("Pane sheet"),
-                    chat: Some(part("Chat")),
-                    properties: part("Properties"),
-                })
-            }
-            _ => None,
-        };
-        cx.subscribe(&Navigator::global(cx), |this, nav, event: &NavEvent, cx| {
-            if *event == NavEvent::Navigated && *nav.read(cx).route() == this.route {
-                this.publish(cx);
-            }
-        })
-        .detach();
-        let mut this = Self { route, pane };
-        this.publish(cx);
-        this
-    }
+/// The pane parts, by name.
+fn pane(s: &State, cx: &mut Cx<State>, id: &str, part: PanePart, _: &mut Vec<El>) -> El {
+    let t = roostr_shell::theme(s, cx);
+    let name = match part {
+        PanePart::Column(tab) => tab.name().to_string(),
+        PanePart::Sheet => "Pane sheet".to_string(),
+    };
+    col()
+        .key(format!("example-pane-{name}"))
+        .w_full()
+        .padding(16.)
+        .child(
+            text(format!("{name} for {id}"))
+                .font(ty::ui(13.))
+                .color(t.muted)
+                .wrap(),
+        )
+}
 
-    fn publish(&mut self, cx: &mut Context<Self>) {
-        if let Some(pane) = &self.pane {
-            PaneState::global(cx).update(cx, |p, cx| p.publish(true, true, 3, 1, cx));
-            roostr_shell::set_pane(Some(pane.clone()), cx);
+/// An object page opens: load the object (its blocks) and publish its pane.
+fn shown(s: &mut State, route: &Route) {
+    if let Route::Object(id) = route {
+        s.store.ensure_object(id);
+        if s.store.summary(id).is_some() || s.store.space(id).is_some() {
+            s.pane.publish(true, true, 3, 1);
         }
     }
 }
 
-impl Render for RoutePage {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let store = Store::global(cx).read(cx);
-        let detail = match &self.route {
-            Route::Object(id) => store
-                .summary(id)
-                .map(|s| format!("{} {} ({})", s.icon, s.name, s.type_key))
-                .or_else(|| store.space(id).map(|s| format!("Space {}", s.name)))
-                .unwrap_or_else(|| "(not in summaries)".into()),
-            Route::Home => "Nothing open in this space yet. Pick something in the sidebar, find anything with search, or make something new from the New menu.".into(),
-            _ => String::new(),
-        };
-        div()
-            .flex()
-            .flex_col()
-            .gap_2()
-            .text_size(px(14.))
-            .child(div().text_color(theme::fg()).child(self.route.path()))
-            .child(div().text_color(theme::muted()).child(detail))
+fn init() -> State {
+    let mut s = roostr_host::daemon_state().unwrap_or_else(|error| panic!("{error}"));
+    roostr_shell::register(
+        &mut s,
+        Pages {
+            page,
+            pane,
+            shown,
+            open_settings: |_| log::info!("Settings requested"),
+            ..Pages::default()
+        },
+    );
+    if let Some(path) = rune::extra_args().iter().find(|a| a.starts_with('/')) {
+        roostr_shell::open_when_ready(&mut s, Route::parse(path));
     }
-}
-
-struct Root {
-    workspace: Entity<Workspace>,
-}
-
-impl Render for Root {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .flex()
-            .flex_col()
-            .size_full()
-            .bg(theme::gutter())
-            .line_height(relative(theme::LINE_HEIGHT_NORMAL))
-            .child(TitleBar::new())
-            .child(div().flex_1().min_h_0().child(self.workspace.clone()))
+    roostr_host::wait_loaded(&mut s, std::time::Duration::from_secs(20));
+    // The headless snapshot's virtual clock doesn't wait for the network:
+    // run the boot (space pick, the opened page's object, the pinned widgets'
+    // queries) until the state goes quiet, waiting on the executor's wakes.
+    let (woke, wakes) = std::sync::mpsc::channel::<()>();
+    let woke = parking_lot::Mutex::new(woke);
+    s.rt.set_waker(std::sync::Arc::new(move || {
+        let _ = woke.lock().send(());
+    }));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        s.poll();
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        let quiet = left.min(std::time::Duration::from_millis(400));
+        if left.is_zero() || wakes.recv_timeout(quiet).is_err() {
+            break;
+        }
     }
+    s
 }
 
 fn main() {
-    let open: Option<String> = std::env::args().nth(1);
-    application()
-        .with_assets(roostr_core::Assets)
-        .run(move |cx| {
-            gpui_kit::init(cx);
-            let config = DaemonConfig::from_env().unwrap_or_else(|error| panic!("{error:#}"));
-            let harness = Arc::new(Harness::new(config.clone()));
-            roostr_core::init(Arc::new(DaemonBackend::new(config)), Some(harness), cx);
-            roostr_properties::init(cx);
-            roostr_shell::init(cx);
-            let pages: PageFactory = Rc::new(|route: &Route, _: &mut Window, cx: &mut App| {
-                cx.new(|cx| RoutePage::new(route.clone(), cx)).into()
-            });
-            let options = WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
-                    None,
-                    size(px(1440.), px(900.)),
-                    cx,
-                ))),
-                ..TitleBar::window_options()
-            };
-            open_window(options, cx, move |window, cx| {
-                let workspace = cx.new(|cx| {
-                    let mut ws = Workspace::new(pages, window, cx);
-                    ws.on_open_settings(|_, _| log::info!("Settings requested"));
-                    ws
-                });
-                if let Some(id) = open {
-                    // Once the shell picked the space (boot), open the object in its active tab.
-                    let nav = Navigator::global(cx);
-                    let mut pending = Some(id);
-                    cx.observe(&nav, move |nav, cx| {
-                        if !nav.read(cx).space().is_empty()
-                            && let Some(id) = pending.take()
-                        {
-                            roostr_core::nav::navigate(Route::Object(id), cx);
-                        }
-                    })
-                    .detach();
-                }
-                cx.new(|_| Root { workspace })
-            })
-            .expect("open shell window");
-            cx.activate(true);
-        });
+    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn"))
+        .try_init();
+    let spec = rune::AppSpec {
+        on_key: Some(roostr_shell::on_key),
+        ..roostr_host::spec("Roostr", (1440., 900.), init, roostr_shell::view)
+    };
+    rune::App::new(spec).chrome(roostr_shell::CHROME).run();
 }

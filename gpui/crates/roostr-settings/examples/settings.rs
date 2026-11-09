@@ -1,136 +1,160 @@
 //! Exercise every roostr-settings view against the test daemon.
 //!
 //! `cargo run -p roostr-settings --example settings -- [settings|space|install|gate] [space-id]`
-//! starts on that view (default: the space page of the first space).
+//! starts on that view (default: the space page of the first space);
+//! `--palette light|system|dark` picks (and remembers) the theme.
 
-use gpui_kit::prelude::FluentBuilder as _;
-use gpui_kit::*;
-use roostr_core::{Store, theme};
-use roostr_settings::{IdentityGate, InstallComputer, SpaceManage, open_settings};
+use roostr_core::State;
+use roostr_settings::{Btn, open_settings};
+use roostr_ui::Theme;
+use rune::{Cursor, El, ScrollSpec, col, row};
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Default)]
 enum Page {
+    #[default]
     Space,
     Install,
     Gate,
 }
 
+/// The example's own state.
+#[derive(Default)]
 struct Demo {
     page: Page,
-    space: Entity<SpaceManage>,
-    install: Entity<InstallComputer>,
-    gate: Entity<IdentityGate>,
-    open_settings_on_start: bool,
+    /// The space shown on the space page ("" = the first space, once loaded).
+    space: String,
 }
 
-impl Demo {
-    fn tab(
-        &self,
-        id: &'static str,
-        label: &'static str,
-        page: Option<Page>,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let active = page.is_some_and(|p| p == self.page);
-        div()
-            .id(id)
-            .px(px(12.))
-            .py(px(5.))
-            .rounded(px(7.))
-            .text_size(px(13.))
-            .cursor_pointer()
-            .border_1()
-            .border_color(theme::border())
-            .when(active, |d| d.bg(theme::hover()))
-            .hover(|s| s.border_color(theme::accent()))
-            .child(label)
-            .on_click(cx.listener(move |this, _, window, cx| match page {
-                Some(page) => {
-                    this.page = page;
-                    cx.notify();
-                }
-                None => open_settings(window, cx),
-            }))
+fn register(s: &mut State) {
+    roostr_settings::register(s);
+    let args = rune::extra_args();
+    let mut args = args
+        .iter()
+        .map(String::as_str)
+        .filter(|a| !a.starts_with("--"));
+    let mode = args.next().unwrap_or("space");
+    let extra = args.next().map(str::to_owned).unwrap_or_default();
+    if let Some(i) = rune::extra_args().iter().position(|a| a == "--palette")
+        && let Some(name) = rune::extra_args().get(i + 1)
+    {
+        s.ui.set_theme_name(name);
     }
+    let demo = s.slot::<Demo>();
+    demo.page = match mode {
+        "install" => Page::Install,
+        "gate" => Page::Gate,
+        _ => Page::Space,
+    };
+    if mode != "settings" {
+        demo.space = extra;
+    }
+    if mode == "settings" {
+        open_settings(s);
+    }
+    s.on_poll(prepare);
 }
 
-impl Render for Demo {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if std::mem::take(&mut self.open_settings_on_start) {
-            open_settings(window, cx);
+/// Opens the shown space's settings and the install poll once the store knows the spaces.
+fn prepare(s: &mut State) -> bool {
+    if !s.store.loaded {
+        return false;
+    }
+    let demo = s.slot::<Demo>();
+    let page = demo.page;
+    if demo.space.is_empty() {
+        match s.store.channels.first() {
+            Some(space) => s.slot::<Demo>().space = space.id.clone(),
+            None => return false,
         }
-        let body: AnyElement = match self.page {
-            Page::Space => div()
-                .id("page-scroll")
-                .flex_1()
-                .min_h_0()
-                .overflow_y_scroll()
-                .child(
-                    div()
-                        .max_w(px(920.))
-                        .mx_auto()
-                        .pt(px(24.))
-                        .pb(px(80.))
-                        .child(self.space.clone()),
-                )
-                .into_any_element(),
-            Page::Install => div()
-                .flex_1()
-                .p(px(24.))
-                .child(div().max_w(px(920.)).mx_auto().child(self.install.clone()))
-                .into_any_element(),
-            Page::Gate => div()
-                .flex_1()
-                .min_h_0()
-                .child(self.gate.clone())
-                .into_any_element(),
-        };
-        div()
-            .size_full()
-            .flex()
-            .flex_col()
-            .child(
-                div()
-                    .flex()
-                    .gap(px(8.))
-                    .p(px(10.))
-                    .border_b_1()
-                    .border_color(theme::border())
-                    .child(self.tab("open-settings", "Settings…", None, cx))
-                    .child(self.tab("show-space", "Space settings", Some(Page::Space), cx))
-                    .child(self.tab("show-install", "Install computer", Some(Page::Install), cx))
-                    .child(self.tab("show-gate", "Identity gate", Some(Page::Gate), cx)),
-            )
-            .child(body)
     }
+    let space = s.slot::<Demo>().space.clone();
+    roostr_settings::open_space_manage(s, &space);
+    if page == Page::Install {
+        roostr_settings::start_install_poll(s);
+    }
+    false
+}
+
+fn tab(t: &Theme, key: &'static str, label: &'static str, page: Option<Page>, active: bool) -> El {
+    let b = Btn::small(t, key, label)
+        .radius(7.0)
+        .on_press(move |s: &mut State| match page {
+            Some(page) => s.slot::<Demo>().page = page,
+            None => open_settings(s),
+        });
+    let b = if active {
+        b.colors(Some(t.hover), Some(t.border), t.fg)
+    } else {
+        b.colors(None, Some(t.border), t.fg)
+    };
+    b.build(t).cursor(Cursor::Pointer)
+}
+
+fn view(s: &State, cx: &mut rune::Cx<State>) -> El {
+    let t = roostr_ui::theme(roostr_settings::theme_pref(s), cx);
+    let mut layer = Vec::new();
+    let demo = s.get::<Demo>();
+    let page = demo.map(|d| d.page).unwrap_or_default();
+    let space = demo.map(|d| d.space.clone()).unwrap_or_default();
+    let body = match page {
+        Page::Space => col()
+            .grow(1.0)
+            .min_h(0.0)
+            .scroll(ScrollSpec {
+                stick_bottom: false,
+            })
+            .child(
+                col()
+                    .w_full()
+                    .max_w(920.0)
+                    .self_center()
+                    .pt(24.0)
+                    .pb(80.0)
+                    .child(roostr_settings::space_manage(s, cx, t, &mut layer, &space)),
+            ),
+        Page::Install => col().grow(1.0).padding(24.0).child(
+            col()
+                .w_full()
+                .max_w(920.0)
+                .self_center()
+                .child(roostr_settings::install_computer(s, cx, t)),
+        ),
+        Page::Gate => col()
+            .grow(1.0)
+            .min_h(0.0)
+            .child(roostr_settings::identity_gate(s, cx, t, &mut layer)),
+    };
+    roostr_settings::settings_modal(s, cx, t, &mut layer);
+    let tabs = row()
+        .gap(8.0)
+        .padding(10.0)
+        .border_sides([0.0, 0.0, 1.0, 0.0], t.border)
+        .child(tab(t, "open-settings", "Settings…", None, false))
+        .child(tab(
+            t,
+            "show-space",
+            "Space settings",
+            Some(Page::Space),
+            page == Page::Space,
+        ))
+        .child(tab(
+            t,
+            "show-install",
+            "Install computer",
+            Some(Page::Install),
+            page == Page::Install,
+        ))
+        .child(tab(
+            t,
+            "show-gate",
+            "Identity gate",
+            Some(Page::Gate),
+            page == Page::Gate,
+        ));
+    let base = col().w_full().h_full().fill(t.bg).child(tabs).child(body);
+    roostr_ui::root(base, layer)
 }
 
 fn main() {
-    roostr_core::dev::run_example("Settings", |args, window, cx| {
-        let mode = args.first().map(String::as_str).unwrap_or("space");
-        let space_id = args
-            .get(1)
-            .cloned()
-            .or_else(|| {
-                Store::global(cx)
-                    .read(cx)
-                    .channels
-                    .first()
-                    .map(|s| s.id.clone())
-            })
-            .unwrap_or_default();
-        roostr_settings::init(cx);
-        cx.new(|cx| Demo {
-            page: match mode {
-                "install" => Page::Install,
-                "gate" => Page::Gate,
-                _ => Page::Space,
-            },
-            space: cx.new(|cx| SpaceManage::new(space_id, window, cx)),
-            install: cx.new(|cx| InstallComputer::new(window, cx)),
-            gate: cx.new(|cx| IdentityGate::new(window, cx)),
-            open_settings_on_start: mode == "settings",
-        })
-        .into()
-    });
+    roostr_host::run_example("Settings", register, view);
 }

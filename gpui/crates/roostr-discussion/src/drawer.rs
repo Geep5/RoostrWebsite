@@ -1,505 +1,477 @@
-//! The right "Chat & properties" pane (`ConversationDrawer.svelte`). On a
-//! desktop the shell lays it out as two columns, Chat then Properties
-//! (`PaneColumn`), each with its name and collapse button; on a phone it is
-//! one sheet with a Chat / Properties switch, the collapse button and the
-//! active tab.
+//! The right "Chat & properties" pane (`ConversationDrawer.svelte`). On a desktop the shell
+//! lays it out as two columns, Chat then Properties ([`pane_column`]), each with its name and
+//! collapse button; on a phone it is one sheet ([`pane_sheet`]) with a Chat / Properties
+//! switch, the collapse button and the active tab.
 
+use std::cell::Cell;
+use std::collections::HashMap;
 use std::time::Duration;
 
-use gpui_kit::component::Icon;
-use gpui_kit::component::Sizable as _;
-use gpui_kit::component::alert::Alert;
-use gpui_kit::component::button::Button;
-use gpui_kit::component::label::Label;
-use gpui_kit::component::tab::{Tab, TabBar};
-use gpui_kit::prelude::FluentBuilder as _;
-use gpui_kit::*;
-use roostr_core::layout::is_mobile;
 use roostr_core::nav::Route;
-use roostr_core::{Glyph, Navigator, PaneState, PaneTab, PaneViews, Store, theme};
-use roostr_properties::PropertiesPane;
+use roostr_core::{PaneTab, State};
+use roostr_rt::Task;
+use roostr_ui::ty::Weights as _;
+use roostr_ui::{Alert, Button, HEADER_H, KitSize, Tab, TabBar, Theme, ty};
+use rune::{Cx, El, ScrollSpec, col, el, row, text};
 
-use crate::discussion::{Discussion, DiscussionOptions};
+use crate::discussion::{Place, drop_instance, instance_key};
+use crate::discussion_view::{instance, place_options, view};
 
 /// Refetch of the open object while the pane is up (`refreshActive`).
 const REFRESH_EVERY: Duration = Duration::from_secs(8);
 
-pub struct ConversationDrawer {
-    object_id: String,
-    /// False for objects without a discussion (agents, types, sets): properties only.
-    chat: bool,
+/// Every object's pane state, by object id.
+#[derive(Default)]
+pub(crate) struct Drawers {
+    map: HashMap<String, Drawer>,
+    /// Panes a view asked for that the executor is creating.
+    requested: std::cell::RefCell<std::collections::HashSet<String>>,
+}
+
+struct Drawer {
+    /// False for objects without a discussion (agents, types, sets): properties only. The
+    /// host says so on every draw (it knows once the object has loaded).
+    chat: Cell<bool>,
     /// The sheet's picked tab.
     picked: Option<PaneTab>,
     /// Last drawn as the phone's sheet (else as desktop columns).
-    in_sheet: bool,
-    discussion: Option<Entity<Discussion>>,
-    properties: Option<Entity<PropertiesPane>>,
-    /// The desktop columns (Chat only with a chat), made when first published.
-    columns: Option<(Option<Entity<PaneColumn>>, Entity<PaneColumn>)>,
+    in_sheet: Cell<bool>,
     refresh_error: String,
     refreshing: bool,
     _timer: Task<()>,
-    _subscriptions: [Subscription; 2],
 }
 
-impl ConversationDrawer {
-    /// The pane for `object_id`; `chat` false shows Properties only.
-    pub fn new(object_id: String, chat: bool, _: &mut Window, cx: &mut Context<Self>) -> Self {
-        Store::global(cx).update(cx, |s, cx| s.ensure_object(&object_id, cx));
-        let timer = cx.spawn(async move |this, cx| {
-            loop {
-                cx.background_executor().timer(REFRESH_EVERY).await;
-                if this.update(cx, |this, cx| this.refresh_active(cx)).is_err() {
-                    return;
-                }
-            }
-        });
-        // Escape anywhere that nothing else handled, on this object's page.
-        // Sheet: back to Chat, else close. Desktop: collapse a column.
-        let keys = cx.observe_keystrokes(|this, event, window, cx| {
-            if event.keystroke.key != "escape"
-                || event.action.is_some()
-                || event.keystroke.modifiers.modified()
-                || !this.is_shown(cx)
-            {
-                return;
-            }
-            if !is_mobile(window) {
-                PaneState::global(cx).update(cx, |p, cx| p.collapse_last(cx));
-            } else if this.chat && this.tab() == PaneTab::Properties {
-                this.picked = Some(PaneTab::Chat);
-                cx.notify();
-            } else {
-                PaneState::global(cx).update(cx, |p, cx| p.set_sheet(false, cx));
-            }
-        });
-        // A collapsed column's view goes (the web unmounts it, so a returning
-        // chat lands at its newest message).
-        let pane = cx.observe(&PaneState::global(cx), |this, _, cx| {
-            if !this.in_sheet {
-                this.drop_collapsed(cx);
-            }
-        });
-        Self {
-            object_id,
-            chat,
-            picked: None,
-            in_sheet: false,
-            discussion: None,
-            properties: None,
-            columns: None,
-            refresh_error: String::new(),
-            refreshing: false,
-            _timer: timer,
-            _subscriptions: [keys, pane],
-        }
-    }
-
-    /// What the shell shows for this pane: this view as the phone's sheet,
-    /// a view per desktop column.
-    pub fn views(this: &Entity<Self>, cx: &mut App) -> PaneViews {
-        let (chat, columns) = {
-            let drawer = this.read(cx);
-            (drawer.chat, drawer.columns.clone())
-        };
-        let (chat_column, properties) = columns.unwrap_or_else(|| {
-            let columns = (
-                chat.then(|| cx.new(|cx| PaneColumn::new(this, PaneTab::Chat, cx))),
-                cx.new(|cx| PaneColumn::new(this, PaneTab::Properties, cx)),
-            );
-            this.update(cx, |drawer, _| drawer.columns = Some(columns.clone()));
-            columns
-        });
-        PaneViews {
-            sheet: this.clone().into(),
-            chat: chat_column.map(Into::into),
-            properties: properties.into(),
-        }
-    }
-
-    /// This object's page is the one showing.
-    fn is_shown(&self, cx: &App) -> bool {
-        matches!(Navigator::global(cx).read(cx).route(), Route::Object(id) if *id == self.object_id)
-    }
-
-    /// The sheet's tab: Chat when the object has one and nothing else was
-    /// picked; never a Chat tab without a chat.
+impl Drawer {
+    /// The sheet's tab: Chat when the object has one and nothing else was picked; never a
+    /// Chat tab without a chat.
     fn tab(&self) -> PaneTab {
         match self.picked {
-            Some(PaneTab::Chat) if !self.chat => PaneTab::Properties,
+            Some(PaneTab::Chat) if !self.chat.get() => PaneTab::Properties,
             Some(tab) => tab,
-            None if self.chat => PaneTab::Chat,
+            None if self.chat.get() => PaneTab::Chat,
             None => PaneTab::Properties,
         }
     }
+}
 
-    fn ensure_view(&mut self, tab: PaneTab, window: &mut Window, cx: &mut Context<Self>) {
-        match tab {
-            PaneTab::Chat => {
-                if self.discussion.is_none() {
-                    let id = self.object_id.clone();
-                    self.discussion = Some(cx.new(|cx| {
-                        Discussion::new(
-                            id,
-                            DiscussionOptions {
-                                full: true,
-                                page_mode: false,
-                                thread_id: crate::chat::DISCUSSION.into(),
-                                embedded: true,
-                            },
-                            window,
-                            cx,
-                        )
-                    }));
+/// The pane of `object_id`, asking for it when it doesn't exist yet.
+fn drawer<'a>(s: &'a State, object_id: &str, chat: bool) -> Option<&'a Drawer> {
+    let drawers = s.get::<Drawers>();
+    if let Some(d) = drawers.and_then(|d| d.map.get(object_id)) {
+        return Some(d);
+    }
+    if drawers.is_none_or(|d| d.requested.borrow_mut().insert(object_id.to_string())) {
+        let id = object_id.to_string();
+        s.rt.spawn(async move |cx| {
+            cx.update(|s| {
+                s.slot::<Drawers>().requested.borrow_mut().remove(&id);
+                if !s.slot::<Drawers>().map.contains_key(&id) {
+                    create(s, id, chat);
                 }
-            }
-            PaneTab::Properties => {
-                if self.properties.is_none() {
-                    let id = self.object_id.clone();
-                    self.properties = Some(cx.new(|cx| PropertiesPane::new(id, window, cx)));
-                }
-            }
-        }
-    }
-
-    fn drop_view(&mut self, tab: PaneTab) {
-        match tab {
-            PaneTab::Chat => self.discussion = None,
-            PaneTab::Properties => self.properties = None,
-        }
-    }
-
-    /// Desktop: no view for a collapsed column.
-    fn drop_collapsed(&mut self, cx: &App) {
-        let pane = PaneState::global(cx).read(cx);
-        if !pane.chat_open {
-            self.discussion = None;
-        }
-        if !pane.props_open {
-            self.properties = None;
-        }
-    }
-
-    fn pick(&mut self, tab: PaneTab, cx: &mut Context<Self>) {
-        self.picked = Some(tab);
-        cx.notify();
-    }
-
-    /// Refetch the object; a failure shows above the tab with a Refresh button.
-    fn refresh_active(&mut self, cx: &mut Context<Self>) {
-        if self.refreshing {
-            return;
-        }
-        self.refreshing = true;
-        let store = Store::global(cx);
-        let task = store.read(cx).fetch_object(&self.object_id, cx);
-        cx.spawn(async move |this, cx| {
-            let result = task.await;
-            let _ = this.update(cx, |this, cx| {
-                this.refreshing = false;
-                match result {
-                    Ok(fresh) => {
-                        this.refresh_error.clear();
-                        let store = Store::global(cx);
-                        let stale = store
-                            .read(cx)
-                            .object(&this.object_id)
-                            .is_none_or(|cached| *cached != fresh);
-                        if stale {
-                            store.update(cx, |s, cx| s.reload_object(&this.object_id, cx));
-                        }
-                    }
-                    Err(error) => this.refresh_error = error.to_string(),
-                }
-                cx.notify();
-            });
+            })
         })
         .detach();
     }
+    None
+}
 
-    /// A Chat / Properties tab of the sheet's switch: its icon, then its name.
-    fn render_tab(tab: PaneTab, cx: &App) -> Tab {
-        let label = tab.name();
-        Tab::new()
-            .aria_label(label)
-            .debug_selector(move || format!("pane-tab-{label}"))
-            .child(div().mr(px(5.)).text_size(px(13.)).child(tab.icon(cx)))
-            .child(
-                div()
-                    .text_size(px(12.5))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child(label),
-            )
-    }
-
-    /// The `»` button: closes the sheet, or collapses a desktop column.
-    fn render_collapse(&self, column: Option<PaneTab>) -> impl IntoElement {
-        let (id, tip): (SharedString, &'static str) = match column {
-            None => ("collapse".into(), "Collapse"),
-            Some(PaneTab::Chat) => ("pane-collapse-Chat".into(), "Collapse chat"),
-            Some(PaneTab::Properties) => ("pane-collapse-Properties".into(), "Collapse properties"),
-        };
-        let selector = id.clone();
-        Button::new(ElementId::Name(id))
-            .debug_selector(move || selector.to_string())
-            .outline()
-            .small()
-            .flex_none()
-            .size(px(26.))
-            .p_0()
-            .rounded(px(7.))
-            .text_color(theme::muted())
-            .tooltip(tip)
-            .on_click(move |_, _, cx| {
-                PaneState::global(cx).update(cx, |p, cx| match column {
-                    None => p.set_sheet(false, cx),
-                    Some(tab) => p.set_open(tab, false, cx),
-                })
-            })
-            // An SVG, not the "»" character: a glyph sits on the font's
-            // baseline, about 2px low in the 26px button.
-            .child(Icon::new(Glyph::ChevronsRight).size(px(15.)))
-    }
-
-    /// A collapsed column folded into the open one's header: its icon and
-    /// name, sliding in from the right as the column slides shut; a click
-    /// expands it again.
-    fn render_folded(tab: PaneTab, cx: &App) -> impl IntoElement {
-        let name = tab.name();
-        Button::new(ElementId::Name(format!("pane-folded-{name}").into()))
-            .debug_selector(move || format!("pane-folded-{name}"))
-            .outline()
-            .small()
-            .flex_none()
-            .h(px(26.))
-            .px(px(8.))
-            .rounded(px(7.))
-            .text_color(theme::muted())
-            .tooltip(format!("Show {}", name.to_lowercase()))
-            .on_click(move |_, _, cx| {
-                PaneState::global(cx).update(cx, |p, cx| p.set_open(tab, true, cx))
-            })
-            .child(div().text_size(px(12.)).child(tab.icon(cx)))
-            .child(div().text_size(px(12.)).child(name))
-            .with_animation(
-                ElementId::Name(format!("pane-fold-in-{name}").into()),
-                Animation::new(Duration::from_millis(220)).with_easing(ease_out_quint()),
-                |d, t| d.opacity(t).ml(px(24. * (1. - t))),
-            )
-    }
-
-    /// A header row; the divider is inset like the object header's, not edge to edge.
-    fn render_head(children: impl IntoIterator<Item = AnyElement>) -> Div {
-        div()
-            .relative()
-            .flex()
-            .flex_none()
-            .items_center()
-            .gap(px(10.))
-            .h(px(theme::HEADER_H))
-            .px(px(14.))
-            .pt(px(18.))
-            .pb(px(8.))
-            .children(children)
-            .child(
-                div()
-                    .absolute()
-                    .left(px(14.))
-                    .right(px(14.))
-                    .bottom_0()
-                    .h(px(1.))
-                    .bg(theme::border()),
-            )
-    }
-
-    fn render_error(&self, this: WeakEntity<Self>) -> Option<Div> {
-        (!self.refresh_error.is_empty()).then(|| {
-            div()
-                .flex()
-                .items_center()
-                .gap(px(4.))
-                .px(px(14.))
-                .my(px(12.))
-                .child(
-                    Alert::warning("refresh-error", self.refresh_error.clone())
-                        .xsmall()
-                        .flex_1()
-                        .min_w_0()
-                        .text_size(px(12.))
-                        .text_color(theme::orange()),
-                )
-                .child(
-                    Button::new("refresh")
-                        .outline()
-                        .xsmall()
-                        .label("Refresh")
-                        .on_click(move |_, _, cx| {
-                            let _ = this.update(cx, |this, cx| this.refresh_active(cx));
-                        }),
-                )
-        })
-    }
-
-    fn render_body(&self, tab: PaneTab) -> AnyElement {
-        match (tab, &self.discussion, &self.properties) {
-            (PaneTab::Chat, Some(discussion), _) => div()
-                .flex_1()
-                .min_h_0()
-                .flex()
-                .flex_col()
-                .child(discussion.clone())
-                .into_any_element(),
-            (PaneTab::Properties, _, Some(properties)) => div()
-                .id("props")
-                .flex_1()
-                .min_h_0()
-                .overflow_x_hidden()
-                .overflow_y_scroll()
-                .px(px(14.))
-                .py(px(8.))
-                .child(properties.clone())
-                .into_any_element(),
-            _ => div().into_any_element(),
-        }
-    }
-
-    /// Whether drawing column `tab` has state to set first (its view not
-    /// made yet, a collapsed column's view to drop, the sheet's mark to
-    /// clear). Each column draws the drawer by reading it: one written while
-    /// drawing would draw the other column again, frame after frame.
-    fn column_needs_prepare(&self, tab: PaneTab, cx: &App) -> bool {
-        let pane = PaneState::global(cx).read(cx);
-        self.in_sheet
-            || (!pane.chat_open && self.discussion.is_some())
-            || (!pane.props_open && self.properties.is_some())
-            || match tab {
-                PaneTab::Chat => self.discussion.is_none(),
-                PaneTab::Properties => self.properties.is_none(),
-            }
-    }
-
-    fn prepare_column(&mut self, tab: PaneTab, window: &mut Window, cx: &mut Context<Self>) {
-        self.in_sheet = false;
-        self.drop_collapsed(cx);
-        self.ensure_view(tab, window, cx);
-    }
-
-    /// A desktop column: its icon and name, its collapse button, its view.
-    /// A refresh failure shows in the first expanded column.
-    fn render_column(&self, tab: PaneTab, this: WeakEntity<Self>, cx: &App) -> AnyElement {
-        let (first, folded) = {
-            let pane = PaneState::global(cx).read(cx);
-            let other = tab.other();
-            (
-                tab == PaneTab::Properties || !pane.is_open(PaneTab::Properties),
-                pane.has(other) && !pane.is_open(other),
-            )
-        };
-        let name = tab.name();
-        let mut head = vec![
-            div()
-                .flex_none()
-                .text_size(px(13.))
-                .child(tab.icon(cx))
-                .into_any_element(),
-            Label::new(name)
-                .flex_1()
-                .min_w_0()
-                .text_size(px(12.5))
-                .font_weight(FontWeight::SEMIBOLD)
-                .into_any_element(),
-        ];
-        // The other column, collapsed, folds into this header: a click opens it again.
-        if folded {
-            head.push(Self::render_folded(tab.other(), cx).into_any_element());
-        }
-        head.push(self.render_collapse(Some(tab)).into_any_element());
-        let head = Self::render_head(head);
-        div()
-            .debug_selector(move || format!("pane-col-{name}"))
-            .size_full()
-            .flex()
-            .flex_col()
-            .text_color(theme::fg())
-            .child(head)
-            .when(first, |d| d.children(self.render_error(this)))
-            .child(self.render_body(tab))
-            .into_any_element()
+/// Makes `object_id`'s pane now, unless it exists.
+pub(crate) fn open(s: &mut State, object_id: &str, chat: bool) {
+    if !s.slot::<Drawers>().map.contains_key(object_id) {
+        create(s, object_id.to_string(), chat);
     }
 }
 
-/// The phone's sheet.
-impl Render for ConversationDrawer {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.in_sheet = true;
-        let tab = self.tab();
-        self.ensure_view(tab, window, cx);
-        self.drop_view(tab.other());
-        // The Properties / Chat switch: the kit's segmented tab bar, in the
-        // desktop columns' order.
-        let shown: Vec<PaneTab> = if self.chat {
-            vec![PaneTab::Properties, PaneTab::Chat]
-        } else {
-            vec![PaneTab::Properties]
-        };
-        let selected = shown.iter().position(|t| *t == tab).unwrap_or(0);
-        let tabs = TabBar::new("pane-tabs")
-            .segmented()
-            .small()
-            .flex_none()
-            .bg(theme::panel())
-            .border_1()
-            .border_color(theme::border())
-            .rounded(px(9.))
-            .p(px(2.))
-            .children(shown.iter().map(|t| Self::render_tab(*t, cx)))
-            .selected_index(selected)
-            .on_click(cx.listener(move |this, ix: &usize, _, cx| {
-                if let Some(tab) = shown.get(*ix) {
-                    this.pick(*tab, cx);
+fn create(s: &mut State, object_id: String, chat: bool) {
+    s.store.ensure_object(&object_id);
+    let id = object_id.clone();
+    let timer = s.rt.spawn(async move |cx| {
+        loop {
+            cx.timer(REFRESH_EVERY).await;
+            let alive = cx.update(|s| {
+                if s.get::<Drawers>().is_none_or(|d| !d.map.contains_key(&id)) {
+                    return false;
                 }
-            }));
-        let head = Self::render_head([
-            tabs.into_any_element(),
-            self.render_collapse(None).into_any_element(),
-        ]);
-        div()
-            .size_full()
-            .flex()
-            .flex_col()
-            .text_color(theme::fg())
-            .child(head)
-            .children(self.render_error(cx.entity().downgrade()))
-            .child(self.render_body(tab))
-    }
-}
-
-/// One desktop column of a [`ConversationDrawer`].
-struct PaneColumn {
-    drawer: WeakEntity<ConversationDrawer>,
-    tab: PaneTab,
-    _drawer_changed: Subscription,
-}
-
-impl PaneColumn {
-    fn new(drawer: &Entity<ConversationDrawer>, tab: PaneTab, cx: &mut Context<Self>) -> Self {
-        Self {
-            drawer: drawer.downgrade(),
-            tab,
-            _drawer_changed: cx.observe(drawer, |_, _, cx| cx.notify()),
+                refresh_active(s, &id);
+                true
+            });
+            if !alive {
+                return;
+            }
         }
-    }
+    });
+    s.slot::<Drawers>().map.insert(
+        object_id,
+        Drawer {
+            chat: Cell::new(chat),
+            picked: None,
+            in_sheet: Cell::new(false),
+            refresh_error: String::new(),
+            refreshing: false,
+            _timer: timer,
+        },
+    );
 }
 
-impl Render for PaneColumn {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let tab = self.tab;
-        let Some(drawer) = self.drawer.upgrade() else {
-            return div().into_any_element();
+/// Refetch the object; a failure shows above the tab with a Refresh button.
+fn refresh_active(s: &mut State, object_id: &str) {
+    let Some(d) = s.slot::<Drawers>().map.get_mut(object_id) else {
+        return;
+    };
+    if d.refreshing {
+        return;
+    }
+    d.refreshing = true;
+    let task = s.store.fetch_object(object_id);
+    let id = object_id.to_string();
+    s.rt.spawn(async move |cx| {
+        let result = task.await;
+        cx.update(|s| {
+            let Some(d) = s.slot::<Drawers>().map.get_mut(&id) else {
+                return;
+            };
+            d.refreshing = false;
+            match result {
+                Ok(fresh) => {
+                    d.refresh_error.clear();
+                    let stale = s.store.object(&id).is_none_or(|cached| *cached != fresh);
+                    if stale {
+                        s.store.reload_object(&id);
+                    }
+                }
+                Err(error) => d.refresh_error = error.to_string(),
+            }
+        });
+    })
+    .detach();
+}
+
+/// `State::on_poll`: a pane goes with its page or once nothing of it shows; its chat goes
+/// while its column is collapsed or the sheet shows Properties (the web unmounts it, so a
+/// returning chat lands at its newest message).
+pub(crate) fn poll(s: &mut State) -> bool {
+    let shown_object = s.nav.route().object_id().map(str::to_string);
+    let up = s.pane.chat_open || s.pane.props_open || s.pane.sheet;
+    let Some(drawers) = s.get::<Drawers>() else {
+        return false;
+    };
+    let mut gone = Vec::new();
+    let mut chat_gone = Vec::new();
+    for (id, d) in &drawers.map {
+        if shown_object.as_deref() != Some(id.as_str()) || !up {
+            gone.push(id.clone());
+            chat_gone.push(id.clone());
+            continue;
+        }
+        let chat_shown = if d.in_sheet.get() {
+            s.pane.sheet && d.tab() == PaneTab::Chat
+        } else {
+            s.pane.chat_open
         };
-        if drawer.read(cx).column_needs_prepare(tab, cx) {
-            drawer.update(cx, |drawer, cx| drawer.prepare_column(tab, window, cx));
+        if !chat_shown {
+            chat_gone.push(id.clone());
         }
-        drawer.read(cx).render_column(tab, self.drawer.clone(), cx)
     }
+    let mut changed = false;
+    for id in chat_gone {
+        let key = instance_key(&id, Place::Pane);
+        if crate::discussion::get(s, &key).is_some() {
+            drop_instance(s, &key);
+            changed = true;
+        }
+    }
+    let drawers = s.slot::<Drawers>();
+    for id in gone {
+        changed |= drawers.map.remove(&id).is_some();
+    }
+    changed
+}
+
+/// Drops `object_id`'s pane.
+pub(crate) fn forget(s: &mut State, object_id: &str) {
+    s.slot::<Drawers>().map.remove(object_id);
+}
+
+/// Escape nobody else took on `object_id`'s page: desktop collapses a column; sheet:
+/// Properties goes back to Chat, else the sheet closes.
+pub fn on_escape(s: &mut State, object_id: &str, mobile: bool) -> bool {
+    if !matches!(s.nav.route(), Route::Object(id) if id == object_id) {
+        return false;
+    }
+    if !mobile {
+        if !(s.pane.chat_open || s.pane.props_open) {
+            return false;
+        }
+        let pane = &mut s.pane;
+        pane.collapse_last(&mut s.ui);
+        return true;
+    }
+    let back_to_chat = s
+        .get::<Drawers>()
+        .and_then(|d| d.map.get(object_id))
+        .is_some_and(|d| d.chat.get() && d.tab() == PaneTab::Properties);
+    if back_to_chat {
+        if let Some(d) = s.slot::<Drawers>().map.get_mut(object_id) {
+            d.picked = Some(PaneTab::Chat);
+        }
+        return true;
+    }
+    if !s.pane.sheet {
+        return false;
+    }
+    s.pane.set_sheet(false);
+    true
+}
+
+/// A Chat / Properties tab of the sheet's switch: its icon, then its name.
+fn sheet_tab(s: &State, tab: PaneTab) -> Tab<State> {
+    Tab::new()
+        .prefix(text(tab.icon(s)).font(ty::ui(13.)).mr(5.))
+        .label(tab.name())
+}
+
+/// The `»` button: closes the sheet, or collapses a desktop column.
+fn collapse(t: &Theme, column: Option<PaneTab>) -> El {
+    let (key, tip) = match column {
+        None => ("collapse", "Collapse"),
+        Some(PaneTab::Chat) => ("pane-collapse-Chat", "Collapse chat"),
+        Some(PaneTab::Properties) => ("pane-collapse-Properties", "Collapse properties"),
+    };
+    Button::new(key)
+        .outline()
+        .small()
+        .square(26.)
+        .p(0.)
+        .radius(7.)
+        .text_color(t.muted)
+        .tooltip(tip)
+        .icon(roostr_ui::Glyph::ChevronsRight)
+        .icon_size(15.)
+        .on_press(move |s: &mut State| match column {
+            None => s.pane.set_sheet(false),
+            Some(tab) => {
+                let pane = &mut s.pane;
+                pane.set_open(tab, false, &mut s.ui);
+            }
+        })
+        .build(t)
+}
+
+/// A collapsed column folded into the open one's header: its icon and name, sliding in from
+/// the right; a press expands it again.
+fn folded(s: &State, t: &Theme, tab: PaneTab) -> El {
+    let name = tab.name();
+    let button = Button::new(format!("pane-folded-{name}"))
+        .outline()
+        .small()
+        .h(26.)
+        .px(8.)
+        .radius(7.)
+        .text_color(t.muted)
+        .tooltip(format!("Show {}", name.to_lowercase()))
+        .on_press(move |s: &mut State| {
+            let pane = &mut s.pane;
+            pane.set_open(tab, true, &mut s.ui);
+        })
+        .child(text(tab.icon(s)).font(ty::ui(12.)))
+        .child(text(name).font(ty::ui(12.)).color(t.muted))
+        .build(t);
+    button.transition(rune::Transition {
+        insertion: rune::Effect {
+            offset: rune::Vec2::new(24.0, 0.0),
+            ..rune::Effect::opacity(0.0)
+        },
+        removal: rune::Effect::IDENTITY,
+        springs: rune::SpringPair::new(
+            roostr_ui::motion::HANDLE.with_duration(0.22).spring(),
+            rune::Spring::NONE,
+        ),
+        ..rune::Transition::identity()
+    })
+}
+
+/// A header row; the divider is inset like the object header's, not edge to edge.
+fn head(t: &Theme, children: Vec<El>) -> El {
+    row()
+        .w_full()
+        .center_y()
+        .gap(10.)
+        .h(HEADER_H)
+        .px(14.)
+        .pt(18.)
+        .pb(8.)
+        .children(children)
+        .child(
+            el().pin(Some(14.), None, Some(14.), Some(0.))
+                .h(1.)
+                .fill(t.border),
+        )
+}
+
+fn refresh_error(t: &Theme, object_id: &str, error: &str) -> Option<El> {
+    if error.is_empty() {
+        return None;
+    }
+    let id = object_id.to_string();
+    Some(
+        row()
+            .center_y()
+            .gap(4.)
+            .px(14.)
+            .my(12.)
+            .child(
+                col().grow(1.).shrink().min_w(0.).child(
+                    Alert::warning("refresh-error", error.to_string())
+                        .size(KitSize::XSmall)
+                        .text_size(12.)
+                        .text_color(t.orange)
+                        .build(t),
+                ),
+            )
+            .child(
+                Button::new("refresh")
+                    .outline()
+                    .xsmall()
+                    .label("Refresh")
+                    .on_press(move |s: &mut State| refresh_active(s, &id))
+                    .build(t),
+            ),
+    )
+}
+
+/// What a tab shows: the discussion in its own scroller, or the properties in a scroll.
+fn body(
+    s: &State,
+    cx: &mut Cx<State>,
+    t: &Theme,
+    layer: &mut Vec<El>,
+    object_id: &str,
+    tab: PaneTab,
+    window: [f32; 2],
+) -> El {
+    match tab {
+        PaneTab::Chat => {
+            let options = place_options(Place::Pane);
+            let chat = match instance(s, object_id, &options) {
+                Some(d) => view(d, s, cx, t, layer, window),
+                None => col(),
+            };
+            col().grow(1.).min_h(0.).child(chat)
+        }
+        PaneTab::Properties => col()
+            .key("props")
+            .grow(1.)
+            .min_h(0.)
+            .scroll(ScrollSpec {
+                stick_bottom: false,
+            })
+            .child(
+                col()
+                    .w_full()
+                    .px(14.)
+                    .py(8.)
+                    .child(roostr_properties::properties_pane(
+                        s, cx, t, layer, object_id,
+                    )),
+            ),
+    }
+}
+
+/// A desktop column of `object_id`'s pane: its icon and name, the other column folded in
+/// when collapsed, its collapse button, its view. A refresh failure shows in the first open
+/// column. `chat` false: the object has no discussion.
+pub fn pane_column(
+    s: &State,
+    cx: &mut Cx<State>,
+    t: &Theme,
+    layer: &mut Vec<El>,
+    object_id: &str,
+    chat: bool,
+    tab: PaneTab,
+    window: [f32; 2],
+) -> El {
+    let Some(d) = drawer(s, object_id, chat) else {
+        return col()
+            .key(format!("pane-col-{}", tab.name()))
+            .w_full()
+            .h_full();
+    };
+    d.in_sheet.set(false);
+    d.chat.set(chat);
+    let pane = &s.pane;
+    let other = tab.other();
+    let first = tab == PaneTab::Properties || !pane.is_open(PaneTab::Properties);
+    let fold = pane.has(other) && !pane.is_open(other);
+    let mut items = vec![
+        text(tab.icon(s)).font(ty::ui(13.)),
+        text(tab.name())
+            .font(ty::ui(12.5).semibold())
+            .color(t.fg)
+            .truncate()
+            .grow(1.)
+            .shrink(),
+    ];
+    // The other column, collapsed, folds into this header: a press opens it again.
+    if fold {
+        items.push(folded(s, t, other));
+    }
+    items.push(collapse(t, Some(tab)));
+    let mut column = col()
+        .key(format!("pane-col-{}", tab.name()))
+        .w_full()
+        .h_full()
+        .child(head(t, items));
+    if first {
+        column = column.children(refresh_error(t, object_id, &d.refresh_error));
+    }
+    column.child(body(s, cx, t, layer, object_id, tab, window))
+}
+
+/// The phone's sheet of `object_id`'s pane: the Properties / Chat switch (the kit's
+/// segmented tab bar, in the desktop columns' order), the collapse button, the picked tab.
+pub fn pane_sheet(
+    s: &State,
+    cx: &mut Cx<State>,
+    t: &Theme,
+    layer: &mut Vec<El>,
+    object_id: &str,
+    chat: bool,
+    window: [f32; 2],
+) -> El {
+    let Some(d) = drawer(s, object_id, chat) else {
+        return col().key("disc-sheet").w_full().h_full();
+    };
+    d.in_sheet.set(true);
+    d.chat.set(chat);
+    let tab = d.tab();
+    let shown: Vec<PaneTab> = if chat {
+        vec![PaneTab::Properties, PaneTab::Chat]
+    } else {
+        vec![PaneTab::Properties]
+    };
+    let selected = shown.iter().position(|x| *x == tab).unwrap_or(0);
+    let id = object_id.to_string();
+    let picks = shown.clone();
+    let tabs = TabBar::new("pane-tabs")
+        .segmented()
+        .small()
+        .fill(t.panel)
+        .border(1., t.border)
+        .radius(9.)
+        .padding(2.)
+        .children(shown.iter().map(|x| sheet_tab(s, *x)))
+        .selected_index(selected)
+        .on_click(move |s: &mut State, ix: usize| {
+            if let (Some(tab), Some(d)) = (picks.get(ix), s.slot::<Drawers>().map.get_mut(&id)) {
+                d.picked = Some(*tab);
+            }
+        })
+        .build(t);
+    col()
+        .key("disc-sheet")
+        .w_full()
+        .h_full()
+        .child(head(t, vec![tabs, collapse(t, None)]))
+        .children(refresh_error(t, object_id, &d.refresh_error))
+        .child(body(s, cx, t, layer, object_id, tab, window))
 }

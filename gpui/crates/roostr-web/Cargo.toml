@@ -1,6 +1,6 @@
 [package]
 name = "roostr-web"
-description = "Roostr in a browser tab (wasm32-unknown-unknown): the desktop app's views over the browser's own replica, or the visitor's daemon paired by its one-use code"
+description = "Roostr in a browser tab (wasm32-unknown-unknown, Rune's web target): the desktop app's views over the browser's own replica, or the visitor's daemon paired by its one-use code"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
@@ -11,6 +11,8 @@ crate-type = ["cdylib", "rlib"]
 # Everything is browser-only; on a desktop target this crate is empty.
 [target.'cfg(target_family = "wasm")'.dependencies]
 roostr-core.workspace = true
+roostr-ui.workspace = true
+roostr-host.workspace = true
 roostr-engine.workspace = true
 roostr-replica.workspace = true
 roostr-nostr.workspace = true
@@ -18,8 +20,11 @@ roostr-app.workspace = true
 roostr-settings.workspace = true
 roostr-site.workspace = true
 roostr-shell.workspace = true
-gpui-kit.workspace = true
-anyhow.workspace = true
+# WebGL2 where the browser has no WebGPU.
+rune = { workspace = true, features = ["webgl"] }
+# Rune keeps its wgpu instances in a static; with WebGL they are only Send + Sync
+# under this feature (the page has one thread). Same major version as Rune's.
+wgpu = { version = "30", default-features = false, features = ["fragile-send-sync-non-atomic-wasm"] }
 futures.workspace = true
 log.workspace = true
 wasm-bindgen.workspace = true
@@ -27,16 +32,9 @@ js-sys.workspace = true
 web-sys = { workspace = true, features = [
     "Document",
     "Element",
-    "Event",
-    "EventTarget",
     "History",
     "Location",
-    "MediaQueryList",
-    "PopStateEvent",
     "Storage",
     "VisibilityState",
     "Window",
 ] }
-
-[target.'cfg(target_family = "wasm")'.dev-dependencies]
-wasm-bindgen-test.workspace = true

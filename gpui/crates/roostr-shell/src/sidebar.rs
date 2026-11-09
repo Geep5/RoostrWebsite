@@ -2,943 +2,647 @@
 //! space head (settings link, search, New pill + menu), one card per pinned
 //! object, then Recently edited, Types and Properties.
 
-use gpui_kit::component::button::Button;
-use gpui_kit::component::empty::Empty;
-use gpui_kit::component::group_box::GroupBox;
-use gpui_kit::component::sidebar::{SidebarItem, SidebarMenuItem};
-use gpui_kit::component::{Icon, Sizable as _, Size};
-use gpui_kit::prelude::FluentBuilder as _;
-use gpui_kit::*;
-use roostr_core::motion::{self, HoverMotion};
-use roostr_core::nav::{Navigator, Route, navigate};
+use roostr_core::nav::{Route, navigate};
 use roostr_core::objects::{object_icon, type_glyph};
 use roostr_core::relations::{format_glyph, is_reserved_key, space_relations};
-use roostr_core::store::Store;
-use roostr_core::types::{ObjectSummary, RelationDef, Space, Value, is_system_type};
-use roostr_core::{Glyph, TypeDef, UiState, theme, ui};
-use roostr_properties::{PropertyPick, PropertySuggest, SuggestEvent};
+use roostr_core::types::{Fields, RelationDef, Space, Value, is_system_type};
+use roostr_core::{State, TypeDef};
+use roostr_ui::{Glyph, KitSize, Theme, glyph, motion, radius, spaced_text, ty, ty::Weights as _};
+use rune::{Color, Cursor, Cx, El, col, el, row, text};
 
-use crate::Tip as _;
-use crate::create_menu::{CreateMenu, CreateMenuEvent};
-use crate::list_motion::{self, PinMotion, Pins};
-use crate::modal::{Prompt, PromptEvent};
-use crate::pinned::PinnedWidget;
-use crate::rail::DragGhost;
-use crate::workspace::{self, Workspace};
-
-#[derive(Clone)]
-pub(crate) struct WidgetDrag {
-    id: String,
-    icon: String,
-    name: String,
-}
-
-/// `.obj-icon`: 20px wide, centred, accent (emoji keep their own colours).
-pub(crate) fn obj_icon(icon: &str) -> Div {
-    div()
-        .flex_none()
-        .w(px(20.))
-        .flex()
-        .justify_center()
-        .text_color(theme::accent())
-        .child(roostr_core::ui::icon_text(icon, px(16.)))
-}
-
-/// The Builtin mark (`.builtin-mark`): a muted 11px lock pushed to the
-/// row's end, explaining itself in a tooltip.
-pub(crate) fn builtin_mark(id: impl Into<ElementId>) -> Stateful<Div> {
-    div()
-        .id(id)
-        .ml_auto()
-        .pl(px(6.))
-        .flex()
-        .flex_none()
-        .opacity(0.55)
-        .child(
-            Icon::new(Glyph::Lock)
-                .size(px(11.))
-                .text_color(theme::muted()),
-        )
-        .tooltip(ui::tooltip("Roostr default - can't be deleted"))
-}
-
-/// A sidebar row (`.item`) as gpui-kit's [`SidebarMenuItem`], held to
-/// Roostr's h26, padding 0 8, radius 6, 13px (hover and current are the
-/// kit's sidebar accent, `hl-med`). The label leaves 26px for the row's
-/// lead, which [`Row`] lays over it.
-fn item(label: impl Into<SharedString>, current: bool) -> SidebarMenuItem {
-    SidebarMenuItem::new(label)
-        .active(current)
-        .label_style(StyleRefinement::default().pl(px(26.)).truncate())
-        .min_h(px(26.))
-        .max_h(px(26.))
-        .py_0()
-        .px(px(8.))
-        .rounded(theme::radius::sm())
-        .text_size(px(13.))
-        .line_height(px(22.))
-        .cursor_pointer()
-}
-
-/// A sidebar row to draw: the kit item needs the window and app, so the
-/// rows are gathered under the store borrow and drawn after it.
-struct Row {
-    id: ElementId,
-    /// What wraps the row (the Types list's current fill and selector).
-    outer: Div,
-    item: SidebarMenuItem,
-    /// The object icon, or a task's checkbox (clickable on its own).
-    lead: AnyElement,
-}
-
-impl Row {
-    fn render(self, window: &mut Window, cx: &mut App) -> Div {
-        self.outer
-            .relative()
-            .child(SidebarItem::render(self.item, self.id, window, cx))
-            .child(
-                div()
-                    .absolute()
-                    .left(px(8.))
-                    .top_0()
-                    .bottom_0()
-                    .flex()
-                    .items_center()
-                    .child(self.lead),
-            )
-    }
-
-    /// `rows` drawn, or the section's `none` note when there are none.
-    fn render_all(
-        rows: Vec<Row>,
-        none_text: &'static str,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> Vec<AnyElement> {
-        if rows.is_empty() {
-            return vec![none(none_text)];
-        }
-        rows.into_iter()
-            .map(|row| row.render(window, cx).into_any_element())
-            .collect()
-    }
-}
-
-fn open(id: String) -> impl Fn(&ClickEvent, &mut Window, &mut App) + 'static {
-    move |_, _, cx| navigate(Route::Object(id.clone()), cx)
-}
+use crate::drag::{self, Axis};
+use crate::shell::{
+    Shell, builtin_mark, current_space, fill, fill_glyph, hover_fg, icon_text, obj_icon,
+    open_object_id, or_untitled, space_id,
+};
+use crate::{list_motion, pin_collapse};
 
 /// Write a task's `done` (a row's checkbox), then refresh the lists.
-pub(crate) fn set_done(id: &str, done: bool, cx: &mut App) {
-    let task = roostr_core::api::note::set_field(id, "done", Value::bool(done), cx);
-    cx.spawn(async move |cx| {
+pub(crate) fn set_done(s: &mut State, id: &str, done: bool) {
+    let task = roostr_core::api::note::set_field(id, "done", Value::bool(done), s);
+    s.rt.spawn(async move |cx| {
         if task.await.is_ok() {
-            cx.update(|cx| Store::global(cx).update(cx, |s, cx| s.refresh_all(cx)));
+            cx.update(|s| s.store.refresh_all());
         }
     })
     .detach();
 }
 
-impl Workspace {
-    pub(crate) fn render_sidebar(
-        &mut self,
-        width: f32,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Div {
-        let card = div()
-            .ml(px(6.))
-            .flex_none()
-            .w(px(width))
-            .h_full()
-            .flex()
-            .flex_col()
-            .rounded(theme::radius::pane())
-            .line_height(relative(1.2))
-            .bg(theme::bg())
-            .overflow_hidden();
-        let Some(current) = Self::current_space(cx) else {
-            return card;
-        };
-        let open_id = Self::open_object_id(cx);
-        let pins = list_motion::pins("pins", &current.id, &current.pinned_ids, window, cx);
-        let pinned = self.render_pinned(&current, open_id.as_deref(), &pins, window, cx);
-        let recent = self.render_recent(&current, open_id.as_deref(), window, cx);
-        let types = self.render_types(open_id.as_deref(), window, cx);
-        let props = self.render_props(open_id.as_deref(), window, cx);
-        card.child(self.render_space_head(&current, window, cx))
-            .child(
-                div()
-                    .id("sidebar-scroll")
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .track_scroll(&self.sidebar_scroll)
-                    .px(px(8.))
-                    .pt(px(8.))
-                    .pb(px(10.))
-                    .flex()
-                    .flex_col()
-                    .gap(px(8.))
-                    .children(pinned)
-                    .child(pins.follow("section:recent", recent))
-                    .child(pins.follow("section:types", types))
-                    .child(pins.follow("section:props", props)),
-            )
-    }
-
-    fn render_space_head(
-        &mut self,
-        current: &Space,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Div {
-        let icon = if current.icon.is_empty() {
-            "◍".to_string()
-        } else {
-            current.icon.clone()
-        };
-        div()
-            .flex_none()
-            .flex()
-            .items_center()
-            .gap(px(2.))
-            .px(px(8.))
-            .pt(px(10.))
-            .pb(px(6.))
-            .bg(theme::bg())
-            .child(
-                crate::fill_button("space-head", theme::hl_med(), cx)
-                    .flex_1()
-                    .min_w_0()
-                    .h_auto()
-                    .px(px(6.))
-                    .py(px(4.))
-                    .rounded(theme::radius::sm())
-                    .text_color(theme::fg())
-                    .accessibility_label(current.name.clone())
-                    .child(
-                        div()
-                            .w_full()
-                            .min_w_0()
-                            .flex()
-                            .items_center()
-                            .justify_start()
-                            .gap(px(10.))
-                            .text_size(px(15.))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .line_height(px(22.))
-                            .child(
-                                div()
-                                    .flex_none()
-                                    .size(px(22.))
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .rounded(theme::radius::sm())
-                                    .overflow_hidden()
-                                    .text_size(px(17.))
-                                    .child(roostr_core::ui::icon_text(&icon, px(22.))),
-                            )
-                            .child(div().min_w_0().truncate().child(current.name.clone())),
-                    )
-                    .tip("Space settings")
-                    .on_click(open(current.id.clone())),
-            )
-            .child(
-                crate::fill_button("head-search", theme::hl_med(), cx)
-                    .size(px(30.))
-                    .rounded(theme::radius::md())
-                    .child(Icon::new(Glyph::Search).size(px(17.)))
-                    .accessibility_label("Search")
-                    .tooltip_with_action("Search", &crate::Search, None)
-                    .tooltip_show_delay(crate::TIP_DELAY)
-                    .on_click(cx.listener(|this, _, window, cx| this.open_search(window, cx))),
-            )
-            .child(
-                div()
-                    .relative()
-                    .flex_none()
-                    .child(
-                        crate::fill_button("create-btn", theme::hover(), cx)
-                            .h(px(30.))
-                            .px(px(7.))
-                            .rounded(theme::radius::pill())
-                            .bg(theme::hl_med())
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap(px(3.))
-                                    .child(Icon::new(Glyph::Compose).size(px(15.)))
-                                    .child(Icon::new(Glyph::ChevronDown).size(px(11.))),
-                            )
-                            .accessibility_label("New object")
-                            .tip("New object")
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                if this.create_menu.is_some() {
-                                    this.create_menu = None;
-                                    cx.notify();
-                                } else {
-                                    this.open_create_menu(window, cx);
-                                }
-                            })),
-                    )
-                    .child(self.anchor_probe("create")),
-            )
-    }
-
-    pub(crate) fn open_create_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.create_menu.is_some() {
-            return;
-        }
-        let menu = cx.new(|cx| CreateMenu::new(window, cx));
-        cx.subscribe_in(
-            &menu,
-            window,
-            |this, _, event: &CreateMenuEvent, window, cx| match event {
-                CreateMenuEvent::Close => {
-                    this.create_menu = None;
-                    cx.notify();
-                }
-                CreateMenuEvent::Create(kind) => this.sidebar_create(kind.clone(), window, cx),
-            },
-        )
-        .detach();
-        self.create_menu = Some(menu);
-        cx.notify();
-    }
-
-    fn flip_section(&mut self, key: &str, cx: &mut Context<Self>) {
-        let collapsed = !self.section_collapsed.get(key).copied().unwrap_or(false);
-        self.section_collapsed.insert(key.to_string(), collapsed);
-        UiState::set(cx, "section-collapsed", &self.section_collapsed);
-        cx.notify();
-    }
-
-    fn render_pinned(
-        &mut self,
-        current: &Space,
-        open_id: Option<&str>,
-        pins: &Pins,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Vec<AnyElement> {
-        let pinned: Vec<ObjectSummary> = {
-            let store = Store::global(cx).read(cx);
-            current
-                .pinned_ids
-                .iter()
-                .filter_map(|id| store.summary(id).cloned())
-                .collect()
-        };
-        let active = Navigator::global(cx).read(cx).space().to_string();
-        let dragging = cx.has_active_drag();
-        let drag_id = self.widget_drag.clone().filter(|_| dragging);
-        let over = self.widget_over.clone().filter(|_| dragging);
-        let mut out = Vec::new();
-        // Lite: the vault or this space not ready yet, or the space loading.
-        if let Some(notice) = roostr_core::lite_ui::ready_notice(&current.id, cx) {
-            out.push(div().px(px(8.)).child(notice).into_any_element());
-        }
-        for p in pinned {
-            let id = p.id.clone();
-            let collapsed = self.pin_collapsed(&id, cx);
-            // Only this device's own fold moves (Svelte popped the body); one
-            // sync brings in snaps.
-            let own = self.pin_folds.contains_key(&id);
-            let fold = list_motion::fold(
-                crate::eid("widget-fold", &id),
-                !collapsed,
-                own.then_some(motion::CONTROL),
-                true,
-                window,
-                cx,
-            );
-            let icon = object_icon(Store::global(cx).read(cx), &p.icon, &p.type_key, &active);
-            let name = if p.name.is_empty() {
-                "Untitled".to_string()
-            } else {
-                p.name.clone()
-            };
-            let is_current = open_id == Some(id.as_str());
-            let body = fold.shown().then(|| {
-                self.pinned_views
-                    .entry(id.clone())
-                    .or_insert_with(|| cx.new(|cx| PinnedWidget::new(id.clone(), cx)))
-                    .clone()
-            });
-            if let Some(view) = &body {
-                // Written only when it changed: a write while drawing redraws the widget.
-                let side_width = self.side_width;
-                if view.read(cx).side_width != side_width {
-                    view.update(cx, |w, cx| {
-                        w.side_width = side_width;
-                        cx.notify();
-                    });
-                }
-            }
-            let over_here = over
-                .as_ref()
-                .filter(|(o, _)| *o == id)
-                .map(|(_, bottom)| *bottom);
-            let payload = WidgetDrag {
-                id: id.clone(),
-                icon: icon.clone(),
-                name: name.clone(),
-            };
-            let collapse_group = SharedString::from(format!("widget-collapse:{id}"));
-            let card = div()
-                .id(crate::eid("widget", &id))
-                .relative()
-                .when(drag_id.as_deref() == Some(&id), |d| d.opacity(0.4))
-                .child(
-                    GroupBox::new()
-                        .id(crate::eid("widget-box", &id))
-                        .content_style(
-                            StyleRefinement::default()
-                                .bg(theme::panel())
-                                .border_1()
-                                .border_color(theme::border())
-                                .rounded(theme::radius::menu())
-                                .p(px(8.))
-                                .gap_0(),
-                        )
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .child(
-                                    // The fold arrow: no fill, fg and full
-                                    // opacity under the pointer.
-                                    crate::fill_button(
-                                        crate::eid("widget-collapse", &id),
-                                        transparent_black(),
-                                        cx,
-                                    )
-                                    .group(collapse_group.clone())
-                                    .w(px(16.))
-                                    .h(px(24.))
-                                    .opacity(0.6)
-                                    .group_hover(collapse_group, |s| s.opacity(1.))
-                                    .accessibility_label("Fold")
-                                    .child(
-                                        workspace::arrow_at(fold.turn(), 7.)
-                                            .text_color(theme::muted())
-                                            .group_hover(format!("widget-collapse:{id}"), |s| {
-                                                s.text_color(theme::fg())
-                                            }),
-                                    )
-                                    .on_click(cx.listener({
-                                        let id = id.clone();
-                                        move |this, _, _, cx| this.toggle_pin_collapsed(&id, cx)
-                                    })),
-                                )
-                                .child(
-                                    crate::fill_button(
-                                        crate::eid("widget-head", &id),
-                                        theme::hl_med(),
-                                        cx,
-                                    )
-                                    .flex_1()
-                                    .min_w_0()
-                                    .h(px(28.))
-                                    .pl(px(2.))
-                                    .pr(px(8.))
-                                    .rounded(theme::radius::sm())
-                                    .text_color(theme::fg())
-                                    .when(is_current, |d| d.bg(theme::hl_med()))
-                                    .accessibility_label(name.clone())
-                                    .child(
-                                        div()
-                                            .w_full()
-                                            .min_w_0()
-                                            .flex()
-                                            .items_center()
-                                            .justify_start()
-                                            .gap(px(6.))
-                                            .text_size(px(14.))
-                                            .font_weight(FontWeight::SEMIBOLD)
-                                            .line_height(px(22.))
-                                            .child(obj_icon(&icon))
-                                            .child(div().min_w_0().truncate().child(name.clone())),
-                                    )
-                                    .on_click(open(id.clone())),
-                                ),
-                        )
-                        .children(body.map(|view| fold.wrap(view))),
-                )
-                .when_some(over_here, |d, bottom| {
-                    d.child(
-                        div()
-                            .absolute()
-                            .left(px(12.))
-                            .right(px(12.))
-                            .h(px(2.))
-                            .rounded(px(2.))
-                            .bg(theme::accent())
-                            .map(|l| {
-                                if bottom {
-                                    l.bottom(px(-5.))
-                                } else {
-                                    l.top(px(-5.))
-                                }
-                            }),
-                    )
-                })
-                .on_drag(payload, |payload, _, _, cx| {
-                    let payload = payload.clone();
-                    let ghost = move || {
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(6.))
-                            .px(px(8.))
-                            .h(px(28.))
-                            .rounded(theme::radius::menu())
-                            .bg(theme::panel())
-                            .border_1()
-                            .border_color(theme::border())
-                            .text_size(px(14.))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(theme::fg())
-                            .opacity(0.8)
-                            .child(obj_icon(&payload.icon))
-                            .child(payload.name.clone())
-                            .into_any_element()
-                    };
-                    cx.new(|_| DragGhost(Box::new(ghost)))
-                })
-                .on_drag_move(cx.listener({
-                    let id = id.clone();
-                    move |this, e: &DragMoveEvent<WidgetDrag>, _, cx| {
-                        let dragged = e.drag(cx).id.clone();
-                        if this.widget_drag.as_deref() != Some(&dragged) {
-                            this.widget_drag = Some(dragged.clone());
-                            cx.notify();
-                        }
-                        if dragged == id {
-                            return;
-                        }
-                        if e.bounds.contains(&e.event.position) {
-                            let bottom = e.event.position.y > e.bounds.center().y;
-                            if this.widget_over != Some((id.clone(), bottom)) {
-                                this.widget_over = Some((id.clone(), bottom));
-                                cx.notify();
-                            }
-                        } else if this.widget_over.as_ref().is_some_and(|(o, _)| *o == id) {
-                            this.widget_over = None;
-                            cx.notify();
-                        }
-                    }
-                }))
-                .on_drop(cx.listener({
-                    let pins = pins.state.clone();
-                    move |this, payload: &WidgetDrag, _, cx| {
-                        let target = this.widget_over.take();
-                        this.widget_drag = None;
-                        cx.notify();
-                        let (Some((target, bottom)), Some(space)) =
-                            (target, Self::current_space(cx))
-                        else {
-                            return;
-                        };
-                        PinMotion::arm(&pins, cx);
-                        roostr_core::pins::move_pin(&space, &payload.id, &target, bottom, cx)
-                            .detach_and_log_err(cx);
-                    }
-                }));
-            out.push(pins.card(&id, card, window, cx));
-        }
-        out
-    }
-
-    fn section(
-        &self,
-        key: &'static str,
-        label: &'static str,
-        add: Option<AnyElement>,
-        rows: Vec<AnyElement>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Div {
-        let open = !self.section_collapsed.get(key).copied().unwrap_or(false);
-        // A long section only fades: sliding it would lay out every row each frame.
-        let fold = list_motion::fold(
-            crate::eid("section-fold", key),
-            open,
-            Some(motion::CONTROL),
-            rows.len() <= 30,
-            window,
-            cx,
-        );
-        // `.section-name` (`transition: color 0.15s`).
-        let (hover, hovered) = motion::hover(
-            crate::eid("section-hover", key),
-            motion::CONTROL,
-            window,
-            cx,
-        );
-        let tint = motion::mix(theme::muted(), theme::fg(), hover);
-        let body = GroupBox::new()
-            .id(crate::eid("section-box", key))
-            .content_style(
-                StyleRefinement::default()
-                    .bg(theme::panel())
-                    .border_1()
-                    .border_color(theme::border())
-                    .rounded(theme::radius::menu())
-                    .px(px(8.))
-                    .py(px(4.))
-                    .gap_0(),
-            )
-            .children(rows.into_iter().enumerate().map(|(i, row)| {
-                div()
-                    .when(i > 0, |d| d.border_t_1().border_color(theme::border()))
-                    .child(row)
-            }));
-        div()
-            .flex()
-            .flex_col()
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .px(px(4.))
-                    .child(
-                        div()
-                            .id(crate::eid("section", key))
-                            .flex()
-                            .items_center()
-                            .gap(px(6.))
-                            .pt(px(2.))
-                            .px(px(8.))
-                            .pb(px(6.))
-                            .text_size(px(11.))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .line_height(px(18.))
-                            .text_color(tint)
-                            .cursor_pointer()
-                            .child(
-                                div()
-                                    .opacity(0.7)
-                                    .child(workspace::arrow_at(fold.turn(), 7.).text_color(tint)),
-                            )
-                            .child(roostr_core::ui::spaced_text(label.to_uppercase(), 0.05))
-                            .on_hover(move |over, _, cx| HoverMotion::set(&hovered, *over, cx))
-                            .on_click(
-                                cx.listener(move |this, _, _, cx| this.flip_section(key, cx)),
-                            ),
-                    )
-                    .children(add),
-            )
-            .when(fold.shown(), |d| d.child(fold.wrap(body)))
-    }
-
-    /// `.section-add`: a 20px ＋, half faded until the pointer is over it.
-    fn section_add(id: &'static str, tip: &'static str, cx: &App) -> Button {
-        let group = SharedString::from(format!("section-add:{id}"));
-        crate::fill_button(id, theme::hl_med(), cx)
-            .group(group.clone())
-            .relative()
-            .size(px(20.))
-            .mr(px(2.))
-            .rounded(theme::radius::xs())
-            .opacity(0.5)
-            .group_hover(group, |s| s.opacity(1.))
-            .child(Icon::new(Glyph::Plus).size(px(12.)))
-            .accessibility_label(tip)
-            .tip(tip)
-    }
-
-    fn render_recent(
-        &mut self,
-        current: &Space,
-        open_id: Option<&str>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Div {
-        let active = Navigator::global(cx).read(cx).space().to_string();
-        let rows: Vec<Row> = {
-            let store = Store::global(cx).read(cx);
-            store
-                .summaries
-                .iter()
-                .filter(|s| {
-                    !current.pinned_ids.contains(&s.id)
-                        && !is_system_type(&s.type_key)
-                        && s.channel_id == current.id
-                })
-                .take(8)
-                .map(|r| {
-                    let name = if r.name.is_empty() {
-                        "Untitled".to_string()
-                    } else {
-                        r.name.clone()
-                    };
-                    let lead = if store.layout_of(&r.type_key) == "task" {
-                        let id = r.id.clone();
-                        ui::checkbox(crate::eid("row-check", &r.id), r.done == Some(true))
-                            .with_size(Size::Medium)
-                            .flex_none()
-                            .mr(px(6.))
-                            .on_change(move |done: &bool, _, cx| {
-                                cx.stop_propagation();
-                                set_done(&id, *done, cx);
-                            })
-                            .into_any_element()
-                    } else {
-                        obj_icon(&object_icon(store, &r.icon, &r.type_key, &active))
-                            .into_any_element()
-                    };
-                    Row {
-                        id: crate::eid("recent", &r.id),
-                        outer: div(),
-                        item: item(name, open_id == Some(r.id.as_str()))
-                            .on_click(open(r.id.clone())),
-                        lead,
-                    }
-                })
-                .collect()
-        };
-        let rows = Row::render_all(rows, "Nothing yet", window, cx);
-        self.section("recent", "Recently edited", None, rows, window, cx)
-    }
-
-    fn render_types(
-        &mut self,
-        open_id: Option<&str>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Div {
-        let space_id = Self::space_id(cx);
-        let rows: Vec<Row> = {
-            let store = Store::global(cx).read(cx);
-            let active = Navigator::global(cx).read(cx).space().to_string();
-            store
-                .types
-                .iter()
-                .filter(|t| t.space == space_id)
-                .map(|t| {
-                    let icon = if t.icon.is_empty() {
-                        type_glyph(store, &t.key, &active)
-                    } else {
-                        t.icon.clone()
-                    };
-                    let name = if t.name.is_empty() {
-                        t.key.clone()
-                    } else {
-                        t.name.clone()
-                    };
-                    let current = open_id == Some(t.id.as_str());
-                    let selector = format!("type:{}", t.id);
-                    let lock = crate::eid("type-lock", &t.id);
-                    Row {
-                        id: crate::eid("type", &t.id),
-                        outer: div()
-                            .rounded(theme::radius::sm())
-                            .when(current, |d| d.bg(theme::hover()))
-                            .debug_selector(move || selector),
-                        item: item(name, false)
-                            .when(t.builtin, |d| {
-                                d.suffix(move |_, _| builtin_mark(lock.clone()))
-                            })
-                            .on_click(open(t.id.clone())),
-                        lead: obj_icon(&icon).into_any_element(),
-                    }
-                })
-                .collect()
-        };
-        let rows = rows
-            .into_iter()
-            .map(|row| row.render(window, cx).into_any_element())
-            .collect();
-        let add = Self::section_add("new-type", "New type", cx)
-            .on_click(cx.listener(|this, _, window, cx| this.new_type(window, cx)))
-            .into_any_element();
-        self.section("types", "Types", Some(add), rows, window, cx)
-    }
-
-    fn render_props(
-        &mut self,
-        open_id: Option<&str>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Div {
-        let space_id = Self::space_id(cx);
-        let rows: Vec<Row> = {
-            let store = Store::global(cx).read(cx);
-            let mut props: Vec<&RelationDef> = space_relations(&store.relations, &space_id)
-                .into_iter()
-                .filter(|r| !r.hidden && !is_reserved_key(&r.key))
-                .collect();
-            let label = |r: &RelationDef| {
-                if r.name.is_empty() {
-                    r.key.to_lowercase()
-                } else {
-                    r.name.to_lowercase()
-                }
-            };
-            props.sort_by_key(|r| label(r));
-            props
-                .into_iter()
-                .map(|r| {
-                    let icon = r
-                        .icon_emoji
-                        .clone()
-                        .filter(|i| !i.is_empty())
-                        .unwrap_or_else(|| format_glyph(&r.format).to_string());
-                    let name = if r.name.is_empty() {
-                        r.key.clone()
-                    } else {
-                        r.name.clone()
-                    };
-                    let lock = crate::eid("prop-lock", &r.id);
-                    Row {
-                        id: crate::eid("prop", &r.id),
-                        outer: div(),
-                        item: item(name, open_id == Some(r.id.as_str()))
-                            .when(store.builtin_ids.contains(&r.id), |d| {
-                                d.suffix(move |_, _| builtin_mark(lock.clone()))
-                            })
-                            .on_click(open(r.id.clone())),
-                        lead: obj_icon(&icon).into_any_element(),
-                    }
-                })
-                .collect()
-        };
-        let rows = Row::render_all(rows, "No properties yet", window, cx);
-        let add = Self::section_add("new-prop", "New property", cx)
-            .child(self.anchor_probe("new-prop"))
-            .on_click(cx.listener(|this, _, window, cx| this.open_new_property(window, cx)))
-            .into_any_element();
-        self.section("props", "Properties", Some(add), rows, window, cx)
-    }
-
-    pub(crate) fn open_new_property(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.new_prop.is_some() {
-            self.new_prop = None;
-            cx.notify();
-            return;
-        }
-        let space_id = Self::space_id(cx);
-        let suggest =
-            cx.new(|cx| PropertySuggest::new(space_id, Vec::new(), Vec::new(), window, cx));
-        cx.subscribe(
-            &suggest,
-            |this, _, event: &SuggestEvent<PropertyPick>, cx| {
-                this.new_prop = None;
-                cx.notify();
-                if let SuggestEvent::Picked(PropertyPick::Relation(rel)) = event {
-                    navigate(Route::Object(rel.id.clone()), cx);
-                }
-            },
-        )
-        .detach();
-        suggest.focus_handle(cx).focus(window, cx);
-        self.new_prop = Some(suggest);
-        cx.notify();
-    }
-
-    /// `newType`: name prompt; per-space key clash check; restore a binned
-    /// type with that key, else create it; open it.
-    pub(crate) fn new_type(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let prompt = cx.new(|cx| Prompt::ask("Type name:", window, cx));
-        cx.subscribe_in(
-            &prompt,
-            window,
-            |this, _, event: &PromptEvent, window, cx| {
-                this.prompt = None;
-                cx.notify();
-                let PromptEvent::Submit(name) = event else {
-                    return;
-                };
-                let name = name.trim().to_string();
-                if name.is_empty() {
-                    return;
-                }
-                let key = type_key_of(&name);
-                if key.is_empty() {
-                    return;
-                }
-                let space = Self::space_id(cx);
-                let clash =
-                    Store::global(cx).read(cx).types.iter().any(|t: &TypeDef| {
-                        t.key == key && (t.space == space || t.space.is_empty())
-                    });
-                if clash {
-                    let alert = cx.new(|cx| {
-                        Prompt::alert(
-                            format!("A type with key \"{key}\" already exists in this space."),
-                            window,
-                            cx,
-                        )
-                    });
-                    cx.subscribe(&alert, |this, _, _: &PromptEvent, cx| {
-                        this.prompt = None;
-                        cx.notify();
-                    })
-                    .detach();
-                    this.prompt = Some(alert);
-                    return;
-                }
-                let binned = roostr_core::api::query_all(
-                    serde_json::json!({ "type": "type", "includeDeleted": true }),
-                    cx,
-                );
-                cx.spawn(async move |_, cx| {
-                    let rows = binned.await.unwrap_or_default();
-                    let found = rows.into_iter().find(|r| {
-                        r.deleted == Some(true)
-                            && roostr_core::types::field_str(&r.fields, "key") == key
-                            && roostr_core::types::field_str(&r.fields, "channel") == space
-                    });
-                    let id = if let Some(row) = found {
-                        let task = cx.update(|cx| roostr_core::api::note::restore(&row.id, cx));
-                        if task.await.is_err() {
-                            return;
-                        }
-                        row.id
-                    } else {
-                        let mut fields = roostr_core::types::Fields::new();
-                        fields.insert("channel".into(), Value::string(space));
-                        fields.insert("key".into(), Value::string(key));
-                        fields.insert("layout".into(), Value::string("page"));
-                        let task = cx.update(|cx| {
-                            roostr_core::api::note::create(&name, Some("type"), Some(fields), cx)
-                        });
-                        let Ok(id) = task.await else { return };
-                        id
-                    };
-                    cx.update(|cx| {
-                        Store::global(cx).update(cx, |s, cx| s.refresh_all(cx));
-                        navigate(Route::Object(id), cx);
-                    });
-                })
-                .detach();
-            },
-        )
-        .detach();
-        self.prompt = Some(prompt);
-        cx.notify();
-    }
+fn open(id: String) -> impl Fn(&mut State) + 'static {
+    move |s: &mut State| navigate(Route::Object(id.clone()), s)
 }
 
-/// `.none`: the empty-section note, as gpui-kit's [`Empty`] reduced to a
-/// muted 12px line.
-fn none(text: &'static str) -> AnyElement {
-    Empty::new()
-        .flex_none()
-        .items_start()
-        .gap_0()
-        .p_0()
-        .px(px(8.))
-        .rounded(px(0.))
-        .text_size(px(12.))
-        .text_color(theme::muted())
-        .child(text)
-        .into_any_element()
+/// The sidebar card, `width` wide.
+pub(crate) fn view(
+    s: &State,
+    cx: &mut Cx<State>,
+    t: &Theme,
+    sh: &Shell,
+    width: f32,
+    layer: &mut Vec<El>,
+) -> El {
+    let card = col()
+        .key("sidebar")
+        .ml(6.)
+        .w(width)
+        .h_full()
+        .radius(radius::PANE)
+        .fill(t.bg)
+        .clip_rounded(radius::PANE);
+    let Some(current) = current_space(s) else {
+        return card;
+    };
+    let open_id = open_object_id(s);
+    let mut list = col()
+        .key("sidebar-list")
+        .w_full()
+        .px(8.)
+        .pt(8.)
+        .pb(10.)
+        .gap(8.);
+    // Lite: the vault or this space not ready yet, or the space loading.
+    if let Some(notice) = roostr_core::lite_ui::ready_notice(&current.id, s) {
+        list = list.child(el().px(8.).child(notice_row(t, notice, "sidebar-notice")));
+    }
+    for id in &current.pinned_ids {
+        if let Some(card) = pinned_card(s, cx, t, sh, id, open_id.as_deref(), layer) {
+            list = list.child(list_motion::pin_card(s, "pins", id, card));
+        }
+    }
+    list = list
+        .child(recent(s, t, sh, current, open_id.as_deref()))
+        .child(types(s, t, sh, open_id.as_deref()))
+        .child(props(s, t, sh, open_id.as_deref()));
+    widget_ghost(s, t, layer);
+    card.child(space_head(s, t, current)).child(
+        col()
+            .key("sidebar-scroll")
+            .grow(1.)
+            .min_h(0.)
+            .w_full()
+            .scroll(rune::ScrollSpec {
+                stick_bottom: false,
+            })
+            .child(list_motion::pin_list(s, "pins", list)),
+    )
+}
+
+/// A lite notice (`notice_row`): flex wrap, centred, gap 10, py 6, 12 pt
+/// muted; its button an outline button running the action.
+pub(crate) fn notice_row(t: &Theme, notice: roostr_core::lite_ui::Notice, key: &str) -> El {
+    let mut line = row()
+        .key(key.to_string())
+        .flex_wrap()
+        .items_center()
+        .gap(10.)
+        .py(6.)
+        .child(text(notice.text).font(ty::ui(12.)).color(t.muted).wrap());
+    if let Some(action) = notice.action {
+        line = line.child(
+            roostr_ui::outline_button(format!("{key}-action"), action.label())
+                .on_press(move |s: &mut State| action.clone().run(s))
+                .build(t),
+        );
+    }
+    line
+}
+
+fn space_head(s: &State, t: &Theme, current: &Space) -> El {
+    let icon = if current.icon.is_empty() {
+        "◍".to_string()
+    } else {
+        current.icon.clone()
+    };
+    let head = fill("space-head", t.hl_med)
+        .grow(1.)
+        .min_w(0.)
+        .px(6.)
+        .py(4.)
+        .radius(radius::SM)
+        .justify_start()
+        .gap(10.)
+        .label(current.name.clone())
+        .child(
+            row()
+                .size(22., 22.)
+                .center()
+                .radius(radius::SM)
+                .clip_rounded(radius::SM)
+                .child(icon_text(s, &icon, 22., ty::ui(17.))),
+        )
+        .child(
+            text(current.name.clone())
+                .font(ty::ui(15.).semibold().lh(22.))
+                .color(t.fg)
+                .truncate()
+                .shrink()
+                .min_w(0.),
+        )
+        .on_press(open(current.id.clone()));
+    let search = fill("head-search", t.hl_med)
+        .size(30., 30.)
+        .radius(radius::MD)
+        .label("Search")
+        .child(fill_glyph(t, Glyph::Search, 17.))
+        .on_press(crate::search::open);
+    let create = fill("create-btn", t.hover)
+        .h(30.)
+        .px(7.)
+        .radius(radius::PILL)
+        .fill(t.hl_med)
+        .gap(3.)
+        .label("New object")
+        .child(fill_glyph(t, Glyph::Compose, 15.))
+        .child(fill_glyph(t, Glyph::ChevronDown, 11.))
+        .on_press(crate::create_menu::toggle);
+    row()
+        .key("space-head-row")
+        .w_full()
+        .items_center()
+        .gap(2.)
+        .px(8.)
+        .pt(10.)
+        .pb(6.)
+        .fill(t.bg)
+        .child(roostr_ui::tooltip(head, "Space settings"))
+        .child(roostr_ui::tooltip(search, "Search (⌘K)"))
+        .child(roostr_ui::tooltip(create, "New object"))
+}
+
+fn flip_section(s: &mut State, key: &str) {
+    let shell = s.slot::<Shell>();
+    let collapsed = !shell.section_collapsed.get(key).copied().unwrap_or(false);
+    shell.section_collapsed.insert(key.to_string(), collapsed);
+    let map = shell.section_collapsed.clone();
+    s.ui.set("section-collapsed", &map);
+}
+
+/// Pin `id`'s card: its fold arrow, its head (opens it; current: `hl-med`),
+/// and its widget body while unfolded. It drags to reorder the pins.
+fn pinned_card(
+    s: &State,
+    cx: &mut Cx<State>,
+    t: &Theme,
+    sh: &Shell,
+    id: &str,
+    open_id: Option<&str>,
+    layer: &mut Vec<El>,
+) -> Option<El> {
+    let p = s.store.summary(id)?;
+    let collapsed = pin_collapse::collapsed(s, id);
+    // Only this device's own fold moves (Svelte popped the body); one sync
+    // brings in snaps.
+    let own = pin_collapse::own(s, id);
+    let icon = object_icon(&s.store, &p.icon, &p.type_key, s.nav.space());
+    let name = or_untitled(&p.name);
+    let is_current = open_id == Some(id);
+    let body = (!collapsed).then(|| {
+        // The body's column: the card's 8 pt padding and border inside the sidebar list.
+        let width = sh.side_width - 6. - 16. - 18.;
+        crate::pinned::widget(s, cx, t, id, width, layer)
+    });
+    let flip = id.to_string();
+    let arrow = fill(format!("widget-collapse:{id}"), Color::TRANSPARENT)
+        .w(16.)
+        .h(24.)
+        .label("Fold")
+        .child(
+            list_motion::arrow(!collapsed, 7., t.muted)
+                .group_color(t.fg)
+                .group_opacity(0.6, 1.0),
+        )
+        .on_press(move |s: &mut State| pin_collapse::toggle(s, &flip));
+    let mut head = fill(format!("widget-head:{id}"), t.hl_med)
+        .grow(1.)
+        .min_w(0.)
+        .h(28.)
+        .pl(2.)
+        .pr(8.)
+        .radius(radius::SM)
+        .justify_start()
+        .gap(6.)
+        .label(name.clone())
+        .child(obj_icon(s, t, &icon))
+        .child(
+            text(name.clone())
+                .font(ty::ui(14.).semibold().lh(22.))
+                .color(t.fg)
+                .truncate()
+                .shrink()
+                .min_w(0.),
+        )
+        .on_press(open(id.to_string()));
+    if is_current {
+        head = head.fill(t.hl_med);
+    }
+    let boxed = col()
+        .key(format!("widget-box:{id}"))
+        .w_full()
+        .fill(t.panel)
+        .border(1., t.border)
+        .border_layout()
+        .radius(radius::MENU)
+        .padding(8.)
+        .child(row().w_full().items_center().child(arrow).child(head))
+        .child(list_motion::fold(
+            format!("widget-fold:{id}"),
+            own,
+            true,
+            body,
+        ));
+    let mut card = col().key(format!("widget:{id}")).w_full().child(boxed);
+    if drag::dragging(s, "widgets") == Some(id) {
+        card = card.opacity(0.4);
+    }
+    if let Some(bottom) = drag::over(s, "widgets", id) {
+        let edge = if bottom {
+            (None, Some(-5.))
+        } else {
+            (Some(-5.), None)
+        };
+        card = card.child(
+            el().pin(Some(12.), edge.0, Some(12.), edge.1)
+                .h(2.)
+                .radius(2.)
+                .fill(t.accent),
+        );
+    }
+    Some(drag::item(card, "widgets", id, Axis::Y, drop_widget))
+}
+
+/// A pinned widget dropped next to another: this device's reorder glides.
+fn drop_widget(s: &mut State, dragged: &str, target: &str, bottom: bool) {
+    let Some(space) = current_space(s).cloned() else {
+        return;
+    };
+    list_motion::arm(s, "pins");
+    roostr_core::pins::move_pin(&space, dragged, target, bottom, s).detach_and_log_err(&s.rt);
+}
+
+/// The floating copy of a dragged widget head.
+fn widget_ghost(s: &State, t: &Theme, layer: &mut Vec<El>) {
+    let Some(id) = drag::dragging(s, "widgets") else {
+        return;
+    };
+    let Some(p) = s.store.summary(id) else {
+        return;
+    };
+    let icon = object_icon(&s.store, &p.icon, &p.type_key, s.nav.space());
+    let ghost = row()
+        .items_center()
+        .gap(6.)
+        .px(8.)
+        .h(28.)
+        .radius(radius::MENU)
+        .fill(t.panel)
+        .border(1., t.border)
+        .opacity(0.8)
+        .child(obj_icon(s, t, &icon))
+        .child(
+            text(or_untitled(&p.name))
+                .font(ty::ui(14.).semibold())
+                .color(t.fg),
+        );
+    drag::ghost(s, "widgets", ghost, layer);
+}
+
+/// A sidebar section: its folding name (`.section-name`, muted → fg on
+/// hover over 0.15 s), an optional ＋, and its rows on a panel card.
+fn section(
+    t: &Theme,
+    sh: &Shell,
+    key: &'static str,
+    label: &'static str,
+    add: Option<El>,
+    rows: Vec<El>,
+) -> El {
+    let open = !sh.section_collapsed.get(key).copied().unwrap_or(false);
+    // A long section only fades: sliding it would lay out every row each frame.
+    let slide = rows.len() <= 30;
+    let body = open.then(|| {
+        rows.into_iter().enumerate().fold(
+            col()
+                .key(format!("section-box:{key}"))
+                .w_full()
+                .fill(t.panel)
+                .border(1., t.border)
+                .border_layout()
+                .radius(radius::MENU)
+                .px(8.)
+                .py(4.),
+            |list, (i, r)| {
+                let r = if i > 0 {
+                    el().w_full()
+                        .border_sides([1., 0., 0., 0.], t.border)
+                        .border_layout()
+                        .child(r)
+                } else {
+                    r
+                };
+                list.child(r)
+            },
+        )
+    });
+    let name = row()
+        .key(format!("section:{key}"))
+        .items_center()
+        .gap(6.)
+        .pt(2.)
+        .px(8.)
+        .pb(6.)
+        .cursor(Cursor::Pointer)
+        .hover_group()
+        .hover_motion(motion::CONTROL.anim(), motion::CONTROL.anim())
+        .child(
+            list_motion::arrow(open, 7., t.muted)
+                .group_color(t.fg)
+                .opacity(0.7),
+        )
+        .child(
+            spaced_text(label.to_uppercase(), 0.05)
+                .size(11.)
+                .weight(ty::SEMIBOLD)
+                .line_height(18.)
+                .color(t.muted)
+                .build(t)
+                .group_color(t.fg),
+        )
+        .on_press(move |s: &mut State| flip_section(s, key));
+    col()
+        .key(format!("section-wrap:{key}"))
+        .w_full()
+        .child(
+            row()
+                .w_full()
+                .items_center()
+                .justify_between()
+                .px(4.)
+                .child(name)
+                .children(add),
+        )
+        .child(list_motion::fold(
+            format!("section-fold:{key}"),
+            true,
+            slide,
+            body,
+        ))
+}
+
+/// `.section-add`: a 20 pt ＋, half faded until the pointer is over it.
+fn section_add(t: &Theme, key: &'static str, tip: &'static str) -> El {
+    let button = fill(key, t.hl_med)
+        .size(20., 20.)
+        .mr(2.)
+        .radius(radius::XS)
+        .label(tip)
+        .child(hover_fg(glyph(Glyph::Plus, 12.), t).group_opacity(0.5, 1.0));
+    roostr_ui::tooltip(button, tip)
+}
+
+/// A sidebar row (`.item`, gpui-kit's SidebarMenuItem held to Roostr's h26,
+/// padding 0 8, radius 6, 13 pt; hover and current are the kit's sidebar
+/// accent): its lead over the label's 26 pt inset, an optional suffix.
+fn item_row(
+    t: &Theme,
+    key: String,
+    label: String,
+    current: bool,
+    lead: El,
+    suffix: Option<El>,
+) -> El {
+    let fg = if current {
+        t.kit.sidebar_accent_foreground
+    } else {
+        t.kit.sidebar_foreground
+    };
+    let mut r = row()
+        .key(key)
+        .w_full()
+        .h(26.)
+        .px(8.)
+        .radius(radius::SM)
+        .items_center()
+        .cursor(Cursor::Pointer)
+        .hover(t.kit.sidebar_accent)
+        .press(t.kit.sidebar_accent)
+        .label(label.clone())
+        .child(row().w(26.).items_center().child(lead))
+        .child(
+            text(label)
+                .font(ty::ui(13.).lh(22.))
+                .color(fg)
+                .truncate()
+                .grow(1.)
+                .shrink()
+                .min_w(0.),
+        )
+        .children(suffix);
+    if current {
+        r = r.fill(t.kit.sidebar_accent);
+    }
+    r
+}
+
+/// `.none`: the empty-section note, a muted 12 pt line.
+fn none(t: &Theme, note: &'static str) -> El {
+    row()
+        .px(8.)
+        .child(text(note).font(ty::ui(12.)).color(t.muted))
+}
+
+fn recent(s: &State, t: &Theme, sh: &Shell, current: &Space, open_id: Option<&str>) -> El {
+    let store = &s.store;
+    let active = s.nav.space();
+    let rows: Vec<El> = store
+        .summaries
+        .iter()
+        .filter(|o| {
+            !current.pinned_ids.contains(&o.id)
+                && !is_system_type(&o.type_key)
+                && o.channel_id == current.id
+        })
+        .take(8)
+        .map(|r| {
+            let lead = if store.layout_of(&r.type_key) == "task" {
+                let id = r.id.clone();
+                roostr_ui::checkbox(format!("row-check:{}", r.id), r.done == Some(true))
+                    .size(KitSize::Medium)
+                    .on_change(move |s: &mut State, done: bool| set_done(s, &id, done))
+                    .build(t)
+                    .mr(6.)
+            } else {
+                obj_icon(s, t, &object_icon(store, &r.icon, &r.type_key, active))
+            };
+            item_row(
+                t,
+                format!("recent:{}", r.id),
+                or_untitled(&r.name),
+                open_id == Some(r.id.as_str()),
+                lead,
+                None,
+            )
+            .on_press(open(r.id.clone()))
+        })
+        .collect();
+    let rows = if rows.is_empty() {
+        vec![none(t, "Nothing yet")]
+    } else {
+        rows
+    };
+    section(t, sh, "recent", "Recently edited", None, rows)
+}
+
+fn types(s: &State, t: &Theme, sh: &Shell, open_id: Option<&str>) -> El {
+    let space = space_id(s);
+    let store = &s.store;
+    let active = s.nav.space();
+    let rows: Vec<El> = store
+        .types
+        .iter()
+        .filter(|ty| ty.space == space)
+        .map(|ty| {
+            let icon = if ty.icon.is_empty() {
+                type_glyph(store, &ty.key, active)
+            } else {
+                ty.icon.clone()
+            };
+            let name = if ty.name.is_empty() {
+                ty.key.clone()
+            } else {
+                ty.name.clone()
+            };
+            let current = open_id == Some(ty.id.as_str());
+            let suffix = ty
+                .builtin
+                .then(|| builtin_mark(t, format!("type-lock:{}", ty.id)));
+            let r = item_row(
+                t,
+                format!("type:{}", ty.id),
+                name,
+                false,
+                obj_icon(s, t, &icon),
+                suffix,
+            )
+            .on_press(open(ty.id.clone()));
+            if current { r.fill(t.hover) } else { r }
+        })
+        .collect();
+    let add = section_add(t, "new-type", "New type").on_press(new_type);
+    section(t, sh, "types", "Types", Some(add), rows)
+}
+
+fn props(s: &State, t: &Theme, sh: &Shell, open_id: Option<&str>) -> El {
+    let space = space_id(s);
+    let store = &s.store;
+    let mut list: Vec<&RelationDef> = space_relations(&store.relations, &space)
+        .into_iter()
+        .filter(|r| !r.hidden && !is_reserved_key(&r.key))
+        .collect();
+    let label = |r: &RelationDef| {
+        if r.name.is_empty() {
+            r.key.to_lowercase()
+        } else {
+            r.name.to_lowercase()
+        }
+    };
+    list.sort_by_key(|r| label(r));
+    let rows: Vec<El> = list
+        .into_iter()
+        .map(|r| {
+            let icon = r
+                .icon_emoji
+                .clone()
+                .filter(|i| !i.is_empty())
+                .unwrap_or_else(|| format_glyph(&r.format).to_string());
+            let name = if r.name.is_empty() {
+                r.key.clone()
+            } else {
+                r.name.clone()
+            };
+            let suffix = store
+                .builtin_ids
+                .contains(&r.id)
+                .then(|| builtin_mark(t, format!("prop-lock:{}", r.id)));
+            item_row(
+                t,
+                format!("prop:{}", r.id),
+                name,
+                open_id == Some(r.id.as_str()),
+                obj_icon(s, t, &icon),
+                suffix,
+            )
+            .on_press(open(r.id.clone()))
+        })
+        .collect();
+    let rows = if rows.is_empty() {
+        vec![none(t, "No properties yet")]
+    } else {
+        rows
+    };
+    let add = section_add(t, "new-prop", "New property").on_press(open_new_property);
+    section(t, sh, "props", "Properties", Some(add), rows)
+}
+
+/// `newType`: name prompt; per-space key clash check; restore a binned
+/// type with that key, else create it; open it.
+pub(crate) fn new_type(s: &mut State) {
+    crate::modal::ask(s, "Type name:", |s, name| {
+        let name = name.trim().to_string();
+        if name.is_empty() {
+            return;
+        }
+        let key = type_key_of(&name);
+        if key.is_empty() {
+            return;
+        }
+        let space = space_id(s);
+        let clash = s
+            .store
+            .types
+            .iter()
+            .any(|t: &TypeDef| t.key == key && (t.space == space || t.space.is_empty()));
+        if clash {
+            crate::modal::alert(
+                s,
+                format!("A type with key \"{key}\" already exists in this space."),
+            );
+            return;
+        }
+        let binned = roostr_core::api::query_all(
+            serde_json::json!({ "type": "type", "includeDeleted": true }),
+            s,
+        );
+        s.rt.spawn(async move |cx| {
+            let rows = binned.await.unwrap_or_default();
+            let found = rows.into_iter().find(|r| {
+                r.deleted == Some(true)
+                    && roostr_core::types::field_str(&r.fields, "key") == key
+                    && roostr_core::types::field_str(&r.fields, "channel") == space
+            });
+            let id = if let Some(row) = found {
+                let task = cx.update(|s| roostr_core::api::note::restore(&row.id, s));
+                if task.await.is_err() {
+                    return;
+                }
+                row.id
+            } else {
+                let mut fields = Fields::new();
+                fields.insert("channel".into(), Value::string(space));
+                fields.insert("key".into(), Value::string(key));
+                fields.insert("layout".into(), Value::string("page"));
+                let task = cx.update(|s| {
+                    roostr_core::api::note::create(&name, Some("type"), Some(fields), s)
+                });
+                let Ok(id) = task.await else { return };
+                id
+            };
+            cx.update(|s| {
+                s.store.refresh_all();
+                navigate(Route::Object(id), s);
+            });
+        })
+        .detach();
+    });
 }
 
 /// Type key from a name: lowercase, runs of non-alphanumerics → `_`, trimmed.
@@ -957,4 +661,69 @@ fn type_key_of(name: &str) -> String {
         }
     }
     out
+}
+
+/// The New property suggest (roostr-properties' `PropertySuggest`) while open:
+/// toggled by the Properties section's ＋, anchored under it (`new-prop`).
+#[derive(Default)]
+pub(crate) struct NewProp {
+    pub(crate) suggest: Option<roostr_properties::PropertySuggestState>,
+}
+
+/// The Properties section's ＋: open the suggest for the space (or close it).
+pub(crate) fn open_new_property(s: &mut State) {
+    if s.slot::<NewProp>().suggest.take().is_some() {
+        return;
+    }
+    let space = space_id(s);
+    s.slot::<NewProp>().suggest = Some(roostr_properties::PropertySuggestState::new(
+        space,
+        Vec::new(),
+        Vec::new(),
+    ));
+}
+
+/// The open suggest, anchored under the ＋ (`new-prop`): picking a property
+/// opens it; any answer (or Escape, a press outside) closes the menu.
+pub(crate) fn new_prop_overlay(s: &State, cx: &mut Cx<State>, t: &Theme, layer: &mut Vec<El>) {
+    let Some(state) = s.get::<NewProp>().and_then(|np| np.suggest.as_ref()) else {
+        return;
+    };
+    let panel = roostr_properties::PropertySuggest::new("new-prop-suggest", state)
+        .on_state(|s: &mut State| {
+            s.slot::<NewProp>().suggest.get_or_insert_with(|| {
+                roostr_properties::PropertySuggestState::new(String::new(), Vec::new(), Vec::new())
+            })
+        })
+        .on_event(
+            |s: &mut State,
+             ev: roostr_properties::SuggestEvent<roostr_properties::PropertyPick>| {
+                s.slot::<NewProp>().suggest = None;
+                if let roostr_properties::SuggestEvent::Picked(
+                    roostr_properties::PropertyPick::Relation(rel),
+                ) = ev
+                {
+                    navigate(Route::Object(rel.id.clone()), s);
+                }
+            },
+        )
+        .build(s, cx, t, layer);
+    layer.push(roostr_ui::overlay::anchored(
+        panel,
+        "new-prop",
+        roostr_ui::Placement::BottomStart,
+        4.,
+    ));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::type_key_of;
+
+    #[test]
+    fn type_keys_from_names() {
+        assert_eq!(type_key_of("Game publisher"), "game_publisher");
+        assert_eq!(type_key_of("  --Hello, World!! "), "hello_world");
+        assert_eq!(type_key_of("!!"), "");
+    }
 }

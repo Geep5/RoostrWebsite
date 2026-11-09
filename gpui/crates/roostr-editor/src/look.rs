@@ -1,29 +1,25 @@
 //! How a text block looks (`BlockNode.svelte` styles): font, size, line
-//! height and colour per text style, and the text runs for its marks
-//! (`marks.ts` classes `m-bold` … `m-mention`).
+//! height and colour per text style, and the painted runs for its marks
+//! (`marks.ts` classes `m-bold` … `m-mention`) as Rune decoration spans.
 
 use std::ops::Range;
 
-use gpui_kit::*;
-use roostr_core::theme;
 use roostr_core::types::{mark, style};
+use roostr_ui::Theme;
+use rune::{Color, Family, Span as Paint, TextStyle};
 
 use crate::marks::{self, Span};
 
 /// Base typography of one text block.
-#[derive(Clone)]
+#[derive(Clone, Copy, Debug)]
 pub struct Look {
-    pub family: SharedString,
-    pub size: Pixels,
-    pub line_height: Pixels,
-    pub weight: FontWeight,
-    pub italic: bool,
-    pub color: Hsla,
+    pub style: TextStyle,
+    pub color: Color,
 }
 
 impl Look {
     /// `.text` + its style class (`.h1` … `.description`, `.done`, inline `color`).
-    pub fn for_style(text_style: u32, checked: bool, color: &str) -> Self {
+    pub fn for_style(t: &Theme, text_style: u32, checked: bool, color: &str) -> Self {
         let (size, line, weight) = match text_style {
             style::HEADER1 => (28., 1.3, 700.),
             style::HEADER2 => (22., 1.3, 650.),
@@ -32,87 +28,56 @@ impl Look {
             style::CODE => (13., 1.55, 400.),
             _ => (15., 1.55, 400.),
         };
-        let mut fg = theme::fg();
+        let mut fg = t.fg;
         if text_style == style::DESCRIPTION || (text_style == style::CHECKBOX && checked) {
-            fg = theme::muted();
+            fg = t.muted;
         }
         if let Some(c) = css_color(color) {
             fg = c;
         }
+        let family = if text_style == style::CODE {
+            Family::Mono
+        } else {
+            Family::Sans
+        };
         Self {
-            family: if text_style == style::CODE {
-                theme::fonts::MONO.into()
-            } else {
-                theme::fonts::UI.into()
+            style: TextStyle {
+                family,
+                italic: text_style == style::QUOTE,
+                ..TextStyle::new(size, weight).lh(((size * line * 100.0) as f32).round() / 100.)
             },
-            size: px(size),
-            line_height: px((size * line * 100.).round() / 100.),
-            weight: FontWeight(weight),
-            italic: text_style == style::QUOTE,
             color: fg,
         }
     }
 
     /// A table cell's `.text` (14px / 1.45; header rows 600).
-    pub fn table_cell(header: bool) -> Self {
+    pub fn table_cell(t: &Theme, header: bool) -> Self {
         Self {
-            family: theme::fonts::UI.into(),
-            size: px(14.),
-            line_height: px(20.3),
-            weight: FontWeight(if header { 600. } else { 400. }),
-            italic: false,
-            color: theme::fg(),
-        }
-    }
-
-    fn font(&self, bold: bool, italic: bool, mono: bool) -> Font {
-        Font {
-            family: if mono {
-                theme::fonts::MONO.into()
-            } else {
-                self.family.clone()
-            },
-            features: FontFeatures::default(),
-            fallbacks: None,
-            weight: if bold {
-                FontWeight(self.weight.0.max(700.))
-            } else {
-                self.weight
-            },
-            style: if italic || self.italic {
-                FontStyle::Italic
-            } else {
-                FontStyle::Normal
-            },
-        }
-    }
-
-    pub fn plain_run(&self, len: usize, color: Hsla) -> TextRun {
-        TextRun {
-            len,
-            font: self.font(false, false, false),
-            color,
-            background_color: None,
-            underline: None,
-            strikethrough: None,
+            style: TextStyle::new(14., if header { 600. } else { 400. }).lh(20.3),
+            color: t.fg,
         }
     }
 }
 
-/// An extra underline over a range (spelling, lint, input-method composition).
-#[derive(Clone)]
+/// An extra underline over a range (spelling, lint).
+#[derive(Clone, Debug)]
 pub struct Squiggle {
     pub range: Range<usize>,
-    pub color: Hsla,
-    pub thickness: Pixels,
-    pub wavy: bool,
+    pub color: Color,
 }
 
-/// Text runs for `text` with its marks and extra underlines.
-pub fn runs(text: &str, spans: &[Span], look: &Look, squiggles: &[Squiggle]) -> Vec<TextRun> {
+/// The painted runs for `text`'s marks and extra underlines. Strikethrough
+/// and the link press come from the field's own marks (`text::TextState`).
+pub fn paints(
+    t: &Theme,
+    text: &str,
+    spans: &[Span],
+    look: &Look,
+    squiggles: &[Squiggle],
+) -> Vec<Paint> {
     let len = text.len();
-    if len == 0 {
-        return vec![look.plain_run(0, look.color)];
+    if len == 0 || (spans.is_empty() && squiggles.is_empty()) {
+        return Vec::new();
     }
     let mut cuts = vec![0, len];
     for m in spans {
@@ -139,70 +104,52 @@ pub fn runs(text: &str, spans: &[Span], look: &Look, squiggles: &[Squiggle]) -> 
             .map(|(_, s)| s.as_slice())
             .unwrap_or(&[]);
         let has = |k: u32| set.iter().find(|m| m.kind == k);
-        let mono = has(mark::INLINE_CODE).is_some();
-        let mut run = TextRun {
-            len: b - a,
-            font: look.font(has(mark::BOLD).is_some(), has(mark::ITALIC).is_some(), mono),
-            color: look.color,
-            background_color: None,
-            underline: None,
-            strikethrough: None,
-        };
-        if mono {
-            run.background_color = Some(theme::panel());
+        let squiggle = squiggles
+            .iter()
+            .rev()
+            .find(|s| s.range.start <= a && s.range.end >= b);
+        if set.is_empty() && squiggle.is_none() {
+            continue;
+        }
+        let mut run = Paint::new(a, b);
+        let mut color = look.color;
+        if has(mark::BOLD).is_some() {
+            run.weight = Some(look.style.weight.max(700.));
+        }
+        if has(mark::ITALIC).is_some() {
+            run.italic = true;
+        }
+        if has(mark::INLINE_CODE).is_some() {
+            run.mono = true;
+            run.bg = Some(t.panel);
         }
         if let Some(c) = has(mark::TEXT_COLOR)
             .and_then(|m| m.param.as_deref())
             .and_then(css_color)
         {
-            run.color = c;
+            color = c;
+            run.color = Some(c);
         }
         if let Some(c) = has(mark::BACKGROUND_COLOR)
             .and_then(|m| m.param.as_deref())
             .and_then(css_color)
         {
-            run.background_color = Some(c);
+            run.bg = Some(c);
         }
         if has(mark::UNDERLINE).is_some() {
-            run.underline = Some(UnderlineStyle {
-                thickness: px(1.),
-                color: Some(run.color),
-                wavy: false,
-            });
-        }
-        if has(mark::STRIKETHROUGH).is_some() {
-            run.strikethrough = Some(StrikethroughStyle {
-                thickness: px(1.),
-                color: Some(run.color),
-            });
+            run.underline = Some(color);
         }
         if has(mark::LINK).is_some() {
-            run.color = theme::accent();
-            run.underline = Some(UnderlineStyle {
-                thickness: px(1.),
-                color: Some(theme::accent()),
-                wavy: false,
-            });
+            run.color = Some(t.accent);
+            run.underline = Some(t.accent);
         }
         if has(mark::MENTION).is_some() {
-            run.color = theme::accent();
-            // CSS: dotted underline, 3px offset - a faint thin line is the nearest GPUI underline.
-            run.underline = Some(UnderlineStyle {
-                thickness: px(1.),
-                color: Some(theme::accent().opacity(0.6)),
-                wavy: false,
-            });
+            run.color = Some(t.accent);
+            // CSS: dotted underline, 3px offset - a faint thin line.
+            run.underline = Some(t.accent.alpha(0.6));
         }
-        if let Some(s) = squiggles
-            .iter()
-            .rev()
-            .find(|s| s.range.start <= a && s.range.end >= b)
-        {
-            run.underline = Some(UnderlineStyle {
-                thickness: s.thickness,
-                color: Some(s.color),
-                wavy: s.wavy,
-            });
+        if let Some(s) = squiggle {
+            run.underline = Some(s.color);
         }
         out.push(run);
     }
@@ -210,12 +157,12 @@ pub fn runs(text: &str, spans: &[Span], look: &Look, squiggles: &[Squiggle]) -> 
 }
 
 /// A CSS colour as the web stores it (`#hex`, `rgb()/rgba()`, a few names).
-pub fn css_color(raw: &str) -> Option<Hsla> {
+pub fn css_color(raw: &str) -> Option<Color> {
     let s = raw.trim();
     if s.is_empty() {
         return None;
     }
-    if let Some(c) = roostr_core::color::hex(s) {
+    if let Some(c) = roostr_ui::color::hex(s) {
         return Some(c);
     }
     let lower = s.to_ascii_lowercase();
@@ -231,19 +178,15 @@ pub fn css_color(raw: &str) -> Option<Hsla> {
             .collect();
         if parts.len() >= 3 {
             let a = parts.get(3).copied().unwrap_or(1.);
-            return Some(
-                Rgba {
-                    r: parts[0] / 255.,
-                    g: parts[1] / 255.,
-                    b: parts[2] / 255.,
-                    a,
-                }
-                .into(),
-            );
+            let byte = |v: f32| v.clamp(0., 255.) as u32;
+            let alpha = (a.clamp(0., 1.) * 255.).round() as u32;
+            return Some(roostr_ui::color::rgba(
+                (byte(parts[0]) << 24) | (byte(parts[1]) << 16) | (byte(parts[2]) << 8) | alpha,
+            ));
         }
         return None;
     }
-    let named = match lower.as_str() {
+    let named: u32 = match lower.as_str() {
         "red" => 0xff0000,
         "green" => 0x008000,
         "blue" => 0x0000ff,
@@ -256,5 +199,5 @@ pub fn css_color(raw: &str) -> Option<Hsla> {
         "black" => 0x000000,
         _ => return None,
     };
-    Some(rgb(named).into())
+    Some(roostr_ui::color::rgb(named))
 }

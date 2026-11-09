@@ -4,8 +4,8 @@
 
 use std::collections::{BTreeSet, HashSet};
 
-use gpui_kit::{App, Task};
-use roostr_core::{AgentEndpoint, Fields, Object, QueryRow, Store, guest_agents};
+use roostr_core::{AgentEndpoint, Fields, Object, QueryRow, State, Store, guest_agents};
+use roostr_rt::Task;
 use serde_json::json;
 
 use crate::chat::{DISCUSSION, mailbox_entries};
@@ -197,7 +197,7 @@ pub(crate) fn endpoint_name(store: &Store, endpoint: &AgentEndpoint) -> String {
 /// `loadObjectAgents`: the agents of the object's space, as @-options.
 pub(crate) fn load_object_agents(
     object: &Object,
-    cx: &mut App,
+    s: &State,
 ) -> Task<anyhow::Result<Vec<ObjectAgentOption>>> {
     let space_id = if object.type_key == "channel" {
         object.id.clone()
@@ -206,7 +206,7 @@ pub(crate) fn load_object_agents(
     };
     let rows = roostr_core::api::query_all(
         json!({ "type": "agent", "filters": [{ "key": "channel", "condition": "equal", "value": space_id }] }),
-        cx,
+        s,
     );
     let (object_id, type_key, fields, object_name) = (
         object.id.clone(),
@@ -214,16 +214,14 @@ pub(crate) fn load_object_agents(
         object.fields.clone(),
         object.name().to_string(),
     );
-    cx.spawn(async move |cx| {
+    s.rt.spawn(async move |cx| {
         let rows = rows.await?;
-        Ok(cx.update(|cx| {
-            let store = Store::global(cx);
-            let store = store.read(cx);
+        Ok(cx.read(|s| {
             object_agent_options(&object_id, &type_key, &fields, &rows, |id| {
                 if id == object_id {
                     object_name.clone()
                 } else {
-                    name_of(store, id)
+                    name_of(&s.store, id)
                 }
             })
         }))

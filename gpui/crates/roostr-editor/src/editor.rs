@@ -2,23 +2,33 @@
 //! the ordered write lane, undo, debounced saves and reconciling remote
 //! changes. Keyboard and input live in `keys.rs`, block operations and menus
 //! in `ops.rs`, drawing in `render.rs`.
+//!
+//! Every open body is an [`Editor`] in the [`Editors`] slot, keyed by object
+//! id. Code that changes one takes it out of the slot for the call
+//! ([`with_editor`]), so its methods keep `&mut self` beside `&mut State`;
+//! async work re-enters the same way and finds nothing once the editor closed
+//! (GPUI's "entity gone").
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::rc::Rc;
 use std::time::Duration;
 
 use anyhow::Result;
-use gpui_kit::*;
 use roostr_core::types::{Block, BlockContent, Object, TextContent, Value, pos, style};
-use roostr_core::{JsonMap, Store, StoreEvent, api};
+use roostr_core::{Cx, JsonMap, State, StoreEvent, api};
+use roostr_rt::Task;
+use rune::TextEdit;
 
-use crate::block_menu::BlockMenu;
+use crate::block_menu::BlockMenuState;
 use crate::codelint::LintProblem;
 use crate::doc::{self, History, Op, Place};
-use crate::link_picker::{LinkPicker, LinkPrompt};
+use crate::file_block::FileBlock;
+use crate::link_picker::{LinkPickerState, LinkPromptState};
 use crate::marks::{self, Span};
-use crate::text::{Layouts, TextState};
+use crate::text::TextState;
 use crate::write_queue::WriteQueue;
+
+/// How long typing waits before it saves.
+pub(crate) const SAVE_DEBOUNCE: Duration = Duration::from_millis(600);
 
 /// Keys that reshape the tree, queued while an async structural op runs.
 #[derive(Clone, Copy, Debug)]
@@ -27,93 +37,69 @@ pub(crate) enum StructuralKey {
     Tab { shift: bool },
 }
 
-/// Rubber-band selection in progress (Anytype selection/provider.tsx).
+/// Rubber-band selection in progress (Anytype selection/provider.tsx), in window points.
+#[derive(Clone, Debug)]
 pub(crate) struct DragSel {
-    /// Anchor in window coordinates (the page scrolls under it; see `scroll_y`).
-    pub anchor: Point<Pixels>,
+    pub anchor: (f32, f32),
     pub base: Vec<String>,
     pub mode: SelMode,
     pub moved: bool,
-    /// Started inside a text: the native text drag owns it until it crosses into a second block.
-    pub text_origin: bool,
     /// Started on the page background (a plain click there is a background click).
     pub background: bool,
-    pub last: Point<Pixels>,
-    /// Editor top at arm time, so the anchor follows the page when it scrolls.
-    pub editor_top: Pixels,
+    pub last: (f32, f32),
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SelMode {
     Replace,
     Toggle,
     Remove,
 }
 
-/// A row lifted by a long press (Editor.svelte touchDrag): its floating
-/// copy rides the finger above the page, the finger drives the same
-/// targeting as the mouse, and the release commits.
-pub(crate) struct TouchLift {
-    pub label: SharedString,
-    /// The row's bounds when it was picked up.
-    pub row: Bounds<Pixels>,
-    /// The x the finger picked it up at.
-    pub x0: Pixels,
-    /// The finger.
-    pub at: Point<Pixels>,
-}
-
 /// The marks toolbar over a text selection.
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Toolbar {
     pub block: String,
     pub from: usize,
     pub to: usize,
-    pub x: Pixels,
-    pub y: Pixels,
 }
 
-/// Slash menu: block, byte offset of the "/", live filter, anchor, and the
-/// kit command list (created on first render; it owns the highlight).
-#[derive(Clone)]
+/// Slash menu: block, byte offset of the "/", live filter and the highlighted row.
+#[derive(Clone, Debug)]
 pub(crate) struct Slash {
     pub block: String,
     pub start: usize,
     pub filter: String,
-    pub pos: Option<Point<Pixels>>,
-    pub cmd: Option<Entity<gpui_kit::component::command::CommandState>>,
+    /// Index into the flat list of entries the filter leaves.
+    pub selected: usize,
 }
 
 /// "Paste as" menu (Anytype editor/page.tsx onPasteUrl).
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub(crate) struct PasteMenu {
     pub block: String,
     pub url: String,
     pub processor: Option<crate::embed::Processor>,
-    pub pos: Point<Pixels>,
     pub at: usize,
-    /// The kit menu showing the choices (built on first render).
-    pub popup: Option<Entity<gpui_kit::component::menu::PopupMenu>>,
 }
 
-/// Spelling suggestions for the word under a right-click.
-#[derive(Clone)]
+/// Spelling suggestions for a misspelled word.
+#[derive(Clone, Debug)]
 pub(crate) struct SpellMenu {
     pub block: String,
     pub word: String,
     pub from: usize,
     pub to: usize,
-    pub pos: Point<Pixels>,
     pub options: Vec<String>,
-    /// The kit menu showing the suggestions (built on first render).
-    pub popup: Option<Entity<gpui_kit::component::menu::PopupMenu>>,
 }
 
+/// The block action menu, open on `block` (and the multi-selection it was opened in).
 pub(crate) struct OpenBlockMenu {
     pub block: String,
     pub group: Option<Vec<String>>,
-    pub menu: Entity<BlockMenu>,
-    pub _sub: Subscription,
+    /// Window point it opened at.
+    pub at: (f32, f32),
+    pub menu: BlockMenuState,
 }
 
 /// A drop target resolved for the pointer (Anytype hoverData).
@@ -128,39 +114,44 @@ pub(crate) struct DropHint {
 #[derive(Clone, Debug)]
 pub(crate) struct DropRect {
     pub id: String,
-    pub bounds: Bounds<Pixels>,
+    pub bounds: [f32; 4],
     pub inner: bool,
     pub bot: bool,
     pub doc_end: bool,
 }
 
-/// Geometry of a block row on the last frame.
+/// Geometry of a block row as last laid out, in window points `[x, y, w, h]`.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct RowGeom {
-    pub bounds: Bounds<Pixels>,
-    /// Content starts after the 48px gutter.
+    pub bounds: [f32; 4],
+    /// Content starts after the gutter.
     pub gutter: bool,
 }
 
-pub(crate) type Rows = Rc<std::cell::RefCell<HashMap<String, RowGeom>>>;
+/// Every open body editor, by object id, and the file pages.
+#[derive(Default)]
+pub struct Editors {
+    pub(crate) map: HashMap<String, Editor>,
+    /// What a field's accessor hands Rune for a block that is gone (never shown).
+    pub(crate) scratch: TextEdit,
+}
 
 /// The block editor for an object's body (`Editor.svelte`).
 pub struct Editor {
     pub(crate) object_id: String,
     pub(crate) read_only: bool,
-    pub(crate) focus_handle: FocusHandle,
     /// Fields and metadata of the object (blocks live in `blocks`).
     pub(crate) object: Option<Object>,
     pub(crate) blocks: Vec<Block>,
-    pub(crate) load_error: Option<SharedString>,
+    pub(crate) load_error: Option<String>,
     /// The live text of every text block (the web's contenteditable DOM).
     pub(crate) texts: HashMap<String, TextState>,
     /// The block holding the caret.
     pub(crate) active: Option<String>,
-    pub(crate) has_focus: bool,
-    pub(crate) focus_pending: bool,
     /// Caret to place once the block exists (the web's focusRequest).
     pub(crate) focus_request: Option<(String, usize)>,
+    /// The editor itself (not a text) should take the keyboard: a block selection.
+    pub(crate) focus_self: bool,
     pub(crate) history: History,
     pub(crate) writes: WriteQueue,
     /// Blocks with unsaved user input. Saves fire only for these.
@@ -172,20 +163,17 @@ pub struct Editor {
     pub(crate) selected: Vec<String>,
     pub(crate) last_focused: String,
     pub(crate) drag_sel: Option<DragSel>,
-    pub(crate) sel_rect: Option<Bounds<Pixels>>,
-    pub(crate) autoscroll: Option<Task<()>>,
-    /// Text drag-selection inside one block: (block, moved).
-    pub(crate) text_drag: Option<(String, bool)>,
-    /// The text block whose link or mention is under the pointer (a pointing hand).
-    pub(crate) link_hover: Option<String>,
+    pub(crate) sel_rect: Option<[f32; 4]>,
     // Popups.
     pub(crate) toolbar: Option<Toolbar>,
+    /// The selection the toolbar was dismissed for (Escape): it stays away until it changes.
+    pub(crate) toolbar_dismissed: Option<Toolbar>,
     pub(crate) slash: Option<Slash>,
     pub(crate) block_menu: Option<OpenBlockMenu>,
-    pub(crate) link_picker: Option<(String, Entity<LinkPicker>, Point<Pixels>, Subscription)>,
-    pub(crate) link_prompt: Option<(Toolbar, Entity<LinkPrompt>, Subscription)>,
-    pub(crate) property_suggest: Option<(String, AnyView, Point<Pixels>, Subscription)>,
-    pub(crate) turn_into: Option<(Toolbar, AnyView, Subscription)>,
+    pub(crate) link_picker: Option<LinkPickerState>,
+    pub(crate) link_prompt: Option<LinkPromptState>,
+    pub(crate) property_suggest: Option<PropertySuggestOpen>,
+    pub(crate) turn_into: Option<TurnIntoOpen>,
     pub(crate) paste_menu: Option<PasteMenu>,
     pub(crate) spell_menu: Option<SpellMenu>,
     pub(crate) file_notice: String,
@@ -194,111 +182,140 @@ pub struct Editor {
     pub(crate) drop_hint: Option<DropHint>,
     pub(crate) last_valid_drop: Option<DropHint>,
     pub(crate) drag_rects: Vec<DropRect>,
-    pub(crate) drag_point: Point<Pixels>,
-    pub(crate) drag_scroll: Option<Task<()>>,
-    /// The paths of an OS file drag over the editor. The drop is taken from
-    /// the window's mouse-up rather than `on_drop`: GPUI's drop needs the
-    /// hitbox hovered, which it denies after keyboard input, and a Finder
-    /// drag sends no mouse moves to reset that.
-    pub(crate) file_drag: Option<Vec<std::path::PathBuf>>,
-    /// The row lifted by a touch hold, while the finger holds it.
-    pub(crate) touch_lift: Option<TouchLift>,
-    /// The viewport is ≤720px wide (BlockNode.svelte / Editor.svelte
-    /// `@media (max-width: 720px)`), as of the last frame.
+    pub(crate) drag_point: (f32, f32),
+    /// The handle was dragged, not clicked (its release must not open the block menu).
+    pub(crate) handle_dragged: bool,
+    /// An OS file drag is over the editor.
+    pub(crate) file_drag: bool,
+    /// The viewport is ≤720pt wide (BlockNode.svelte `@media (max-width: 720px)`).
     pub(crate) narrow: bool,
-    // Geometry of the last frame.
-    pub(crate) layouts: Layouts,
-    pub(crate) rows: Rows,
-    pub(crate) bot_strips: Rows,
-    pub(crate) bounds: Rc<std::cell::Cell<Bounds<Pixels>>>,
-    /// The part of the editor its scrolling ancestor shows (the paint mask):
-    /// edge autoscroll aims its wheel events here, like scrolling the
-    /// nearest overflow ancestor directly.
-    pub(crate) visible: Rc<std::cell::Cell<Bounds<Pixels>>>,
-    /// Each root block's height as last drawn: long pages build only the
+    // Geometry of the last layout.
+    pub(crate) rows: HashMap<String, RowGeom>,
+    pub(crate) bot_strips: HashMap<String, RowGeom>,
+    /// The editor's own rect, in window points.
+    pub(crate) bounds: [f32; 4],
+    /// The editor's top with its page scrolled to the top (window points): with `bounds`
+    /// it says how far the page is scrolled.
+    pub(crate) unscrolled_top: f32,
+    /// The window's height.
+    pub(crate) window_h: f32,
+    /// Each root block's height as last laid out: long pages build only the
     /// blocks in and near the window, and these size the space for the rest.
-    pub(crate) block_heights: Rc<std::cell::RefCell<HashMap<String, f32>>>,
+    pub(crate) block_heights: HashMap<String, f32>,
     /// Embed stills and titles by URL (`None` while the fetch runs).
-    pub(crate) posters: std::cell::RefCell<HashMap<String, Option<crate::embed::Poster>>>,
+    pub(crate) posters: HashMap<String, Option<crate::embed::Poster>>,
     // Spellcheck and Tool code lint.
     pub(crate) misspelled: HashMap<String, Vec<std::ops::Range<usize>>>,
     pub(crate) spell_task: Option<Task<()>>,
     pub(crate) lint: HashMap<String, Vec<LintProblem>>,
     pub(crate) lint_task: Option<Task<()>>,
     pub(crate) lint_run: u64,
-    // Caret blink.
-    pub(crate) caret_on: bool,
-    pub(crate) blink: Option<Task<()>>,
     /// Code blocks whose "Copy" just ran (label shows "Copied").
     pub(crate) copied: HashSet<String>,
-    pub(crate) file_views: HashMap<String, Entity<crate::file_block::FileBlock>>,
+    pub(crate) file_blocks: HashMap<String, FileBlock>,
     /// The object's present, non-hidden properties for the slash menu: (key, name, format).
     pub(crate) present_relations: Vec<(String, String, String)>,
     refresh_pending: bool,
     refresh_again: bool,
-    _subscriptions: Vec<Subscription>,
+}
+
+/// The "New property" picker the slash menu opened on `block`.
+pub(crate) struct PropertySuggestOpen {
+    pub block: String,
+    /// Window point it opened at.
+    pub at: (f32, f32),
+    pub state: roostr_properties::PropertySuggestState,
+}
+
+/// The "Turn into object" type picker over a selection.
+pub(crate) struct TurnIntoOpen {
+    pub at: Toolbar,
+    /// Window point under the selection.
+    pub pos: (f32, f32),
+    pub state: roostr_properties::TypeSuggestState,
+}
+
+/// Run `f` on the open editor of `object_id` (taken out of its slot for the call).
+pub(crate) fn with_editor<R>(
+    s: &mut State,
+    object_id: &str,
+    f: impl FnOnce(&mut Editor, &mut State) -> R,
+) -> Option<R> {
+    let mut editor = s.slot::<Editors>().map.remove(object_id)?;
+    let out = f(&mut editor, s);
+    s.slot::<Editors>()
+        .map
+        .insert(object_id.to_string(), editor);
+    Some(out)
+}
+
+/// [`with_editor`] from async code; `None` once the editor closed.
+pub(crate) fn update_editor<R>(
+    cx: &Cx,
+    object_id: &str,
+    f: impl FnOnce(&mut Editor, &mut State) -> R,
+) -> Option<R> {
+    cx.update(|s| with_editor(s, object_id, f))
+}
+
+/// The open editor of `object_id`, read-only.
+pub(crate) fn editor<'a>(s: &'a State, object_id: &str) -> Option<&'a Editor> {
+    s.get::<Editors>()?.map.get(object_id)
+}
+
+/// The `TextEdit` Rune edits for block `block` of `object_id`'s editor.
+pub(crate) fn edit_of<'a>(s: &'a mut State, object_id: &str, block: &str) -> &'a mut TextEdit {
+    let editors = s.slot::<Editors>();
+    let present = editors
+        .map
+        .get(object_id)
+        .is_some_and(|e| e.texts.contains_key(block));
+    if present {
+        &mut editors
+            .map
+            .get_mut(object_id)
+            .and_then(|e| e.texts.get_mut(block))
+            .expect("checked above")
+            .edit
+    } else {
+        editors.scratch = TextEdit::new("");
+        &mut editors.scratch
+    }
+}
+
+/// `StoreEvent`s: a commit to an open body (or a reconnect) re-reads it once its writes settle.
+pub(crate) fn on_store(s: &mut State, event: &StoreEvent) {
+    let ids: Vec<String> = match event {
+        StoreEvent::Committed(id) => s
+            .get::<Editors>()
+            .filter(|e| e.map.contains_key(id))
+            .map(|_| vec![id.clone()])
+            .unwrap_or_default(),
+        StoreEvent::Reconnected => s
+            .get::<Editors>()
+            .map(|e| e.map.keys().cloned().collect())
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    };
+    for id in ids {
+        with_editor(s, &id, |e, s| e.refresh_when_settled(s));
+    }
 }
 
 impl Editor {
     /// The editor for `object_id`'s body. `read_only` shows the body and never edits it.
-    pub fn new(
-        object_id: String,
-        read_only: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Self {
-        let focus_handle = cx.focus_handle();
-        let store = Store::global(cx);
-        let mut subs =
-            vec![cx.subscribe(
-                &store,
-                |this: &mut Self, _, event: &StoreEvent, cx| match event {
-                    StoreEvent::Committed(id) if *id == this.object_id => {
-                        this.refresh_when_settled(cx)
-                    }
-                    StoreEvent::Reconnected => this.refresh_when_settled(cx),
-                    _ => {}
-                },
-            )];
-        // Re-render when summaries/relations/types change (link rows, relation blocks, menus).
-        subs.push(cx.observe(&store, |_, _, cx| cx.notify()));
-        subs.push(cx.on_focus(&focus_handle, window, |this, _, cx| {
-            this.has_focus = true;
-            this.restart_blink(cx);
-            cx.notify();
-        }));
-        subs.push(cx.on_blur(&focus_handle, window, |this, _, cx| {
-            this.has_focus = false;
-            if let Some(id) = this.active.clone() {
-                this.flush_save(&id, cx);
-            }
-            this.toolbar = None;
-            this.sync_texts();
-            cx.notify();
-        }));
-        // Save typing when the editor goes away (the web's pagehide / unmount flush).
-        subs.push(cx.on_release(|this, cx| {
-            let ids: Vec<String> = this.dirty.iter().cloned().collect();
-            for id in ids {
-                if let Some(content) = this.unsaved_content(&id) {
-                    let oid = this.object_id.clone();
-                    api::note::block_update(&oid, &id, &content, cx).detach_and_log_err(cx);
-                }
-            }
-        }));
-        let writes = WriteQueue::new(cx);
-        let mut editor = Self {
+    pub(crate) fn new(object_id: String, read_only: bool, s: &mut State) -> Self {
+        let writes = WriteQueue::new(s);
+        let editor = Self {
             object_id,
             read_only,
-            focus_handle,
             object: None,
             blocks: Vec::new(),
             load_error: None,
             texts: HashMap::new(),
             active: None,
-            has_focus: false,
-            focus_pending: false,
             focus_request: None,
+            focus_self: false,
             history: History::default(),
             writes,
             dirty: HashSet::new(),
@@ -309,10 +326,8 @@ impl Editor {
             last_focused: String::new(),
             drag_sel: None,
             sel_rect: None,
-            autoscroll: None,
-            text_drag: None,
-            link_hover: None,
             toolbar: None,
+            toolbar_dismissed: None,
             slash: None,
             block_menu: None,
             link_picker: None,
@@ -326,41 +341,48 @@ impl Editor {
             drop_hint: None,
             last_valid_drop: None,
             drag_rects: Vec::new(),
-            drag_point: Point::default(),
-            drag_scroll: None,
-            file_drag: None,
-            touch_lift: None,
+            drag_point: (0., 0.),
+            handle_dragged: false,
+            file_drag: false,
             narrow: false,
-            layouts: Layouts::default(),
-            rows: Rows::default(),
-            bot_strips: Rows::default(),
-            bounds: Rc::new(std::cell::Cell::new(Bounds::default())),
-            visible: Rc::new(std::cell::Cell::new(Bounds::default())),
-            block_heights: Rc::new(std::cell::RefCell::new(HashMap::new())),
-            posters: Default::default(),
+            rows: HashMap::new(),
+            bot_strips: HashMap::new(),
+            bounds: [0.; 4],
+            unscrolled_top: 0.,
+            window_h: 900.,
+            block_heights: HashMap::new(),
+            posters: HashMap::new(),
             misspelled: HashMap::new(),
             spell_task: None,
             lint: HashMap::new(),
             lint_task: None,
             lint_run: 0,
-            caret_on: true,
-            blink: None,
             copied: HashSet::new(),
-            file_views: HashMap::new(),
+            file_blocks: HashMap::new(),
             present_relations: Vec::new(),
             refresh_pending: false,
             refresh_again: false,
-            _subscriptions: subs,
         };
-        editor.load(cx);
-        crate::spellcheck::ensure_loaded(cx);
+        editor.load(s);
+        crate::spellcheck::ensure_loaded(s);
         editor
+    }
+
+    /// The editor is going away: save typing (the web's pagehide / unmount
+    /// flush); the writes already queued still land.
+    pub(crate) fn close(self, s: &mut State) {
+        for id in &self.dirty {
+            if let Some(content) = self.unsaved_content(id) {
+                api::note::block_update(&self.object_id, id, &content, s).detach_and_log_err(&s.rt);
+            }
+        }
+        self.writes.finish();
     }
 
     /// Put the caret at the start of the body (Enter in the title): into the
     /// first line when it is an empty text line, else into a fresh empty
     /// line added above whatever comes first (nothing existing is edited).
-    pub fn focus_start(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn focus_start(&mut self, s: &mut State) {
         if self.read_only {
             return;
         }
@@ -372,8 +394,7 @@ impl Editor {
             && t.style != style::TITLE
             && t.style != style::CODE
         {
-            self.focus_block(&first.id, 0, cx);
-            window.focus(&self.focus_handle, cx);
+            self.focus_block(&first.id, 0, s);
             return;
         }
         let id = new_id();
@@ -382,27 +403,26 @@ impl Editor {
             Some(f) => (f.id.clone(), pos::TOP),
             None => (String::new(), pos::BOTTOM),
         };
-        let add = self.w_block_add(block, &target, position, cx);
+        let add = self.w_block_add(block, &target, position, s);
         self.focus_request = Some((id, 0));
-        cx.spawn(async move |this, cx| {
+        let oid = self.object_id.clone();
+        s.rt.spawn(async move |cx| {
             let _ = add.await;
-            let _ = this.update(cx, |this, cx| this.refresh(cx).detach());
+            update_editor(&cx, &oid, |e, s| e.refresh(s).detach());
         })
         .detach();
     }
 
     // ───────────────────────────────────────────── data
 
-    fn load(&mut self, cx: &mut Context<Self>) {
-        let fetch = Store::global(cx).read(cx).fetch_object(&self.object_id, cx);
-        cx.spawn(async move |this, cx| {
+    fn load(&self, s: &mut State) {
+        let fetch = s.store.fetch_object(&self.object_id);
+        let oid = self.object_id.clone();
+        s.rt.spawn(async move |cx| {
             let result = fetch.await;
-            let _ = this.update(cx, |this, cx| {
-                match result {
-                    Ok(object) => this.adopt(object, cx),
-                    Err(error) => this.load_error = Some(error.to_string().into()),
-                }
-                cx.notify();
+            update_editor(&cx, &oid, |e, s| match result {
+                Ok(object) => e.adopt(object, s),
+                Err(error) => e.load_error = Some(error.to_string()),
             });
         })
         .detach();
@@ -410,7 +430,7 @@ impl Editor {
 
     /// Fold a fresh copy of the object into the one on screen (reconcile.ts):
     /// blocks are replaced, but the focused block keeps its live text.
-    pub(crate) fn adopt(&mut self, fresh: Object, cx: &mut Context<Self>) {
+    pub(crate) fn adopt(&mut self, fresh: Object, s: &mut State) {
         if fresh.id != self.object_id {
             return;
         }
@@ -428,59 +448,65 @@ impl Editor {
         }
         self.selected
             .retain(|id| self.blocks.iter().any(|b| b.id == *id));
-        self.schedule_spell(cx);
-        self.schedule_lint(cx);
-        cx.notify();
+        self.update_present_relations(s);
+        self.sync_file_blocks(s);
+        self.ensure_posters(s);
+        self.schedule_spell(s);
+        self.schedule_lint(s);
+    }
+
+    /// The block whose text has the keyboard right now.
+    pub(crate) fn editing(&self) -> Option<&str> {
+        self.active
+            .as_deref()
+            .filter(|id| self.texts.get(*id).is_some_and(TextState::focused))
     }
 
     /// Bring every text's live state in line with the block list
-    /// ([`sync_live_texts`]); the block holding the caret, while the editor
-    /// has focus, is the one being edited.
+    /// ([`sync_live_texts`]); the block holding the caret, while it has the
+    /// keyboard, is the one being edited.
     pub(crate) fn sync_texts(&mut self) {
-        let editing = if self.has_focus {
-            self.active.as_deref()
-        } else {
-            None
-        };
-        sync_live_texts(&self.blocks, &mut self.texts, editing);
+        let editing = self.editing().map(str::to_string);
+        sync_live_texts(&self.blocks, &mut self.texts, editing.as_deref());
     }
 
     /// One more read of the object once typing has saved and writes landed
     /// (`refreshWhenSettled`): deferred, never dropped, bursts collapse.
-    pub(crate) fn refresh_when_settled(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn refresh_when_settled(&mut self, s: &mut State) {
         if self.refresh_pending {
             self.refresh_again = true;
             return;
         }
         self.refresh_pending = true;
-        cx.spawn(async move |this, cx| {
+        let oid = self.object_id.clone();
+        s.rt.spawn(async move |cx| {
             loop {
-                let _ = this.update(cx, |this, _| this.refresh_again = false);
+                if update_editor(&cx, &oid, |e, _| e.refresh_again = false).is_none() {
+                    return;
+                }
                 // settled(): no typing waiting to save and every write landed.
                 loop {
-                    let Ok(idle) = this.update(cx, |this, cx| this.writes.idle(cx)) else {
+                    let Some(idle) = update_editor(&cx, &oid, |e, s| e.writes.idle(s)) else {
                         return;
                     };
                     idle.await;
-                    let Ok(dirty) = this.update(cx, |this, _| !this.dirty.is_empty()) else {
+                    let Some(dirty) = update_editor(&cx, &oid, |e, _| !e.dirty.is_empty()) else {
                         return;
                     };
                     if !dirty {
                         break;
                     }
-                    cx.background_executor()
-                        .timer(Duration::from_millis(150))
-                        .await;
+                    cx.timer(Duration::from_millis(150)).await;
                 }
-                let Ok(raced) = this.update(cx, |this, cx| this.read_unless_raced(cx)) else {
+                let Some(raced) = update_editor(&cx, &oid, |e, s| e.read_unless_raced(s)) else {
                     return;
                 };
                 let ok = raced.await;
-                let Ok(again) = this.update(cx, |this, _| {
+                let Some(again) = update_editor(&cx, &oid, |e, _| {
                     if !ok {
-                        this.refresh_again = true;
+                        e.refresh_again = true;
                     }
-                    this.refresh_again
+                    e.refresh_again
                 }) else {
                     return;
                 };
@@ -488,7 +514,7 @@ impl Editor {
                     break;
                 }
             }
-            let _ = this.update(cx, |this, _| this.refresh_pending = false);
+            update_editor(&cx, &oid, |e, _| e.refresh_pending = false);
         })
         .detach();
     }
@@ -500,16 +526,17 @@ impl Editor {
     }
 
     /// Re-read the object; false when the read raced a newer local edit and was dropped.
-    fn read_unless_raced(&mut self, cx: &mut Context<Self>) -> Task<bool> {
+    fn read_unless_raced(&mut self, s: &mut State) -> Task<bool> {
         let mark = self.write_mark();
-        let fetch = Store::global(cx).read(cx).fetch_object(&self.object_id, cx);
-        cx.spawn(async move |this, cx| {
+        let fetch = s.store.fetch_object(&self.object_id);
+        let oid = self.object_id.clone();
+        s.rt.spawn(async move |cx| {
             let Ok(fresh) = fetch.await else { return true };
-            this.update(cx, |this, cx| {
-                if this.write_mark() != mark {
+            update_editor(&cx, &oid, |e, s| {
+                if e.write_mark() != mark {
                     return false;
                 }
-                this.adopt(fresh, cx);
+                e.adopt(fresh, s);
                 true
             })
             .unwrap_or(true)
@@ -518,20 +545,20 @@ impl Editor {
 
     /// Persist every pending edit, wait for the writes, re-read server state,
     /// then honor a pending caret request (`refresh`).
-    pub(crate) fn refresh(&mut self, cx: &mut Context<Self>) -> Task<()> {
-        self.flush_all(cx);
-        let idle = self.writes.idle(cx);
-        cx.spawn(async move |this, cx| {
+    pub(crate) fn refresh(&mut self, s: &mut State) -> Task<()> {
+        self.flush_all(s);
+        let idle = self.writes.idle(s);
+        let oid = self.object_id.clone();
+        s.rt.spawn(async move |cx| {
             idle.await;
-            let Ok(read) = this.update(cx, |this, cx| this.read_unless_raced(cx)) else {
+            let Some(read) = update_editor(&cx, &oid, |e, s| e.read_unless_raced(s)) else {
                 return;
             };
             read.await;
-            let _ = this.update(cx, |this, cx| {
-                if let Some((id, offset)) = this.focus_request.take() {
-                    this.focus_block(&id, offset, cx);
+            update_editor(&cx, &oid, |e, s| {
+                if let Some((id, offset)) = e.focus_request.take() {
+                    e.focus_block(&id, offset, s);
                 }
-                cx.notify();
             });
         })
     }
@@ -643,7 +670,7 @@ impl Editor {
     /// The live text and marks of a block (`fromDom`).
     pub(crate) fn live(&self, id: &str) -> (String, Vec<Span>) {
         match self.texts.get(id) {
-            Some(t) => (t.text.clone(), t.spans.clone()),
+            Some(t) => (t.text().to_string(), t.spans.clone()),
             None => match self.text_of(id) {
                 Some(t) => (
                     t.text.clone(),
@@ -684,61 +711,84 @@ impl Editor {
             .unwrap_or_default()
     }
 
-    pub(crate) fn space_id(&self, cx: &App) -> String {
-        roostr_core::relations::object_space_id(Store::global(cx).read(cx), &self.object_fields())
+    pub(crate) fn space_id(&self, s: &State) -> String {
+        roostr_core::relations::object_space_id(&s.store, &self.object_fields())
+    }
+
+    /// The object's present, non-hidden properties (the slash menu lists them).
+    pub(crate) fn update_present_relations(&mut self, s: &State) {
+        let fields = self.object_fields();
+        let space = roostr_core::relations::object_space_id(&s.store, &fields);
+        self.present_relations =
+            roostr_core::relations::space_relations(&s.store.relations, &space)
+                .into_iter()
+                .filter(|r| {
+                    !r.hidden
+                        && !roostr_core::relations::is_reserved_key(&r.key)
+                        && fields.contains_key(&r.key)
+                })
+                .map(|r| (r.key.clone(), r.name.clone(), r.format.clone()))
+                .collect();
     }
 
     // ───────────────────────────────────────────── commit & undo
 
     /// One user action: apply its ops now, remember how to undo it, persist
     /// the same ops in order. A failed write re-reads server truth.
-    pub(crate) fn commit(&mut self, ops: Vec<Op>, record: bool, cx: &mut Context<Self>) -> Vec<Op> {
+    pub(crate) fn commit(&mut self, ops: Vec<Op>, record: bool, s: &mut State) -> Vec<Op> {
         let inverse = doc::apply_all(&mut self.blocks, &ops);
         if record {
             self.history.record(inverse.clone());
         }
         for op in ops {
-            let write = self.op_write(op, cx);
-            cx.spawn(async move |this, cx| {
-                if let Err(error) = write.await {
-                    log::error!("[editor] write failed, restoring server state: {error:#}");
-                    let _ = this.update(cx, |this, cx| this.refresh(cx).detach());
-                }
-            })
-            .detach();
+            self.persist(op, s);
         }
         self.sync_texts();
-        self.schedule_spell(cx);
-        self.schedule_lint(cx);
-        cx.notify();
+        self.sync_file_blocks(s);
+        self.ensure_posters(s);
+        self.schedule_spell(s);
+        self.schedule_lint(s);
         inverse
     }
 
+    /// Write `op` in the lane; on failure re-read what the server has.
+    fn persist(&mut self, op: Op, s: &mut State) {
+        let write = self.op_write(op, s);
+        let oid = self.object_id.clone();
+        s.rt.spawn(async move |cx| {
+            if let Err(error) = write.await {
+                log::error!("[editor] write failed, restoring server state: {error:#}");
+                update_editor(&cx, &oid, |e, s| e.refresh(s).detach());
+            }
+        })
+        .detach();
+    }
+
     /// Persist `op` through the write queue (`opWrite`).
-    fn op_write(&self, op: Op, cx: &mut Context<Self>) -> Task<Result<JsonMap>> {
+    fn op_write(&self, op: Op, s: &mut State) -> Task<Result<JsonMap>> {
         match op {
-            Op::Content { id, content } => self.w_block_update(&id, content, cx),
+            Op::Content { id, content } => self.w_block_update(&id, content, s),
             Op::Insert { block, at } => {
                 if at.target.is_empty() {
-                    self.w_block_add(block, "", pos::NONE, cx)
+                    self.w_block_add(block, "", pos::NONE, s)
                 } else {
-                    self.w_block_add(block, &at.target, at.position, cx)
+                    self.w_block_add(block, &at.target, at.position, s)
                 }
             }
-            Op::Remove { id } => self.w_block_remove(&id, cx),
+            Op::Remove { id } => self.w_block_remove(&id, s),
             Op::Move { id, to } => {
                 if to.target.is_empty() {
-                    self.w_block_move(&id, "", pos::BOTTOM, cx)
+                    self.w_block_move(&id, "", pos::BOTTOM, s)
                 } else {
-                    self.w_block_move(&id, &to.target, to.position, cx)
+                    self.w_block_move(&id, &to.target, to.position, s)
                 }
             }
         }
     }
 
     /// Undo (or redo) the last action: pending typing first becomes its own step.
-    pub(crate) fn undo_redo(&mut self, redo: bool, cx: &mut Context<Self>) {
-        self.flush_all(cx);
+    pub(crate) fn undo_redo(&mut self, redo: bool, s: &mut State) {
+        self.flush_all(s);
         let tx = if redo {
             self.history.take_redo()
         } else {
@@ -764,14 +814,7 @@ impl Editor {
             }
         }
         for op in tx {
-            let write = self.op_write(op, cx);
-            cx.spawn(async move |this, cx| {
-                if let Err(error) = write.await {
-                    log::error!("[editor] write failed, restoring server state: {error:#}");
-                    let _ = this.update(cx, |this, cx| this.refresh(cx).detach());
-                }
-            })
-            .detach();
+            self.persist(op, s);
         }
         if redo {
             self.history.push_undo(inverse);
@@ -779,11 +822,12 @@ impl Editor {
             self.history.push_redo(inverse);
         }
         self.sync_texts();
+        self.sync_file_blocks(s);
+        self.ensure_posters(s);
         if !caret_block.is_empty() && self.texts.contains_key(&caret_block) {
-            let len = self.texts[&caret_block].text.len();
-            self.focus_block(&caret_block, len, cx);
+            let len = self.texts[&caret_block].text().len();
+            self.focus_block(&caret_block, len, s);
         }
-        cx.notify();
     }
 
     // ───────────────────────────────────────────── saves
@@ -794,23 +838,22 @@ impl Editor {
         self.dirty.remove(id);
     }
 
-    pub(crate) fn schedule_save(&mut self, id: &str, cx: &mut Context<Self>) {
+    pub(crate) fn schedule_save(&mut self, id: &str, s: &mut State) {
         self.dirty.insert(id.to_string());
         let block = id.to_string();
-        let timer = cx.spawn(async move |this, cx| {
-            cx.background_executor()
-                .timer(Duration::from_millis(600))
-                .await;
-            let _ = this.update(cx, |this, cx| this.flush_save(&block, cx));
+        let oid = self.object_id.clone();
+        let timer = s.rt.spawn(async move |cx| {
+            cx.timer(SAVE_DEBOUNCE).await;
+            update_editor(&cx, &oid, |e, s| e.flush_save(&block, s));
         });
         self.save_timers.insert(id.to_string(), timer);
     }
 
     /// Save every block with unsaved typing now.
-    pub(crate) fn flush_all(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn flush_all(&mut self, s: &mut State) {
         let ids: Vec<String> = self.dirty.iter().cloned().collect();
         for id in ids {
-            self.flush_save(&id, cx);
+            self.flush_save(&id, s);
         }
     }
 
@@ -818,16 +861,16 @@ impl Editor {
     fn unsaved_content(&self, id: &str) -> Option<BlockContent> {
         let live = self.texts.get(id)?;
         let cur = self.text_of(id)?;
-        let marks = marks::marks_from_spans(&live.text, &live.spans);
+        let marks = marks::marks_from_spans(live.text(), &live.spans);
         let stored = marks::normalized_marks(&cur.text, cur.marks.as_deref().unwrap_or(&[]));
-        if cur.text == live.text && stored == marks {
+        if cur.text == live.text() && stored == marks {
             return None;
         }
-        Some(self.content_for(id, &live.text, &live.spans))
+        Some(self.content_for(id, live.text(), &live.spans))
     }
 
     /// The typing since the last save is one undo step; state follows the live text.
-    pub(crate) fn flush_save(&mut self, id: &str, cx: &mut Context<Self>) {
+    pub(crate) fn flush_save(&mut self, id: &str, s: &mut State) {
         if !self.dirty.contains(id) {
             return;
         }
@@ -843,15 +886,16 @@ impl Editor {
                     content,
                 }],
                 true,
-                cx,
+                s,
             );
         }
     }
 
     // ───────────────────────────────────────────── caret
 
-    /// Move the caret into `id` at byte `offset` (`focusSync`).
-    pub(crate) fn focus_block(&mut self, id: &str, offset: usize, cx: &mut Context<Self>) {
+    /// Move the caret into `id` at byte `offset` (`focusSync`): its field
+    /// takes the keyboard on the next frame.
+    pub(crate) fn focus_block(&mut self, id: &str, offset: usize, s: &mut State) {
         if !self.texts.contains_key(id) {
             if self.block(id).is_some() {
                 self.sync_texts();
@@ -864,33 +908,32 @@ impl Editor {
         if let Some(old) = self.active.clone()
             && old != id
         {
-            self.flush_save(&old, cx);
+            self.flush_save(&old, s);
+        }
+        for (bid, t) in self.texts.iter_mut() {
+            if bid != id {
+                t.edit.focused = false;
+            }
         }
         self.active = Some(id.to_string());
+        self.focus_self = false;
         if let Some(t) = self.texts.get_mut(id) {
             t.move_to(offset);
+            t.edit.focused = true;
         }
         self.last_focused = id.to_string();
-        self.focus_pending = true;
-        self.restart_blink(cx);
-        cx.notify();
     }
 
-    pub(crate) fn restart_blink(&mut self, cx: &mut Context<Self>) {
-        self.caret_on = true;
-        self.blink = Some(cx.spawn(async move |this, cx| {
-            loop {
-                cx.background_executor()
-                    .timer(Duration::from_millis(530))
-                    .await;
-                let Ok(()) = this.update(cx, |this, cx| {
-                    this.caret_on = !this.caret_on;
-                    cx.notify();
-                }) else {
-                    return;
-                };
-            }
-        }));
+    /// Take the keyboard from every text (a block selection, Escape): the
+    /// editor itself listens for keys.
+    pub(crate) fn blur_texts(&mut self, s: &mut State) {
+        if let Some(a) = self.active.take() {
+            self.flush_save(&a, s);
+        }
+        for t in self.texts.values_mut() {
+            t.edit.focused = false;
+        }
+        self.focus_self = true;
     }
 
     // ───────────────────────────────────────────── queued writes
@@ -900,12 +943,12 @@ impl Editor {
         block: Block,
         target: &str,
         position: u32,
-        cx: &mut Context<Self>,
+        s: &State,
     ) -> Task<Result<JsonMap>> {
         let oid = self.object_id.clone();
         let target = target.to_string();
-        self.writes.run(cx, move |cx| {
-            api::note::block_add(&oid, &block, &target, position, cx)
+        self.writes.run(s, move |s| {
+            api::note::block_add(&oid, &block, &target, position, s)
         })
     }
 
@@ -913,13 +956,12 @@ impl Editor {
         &self,
         id: &str,
         content: BlockContent,
-        cx: &mut Context<Self>,
+        s: &State,
     ) -> Task<Result<JsonMap>> {
         let oid = self.object_id.clone();
         let id = id.to_string();
-        self.writes.run(cx, move |cx| {
-            api::note::block_update(&oid, &id, &content, cx)
-        })
+        self.writes
+            .run(s, move |s| api::note::block_update(&oid, &id, &content, s))
     }
 
     pub(crate) fn w_block_move(
@@ -927,21 +969,21 @@ impl Editor {
         id: &str,
         target: &str,
         position: u32,
-        cx: &mut Context<Self>,
+        s: &State,
     ) -> Task<Result<JsonMap>> {
         let oid = self.object_id.clone();
         let id = id.to_string();
         let target = target.to_string();
-        self.writes.run(cx, move |cx| {
-            api::note::block_move(&oid, &id, &target, position, cx)
+        self.writes.run(s, move |s| {
+            api::note::block_move(&oid, &id, &target, position, s)
         })
     }
 
-    pub(crate) fn w_block_remove(&self, id: &str, cx: &mut Context<Self>) -> Task<Result<JsonMap>> {
+    pub(crate) fn w_block_remove(&self, id: &str, s: &State) -> Task<Result<JsonMap>> {
         let oid = self.object_id.clone();
         let id = id.to_string();
         self.writes
-            .run(cx, move |cx| api::note::block_remove(&oid, &id, cx))
+            .run(s, move |s| api::note::block_remove(&oid, &id, s))
     }
 
     pub(crate) fn w_set_attrs(
@@ -949,25 +991,20 @@ impl Editor {
         id: &str,
         align: Option<u32>,
         background: Option<String>,
-        cx: &mut Context<Self>,
+        s: &State,
     ) -> Task<Result<JsonMap>> {
         let oid = self.object_id.clone();
         let id = id.to_string();
-        self.writes.run(cx, move |cx| {
-            api::note::block_set_attrs(&oid, &id, align, background.as_deref(), cx)
+        self.writes.run(s, move |s| {
+            api::note::block_set_attrs(&oid, &id, align, background.as_deref(), s)
         })
     }
 
-    pub(crate) fn w_set_field(
-        &self,
-        key: &str,
-        value: Value,
-        cx: &mut Context<Self>,
-    ) -> Task<Result<JsonMap>> {
+    pub(crate) fn w_set_field(&self, key: &str, value: Value, s: &State) -> Task<Result<JsonMap>> {
         let oid = self.object_id.clone();
         let key = key.to_string();
         self.writes
-            .run(cx, move |cx| api::note::set_field(&oid, &key, value, cx))
+            .run(s, move |s| api::note::set_field(&oid, &key, value, s))
     }
 
     /// `table.create` in the write lane; resolves to the result map (`id`).
@@ -977,13 +1014,13 @@ impl Editor {
         position: u32,
         rows: u32,
         cols: u32,
-        cx: &mut Context<Self>,
+        s: &State,
     ) -> Task<Result<JsonMap>> {
         let oid = self.object_id.clone();
         let target = target.to_string();
-        self.writes.run(cx, move |cx| {
-            let task = api::table::create(&oid, &target, position, rows, cols, cx);
-            cx.background_spawn(async move {
+        self.writes.run(s, move |s| {
+            let task = api::table::create(&oid, &target, position, rows, cols, s);
+            s.rt.spawn(async move |_| {
                 let id = task.await?;
                 let mut map = JsonMap::new();
                 map.insert("id".into(), serde_json::Value::String(id));
@@ -991,11 +1028,19 @@ impl Editor {
             })
         })
     }
-}
 
-impl Focusable for Editor {
-    fn focus_handle(&self, _: &App) -> FocusHandle {
-        self.focus_handle.clone()
+    /// Await `tasks` in order, then `refresh`.
+    pub(crate) fn await_then_refresh(&self, tasks: Vec<Task<Result<JsonMap>>>, s: &State) {
+        let oid = self.object_id.clone();
+        s.rt.spawn(async move |cx| {
+            for t in tasks {
+                if let Err(error) = t.await {
+                    log::error!("[editor] write failed: {error:#}");
+                }
+            }
+            update_editor(&cx, &oid, |e, s| e.refresh(s).detach());
+        })
+        .detach();
     }
 }
 
@@ -1007,7 +1052,7 @@ impl Focusable for Editor {
 /// effect (`if (document.activeElement !== textEl) textEl.innerHTML = …`):
 /// the focused block shows a remote edit only once it loses focus. Texts of
 /// blocks that are gone are dropped; new blocks get one.
-fn sync_live_texts(
+pub(crate) fn sync_live_texts(
     blocks: &[Block],
     texts: &mut HashMap<String, TextState>,
     editing: Option<&str>,
@@ -1022,7 +1067,7 @@ fn sync_live_texts(
         let spans = marks::spans_from_marks(&t.text, t.marks.as_deref().unwrap_or(&[]));
         match texts.get_mut(&b.id) {
             Some(live) => {
-                if live.text != t.text || live.spans != spans {
+                if live.text() != t.text || live.spans != spans {
                     live.set_content(t.text.clone(), spans);
                 }
             }
@@ -1097,8 +1142,7 @@ pub(crate) fn place(target: &str, position: u32) -> Place {
 
 #[cfg(test)]
 mod tests {
-    // Not `super::*`: gpui_kit's glob exports its own `test` attribute.
-    use super::{Block, HashMap, style, sync_live_texts, text_block};
+    use super::*;
 
     fn set_text(blocks: &mut [Block], id: &str, text: &str) {
         let block = blocks.iter_mut().find(|b| b.id == id).unwrap();
@@ -1113,20 +1157,21 @@ mod tests {
         ];
         let mut texts = HashMap::new();
         sync_live_texts(&blocks, &mut texts, None);
-        assert_eq!(texts["a"].text, "alpha");
-        assert_eq!(texts["b"].text, "beta");
+        assert_eq!(texts["a"].text(), "alpha");
+        assert_eq!(texts["b"].text(), "beta");
 
         // The caret is in "a" and the person has typed there (unsaved);
         // another device edits both blocks and adds a third.
         let typed = texts.get_mut("a").unwrap();
         typed.set_content("alpha, typed here".into(), Vec::new());
-        typed.move_to(typed.text.len());
+        typed.move_to("alpha, typed here".len());
         set_text(&mut blocks, "a", "alpha, edited elsewhere");
         set_text(&mut blocks, "b", "beta, edited elsewhere");
         blocks.push(text_block("c", "gamma", style::PARAGRAPH));
         sync_live_texts(&blocks, &mut texts, Some("a"));
         assert_eq!(
-            texts["a"].text, "alpha, typed here",
+            texts["a"].text(),
+            "alpha, typed here",
             "the focused block keeps its text"
         );
         assert_eq!(
@@ -1134,12 +1179,12 @@ mod tests {
             "alpha, typed here".len(),
             "and its caret"
         );
-        assert_eq!(texts["b"].text, "beta, edited elsewhere");
-        assert_eq!(texts["c"].text, "gamma");
+        assert_eq!(texts["b"].text(), "beta, edited elsewhere");
+        assert_eq!(texts["c"].text(), "gamma");
 
         // Once the block loses focus it shows what is stored.
         sync_live_texts(&blocks, &mut texts, None);
-        assert_eq!(texts["a"].text, "alpha, edited elsewhere");
+        assert_eq!(texts["a"].text(), "alpha, edited elsewhere");
 
         // A block removed elsewhere goes, even the one that was focused.
         blocks.retain(|b| b.id != "a");

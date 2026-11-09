@@ -2,26 +2,14 @@
 //! open route of the active space, live titles from the store, drag reorder,
 //! middle-click close, separators hidden beside the active tab.
 
-use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::tab::{Tab, TabBar};
-use gpui_kit::component::{Icon, Sizable as _};
-use gpui_kit::prelude::FluentBuilder as _;
-use gpui_kit::*;
-use roostr_core::nav::{Navigator, Route};
+use roostr_core::State;
+use roostr_core::nav::Route;
 use roostr_core::objects::{object_icon, type_glyph};
-use roostr_core::store::Store;
-use roostr_core::{Glyph, theme, ui};
+use roostr_ui::{Glyph, Tab, TabBar, Theme, checkbox_display, radius, ty};
+use rune::{Cursor, Cx, El, PointerButton, Tx, el, row, text};
 
-use crate::Tip as _;
-use crate::rail::DragGhost;
-use crate::workspace::Workspace;
-
-#[derive(Clone)]
-pub(crate) struct TabDrag {
-    uid: u64,
-    icon: String,
-    name: String,
-}
+use crate::drag::{self, Axis};
+use crate::shell::{fill, fill_glyph, or_untitled};
 
 /// What a tab shows for its route (`tabInfo`).
 struct TabInfo {
@@ -31,26 +19,19 @@ struct TabInfo {
     task: Option<bool>,
 }
 
-fn tab_info(route: &Route, cx: &App) -> TabInfo {
-    let store = Store::global(cx).read(cx);
-    let active = Navigator::global(cx).read(cx).space().to_string();
+fn tab_info(s: &State, route: &Route) -> TabInfo {
+    let store = &s.store;
+    let active = s.nav.space();
     let Route::Object(id) = route else {
         let name = store
-            .space(&active)
-            .map(|s| s.name.clone())
+            .space(active)
+            .map(|sp| sp.name.clone())
             .filter(|n| !n.is_empty());
         return TabInfo {
             icon: "🏠".into(),
             name: name.unwrap_or_else(|| "Home".into()),
             task: None,
         };
-    };
-    let or_untitled = |s: &str| {
-        if s.is_empty() {
-            "Untitled".to_string()
-        } else {
-            s.to_string()
-        }
     };
     if let Some(o) = store.summary(id) {
         if store.layout_of(&o.type_key) == "task" {
@@ -61,37 +42,34 @@ fn tab_info(route: &Route, cx: &App) -> TabInfo {
             };
         }
         return TabInfo {
-            icon: object_icon(store, &o.icon, &o.type_key, &active),
+            icon: object_icon(store, &o.icon, &o.type_key, active),
             name: or_untitled(&o.name),
             task: None,
         };
     }
-    if let Some(t) = store.types.iter().find(|t| t.id == *id) {
-        let icon = if t.icon.is_empty() {
-            type_glyph(store, &t.key, &active)
-        } else {
-            t.icon.clone()
-        };
-        let name = if t.name.is_empty() {
-            t.key.clone()
-        } else {
-            t.name.clone()
-        };
+    if let Some(ty) = store.types.iter().find(|ty| ty.id == *id) {
         return TabInfo {
-            icon,
-            name,
+            icon: if ty.icon.is_empty() {
+                type_glyph(store, &ty.key, active)
+            } else {
+                ty.icon.clone()
+            },
+            name: if ty.name.is_empty() {
+                ty.key.clone()
+            } else {
+                ty.name.clone()
+            },
             task: None,
         };
     }
     if let Some(c) = store.space(id) {
-        let name = if c.name.is_empty() {
-            "Space".to_string()
-        } else {
-            c.name.clone()
-        };
         return TabInfo {
             icon: "🏰".into(),
-            name,
+            name: if c.name.is_empty() {
+                "Space".to_string()
+            } else {
+                c.name.clone()
+            },
             task: None,
         };
     }
@@ -102,209 +80,150 @@ fn tab_info(route: &Route, cx: &App) -> TabInfo {
     }
 }
 
-impl Workspace {
-    pub(crate) fn render_tab_strip(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        let nav = Navigator::global(cx).read(cx);
-        let tabs: Vec<(u64, Route)> = nav
-            .tabs()
-            .iter()
-            .map(|t| (t.uid, t.route.clone()))
-            .collect();
-        let active = nav.active_index();
-        let dragging = cx.has_active_drag();
-        let drag_uid = self.tab_drag.filter(|_| dragging);
-        let over = self.tab_over.filter(|_| dragging);
-        let count = tabs.len();
-        let uids: Vec<u64> = tabs.iter().map(|t| t.0).collect();
-        self.tab_focus.retain(|u, _| uids.contains(u));
-        // gpui-kit's TabBar (default Tab variant: the active tab on
-        // `tab.active.background`, labels ellipsised at 220px, a clicked tab
-        // scrolled into view). Roostr's drag reorder, middle-click and ×
-        // close, keyboard focus and separators ride on each Tab.
-        let mut bar = TabBar::new("tab-strip")
-            .selected_index(active)
-            .max_width(px(220.))
-            .flex_none()
-            .h(px(40.))
-            .px(px(8.))
-            .line_height(relative(1.2))
-            .bg(theme::panel())
-            .on_click(|ix, _, cx| {
-                let ix = *ix;
-                Navigator::global(cx).update(cx, |nav, cx| nav.activate(ix, cx));
+/// A tab dropped next to another: `to` is its place among the others.
+fn drop_tab(s: &mut State, dragged: &str, target: &str, after: bool) {
+    let uids: Vec<String> = s.nav.tabs().iter().map(|t| t.uid.to_string()).collect();
+    let Some(from) = uids.iter().position(|u| u == dragged) else {
+        return;
+    };
+    let rest: Vec<&String> = uids.iter().filter(|u| *u != dragged).collect();
+    let Some(ix) = rest.iter().position(|u| *u == target) else {
+        return;
+    };
+    let at = ix + usize::from(after);
+    s.nav.move_tab(from, at, &mut s.ui);
+}
+
+/// gpui-kit's TabBar (default Tab variant: the active tab on the kit's
+/// active tab fill, labels ellipsised at 220 pt), with Roostr's drag
+/// reorder, middle-click and × close and separators on each tab.
+pub(crate) fn view(s: &State, _cx: &mut Cx<State>, t: &Theme) -> El {
+    let tabs: Vec<(u64, Route)> = s
+        .nav
+        .tabs()
+        .iter()
+        .map(|t| (t.uid, t.route.clone()))
+        .collect();
+    let active = s.nav.active_index();
+    let count = tabs.len();
+    let dragging = drag::dragging(s, "tabs").map(str::to_string);
+    let mut bar = TabBar::new("tab-strip")
+        .selected_index(active)
+        .max_width(220.)
+        .h(40.)
+        .px(8.)
+        .fill(t.panel)
+        .on_click(|s: &mut State, ix: usize| s.nav.activate(ix, &mut s.ui));
+    for (i, (uid, route)) in tabs.into_iter().enumerate() {
+        let info = tab_info(s, &route);
+        let is_active = i == active;
+        let lead = match info.task {
+            Some(done) => checkbox_display(format!("tab-check:{uid}"), done)
+                .small()
+                .build(t),
+            None => text(info.icon.clone()).font(ty::ui(13.5)),
+        };
+        let mut content = row()
+            .key(format!("tab:{uid}"))
+            .items_center()
+            .gap(7.)
+            .min_w(0.)
+            .label(info.name.clone())
+            .child(lead)
+            .child(
+                text(info.name.clone())
+                    .font(ty::ui(13.))
+                    .color(if is_active {
+                        t.kit.tab_active_foreground
+                    } else {
+                        t.kit.tab_foreground
+                    })
+                    .truncate()
+                    .shrink()
+                    .min_w(0.),
+            )
+            // Middle-click closes.
+            .pointer_buttons([PointerButton::Middle])
+            .on_press_tx(move |s: &mut State, tx: &mut Tx| {
+                if tx.button() == PointerButton::Middle {
+                    s.nav.close(i, &mut s.ui);
+                } else {
+                    s.nav.activate(i, &mut s.ui);
+                }
             });
-        for (i, (uid, route)) in tabs.into_iter().enumerate() {
-            let info = tab_info(&route, cx);
-            let is_active = i == active;
-            let group: SharedString = format!("tab-{uid}").into();
-            let over_here = over.filter(|(o, _)| *o == uid).map(|(_, after)| after);
-            let payload = TabDrag {
-                uid,
-                icon: info.icon.clone(),
-                name: info.name.clone(),
-            };
-            let focus = self
-                .tab_focus
-                .entry(uid)
-                .or_insert_with(|| cx.focus_handle().tab_index(0).tab_stop(true))
-                .clone();
-            // Icon (or the Anytype checkbox on a task) and the ellipsised name.
-            let content = div()
-                .flex()
-                .items_center()
-                .gap(px(7.))
-                .min_w_0()
-                .map(|d| match info.task {
-                    Some(done) => d.child(ui::checkbox_display(("tab-check", uid), done).small()),
-                    None => d.child(
-                        div()
-                            .flex_none()
-                            .text_size(px(13.5))
-                            .child(info.icon.clone()),
-                    ),
-                })
-                .child(div().min_w_0().truncate().child(info.name.clone()));
-            // The separator after this tab, hidden beside the active one.
-            let separator = (i + 1 < count).then(|| {
-                let hidden = i == active || i + 1 == active;
-                div()
-                    .absolute()
-                    .right_0()
-                    .top(px(8.))
-                    .w(px(1.))
-                    .h(px(16.))
-                    .bg(theme::border())
-                    .when(hidden, |d| d.opacity(0.))
-            });
-            let drop_line = over_here.map(|after| {
-                div()
-                    .absolute()
-                    .top(px(3.))
-                    .bottom(px(3.))
-                    .w(px(2.))
-                    .rounded(px(2.))
-                    .bg(theme::accent())
-                    .map(|l| if after { l.right_0() } else { l.left_0() })
-            });
-            let close = div()
-                .flex()
-                .items_center()
-                .pr(px(6.))
-                .child(
-                    Button::new(("tab-x", uid))
-                        .ghost()
-                        .flex_none()
-                        .h(px(17.))
-                        .w_auto()
-                        .px(px(3.))
-                        .py(px(1.))
-                        .rounded(theme::radius::xs())
-                        .text_color(theme::muted())
-                        .opacity(if is_active { 1. } else { 0. })
-                        .group_hover(group.clone(), |s| s.opacity(1.))
-                        .tab_stop(false)
-                        .cursor_pointer()
-                        .accessibility_label("Close tab")
-                        .child(div().text_size(px(15.)).line_height(px(15.)).child("×"))
-                        .on_click(cx.listener(move |_, _, _, cx| {
-                            cx.stop_propagation();
-                            Navigator::global(cx).update(cx, |nav, cx| nav.close(i, cx));
-                        })),
-                )
-                .children(separator)
-                .children(drop_line);
-            let tab = Tab::new()
-                .aria_label(info.name.clone())
-                .child(content)
-                .suffix(close)
-                .track_focus(&focus)
-                .focus_visible(|s| s.border_1().border_color(theme::accent()))
-                .on_key_down(cx.listener(move |_, e: &KeyDownEvent, _, cx| {
-                    if e.keystroke.key == "enter" {
-                        Navigator::global(cx).update(cx, |nav, cx| nav.activate(i, cx));
-                    }
-                }))
-                .group(group)
-                .when(drag_uid == Some(uid), |d| d.opacity(0.4))
-                .on_mouse_up(
-                    MouseButton::Middle,
-                    cx.listener(move |_, _, _, cx| {
-                        Navigator::global(cx).update(cx, |nav, cx| nav.close(i, cx));
-                    }),
-                )
-                .on_drag(payload, |payload, _, _, cx| {
-                    let payload = payload.clone();
-                    let ghost = move || {
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(7.))
-                            .h(px(30.))
-                            .px(px(10.))
-                            .rounded(theme::radius::tab())
-                            .bg(theme::hl_med())
-                            .text_size(px(13.))
-                            .text_color(theme::fg())
-                            .opacity(0.8)
-                            .child(payload.icon.clone())
-                            .child(payload.name.clone())
-                            .into_any_element()
-                    };
-                    cx.new(|_| DragGhost(Box::new(ghost)))
-                })
-                .on_drag_move(cx.listener(move |this, e: &DragMoveEvent<TabDrag>, _, cx| {
-                    let dragged = e.drag(cx).uid;
-                    if this.tab_drag != Some(dragged) {
-                        this.tab_drag = Some(dragged);
-                        cx.notify();
-                    }
-                    if dragged == uid {
-                        return;
-                    }
-                    if e.bounds.contains(&e.event.position) {
-                        let after = e.event.position.x > e.bounds.center().x;
-                        if this.tab_over != Some((uid, after)) {
-                            this.tab_over = Some((uid, after));
-                            cx.notify();
-                        }
-                    } else if this.tab_over.is_some_and(|(o, _)| o == uid) {
-                        this.tab_over = None;
-                        cx.notify();
-                    }
-                }))
-                .on_drop(cx.listener(|this, payload: &TabDrag, _, cx| {
-                    let target = this.tab_over.take();
-                    this.tab_drag = None;
-                    cx.notify();
-                    let Some((target, after)) = target else {
-                        return;
-                    };
-                    if target == payload.uid {
-                        return;
-                    }
-                    let nav = Navigator::global(cx);
-                    let uids: Vec<u64> = nav.read(cx).tabs().iter().map(|t| t.uid).collect();
-                    let Some(from) = uids.iter().position(|u| *u == payload.uid) else {
-                        return;
-                    };
-                    let rest: Vec<u64> = uids.into_iter().filter(|u| *u != payload.uid).collect();
-                    let Some(ix) = rest.iter().position(|u| *u == target) else {
-                        return;
-                    };
-                    let at = ix + usize::from(after);
-                    nav.update(cx, |nav, cx| nav.move_tab(from, at, cx));
-                }));
-            bar = bar.child(tab);
+        if dragging.as_deref() == Some(uid.to_string().as_str()) {
+            content = content.opacity(0.4);
         }
-        bar.suffix(
-            crate::fill_button("tab-new", theme::hl_med(), cx)
-                .size(px(26.))
-                .ml(px(4.))
-                .rounded(theme::radius::sm())
-                .child(Icon::new(Glyph::Plus).size(px(14.)))
-                .accessibility_label("New tab")
-                .tip("New tab")
-                .on_click(|_, _, cx| roostr_core::nav::open_tab(Route::Home, false, cx)),
-        )
+        let content = drag::item(content, "tabs", &uid.to_string(), Axis::X, drop_tab);
+        // The separator after this tab, hidden beside the active one.
+        let mut close = row().items_center().pr(6.).child(
+            row()
+                .key(format!("tab-x:{uid}"))
+                .h(17.)
+                .px(3.)
+                .py(1.)
+                .radius(radius::XS)
+                .center()
+                .cursor(Cursor::Pointer)
+                .hover(t.kit.secondary_hover)
+                .group_opacity(if is_active { 1. } else { 0. }, 1.)
+                .label("Close tab")
+                .child(text("×").font(ty::ui(15.).lh(15.)).color(t.muted))
+                .on_press(move |s: &mut State| s.nav.close(i, &mut s.ui)),
+        );
+        if i + 1 < count {
+            let hidden = i == active || i + 1 == active;
+            close = close.child(
+                el().pin(None, Some(8.), Some(0.), None)
+                    .w(1.)
+                    .h(16.)
+                    .fill(t.border)
+                    .opacity(if hidden { 0. } else { 1. }),
+            );
+        }
+        if let Some(after) = drag::over(s, "tabs", &uid.to_string()) {
+            let (left, right) = if after {
+                (None, Some(0.))
+            } else {
+                (Some(0.), None)
+            };
+            close = close.child(
+                el().pin(left, Some(3.), right, Some(3.))
+                    .w(2.)
+                    .radius(2.)
+                    .fill(t.accent),
+            );
+        }
+        bar = bar.child(Tab::new().child(content).suffix(close));
     }
+    let new_tab = fill("tab-new", t.hl_med)
+        .size(26., 26.)
+        .ml(4.)
+        .radius(radius::SM)
+        .label("New tab")
+        .child(fill_glyph(t, Glyph::Plus, 14.))
+        .on_press(|s: &mut State| roostr_core::nav::open_tab(Route::Home, false, s));
+    bar.suffix(roostr_ui::tooltip(new_tab, "New tab")).build(t)
+}
+
+/// The floating copy of a dragged tab.
+pub(crate) fn tab_ghost(s: &State, t: &Theme, layer: &mut Vec<El>) {
+    let Some(uid) = drag::dragging(s, "tabs") else {
+        return;
+    };
+    let Some(tab) = s.nav.tabs().iter().find(|tab| tab.uid.to_string() == uid) else {
+        return;
+    };
+    let info = tab_info(s, &tab.route);
+    let ghost = row()
+        .items_center()
+        .gap(7.)
+        .h(30.)
+        .px(10.)
+        .radius(radius::TAB)
+        .fill(t.hl_med)
+        .opacity(0.8)
+        .child(text(info.icon).font(ty::ui(13.)))
+        .child(text(info.name).font(ty::ui(13.)).color(t.fg));
+    drag::ghost(s, "tabs", ghost, layer);
 }

@@ -8,11 +8,11 @@ use std::cmp::Ordering;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::f64::consts::PI;
 
-use gpui_kit::Hsla;
 use roostr_core::objects::kind_name;
 use roostr_core::{Fields, QueryRow, RelationDef, TypeDef, Value};
+use rune::Color;
 
-use crate::paint::oklch;
+use crate::geom::oklch;
 
 /// Spacing between neighbouring object dots inside a cluster (world units).
 pub(crate) const DOT_SPACING: f64 = 13.;
@@ -38,7 +38,7 @@ pub(crate) struct GraphType {
     pub key: String,
     pub name: String,
     pub icon: String,
-    pub color: Hsla,
+    pub color: Color,
     /// Cluster radius (world units).
     pub rad: f64,
     /// Angle on the outer ring; x/y is the cluster centre.

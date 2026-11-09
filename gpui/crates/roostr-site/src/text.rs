@@ -1,11 +1,11 @@
-//! Text helpers the site pages share: inline rich text (the pages' `<b>`,
-//! `<i>`, `<code>`, `<a>` runs inside one paragraph) and letter-spaced
-//! single lines (CSS `letter-spacing`, which GPUI text has no notion of).
+//! Inline rich text the site pages share: the pages' `<b>`, `<i>`, `<code>` and `<a>` runs
+//! inside one paragraph, as Rune spans and links.
 
 use std::ops::Range;
 
-use gpui_kit::*;
+use roostr_core::State;
 use roostr_core::nav::{self, Route, SitePage};
+use rune::{Color, El, Link, Span, TextStyle, Tx, rich};
 
 /// Where a link in rich text goes.
 #[derive(Clone, Debug, PartialEq)]
@@ -25,10 +25,14 @@ impl Href {
         }
     }
 
-    pub(crate) fn open(&self, cx: &mut App) {
+    pub(crate) fn open(&self, s: &mut State, tx: &mut Tx) {
         match self {
-            Self::Route(route) => nav::navigate(route.clone(), cx),
-            Self::External(url) => cx.open_url(url),
+            Self::Route(route) => nav::navigate(route.clone(), s),
+            Self::External(url) => {
+                if let Err(error) = tx.open_url(url) {
+                    log::warn!("could not open {url}: {error}");
+                }
+            }
         }
     }
 }
@@ -42,40 +46,48 @@ pub(crate) fn home() -> Href {
 #[derive(Clone, Copy)]
 pub(crate) struct RichStyle {
     /// `b { color }` (None: inherit).
-    pub bold: Option<Hsla>,
+    pub bold: Option<Color>,
     /// `a { color }`.
-    pub link: Hsla,
+    pub link: Color,
     /// `code { background }`.
-    pub code_bg: Hsla,
+    pub code_bg: Color,
+}
+
+/// The inherited inline style of a run.
+#[derive(Clone, Copy, Default, PartialEq)]
+struct Inline {
+    bold: bool,
+    italic: bool,
+    color: Option<Color>,
+    underline: Option<Color>,
 }
 
 /// One paragraph of inline-styled text.
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub(crate) struct Rich {
-    text: String,
-    highlights: Vec<(Range<usize>, HighlightStyle)>,
-    fonts: Vec<(Range<usize>, SharedString)>,
-    links: Vec<(Range<usize>, Href)>,
+    pub(crate) text: String,
+    pub(crate) spans: Vec<Span>,
+    pub(crate) links: Vec<(Range<usize>, String)>,
 }
 
-/// A thin space: stands in for `code { padding: 0 6px }` / pill padding, as
-/// GPUI text runs cannot carry box padding.
+/// A thin space: two each side stand in for `code { padding: 0 6px }`, as box padding inside
+/// a line of text takes room but a span background does not.
 const THIN: &str = "\u{2009}";
 
 impl Rich {
-    /// Parse the page markup: `**bold**`, `_italic_`, `` `code` ``,
-    /// `[label](href)` (label may hold `**bold**`). Everything else is literal.
+    /// Parse the page markup: `**bold**`, `_italic_`, `` `code` ``, `[label](href)` (label may
+    /// hold `**bold**`). Everything else is literal.
     pub(crate) fn markup(source: &str, style: RichStyle) -> Self {
         let mut rich = Self::default();
-        rich.parse(source, style, None);
+        rich.parse(source, style, Inline::default());
         rich
     }
 
-    fn parse(&mut self, source: &str, style: RichStyle, inherited: Option<HighlightStyle>) {
+    fn parse(&mut self, source: &str, style: RichStyle, inherited: Inline) {
         let mut rest = source;
         while !rest.is_empty() {
             let next = rest.find(['*', '_', '`', '[']).unwrap_or(rest.len());
-            self.push(&rest[..next], inherited.unwrap_or_default());
+            self.push(&rest[..next], inherited);
             rest = &rest[next..];
             if rest.is_empty() {
                 break;
@@ -83,19 +95,23 @@ impl Rich {
             if let Some(body) = rest.strip_prefix("**")
                 && let Some(end) = body.find("**")
             {
-                let mut bold = inherited.unwrap_or_default();
-                bold.font_weight = Some(FontWeight::BOLD);
-                if let Some(color) = style.bold {
-                    bold.color = Some(color);
-                }
-                self.parse(&body[..end], style, Some(bold));
+                let bold = Inline {
+                    bold: true,
+                    color: style.bold.or(inherited.color),
+                    ..inherited
+                };
+                self.parse(&body[..end], style, bold);
                 rest = &body[end + 2..];
             } else if let Some(body) = rest.strip_prefix('_')
                 && let Some(end) = body.find('_')
             {
-                let mut italic = inherited.unwrap_or_default();
-                italic.font_style = Some(FontStyle::Italic);
-                self.push(&body[..end], italic);
+                self.push(
+                    &body[..end],
+                    Inline {
+                        italic: true,
+                        ..inherited
+                    },
+                );
                 rest = &body[end + 1..];
             } else if let Some(body) = rest.strip_prefix('`')
                 && let Some(end) = body.find('`')
@@ -109,101 +125,123 @@ impl Rich {
                 let label = &body[..close];
                 let href = &body[close + 2..close + end];
                 let start = self.text.len();
-                let link = HighlightStyle {
+                let link = Inline {
                     color: Some(style.link),
-                    underline: Some(UnderlineStyle {
-                        thickness: px(1.),
-                        color: Some(style.link),
-                        wavy: false,
-                    }),
-                    ..inherited.unwrap_or_default()
+                    underline: Some(style.link),
+                    ..inherited
                 };
-                self.parse(label, style, Some(link));
-                self.links.push((start..self.text.len(), Href::parse(href)));
+                self.parse(label, style, link);
+                self.links.push((start..self.text.len(), href.to_string()));
                 rest = &body[close + end + 1..];
             } else {
                 // A lone marker character is literal text.
                 let ch = rest.chars().next().map(char::len_utf8).unwrap_or(1);
-                self.push(&rest[..ch], inherited.unwrap_or_default());
+                self.push(&rest[..ch], inherited);
                 rest = &rest[ch..];
             }
         }
     }
 
-    /// Append `text` with `highlight`.
-    pub(crate) fn push(&mut self, text: &str, highlight: HighlightStyle) -> &mut Self {
+    /// Append `text` in `inline`.
+    fn push(&mut self, text: &str, inline: Inline) {
         if text.is_empty() {
-            return self;
+            return;
         }
         let start = self.text.len();
-        push_breakable(&mut self.text, text);
-        if highlight != HighlightStyle::default() {
-            self.highlights.push((start..self.text.len(), highlight));
+        self.text.push_str(text);
+        if inline == Inline::default() {
+            return;
         }
-        self
+        let mut span = Span::new(start, self.text.len());
+        if inline.bold {
+            span = span.weight(700.0);
+        }
+        if inline.italic {
+            span = span.italic();
+        }
+        if let Some(color) = inline.color {
+            span = span.color(color);
+        }
+        if let Some(color) = inline.underline {
+            span = span.underline(color);
+        }
+        self.spans.push(span);
     }
 
-
-    /// `<code>`: system mono on the code background, `padding: 1px 6px`.
-    /// The background goes on three runs (pad, code, pad): a font-family
-    /// override applies only to runs that lie wholly inside its range.
-    fn code(&mut self, text: &str, background: Hsla) {
-        let padding = THIN.repeat(2);
-        let highlight = HighlightStyle {
-            background_color: Some(background),
-            ..Default::default()
-        };
-        for (part, is_code) in [
-            (padding.as_str(), false),
-            (text, true),
-            (padding.as_str(), false),
-        ] {
-            let start = self.text.len();
-            self.text.push_str(part);
-            self.highlights.push((start..self.text.len(), highlight));
-            if is_code {
-                self.fonts.push((
-                    start..self.text.len(),
-                    roostr_core::theme::fonts::MONO.into(),
-                ));
-            }
-        }
+    /// `<code>`: the mono font on the code background, `padding: 1px 6px`.
+    fn code(&mut self, text: &str, background: Color) {
+        let start = self.text.len();
+        self.text.push_str(&THIN.repeat(2));
+        self.spans
+            .push(Span::new(start, self.text.len()).bg(background, 1.0));
+        let start = self.text.len();
+        self.text.push_str(text);
+        self.spans
+            .push(Span::new(start, self.text.len()).mono().bg(background, 1.0));
+        let start = self.text.len();
+        self.text.push_str(&THIN.repeat(2));
+        self.spans
+            .push(Span::new(start, self.text.len()).bg(background, 1.0));
     }
 
-    /// The paragraph as an element (clickable when it has links).
-    pub(crate) fn into_element(self, id: impl Into<ElementId>) -> AnyElement {
-        let mut highlights = self.highlights;
-        // StyledText wants sorted, non-overlapping ranges: nested markup
-        // pushes outer runs only around their plain parts, so a sort suffices.
-        highlights.sort_by_key(|(range, _)| range.start);
-        let styled = StyledText::new(self.text)
-            .with_highlights(highlights)
-            .with_font_family_overrides(self.fonts);
+    /// The paragraph as a wrapping text element in `font` and `color`; its links open their
+    /// hrefs.
+    pub(crate) fn build(self, font: TextStyle, color: Color) -> El {
+        let mut e = rich(self.text, self.spans).font(font).color(color);
         if self.links.is_empty() {
-            return styled.into_any_element();
+            return e;
         }
-        let (ranges, hrefs): (Vec<_>, Vec<_>) = self.links.into_iter().unzip();
-        InteractiveText::new(id, styled)
-            .on_click(ranges, move |ix, _, cx| hrefs[ix].open(cx))
-            .into_any_element()
+        for (range, href) in self.links {
+            e = e.link(Link::new(range, href));
+        }
+        e.on_link(|s: &mut State, href: &str, tx: &mut Tx| Href::parse(href).open(s, tx))
     }
 }
 
-/// Append `text`, letting lines break after a hyphen that joins two words
-/// ("Task-like", "end-to-end") like the browser does (UAX #14: no break
-/// before a digit). GPUI keeps `-` inside words, so a zero-width space marks
-/// the opportunity.
-fn push_breakable(out: &mut String, text: &str) {
-    let mut previous: Option<char> = None;
-    let mut chars = text.chars().peekable();
-    while let Some(ch) = chars.next() {
-        out.push(ch);
-        if ch == '-'
-            && previous.is_some_and(|p| p.is_alphanumeric() || p == '@')
-            && chars.peek().is_some_and(|n| n.is_alphabetic())
-        {
-            out.push('\u{200B}');
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn style() -> RichStyle {
+        RichStyle {
+            bold: Some(Color::WHITE),
+            link: Color::BLACK,
+            code_bg: Color::TRANSPARENT,
         }
-        previous = Some(ch);
+    }
+
+    #[test]
+    fn markup_strips_markers_and_styles_runs() {
+        let r = Rich::markup("a **b** _c_ `d` [**e** f](/guide) g*h", style());
+        assert_eq!(r.text, format!("a b c {THIN}{THIN}d{THIN}{THIN} e f g*h"));
+        let b = r.text.find('b').unwrap();
+        assert!(
+            r.spans
+                .iter()
+                .any(|s| s.start as usize == b && s.weight == Some(700.0))
+        );
+        let c = r.text.find('c').unwrap();
+        assert!(r.spans.iter().any(|s| s.start as usize == c && s.italic));
+        let d = r.text.find('d').unwrap();
+        assert!(r.spans.iter().any(|s| s.start as usize == d && s.mono));
+        let e = r.text.find('e').unwrap();
+        let link = &r.links[0];
+        assert_eq!((link.0.start, &r.text[link.0.clone()]), (e, "e f"));
+        assert_eq!(
+            Href::parse(&link.1),
+            Href::Route(Route::Site(SitePage::Guide))
+        );
+        // The bold run inside a link keeps the link's underline.
+        assert!(r.spans.iter().any(|s| s.start as usize == e
+            && s.weight == Some(700.0)
+            && s.underline == Some(Color::BLACK)));
+    }
+
+    #[test]
+    fn external_links_stay_urls() {
+        assert_eq!(
+            Href::parse("mailto:hi@roostr.space"),
+            Href::External("mailto:hi@roostr.space".into())
+        );
     }
 }

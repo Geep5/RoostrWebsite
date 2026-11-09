@@ -3,159 +3,42 @@
 //! named by the environment (`GLON_DATA` / `ROOSTR_API`), or - `--replica`,
 //! `ROOSTR_BACKEND=replica` or the Settings choice - against this device's
 //! own replica (`roostr-replica`), no daemon needed.
-
-#[cfg(target_os = "macos")]
-mod reduce_motion;
+//!
+//! `roostr [path]` opens a web path once the shell picked the space
+//! (`roostr --daemon /app/object/<id>`). Rune's headless flags work too
+//! (`--snap out.png --size 1440x900`): the window then opens once the vault
+//! loaded and the first page's loads settled, since a snapshot's virtual
+//! clock doesn't wait for the network.
+//!
+//! macOS's Reduce motion is Rune's: it reads the setting when the window
+//! opens and whenever it regains focus, and every transition follows it.
 
 use std::sync::Arc;
+use std::time::Duration;
 
-use gpui_kit::component::TitleBar;
-use gpui_kit::prelude::FluentBuilder as _;
-use gpui_kit::*;
+use roostr_core::State;
+use roostr_core::create::PickFile;
 use roostr_core::daemon::{DaemonBackend, DaemonConfig};
 use roostr_core::harness::Harness;
 use roostr_core::mode::{self, Mode};
 use roostr_core::nav::Route;
-use roostr_core::theme;
 use roostr_replica::ReplicaBackend;
-use roostr_shell::{NewObject, OpenSettings, Search, Workspace};
+use roostr_ui::ty::Weights as _;
+use roostr_ui::{ThemePref, ty};
+use rune::{AppSpec, Cursor, Cx, El, FileDialogOptions, FileDialogs, MenuItem, Tx, col, el, text};
 
-actions!(roostr, [About, Quit]);
+/// The window's size at launch.
+const SIZE: (f32, f32) = (1440., 900.);
 
-/// The window content: the title bar strip, then the shell.
-struct AppRoot {
-    workspace: Entity<Workspace>,
-}
-
-impl Render for AppRoot {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .flex()
-            .flex_col()
-            .size_full()
-            .bg(theme::gutter())
-            .line_height(relative(theme::LINE_HEIGHT_NORMAL))
-            .text_color(theme::fg())
-            .child(TitleBar::new())
-            .child(div().flex_1().min_h_0().child(self.workspace.clone()))
-    }
-}
+/// How long a headless snapshot waits for the vault and the first page.
+const HEADLESS_LIMIT: Duration = Duration::from_secs(30);
 
 /// Shown instead of the app when its backend can't be opened.
 struct ConfigError {
     title: &'static str,
-    message: SharedString,
+    message: String,
     /// Offer the other mode (a daemon that can't be reached: this device's replica).
     switch_to: Option<Mode>,
-}
-
-impl Render for ConfigError {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        let switch_to = self.switch_to;
-        div()
-            .flex()
-            .flex_col()
-            .size_full()
-            .bg(theme::bg())
-            .text_color(theme::fg())
-            .font_family(theme::fonts::UI)
-            .child(TitleBar::new())
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .items_center()
-                    .gap(px(12.))
-                    .p(px(48.))
-                    .child(
-                        div()
-                            .text_size(px(16.))
-                            .font_weight(FontWeight::BOLD)
-                            .child(self.title),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(13.))
-                            .text_color(theme::muted())
-                            .child(self.message.clone()),
-                    )
-                    .when_some(switch_to, |d, mode| {
-                        d.child(
-                            div()
-                                .id("switch-mode")
-                                .mt(px(8.))
-                                .px(px(14.))
-                                .py(px(8.))
-                                .rounded(px(8.))
-                                .border_1()
-                                .border_color(theme::border())
-                                .cursor_pointer()
-                                .text_size(px(13.))
-                                .child(match mode {
-                                    Mode::Replica => {
-                                        "Use Roostr without the daemon (this device's own replica)"
-                                    }
-                                    Mode::Daemon => "Use the daemon on this computer",
-                                })
-                                .on_click(move |_, _, cx| mode::switch(mode, cx)),
-                        )
-                    }),
-            )
-    }
-}
-
-fn window_options(cx: &App) -> WindowOptions {
-    WindowOptions {
-        window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
-            None,
-            size(px(1440.), px(900.)),
-            cx,
-        ))),
-        ..TitleBar::window_options()
-    }
-}
-
-fn set_menus(cx: &mut App) {
-    cx.on_action(|_: &Quit, cx| cx.quit());
-    cx.on_action(|_: &About, cx| {
-        let Some(window) = cx.active_window() else {
-            return;
-        };
-        let _ = window.update(cx, |_, window, cx| {
-            let detail = format!("Version {}", env!("CARGO_PKG_VERSION"));
-            let answer = window.prompt(PromptLevel::Info, "Roostr", Some(&detail), &["OK"], cx);
-            cx.background_spawn(async move {
-                let _ = answer.await;
-            })
-            .detach();
-        });
-    });
-    cx.bind_keys([
-        KeyBinding::new("cmd-q", Quit, None),
-        KeyBinding::new("cmd-,", OpenSettings, None),
-        KeyBinding::new("cmd-n", NewObject, None),
-    ]);
-    cx.set_menus(vec![
-        Menu {
-            name: "Roostr".into(),
-            items: vec![
-                MenuItem::action("About Roostr", About),
-                MenuItem::separator(),
-                MenuItem::action("Settings…", OpenSettings),
-                MenuItem::separator(),
-                MenuItem::action("Quit Roostr", Quit),
-            ],
-            disabled: false,
-        },
-        Menu {
-            name: "File".into(),
-            items: vec![
-                MenuItem::action("New…", NewObject),
-                MenuItem::action("Search", Search),
-            ],
-            disabled: false,
-        },
-    ]);
 }
 
 /// `--replica` / `--daemon`, else `ROOSTR_BACKEND`, else the choice saved in
@@ -175,75 +58,205 @@ fn chosen_mode() -> Mode {
         .unwrap_or(Mode::Daemon)
 }
 
-/// `roostr [path]`: the web path to open (`/app/object/<id>`, `/guide`, …).
+/// `roostr [path]`: the web path to open (`/app/object/<id>`, `/guide`, …),
+/// among the arguments Rune doesn't take.
 fn route_arg() -> Option<String> {
-    std::env::args().skip(1).find(|a| !a.starts_with("--"))
+    rune::extra_args()
+        .iter()
+        .find(|a| !a.starts_with("--"))
+        .cloned()
 }
 
-fn open_app(cx: &mut App) {
-    roostr_app::init(cx);
-    open_window(window_options(cx), cx, |window, cx| {
-        let workspace = roostr_app::workspace(window, cx);
-        if let Some(path) = route_arg() {
-            roostr_app::open_when_ready(Route::parse(&path), cx);
+/// The app's state: the vault in the chosen mode with every feature
+/// registered, or the reason it can't open.
+fn init() -> State {
+    let opened = match chosen_mode() {
+        Mode::Replica => {
+            let dir = ReplicaBackend::default_dir();
+            match futures::executor::block_on(ReplicaBackend::open_native(&dir)) {
+                // No harness: computer features show "Roostr isn't running on this computer".
+                Ok(backend) => Ok(State::new(Arc::new(backend), None)),
+                Err(error) => Err(ConfigError {
+                    title: "Roostr can't open this device's replica",
+                    message: format!("{}: {error:#}", dir.display()),
+                    switch_to: Some(Mode::Daemon),
+                }),
+            }
         }
-        cx.new(|_| AppRoot { workspace })
-    })
-    .expect("open the Roostr window");
+        Mode::Daemon => match DaemonConfig::from_env() {
+            Ok(config) => {
+                let harness = Arc::new(Harness::new(config.clone()));
+                Ok(State::new(
+                    Arc::new(DaemonBackend::new(config)),
+                    Some(harness),
+                ))
+            }
+            Err(error) => Err(ConfigError {
+                title: "Roostr can't reach its daemon",
+                message: format!("{error:#}"),
+                switch_to: Some(Mode::Replica),
+            }),
+        },
+    };
+    let mut s = match opened {
+        Ok(s) => s,
+        Err(error) => {
+            let mut s = State::unopened();
+            s.put(error);
+            return s;
+        }
+    };
+    roostr_app::register(&mut s);
+    s.pick_file = Some(PickFile(std::rc::Rc::new(pick_file)));
+    if let Some(path) = route_arg() {
+        roostr_shell::open_when_ready(&mut s, Route::parse(&path));
+    }
+    s
 }
 
-fn open_error(title: &'static str, message: String, switch_to: Option<Mode>, cx: &mut App) {
-    theme::init(cx);
-    let message = SharedString::from(message);
-    open_window(window_options(cx), cx, |_, cx| {
-        cx.new(|_| ConfigError {
-            title,
-            message,
-            switch_to,
-        })
+/// `AppSpec::setup`: Roostr's hooks, then for a headless snapshot the vault's
+/// first load and the first page's loads (the image cache exists from here,
+/// so a cover lands in it).
+fn setup(s: &mut State, waker: rune::Waker) {
+    roostr_host::setup(s, waker.clone());
+    if rune::is_headless() && s.get::<ConfigError>().is_none() {
+        roostr_host::wait_loaded(s, HEADLESS_LIMIT);
+        roostr_host::settle(s, HEADLESS_LIMIT);
+        // Both waited on wakes of their own: the window's again.
+        s.rt.set_waker(waker);
+    }
+}
+
+/// The system's Open dialog (a sheet over the window), for "File" blocks
+/// and covers.
+fn pick_file(s: &mut State) -> roostr_rt::Task<Option<std::path::PathBuf>> {
+    s.rt.spawn(async |_| {
+        let options = FileDialogOptions {
+            title: "Choose a file".into(),
+            ..FileDialogOptions::default()
+        };
+        match FileDialogs::native().open(options).await {
+            Ok(path) => path,
+            Err(error) => {
+                log::warn!("file dialog: {error}");
+                None
+            }
+        }
     })
-    .expect("open the Roostr window");
+}
+
+fn view(s: &State, cx: &mut Cx<State>) -> El {
+    match s.get::<ConfigError>() {
+        Some(error) => config_error(error, cx),
+        None => roostr_shell::view(s, cx),
+    }
+}
+
+/// The backend's failure with the way to the other mode.
+fn config_error(error: &ConfigError, cx: &mut Cx<State>) -> El {
+    let t = roostr_ui::theme(ThemePref::Dark, cx);
+    let mut body = col()
+        .w_full()
+        .items_center()
+        .gap(12.)
+        .padding(48.)
+        .child(text(error.title).font(ty::ui(16.).bold()).color(t.fg))
+        .child(
+            text(error.message.clone())
+                .font(ty::ui(13.))
+                .color(t.muted)
+                .wrap(),
+        );
+    if let Some(mode) = error.switch_to {
+        body = body.child(
+            el().key("switch-mode")
+                .mt(8.)
+                .px(14.)
+                .py(8.)
+                .radius(8.)
+                .border(1., t.border)
+                .cursor(Cursor::Pointer)
+                .hover(t.hover)
+                .on_press_tx(move |_: &mut State, tx: &mut Tx| {
+                    if mode::switch(mode) {
+                        tx.quit();
+                    }
+                })
+                .child(
+                    text(match mode {
+                        Mode::Replica => {
+                            "Use Roostr without the daemon (this device's own replica)"
+                        }
+                        Mode::Daemon => "Use the daemon on this computer",
+                    })
+                    .font(ty::ui(13.))
+                    .color(t.fg),
+                ),
+        );
+    }
+    // The title bar strip: room for the traffic lights, and a handle to drag.
+    let titlebar = el().h(38.).w_full().window_drag();
+    roostr_ui::root(
+        col()
+            .w_full()
+            .h_full()
+            .fill(t.bg)
+            .child(titlebar)
+            .child(body),
+        [],
+    )
+}
+
+fn settings(s: &mut State, _: &mut Tx) {
+    if s.get::<ConfigError>().is_none() {
+        roostr_shell::open_settings(s);
+    }
+}
+
+fn new_object(s: &mut State, _: &mut Tx) {
+    if s.get::<ConfigError>().is_none() {
+        roostr_shell::new_object(s);
+    }
+}
+
+fn search(s: &mut State, _: &mut Tx) {
+    if s.get::<ConfigError>().is_none() {
+        roostr_shell::search(s);
+    }
+}
+
+fn on_key(s: &mut State, ev: &rune::KeyEvent, tx: &mut Tx) -> bool {
+    s.get::<ConfigError>().is_none() && roostr_app::on_key(s, ev, tx)
+}
+
+fn chord(text: &str) -> rune::Shortcut {
+    text.parse().expect("a valid accelerator")
 }
 
 fn main() {
     // Warnings and errors from every crate go to stderr; `RUST_LOG` overrides.
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
-    application().with_assets(roostr_core::Assets).run(|cx| {
-        gpui_kit::init(cx);
-        #[cfg(target_os = "macos")]
-        reduce_motion::follow(cx);
-        set_menus(cx);
-        match chosen_mode() {
-            Mode::Replica => {
-                let dir = ReplicaBackend::default_dir();
-                match futures::executor::block_on(ReplicaBackend::open_native(&dir)) {
-                    Ok(backend) => {
-                        // No harness: computer features show "Roostr isn't running on this computer".
-                        roostr_core::init(Arc::new(backend), None, cx);
-                        open_app(cx);
-                    }
-                    Err(error) => open_error(
-                        "Roostr can't open this device's replica",
-                        format!("{}: {error:#}", dir.display()),
-                        Some(Mode::Daemon),
-                        cx,
-                    ),
-                }
-            }
-            Mode::Daemon => match DaemonConfig::from_env() {
-                Ok(config) => {
-                    let harness = Arc::new(Harness::new(config.clone()));
-                    roostr_core::init(Arc::new(DaemonBackend::new(config)), Some(harness), cx);
-                    open_app(cx);
-                }
-                Err(error) => open_error(
-                    "Roostr can't reach its daemon",
-                    format!("{error:#}"),
-                    Some(Mode::Replica),
-                    cx,
-                ),
-            },
-        }
-        cx.activate(true);
-    });
+    let spec = AppSpec {
+        on_key: Some(on_key),
+        setup: Some(setup),
+        ..roostr_host::spec("Roostr", SIZE, init, view)
+    };
+    // The app menu keeps the system's About Roostr, Hide and Quit Roostr (⌘Q);
+    // Settings… goes after About, as in every Mac app.
+    rune::App::new(spec)
+        .chrome(roostr_shell::CHROME)
+        .menu_item(MenuItem::separator())
+        .menu_item(
+            MenuItem::new("Settings…", settings)
+                .id("settings")
+                .key_equivalent(chord("cmd+,")),
+        )
+        .menu_item(
+            MenuItem::new("New…", new_object)
+                .id("new")
+                .menu("File")
+                .key_equivalent(chord("cmd+n")),
+        )
+        .menu_item(MenuItem::new("Search", search).id("search").menu("File"))
+        .run();
 }

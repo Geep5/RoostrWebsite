@@ -4,201 +4,173 @@
 
 use std::rc::Rc;
 
-use gpui_kit::component::IndexPath;
-use gpui_kit::component::input::{Input, InputState};
-use gpui_kit::component::searchable_list::{SearchableListItem, SearchableVec};
-use gpui_kit::component::select::{self, SelectEvent, SelectState};
-use gpui_kit::prelude::FluentBuilder as _;
-use gpui_kit::*;
-use roostr_core::{motion, theme};
+use roostr_ui::color::rgb;
+use roostr_ui::ty::Weights as _;
+use roostr_ui::{Input, InputState, Theme, motion, ty};
+use rune::{
+    Align, Color, Cursor, Effect, El, Span as RuneSpan, Spring, SpringPair, TextStyle, Transition,
+    Tx, el, row, text,
+};
 
 /// `#f55522`: the danger hover / armed colour of these screens.
-pub fn danger() -> Hsla {
-    rgb(0xf55522).into()
+pub fn danger() -> Color {
+    rgb(0xf55522)
 }
 
 /// Uppercase section heading (`h3`: 11px, muted, bold).
-pub fn h3(text: impl Into<SharedString>) -> Div {
-    let text: SharedString = text.into();
-    div()
-        .text_size(px(11.))
-        .line_height(px(14.))
-        .font_weight(FontWeight::BOLD)
-        .text_color(theme::muted())
-        .child(SharedString::from(text.to_uppercase()))
+pub fn h3(t: &Theme, s: impl Into<String>) -> El {
+    let s: String = s.into();
+    text(s.to_uppercase())
+        .font(ty::ui(11.0).lh(14.0).weight(ty::BOLD))
+        .color(t.muted)
 }
 
 /// Muted 12px helper text (`.hint`, line-height 1.5). It may shrink and wrap
 /// inside a row, so a long hint never runs past a narrow sheet's edge.
-pub fn hint(text: impl Into<SharedString>) -> Div {
-    div()
-        .min_w_0()
-        .text_size(px(12.))
-        .line_height(px(18.))
-        .text_color(theme::muted())
-        .child(text.into())
+pub fn hint(t: &Theme, s: impl Into<String>) -> El {
+    text(s.into())
+        .font(ty::ui(12.0).lh(18.0))
+        .color(t.muted)
+        .wrap()
+        .min_w(0.0)
+        .shrink()
 }
 
-/// A transient confirmation ("Saved", "Copied ✓") that rises in over 150ms
-/// (opacity, y 6 → 0) and fades out over 200ms after its flag clears. It is
-/// never interactive, so the exit may outlive the flag: the owning view keeps
-/// one per flash and remembers the last text for the exit to draw.
-#[derive(Default)]
-pub struct Flash {
-    state: motion::MotionState,
-    text: SharedString,
-}
-
-impl Flash {
-    /// The presence declaration: shown or leaving.
-    pub fn motion(shown: bool) -> motion::Motion {
-        let hidden = motion::Target::default().y(6.).opacity(0.);
-        motion::Motion::new(motion::Target::default())
-            .exit(hidden)
-            .transition(
-                if shown {
-                    motion::CONTROL
-                } else {
-                    motion::Tween::ease(200)
-                }
-                .transition(),
-            )
-            .present(shown)
+/// A transient confirmation ("Saved", "Copied ✓"): rises in over 150ms
+/// (opacity, y 6 → 0) and fades out over 200ms once `text` is empty (Rune
+/// keeps a removed keyed element drawn until its exit settles).
+pub fn flash(key: &str, s: &str, build: impl FnOnce(String) -> El) -> Option<El> {
+    if s.is_empty() {
+        return None;
     }
-
-    /// The flash for `text` ("" = hidden), each frame; `build` styles the
-    /// text. Draws nothing once the exit has settled.
-    pub fn render<E: IntoElement>(
-        &mut self,
-        text: impl Into<SharedString>,
-        build: impl FnOnce(SharedString) -> E,
-        window: &mut Window,
-        cx: &App,
-    ) -> AnyElement {
-        let text = text.into();
-        let shown = !text.is_empty();
-        if shown {
-            self.text = text;
-        }
-        let frame = self.state.frame(Self::motion(shown), window, cx);
-        let label = self.text.clone();
-        frame.render(|frame| frame.apply(div().child(build(label))))
-    }
+    Some(
+        el().key(key.to_owned())
+            .child(build(s.to_owned()))
+            .transition(Transition {
+                insertion: Effect {
+                    offset: rune::Vec2::new(0.0, 6.0),
+                    ..Effect::opacity(0.0)
+                },
+                removal: Effect::opacity(0.0),
+                springs: SpringPair::new(
+                    motion::CONTROL.spring(),
+                    Spring::new(motion::Tween::ease(200).duration, 0.0),
+                ),
+                ..Transition::identity()
+            }),
+    )
 }
 
-type ClickHandler = Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
+type Press<S> = Rc<dyn Fn(&mut S, &mut Tx)>;
 
 /// A bordered text button as the web CSS draws it.
-#[derive(IntoElement)]
-pub struct Btn {
-    id: ElementId,
-    label: SharedString,
-    leading: Option<AnyElement>,
-    bg: Option<Hsla>,
-    border: Option<Hsla>,
-    color: Hsla,
-    radius: Pixels,
-    px: Pixels,
-    py: Pixels,
-    size: Pixels,
-    weight: FontWeight,
-    hover_border: Option<Hsla>,
-    hover_color: Option<Hsla>,
-    hover_bg: Option<Hsla>,
+pub struct Btn<S> {
+    key: String,
+    label: String,
+    leading: Option<El>,
+    bg: Option<Color>,
+    border: Option<Color>,
+    color: Color,
+    radius: f32,
+    px: f32,
+    py: f32,
+    size: f32,
+    weight: f32,
+    hover_border: Option<Color>,
+    hover_color: Option<Color>,
+    hover_bg: Option<Color>,
     disabled_opacity: f32,
     disabled: bool,
     full_width: bool,
-    centered: bool,
-    tooltip: Option<SharedString>,
-    on_click: Option<ClickHandler>,
+    tooltip: Option<String>,
+    on_press: Option<Press<S>>,
 }
 
-impl Btn {
-    fn base(id: impl Into<ElementId>, label: impl Into<SharedString>) -> Self {
+impl<S: 'static> Btn<S> {
+    fn base(t: &Theme, key: impl Into<String>, label: impl Into<String>) -> Self {
         Self {
-            id: id.into(),
+            key: key.into(),
             label: label.into(),
             leading: None,
-            bg: Some(theme::bg()),
-            border: Some(theme::border()),
-            color: theme::fg(),
-            radius: px(8.),
-            px: px(14.),
-            py: px(7.),
-            size: px(13.),
-            weight: FontWeight::NORMAL,
-            hover_border: Some(theme::accent()),
+            bg: Some(t.bg),
+            border: Some(t.border),
+            color: t.fg,
+            radius: 8.0,
+            px: 14.0,
+            py: 7.0,
+            size: 13.0,
+            weight: ty::NORMAL,
+            hover_border: Some(t.accent),
             hover_color: None,
             hover_bg: None,
             disabled_opacity: 0.5,
             disabled: false,
             full_width: false,
-            centered: true,
             tooltip: None,
-            on_click: None,
+            on_press: None,
         }
     }
 
     /// Settings `.action`: bg, border, radius 8, 7×14, 13px; hover accent border.
-    pub fn action(id: impl Into<ElementId>, label: impl Into<SharedString>) -> Self {
-        Self::base(id, label)
+    pub fn action(t: &Theme, key: impl Into<String>, label: impl Into<String>) -> Self {
+        Self::base(t, key, label)
     }
 
     /// Settings `.keyrow button` / `.relay button` / `form button`: radius 7, 5×12, 12px.
-    pub fn small(id: impl Into<ElementId>, label: impl Into<SharedString>) -> Self {
+    pub fn small(t: &Theme, key: impl Into<String>, label: impl Into<String>) -> Self {
         Self {
-            radius: px(7.),
-            px: px(12.),
-            py: px(5.),
-            size: px(12.),
-            ..Self::base(id, label)
+            radius: 7.0,
+            px: 12.0,
+            py: 5.0,
+            size: 12.0,
+            ..Self::base(t, key, label)
         }
     }
 
     /// SpaceManage `button`: panel bg, radius 7, 4×10, 12px.
-    pub fn manage(id: impl Into<ElementId>, label: impl Into<SharedString>) -> Self {
+    pub fn manage(t: &Theme, key: impl Into<String>, label: impl Into<String>) -> Self {
         Self {
-            bg: Some(theme::panel()),
-            radius: px(7.),
-            px: px(10.),
-            py: px(4.),
-            size: px(12.),
-            ..Self::base(id, label)
+            bg: Some(t.panel),
+            radius: 7.0,
+            px: 10.0,
+            py: 4.0,
+            size: 12.0,
+            ..Self::base(t, key, label)
         }
     }
 
     /// The `×` remove button (`.x`): borderless, muted 16px, hover `#f55522`.
-    pub fn x(id: impl Into<ElementId>) -> Self {
+    pub fn x(t: &Theme, key: impl Into<String>) -> Self {
         Self {
             bg: None,
             border: None,
-            color: theme::muted(),
-            px: px(4.),
-            py: px(0.),
-            size: px(16.),
+            color: t.muted,
+            px: 4.0,
+            py: 0.0,
+            size: 16.0,
             hover_border: None,
             hover_color: Some(danger()),
-            ..Self::base(id, "×")
+            ..Self::base(t, key, "×")
         }
     }
 
     /// Solid red confirm (`.del-btn`): white 13px/600, radius 6, disabled at 35%.
-    pub fn destructive(id: impl Into<ElementId>, label: impl Into<SharedString>) -> Self {
+    pub fn destructive(t: &Theme, key: impl Into<String>, label: impl Into<String>) -> Self {
         Self {
-            bg: Some(theme::red()),
+            bg: Some(t.red),
             border: None,
-            color: theme::white(),
-            radius: px(6.),
-            weight: FontWeight::SEMIBOLD,
+            color: t.white,
+            radius: 6.0,
+            weight: ty::SEMIBOLD,
             hover_border: None,
             disabled_opacity: 0.35,
-            ..Self::base(id, label)
+            ..Self::base(t, key, label)
         }
     }
 
-    /// Muted label (`.subtle`), 6px above.
-    pub fn subtle(mut self) -> Self {
-        self.color = theme::muted();
+    /// Muted label (`.subtle`).
+    pub fn subtle(mut self, t: &Theme) -> Self {
+        self.color = t.muted;
         self
     }
 
@@ -212,17 +184,17 @@ impl Btn {
     /// Settings `.action.danger` (armed logout): `#f55522` text, tinted border.
     pub fn armed(mut self) -> Self {
         self.color = danger();
-        self.border = Some(rgba(0xf5552266).into());
+        self.border = Some(danger().alpha(0.4));
         self
     }
 
-    pub fn style(mut self, f: impl FnOnce(&mut Self)) -> Self {
-        f(&mut self);
-        self
+    /// Applies `f` when `cond` holds (GPUI's `.when`).
+    pub fn when(self, cond: bool, f: impl FnOnce(Self) -> Self) -> Self {
+        if cond { f(self) } else { self }
     }
 
-    pub fn leading(mut self, element: impl IntoElement) -> Self {
-        self.leading = Some(element.into_any_element());
+    pub fn leading(mut self, e: El) -> Self {
+        self.leading = Some(e);
         self
     }
 
@@ -237,193 +209,247 @@ impl Btn {
         self
     }
 
-    pub fn tooltip(mut self, text: impl Into<SharedString>) -> Self {
-        self.tooltip = Some(text.into());
+    pub fn tooltip(mut self, s: impl Into<String>) -> Self {
+        self.tooltip = Some(s.into());
         self
     }
 
-    pub fn on_click(mut self, f: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static) -> Self {
-        self.on_click = Some(Rc::new(f));
+    pub fn on_press(self, f: impl Fn(&mut S) + 'static) -> Self {
+        self.on_press_tx(move |s: &mut S, _: &mut Tx| f(s))
+    }
+
+    pub fn on_press_tx(mut self, f: impl Fn(&mut S, &mut Tx) + 'static) -> Self {
+        self.on_press = Some(Rc::new(f));
         self
     }
 
-    pub fn set_colors(&mut self, bg: Option<Hsla>, border: Option<Hsla>, color: Hsla) {
+    pub fn colors(mut self, bg: Option<Color>, border: Option<Color>, color: Color) -> Self {
         self.bg = bg;
         self.border = border;
         self.color = color;
+        self
     }
 
-    pub fn set_padding(&mut self, x: f32, y: f32) {
-        self.px = px(x);
-        self.py = px(y);
+    pub fn padding(mut self, x: f32, y: f32) -> Self {
+        self.px = x;
+        self.py = y;
+        self
     }
 
-    pub fn set_text(&mut self, size: f32, weight: FontWeight) {
-        self.size = px(size);
+    pub fn text_style(mut self, size: f32, weight: f32) -> Self {
+        self.size = size;
         self.weight = weight;
+        self
     }
 
-    pub fn set_radius(&mut self, radius: f32) {
-        self.radius = px(radius);
+    pub fn radius(mut self, radius: f32) -> Self {
+        self.radius = radius;
+        self
     }
 
-    pub fn set_hover(&mut self, border: Option<Hsla>, color: Option<Hsla>, bg: Option<Hsla>) {
+    pub fn hover(mut self, border: Option<Color>, color: Option<Color>, bg: Option<Color>) -> Self {
         self.hover_border = border;
         self.hover_color = color;
         self.hover_bg = bg;
+        self
     }
-}
 
-impl RenderOnce for Btn {
-    fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
-        use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
-        use gpui_kit::component::{Disableable as _, Sizable as _, Size};
+    pub fn build(self, _t: &Theme) -> El {
         let disabled = self.disabled;
         let line = (self.size * 1.25).round();
-        let bg = self.bg.unwrap_or(transparent_black());
-        // The kit paints the hover state from the variant: border from
-        // `color`, text from `foreground`, fill from `hover`. The resting
-        // look is the instance style below, which the kit layers on top.
-        let hover_fill = self.hover_bg.unwrap_or(bg);
-        let hover = ButtonCustomVariant::new(cx)
-            .color(
-                self.hover_border
-                    .or(self.border)
-                    .unwrap_or(transparent_black()),
-            )
-            .foreground(self.hover_color.unwrap_or(self.color))
-            .hover(hover_fill)
-            .active(hover_fill);
-        Button::new(self.id)
-            .custom(hover)
-            // A free size: no fixed height, so the web padding sets it.
-            .with_size(Size::Size(self.size))
-            .rounded(self.radius)
-            .accessibility_label(self.label.clone())
-            .disabled(disabled)
-            .flex_none()
+        let border_w = if self.border.is_some() { 1.0 } else { 0.0 };
+        let mut label = text(self.label.clone())
+            .font(TextStyle::new(self.size, self.weight).lh(line))
+            .color(self.color);
+        if let Some(c) = self.hover_color.filter(|_| !disabled) {
+            label = label.group_color(c);
+        }
+        let mut b = row()
+            .key(self.key)
+            .role("button")
+            .label(self.label)
+            .center()
+            .gap(6.0)
             .px(self.px)
             .py(self.py)
-            .bg(bg)
-            .text_color(self.color)
-            .when_some(self.border, |b, border| b.border_1().border_color(border))
-            .when(self.full_width, |b| b.w_full())
-            .when(disabled, |b| b.opacity(self.disabled_opacity))
-            .when(!disabled, |b| b.cursor_pointer())
-            // Leading slot first, then the label (the kit puts children after
-            // its own label, so both go in one row of ours).
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .when(self.centered, |d| d.justify_center())
-                    .gap(px(6.))
-                    .text_size(self.size)
-                    .line_height(line)
-                    .font_weight(self.weight)
-                    .children(self.leading)
-                    .child(self.label),
-            )
-            .when_some(self.tooltip, |b, text| b.tooltip(text))
-            .when_some(self.on_click.filter(|_| !disabled), |b, handler| {
-                b.on_click(move |event, window, cx| handler(event, window, cx))
-            })
+            .radius(self.radius)
+            .hover_group();
+        if let Some(bg) = self.bg {
+            b = b.fill(bg);
+        }
+        if let Some(border) = self.border {
+            b = b.border(border_w, border);
+        }
+        if self.full_width {
+            b = b.w_full();
+        }
+        if let Some(lead) = self.leading {
+            b = b.child(lead);
+        }
+        b = b.child(label);
+        if !disabled {
+            // Hover border / fill: a ring laid over the edge that shows with the group's
+            // hover (Rune's hover is a fill overlay; CSS here changes the border colour).
+            if let Some(c) = self.hover_border {
+                b = b.child(
+                    el().absolute(0.0, 0.0)
+                        .w_full()
+                        .h_full()
+                        .radius(self.radius)
+                        .border(1.0, c)
+                        .group_opacity(0.0, 1.0)
+                        .a11y_hidden(),
+                );
+            }
+            if let Some(c) = self.hover_bg {
+                b = b.hover(c);
+            }
+            b = b.cursor(Cursor::Pointer);
+        } else {
+            b = b.opacity(self.disabled_opacity).disabled(true);
+        }
+        if let Some(tip) = self.tooltip {
+            b = roostr_ui::tooltip(b, tip);
+        }
+        match self.on_press.filter(|_| !disabled) {
+            Some(f) => b.focusable(true).on_press_tx(move |s: &mut S, tx| f(s, tx)),
+            None => b,
+        }
     }
 }
 
 /// The settings toggle (`.switch`): the kit switch in the accent colour, the
 /// knob springing between states. `toggle` gets the requested state.
-pub fn switch(
-    id: impl Into<ElementId>,
+pub fn switch<S: 'static>(
+    t: &Theme,
+    key: impl Into<String>,
     on: bool,
-    toggle: impl Fn(bool, &mut Window, &mut App) + 'static,
-) -> gpui_kit::component::switch::Switch {
-    gpui_kit::component::switch::Switch::new(id)
+    toggle: impl Fn(&mut S, bool) + 'static,
+) -> El {
+    roostr_ui::Switch::new(key)
         .checked(on)
-        .color(theme::accent())
-        .on_change(move |next, window, cx| toggle(*next, window, cx))
+        .color(t.accent)
+        .on_change(toggle)
+        .build(t)
 }
 
 /// How a text field is drawn.
 #[derive(Clone, Copy)]
 pub struct FieldStyle {
-    pub bg: Hsla,
+    pub bg: Color,
     pub radius: f32,
     pub px: f32,
     pub py: f32,
     pub size: f32,
     /// Focus border colour, and its 3px ring.
-    pub focus: Hsla,
-    pub ring: Option<Hsla>,
+    pub focus: Color,
+    pub ring: Option<Color>,
     pub centered: bool,
 }
 
 impl FieldStyle {
     /// `.modal input`: panel bg, radius 6, 6×9, 13px, accent focus + 40% ring.
-    pub fn modal() -> Self {
-        let mut ring = theme::accent();
-        ring.a = 0.4;
+    pub fn modal(t: &Theme) -> Self {
         Self {
-            bg: theme::panel(),
-            radius: 6.,
-            px: 9.,
-            py: 6.,
-            size: 13.,
-            focus: theme::accent(),
-            ring: Some(ring),
+            bg: t.panel,
+            radius: 6.0,
+            px: 9.0,
+            py: 6.0,
+            size: 13.0,
+            focus: t.accent,
+            ring: Some(t.accent.alpha(0.4)),
             centered: false,
         }
     }
 }
 
-/// A single-line text field over a gpui-kit [`InputState`] with web chrome.
-pub fn field(state: &Entity<InputState>, style: FieldStyle, window: &Window, cx: &App) -> Div {
-    let focused = state.focus_handle(cx).is_focused(window);
-    let line = (style.size * 1.25).round();
-    div()
-        .flex()
-        .items_center()
-        .min_w_0()
-        .h(px(line + style.py * 2. + 2.))
-        .px(px(style.px))
-        .rounded(px(style.radius))
-        .bg(style.bg)
-        .border_1()
-        .border_color(if focused {
-            style.focus
-        } else {
-            theme::border()
-        })
-        .when(focused, |d| match style.ring {
-            Some(ring) => d.shadow(vec![BoxShadow {
-                color: ring,
-                offset: point(px(0.), px(0.)),
-                blur_radius: px(0.),
-                spread_radius: px(3.),
-                inset: false,
-            }]),
-            None => d,
-        })
-        .text_size(px(style.size))
-        .child(
-            Input::new(state)
+/// A single-line text field over a roostr-ui [`InputState`] with web chrome.
+pub struct Field {
+    input: Input,
+    focused: bool,
+    style: FieldStyle,
+    key: String,
+}
+
+impl Field {
+    pub fn new(key: impl Into<String>, state: &InputState, style: FieldStyle) -> Self {
+        let key = key.into();
+        let line = (style.size * 1.25).round();
+        Self {
+            input: Input::new(format!("{key}-input"), state)
                 .appearance(false)
-                .px_0()
-                .py_0()
-                .h(px(line))
-                .text_size(px(style.size))
-                .when(style.centered, |i| i.text_center()),
-        )
+                .px(0.0)
+                .h(line)
+                .text_size(style.size)
+                .line_height(line),
+            focused: state.is_focused(),
+            style,
+            key,
+        }
+    }
+
+    pub fn placeholder(mut self, p: impl Into<String>) -> Self {
+        self.input = self.input.placeholder(p);
+        self
+    }
+
+    /// Binds the field to its [`InputState`] in the app state.
+    pub fn on_edit<S: 'static>(
+        mut self,
+        f: impl for<'a> Fn(&'a mut S) -> &'a mut InputState + 'static,
+    ) -> Self {
+        self.input = self.input.on_edit(f);
+        self
+    }
+
+    /// Enter in the field (`InputEvent::PressEnter`).
+    pub fn on_submit<S: 'static>(mut self, f: impl Fn(&mut S, &mut Tx) + 'static) -> Self {
+        self.input = self.input.on_submit(f);
+        self
+    }
+
+    /// The text changed (`InputEvent::Change`).
+    pub fn on_change<S: 'static>(mut self, f: impl Fn(&mut S, &mut Tx) + 'static) -> Self {
+        self.input = self.input.on_change(f);
+        self
+    }
+
+    /// A password field's eye toggle.
+    pub fn mask_toggle(mut self) -> Self {
+        self.input = self.input.mask_toggle();
+        self
+    }
+
+    pub fn build(self, t: &Theme) -> El {
+        let style = self.style;
+        let line = (style.size * 1.25).round();
+        let mut input = self.input.text_color(t.fg).build(t);
+        if style.centered {
+            input = input.align(Align::Center);
+        }
+        let mut e = row()
+            .key(self.key)
+            .center_y()
+            .min_w(0.0)
+            .h(line + style.py * 2.0 + 2.0)
+            .px(style.px + 1.0)
+            .radius(style.radius)
+            .fill(style.bg)
+            .border(1.0, if self.focused { style.focus } else { t.border })
+            .child(input);
+        if self.focused
+            && let Some(ring) = style.ring
+        {
+            e = e.outline(3.0, 0.0, ring);
+        }
+        e
+    }
 }
 
 /// The spinning ring of "Checking…" / sign-in waits (`.desk-spin`).
-pub fn spinner(color: Hsla) -> impl IntoElement {
-    use gpui_kit::component::Sizable as _;
-    div().flex_none().mr(px(6.)).child(
-        gpui_kit::component::spinner::Spinner::new()
-            .color(color)
-            .with_size(px(10.)),
-    )
+pub fn spinner(t: &Theme, color: Color) -> El {
+    el().mr(6.0)
+        .child(roostr_ui::Spinner::new().px(10.0).color(color).build(t))
 }
 
 /// One run of inline-formatted text.
@@ -436,256 +462,102 @@ pub enum Span<'a> {
     Code(&'a str),
 }
 
-/// Wrapped text mixing plain, bold and code runs (an HTML paragraph).
-pub fn rich(spans: &[Span], color: Hsla, window: &Window) -> StyledText {
-    let base = window.text_style().font();
-    let mut text = String::new();
+/// Wrapped text mixing plain, bold and code runs (an HTML paragraph), at
+/// `size` / `line` in `color`.
+pub fn rich(t: &Theme, spans: &[Span], color: Color, size: f32, line: f32) -> El {
+    let mut s = String::new();
     let mut runs = Vec::with_capacity(spans.len());
     for span in spans {
-        let (s, font, run_color, background) = match *span {
-            Span::Plain(s) => (s, base.clone(), color, None),
-            Span::Bold(s) => (
-                s,
-                Font {
-                    weight: FontWeight::BOLD,
-                    ..base.clone()
-                },
-                color,
-                None,
-            ),
-            Span::Code(s) => (
-                s,
-                Font {
-                    family: theme::fonts::MONO.into(),
-                    ..base.clone()
-                },
-                theme::fg(),
-                Some(theme::hl_med()),
-            ),
+        let (part, f): (&str, fn(RuneSpan, &Theme) -> RuneSpan) = match *span {
+            Span::Plain(p) => (p, |r, _| r),
+            Span::Bold(p) => (p, |r, _| r.weight(ty::BOLD)),
+            Span::Code(p) => (p, |r, t| {
+                let mut r = r;
+                r.mono = true;
+                r.color = Some(t.fg);
+                r.bg = Some(t.hl_med);
+                r
+            }),
         };
-        text.push_str(s);
-        runs.push(TextRun {
-            len: s.len(),
-            font,
-            color: run_color,
-            background_color: background,
-            underline: None,
-            strikethrough: None,
-        });
+        let start = s.len();
+        s.push_str(part);
+        runs.push(f(RuneSpan::new(start, s.len()), t));
     }
-    StyledText::new(text).with_runs(runs)
+    rune::rich(s, runs)
+        .font(ty::ui(size).lh(line))
+        .color(color)
+        .min_w(0.0)
+        .shrink()
 }
-
-type PickHandler = Rc<dyn Fn(&str, &mut Window, &mut App)>;
 
 /// One `<option>`: its value and the label shown.
-#[derive(Clone)]
-struct SelectOption {
-    value: String,
-    label: SharedString,
+pub type SelectOption = (String, String);
+
+/// A `<select>` over roostr-ui's [`roostr_ui::Select`]: a bordered trigger
+/// showing the current option and a menu of the options below it. Its open
+/// state lives in the app state behind `lens`; `on_pick` hears picks.
+pub fn select<S: 'static>(
+    t: &Theme,
+    layer: &mut Vec<El>,
+    key: &str,
+    state: &roostr_ui::SelectState,
+    lens: impl for<'a> Fn(&'a mut S) -> &'a mut roostr_ui::SelectState + 'static,
+    min_w: f32,
+    bg: Color,
+    on_pick: impl Fn(&mut S, &str, &mut Tx) + 'static,
+) -> El {
+    // GPUI's box sized the select to its content: the longest option at
+    // 13px (about 0.62 em a character) plus padding, gap and chevron.
+    let longest = state
+        .items()
+        .iter()
+        .map(|i| i.title.chars().count())
+        .max()
+        .unwrap_or(0);
+    let width = (longest as f32 * 13.0 * 0.62 + 10.0 * 2.0 + 8.0 + 12.0 + 6.0).max(min_w);
+    roostr_ui::Select::new(key.to_owned(), state)
+        .on_state(lens)
+        .w(width)
+        .on_change_tx(move |s: &mut S, v: Option<&str>, tx: &mut Tx| {
+            if let Some(v) = v {
+                on_pick(s, v, tx)
+            }
+        })
+        .icon(roostr_ui::Glyph::ChevronDown)
+        .menu_width(min_w.max(160.0))
+        .menu_max_h(320.0)
+        .h(30.0)
+        .px(10.0)
+        .py(6.0)
+        .gap(8.0)
+        .radius(8.0)
+        .fill(bg)
+        .border_color(t.border)
+        .text_size(13.0)
+        .build(t, layer)
 }
 
-impl SearchableListItem for SelectOption {
-    type Value = String;
-
-    fn title(&self) -> SharedString {
-        self.label.clone()
-    }
-
-    fn value(&self) -> &String {
-        &self.value
-    }
-}
-
-type OptionList = SearchableVec<SelectOption>;
-
-fn option_list(options: &[(String, SharedString)]) -> OptionList {
-    SearchableVec::new(
-        options
+/// The options of a select, kept in step with `options` and `selected`
+/// without echoing a pick back.
+pub fn sync_select(state: &mut roostr_ui::SelectState, options: &[SelectOption], selected: &str) {
+    let same = state.items().len() == options.len()
+        && state
+            .items()
             .iter()
-            .map(|(value, label)| SelectOption {
-                value: value.clone(),
-                label: label.clone(),
-            })
-            .collect::<Vec<_>>(),
-    )
-}
-
-/// Per-select element state: the kit state, the options it holds, and the
-/// latest pick handler its confirm subscription calls.
-struct SelectHost {
-    state: Entity<SelectState<OptionList>>,
-    options: Vec<(String, SharedString)>,
-    on_pick: Option<PickHandler>,
-    _confirm: Subscription,
-}
-
-/// A `<select>` over the kit [`select::Select`]: a bordered trigger showing
-/// the current option and a menu of the options below it. The kit owns the
-/// open state (outside click and Escape close it); the host keeps the value
-/// and is told of picks through `on_pick`.
-#[derive(IntoElement)]
-pub struct Select {
-    id: ElementId,
-    options: Vec<(String, SharedString)>,
-    selected: String,
-    bg: Hsla,
-    min_w: Pixels,
-    on_pick: Option<PickHandler>,
-}
-
-impl Select {
-    pub fn new(
-        id: impl Into<ElementId>,
-        options: Vec<(String, SharedString)>,
-        selected: impl Into<String>,
-    ) -> Self {
-        Self {
-            id: id.into(),
-            options,
-            selected: selected.into(),
-            bg: theme::bg(),
-            min_w: px(0.),
-            on_pick: None,
-        }
-    }
-
-    pub fn bg(mut self, bg: Hsla) -> Self {
-        self.bg = bg;
-        self
-    }
-
-    pub fn min_w(mut self, min_w: Pixels) -> Self {
-        self.min_w = min_w;
-        self
-    }
-
-    pub fn on_pick(mut self, f: impl Fn(&str, &mut Window, &mut App) + 'static) -> Self {
-        self.on_pick = Some(Rc::new(f));
-        self
-    }
-}
-
-impl RenderOnce for Select {
-    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let Self {
-            id,
-            options,
-            selected,
-            bg,
-            min_w,
-            on_pick,
-        } = self;
-        let host = window.use_keyed_state((id.clone(), "host"), cx, |window, cx| {
-            let ix = options.iter().position(|(v, _)| *v == selected);
-            let state = cx.new(|cx| {
-                SelectState::new(option_list(&options), ix.map(IndexPath::new), window, cx)
-            });
-            let confirm = cx.subscribe_in(
-                &state,
-                window,
-                |host: &mut SelectHost, _, event: &SelectEvent<OptionList>, window, cx| {
-                    let SelectEvent::Confirm(Some(value)) = event else {
-                        return;
-                    };
-                    if let Some(f) = host.on_pick.clone() {
-                        f(value, window, cx);
-                    }
-                },
-            );
-            SelectHost {
-                state,
-                options: options.clone(),
-                on_pick: None,
-                _confirm: confirm,
-            }
-        });
-        // Follow the host's options and value without echoing a pick back.
-        let state = host.update(cx, |host, cx| {
-            host.on_pick = on_pick;
-            let state = host.state.clone();
-            let reselect = host.options != options;
-            if reselect {
-                host.options = options.clone();
-                state.update(cx, |s, cx| s.set_items(option_list(&options), window, cx));
-            }
-            let want = options
+            .zip(options)
+            .all(|(item, (v, l))| item.value == *v && item.title == *l);
+    if !same {
+        state.set_items(
+            options
                 .iter()
-                .any(|(v, _)| *v == selected)
-                .then_some(&selected);
-            if reselect || state.read(cx).selected_value() != want {
-                state.update(cx, |s, cx| match want {
-                    Some(value) => s.set_selected_value(value, window, cx),
-                    None => s.set_selected_index(None, window, cx),
-                });
-            }
-            state
-        });
-        // The kit select fills its parent; this box sizes it to its content.
-        div().flex_none().min_w(min_w).child(
-            select::Select::new(&state)
-                .id(id)
-                .icon(gpui_kit::component::Icon::new(roostr_core::Glyph::ChevronDown).size(px(12.)))
-                .menu_width(min_w.max(px(160.)))
-                .menu_max_h(px(320.))
-                .min_w(min_w)
-                .h(px(30.))
-                .px(px(10.))
-                .py(px(6.))
-                .gap(px(8.))
-                .rounded(px(8.))
-                .bg(bg)
-                .border_color(theme::border())
-                .text_size(px(13.))
-                .line_height(px(16.))
-                .cursor_pointer(),
-        )
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::time::Duration;
-
-    use super::{Flash, motion};
-
-    #[test]
-    fn flash_hidden_on_mount_then_rises_and_fades() {
-        let mut state = motion::MotionState::default();
-        let at = Duration::from_millis;
-        assert!(
-            !state
-                .sample(Flash::motion(false), at(0), false)
-                .is_mounted()
-        );
-        let shown = state.sample(Flash::motion(true), at(10), false);
-        assert!(shown.is_mounted() && shown.is_animating());
-        assert!(shown.target().alpha() < 0.5 && shown.target().y_px() > 3.);
-        let settled = state.sample(Flash::motion(true), at(10 + 150), false);
-        assert_eq!(
-            (settled.target().y_px(), settled.target().alpha()),
-            (0., 1.)
-        );
-        assert!(
-            state
-                .sample(Flash::motion(false), at(200), false)
-                .is_mounted()
-        );
-        assert!(
-            !state
-                .sample(Flash::motion(false), at(200 + 200), false)
-                .is_mounted()
+                .map(|(v, l)| roostr_ui::SelectItem::new(v.clone(), l.clone()))
+                .collect(),
         );
     }
-
-    #[test]
-    fn flash_snaps_under_reduced_motion() {
-        let mut state = motion::MotionState::default();
-        let at = Duration::from_millis;
-        state.sample(Flash::motion(false), at(0), true);
-        let shown = state.sample(Flash::motion(true), at(1), true);
-        assert_eq!((shown.target().y_px(), shown.target().alpha()), (0., 1.));
-        assert!(!shown.is_animating());
-        assert!(!state.sample(Flash::motion(false), at(2), true).is_mounted());
+    if state.selected_value() != Some(selected) {
+        match state.position(selected) {
+            Some(_) => state.set_selected_value(selected),
+            None => state.set_selected_index(None),
+        }
     }
 }

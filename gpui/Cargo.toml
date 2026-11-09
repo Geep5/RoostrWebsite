@@ -66,6 +66,14 @@ sha2 = "0.10"
 
 # Decoding the landing page's 60-frame WebP takes ~15 s unoptimized; a few
 # seconds of extra first build buys an instant hero in debug builds.
+# Disk: Rune links into every test and example binary; full debug info made the
+# target grow by tens of gigabytes. Line tables keep backtraces readable.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
+
 [profile.dev.package.image-webp]
 opt-level = 3
 

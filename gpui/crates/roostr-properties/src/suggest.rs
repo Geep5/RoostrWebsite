@@ -6,27 +6,25 @@
 //! hover/arrow highlight and Enter. Roostr supplies the rows (glyph + name),
 //! its own filtering and ranking (`filterable(false)`), the create steps, and
 //! dismisses on the first Escape (the palette alone would clear the query
-//! first).
+//! first). The host keeps the menu's state while it is open and places the
+//! panel; the panel pushes its own outside-press scrim into `layer`.
 
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 
-use gpui_kit::base::actions::{Cancel, Confirm};
-use gpui_kit::component::Icon;
-use gpui_kit::component::IndexPath;
-use gpui_kit::component::command::{Command, CommandGroup, CommandItem, CommandState};
-use gpui_kit::component::input::Escape;
-use gpui_kit::component::label::Label;
-use gpui_kit::prelude::FluentBuilder as _;
-use gpui_kit::*;
 use roostr_core::objects::type_glyph;
 use roostr_core::relations::{
     CREATABLE_FORMATS, create_relation, is_reserved_key, space_relations,
 };
-use roostr_core::ui::prop_icon;
-use roostr_core::{RelationDef, Store, TypeDef, theme};
+use roostr_core::{RelationDef, State, TypeDef};
+use roostr_ui::overlay::dismissable;
+use roostr_ui::{
+    Command, CommandGroup, CommandItem, CommandState, IndexPath, Theme, glyph, prop_icon, radius,
+    ty,
+};
+use rune::{Color, Cx, El, Key, KeyEvent, Tx, col, el, row, text};
 
-use crate::type_limit::{TypeLimitPicker, toggled};
-use crate::widgets::{act_button, empty_note, pop_shadow};
+use crate::type_limit::{toggled, type_limit_picker};
+use crate::widgets::{Lens, act_button, empty_note, lens, pop_shadow};
 
 /// What a suggest menu reports to its host.
 pub enum SuggestEvent<T> {
@@ -43,6 +41,8 @@ pub enum PropertyPick {
     /// One of the host's non-relation `extras` (its key).
     Extra(String),
 }
+
+type EventFn<T> = Rc<dyn Fn(&mut State, SuggestEvent<T>)>;
 
 fn format_name(format: &str) -> &str {
     match format {
@@ -63,53 +63,67 @@ fn format_name(format: &str) -> &str {
 
 /// A row's lead (the property's emoji, else its format's line icon) and
 /// name, with an optional muted note at the right end.
-fn glyph_name(emoji: Option<String>, format: &str, name: String, note: Option<String>) -> Div {
+fn glyph_name(
+    t: &Theme,
+    ink: Color,
+    emoji: Option<String>,
+    format: &str,
+    name: String,
+    note: Option<String>,
+) -> El {
     let lead = match emoji {
-        Some(e) => div().child(e),
-        None => div()
-            .flex()
-            .justify_center()
-            .text_color(theme::muted())
-            .child(Icon::new(prop_icon(format)).size(px(14.))),
+        Some(e) => el()
+            .w(18.0)
+            .center()
+            .child(text(e).font(ty::ui(13.0)).color(ink)),
+        None => el()
+            .w(18.0)
+            .center()
+            .child(glyph(prop_icon(format), 14.0).color(t.muted)),
     };
-    div()
-        .flex()
+    let mut line = row()
+        .grow(1.0)
+        .shrink()
+        .min_w(0.0)
+        .center_y()
         .justify_between()
-        .items_center()
-        .gap(px(10.))
-        .w_full()
-        .min_w_0()
-        .text_size(px(13.))
+        .gap(10.0)
         .child(
-            div()
-                .flex()
-                .items_center()
-                .gap(px(8.))
-                .min_w_0()
-                .child(lead.flex_none().w(px(18.)).text_center())
+            row()
+                .shrink()
+                .min_w(0.0)
+                .center_y()
+                .gap(8.0)
+                .child(lead)
                 .child(
-                    div()
-                        .min_w_0()
-                        .overflow_hidden()
-                        .whitespace_nowrap()
-                        .text_ellipsis()
-                        .child(name),
+                    text(name)
+                        .font(ty::ui(13.0))
+                        .color(ink)
+                        .truncate()
+                        .shrink()
+                        .min_w(0.0),
                 ),
-        )
-        .when_some(note, |d, note| {
-            d.child(
-                div()
-                    .flex_none()
-                    .text_size(px(11.))
-                    .text_color(theme::muted())
-                    .child(note),
-            )
-        })
+        );
+    if let Some(note) = note {
+        line = line.child(text(note).font(ty::ui(11.0)).color(t.muted));
+    }
+    line
 }
 
 /// A palette row drawn by Roostr; `label` is what assistive tech reads.
-fn row_item(label: impl Into<SharedString>, row: impl Fn() -> Div + 'static) -> CommandItem {
-    CommandItem::new().label(label).child(move |_, _| row())
+fn row_item(label: impl Into<String>, body: El) -> CommandItem {
+    CommandItem::new().label(label).child(body)
+}
+
+/// The highlighted row as the palette shows it: the state's while it is a row, else the first.
+fn shown_highlight(
+    command: &CommandState,
+    targets: &[(IndexPath, impl Sized)],
+) -> Option<IndexPath> {
+    command
+        .highlighted()
+        .filter(|h| targets.iter().any(|(p, _)| p == h))
+        .or_else(|| targets.first().map(|(p, _)| *p))
 }
 
 /// What a PropertySuggest row does.
@@ -121,45 +135,32 @@ enum Target {
     Relation(RelationDef),
 }
 
-/// Relation picker with search (+ "create property"); place inside a popover/anchored.
-pub struct PropertySuggest {
+/// The query and step the default highlight is placed for.
+type Step = (String, bool, String);
+
+/// A PropertySuggest menu's state, kept by the host while the menu is open.
+#[derive(Clone)]
+pub struct PropertySuggestState {
     space_id: String,
     exclude: Vec<String>,
     extras: Vec<(String, String)>,
-    command: Entity<CommandState>,
+    command: CommandState,
     creating: bool,
     create_format: String,
     create_types: Vec<String>,
-    /// The query and step the default highlight was last placed for.
-    highlighted_for: Option<(String, bool, String)>,
-    focus: FocusHandle,
-    _subs: Vec<Subscription>,
+    /// The query and step the default highlight was last placed for (None: place it).
+    highlighted_for: Option<Step>,
+    /// Dropped with the host's state: a create answering after the menu closed stays quiet.
+    alive: Rc<()>,
 }
 
-impl EventEmitter<SuggestEvent<PropertyPick>> for PropertySuggest {}
-
-impl Focusable for PropertySuggest {
-    fn focus_handle(&self, cx: &App) -> FocusHandle {
-        self.command.focus_handle(cx)
-    }
-}
-
-impl PropertySuggest {
+impl PropertySuggestState {
     /// `exclude`: relation keys to hide (already present); `extras`: `(key, name)`
-    /// non-relation options (system columns like Type/Created).
-    pub fn new(
-        space_id: String,
-        exclude: Vec<String>,
-        extras: Vec<(String, String)>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Self {
-        let command = cx.new(|cx| CommandState::new(window, cx));
-        let subs = vec![cx.observe(&Store::global(cx), |_, _, cx| cx.notify())];
-        let c = command.clone();
-        window.defer(cx, move |window, cx| {
-            c.update(cx, |c, cx| c.focus(window, cx))
-        });
+    /// non-relation options (system columns like Type/Created). The query field is
+    /// focused on the menu's first frame.
+    pub fn new(space_id: String, exclude: Vec<String>, extras: Vec<(String, String)>) -> Self {
+        let mut command = CommandState::new();
+        command.focus();
         Self {
             space_id,
             exclude,
@@ -169,35 +170,22 @@ impl PropertySuggest {
             create_format: String::new(),
             create_types: Vec::new(),
             highlighted_for: None,
-            focus: cx.focus_handle(),
-            _subs: subs,
+            alive: Rc::new(()),
         }
     }
 
-    fn raw(&self, cx: &App) -> String {
-        self.command.read(cx).query(cx).trim().to_string()
+    fn raw(&self) -> String {
+        self.command.query().trim().to_string()
     }
 
-    fn all(&self, cx: &App) -> Vec<RelationDef> {
-        let store = Store::global(cx).read(cx);
-        space_relations(&store.relations, &self.space_id)
+    fn step(&self) -> Step {
+        (self.raw(), self.creating, self.create_format.clone())
+    }
+
+    fn all(&self, s: &State) -> Vec<RelationDef> {
+        space_relations(&s.store.relations, &self.space_id)
             .into_iter()
             .filter(|r| !r.hidden && !is_reserved_key(&r.key) && !self.exclude.contains(&r.key))
-            .cloned()
-            .collect()
-    }
-
-    fn label(r: &RelationDef) -> String {
-        if r.name.is_empty() {
-            r.key.clone()
-        } else {
-            r.name.clone()
-        }
-    }
-
-    fn filtered(all: &[RelationDef], q: &str) -> Vec<RelationDef> {
-        all.iter()
-            .filter(|r| q.is_empty() || Self::label(r).to_lowercase().contains(q))
             .cloned()
             .collect()
     }
@@ -211,370 +199,452 @@ impl PropertySuggest {
             .cloned()
             .collect()
     }
+}
 
-    fn can_create(all: &[RelationDef], q: &str) -> bool {
-        !q.is_empty() && !all.iter().any(|r| Self::label(r).to_lowercase() == q)
-    }
-
-    fn confirm(&mut self, target: Target, window: &mut Window, cx: &mut Context<Self>) {
-        match target {
-            Target::Create => {
-                self.creating = true;
-                cx.notify();
-            }
-            Target::Format(f) => self.choose(f, window, cx),
-            Target::Extra(key) => cx.emit(SuggestEvent::Picked(PropertyPick::Extra(key))),
-            Target::Relation(rel) => cx.emit(SuggestEvent::Picked(PropertyPick::Relation(rel))),
-        }
-    }
-
-    /// A new property's type is always asked: an Object then asks which types it may link.
-    fn choose(&mut self, format: &str, window: &mut Window, cx: &mut Context<Self>) {
-        self.create_format = format.to_string();
-        if format != "object" {
-            self.create(window, cx);
-        }
-        cx.notify();
-    }
-
-    fn create(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let name = self.raw(cx);
-        let task = create_relation(
-            &name,
-            &self.create_format,
-            &self.create_types,
-            &self.space_id,
-            cx,
-        );
-        cx.spawn_in(window, async move |this, cx| match task.await {
-            Ok(rel) => {
-                let _ = this.update(cx, |_, cx| {
-                    cx.emit(SuggestEvent::Picked(PropertyPick::Relation(rel)))
-                });
-            }
-            Err(error) => log::error!("create property: {error:#}"),
-        })
-        .detach();
-    }
-
-    /// The step-3 panel (an Object's type limits + Back / Create), shown under
-    /// the list once a format that needs it is chosen.
-    fn limit_panel(&self, raw: &str, cx: &mut Context<Self>) -> impl Fn() -> AnyElement + 'static {
-        let entity = cx.entity().downgrade();
-        let types = self.create_types.clone();
-        let space = self.space_id.clone();
-        let raw = raw.to_string();
-        move || {
-            let (toggle, back, create) = (entity.clone(), entity.clone(), entity.clone());
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(4.))
-                .p(px(4.))
-                .child(
-                    Label::new(format!("Object “{raw}” links to").to_uppercase())
-                        .px(px(6.))
-                        .pt(px(6.))
-                        .pb(px(2.))
-                        .text_size(px(10.))
-                        .text_color(theme::muted()),
-                )
-                .child(TypeLimitPicker::new(
-                    "limit",
-                    types.clone(),
-                    space.clone(),
-                    move |id, _, cx| {
-                        let _ = toggle.update(cx, |this, cx| {
-                            this.create_types = toggled(&this.create_types, id);
-                            cx.notify();
-                        });
-                    },
-                ))
-                .child(
-                    div()
-                        .flex()
-                        .gap(px(6.))
-                        .justify_end()
-                        .mt(px(6.))
-                        .child(act_button("back", "Back", false).on_click(move |_, _, cx| {
-                            let _ = back.update(cx, |this, cx| {
-                                this.create_format.clear();
-                                cx.notify();
-                            });
-                        }))
-                        .child(act_button("create-it", "Create", false).on_click(
-                            move |_, window, cx| {
-                                let _ = create.update(cx, |this, cx| this.create(window, cx));
-                            },
-                        )),
-                )
-                .into_any_element()
-        }
+fn label(r: &RelationDef) -> String {
+    if r.name.is_empty() {
+        r.key.clone()
+    } else {
+        r.name.clone()
     }
 }
 
-impl Render for PropertySuggest {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let raw = self.raw(cx);
+fn filtered(all: &[RelationDef], q: &str) -> Vec<RelationDef> {
+    all.iter()
+        .filter(|r| q.is_empty() || label(r).to_lowercase().contains(q))
+        .cloned()
+        .collect()
+}
+
+fn can_create(all: &[RelationDef], q: &str) -> bool {
+    !q.is_empty() && !all.iter().any(|r| label(r).to_lowercase() == q)
+}
+
+/// Relation picker with search (+ "create property"): the menu panel.
+pub struct PropertySuggest {
+    key: String,
+    state: PropertySuggestState,
+    lens: Option<Lens<PropertySuggestState>>,
+    on_event: Option<EventFn<PropertyPick>>,
+}
+
+impl PropertySuggest {
+    pub fn new(key: impl Into<String>, state: &PropertySuggestState) -> Self {
+        Self {
+            key: key.into(),
+            state: state.clone(),
+            lens: None,
+            on_event: None,
+        }
+    }
+
+    /// Where the host keeps this menu's state.
+    pub fn on_state(
+        mut self,
+        f: impl for<'a> Fn(&'a mut State) -> &'a mut PropertySuggestState + 'static,
+    ) -> Self {
+        self.lens = Some(lens(f));
+        self
+    }
+
+    /// Picked / Dismissed; the host closes the menu here (drops the state).
+    pub fn on_event(
+        mut self,
+        f: impl Fn(&mut State, SuggestEvent<PropertyPick>) + 'static,
+    ) -> Self {
+        self.on_event = Some(Rc::new(f));
+        self
+    }
+
+    pub fn build(self, s: &State, _cx: &mut Cx<State>, t: &Theme, layer: &mut Vec<El>) -> El {
+        let st = &self.state;
+        let raw = st.raw();
         let q = raw.to_lowercase();
-        let all = self.all(cx);
-        let filtered = Self::filtered(&all, &q);
-        let extras = self.filtered_extras(&q);
-        let can_create = Self::can_create(&all, &q);
-        let pick_format = can_create && self.creating && self.create_format.is_empty();
-        let limits = can_create && self.creating && !self.create_format.is_empty();
+        let all = st.all(s);
+        let filtered = filtered(&all, &q);
+        let extras = st.filtered_extras(&q);
+        let can_create = can_create(&all, &q);
+        let pick_format = can_create && st.creating && st.create_format.is_empty();
+        let limits = can_create && st.creating && !st.create_format.is_empty();
 
         // Rows, one group per section; `targets` maps each row's path to its action.
-        let mut groups: Vec<CommandGroup> = Vec::new();
-        let mut targets: Vec<(IndexPath, Target)> = Vec::new();
-        let mut add_group = |heading: Option<String>, rows: Vec<(CommandItem, Target)>| {
-            let section = groups.len();
-            let mut group = CommandGroup::new();
-            if let Some(h) = heading {
-                group = group.label(h.to_uppercase());
-            }
-            for (row, (item, target)) in rows.into_iter().enumerate() {
-                targets.push((IndexPath::new(row).section(section), target));
-                group = group.item(item);
-            }
-            groups.push(group);
-        };
-        if can_create && !self.creating {
+        // Bodies are drawn once the highlighted row is known (it takes the accent ink).
+        enum Body {
+            Create(String),
+            Format(&'static str),
+            Extra(String),
+            Relation(Option<String>, String, String),
+        }
+        let mut sections: Vec<(Option<String>, Vec<(String, Body, Target)>)> = Vec::new();
+        if can_create && !st.creating {
             let text = format!("＋ Create property “{raw}”");
-            add_group(
+            sections.push((
                 None,
-                vec![(
-                    row_item(text.clone(), move || {
-                        div()
-                            .text_size(px(13.))
-                            .text_color(theme::accent())
-                            .child(text.clone())
-                    }),
-                    Target::Create,
-                )],
-            );
+                vec![(text.clone(), Body::Create(text), Target::Create)],
+            ));
         }
         if pick_format {
-            add_group(
+            sections.push((
                 Some(format!("Type of “{raw}”")),
                 CREATABLE_FORMATS
                     .iter()
                     .map(|&f| {
                         (
-                            row_item(format_name(f).to_string(), move || {
-                                glyph_name(None, f, format_name(f).to_string(), None)
-                            }),
+                            format_name(f).to_string(),
+                            Body::Format(f),
                             Target::Format(f),
                         )
                     })
                     .collect(),
-            );
+            ));
         }
         if !extras.is_empty() {
-            add_group(
+            sections.push((
                 Some("System".into()),
                 extras
                     .into_iter()
-                    .map(|(key, name)| {
-                        let n = name.clone();
-                        (
-                            row_item(name, move || div().text_size(px(13.)).child(n.clone())),
-                            Target::Extra(key),
-                        )
-                    })
+                    .map(|(key, name)| (name.clone(), Body::Extra(name), Target::Extra(key)))
                     .collect(),
-            );
+            ));
         }
         if !filtered.is_empty() {
-            add_group(
+            sections.push((
                 Some("My properties".into()),
                 filtered
                     .into_iter()
                     .map(|rel| {
-                        let (emoji, name, format) = (
+                        let name = label(&rel);
+                        let body = Body::Relation(
                             rel.icon_emoji.clone().filter(|e| !e.is_empty()),
-                            Self::label(&rel),
+                            name.clone(),
                             rel.format.clone(),
                         );
-                        (
-                            row_item(name.clone(), move || {
-                                glyph_name(
-                                    emoji.clone(),
-                                    &format,
-                                    name.clone(),
-                                    Some(format.clone()),
-                                )
-                            }),
-                            Target::Relation(rel),
-                        )
+                        (name, body, Target::Relation(rel))
                     })
                     .collect(),
-            );
+            ));
         }
-
-        // Enter does what the web menu's did: the first matching property,
-        // else "Create property", else the first format. The palette
-        // highlights its first row, so the highlight is placed once per query
-        // and step; arrows and hover move it from there.
-        let step = (raw.clone(), self.creating, self.create_format.clone());
-        if self.highlighted_for.as_ref() != Some(&step) {
-            self.highlighted_for = Some(step);
-            let want = if pick_format {
-                targets
-                    .iter()
-                    .find(|(_, t)| matches!(t, Target::Format(_)))
-                    .map(|(ix, _)| *ix)
-            } else if !self.creating {
-                let first_relation = targets
-                    .iter()
-                    .find(|(_, t)| matches!(t, Target::Relation(_)))
-                    .map(|(ix, _)| *ix);
-                first_relation.or_else(|| {
-                    targets
-                        .iter()
-                        .find(|(_, t)| matches!(t, Target::Create))
-                        .map(|(ix, _)| *ix)
-                })
-            } else {
-                None
-            };
-            if let Some(ix) = want {
-                // After this render installs the rows the path points into.
-                let command = self.command.downgrade();
-                window.defer(cx, move |window, cx| {
-                    let _ = command.update(cx, |c, cx| c.set_selected_index(Some(ix), window, cx));
-                });
+        let mut targets: Vec<(IndexPath, Target)> = Vec::new();
+        for (section, (_, rows)) in sections.iter().enumerate() {
+            for (r, (_, _, target)) in rows.iter().enumerate() {
+                targets.push((IndexPath::new(r).section(section), target.clone()));
             }
         }
 
-        let targets = Rc::new(targets);
-        let entity = cx.entity().downgrade();
-        let on_query = entity.clone();
-        let mut command = Command::new(&self.command)
+        // Enter does what the web menu's did: the first matching property,
+        // else "Create property", else the first format. The highlight is
+        // placed once per query and step; arrows and hover move it from there.
+        let step = st.step();
+        let want = if pick_format {
+            targets
+                .iter()
+                .find(|(_, t)| matches!(t, Target::Format(_)))
+                .map(|(ix, _)| *ix)
+        } else if !st.creating {
+            targets
+                .iter()
+                .find(|(_, t)| matches!(t, Target::Relation(_)))
+                .or_else(|| targets.iter().find(|(_, t)| matches!(t, Target::Create)))
+                .map(|(ix, _)| *ix)
+        } else {
+            None
+        };
+        let place = st.highlighted_for.as_ref() != Some(&step) && want.is_some();
+        let mut command = st.command.clone();
+        if place {
+            command.set_highlighted(want);
+        }
+        let current = shown_highlight(&command, &targets);
+
+        let mut groups: Vec<CommandGroup> = Vec::new();
+        for (section, (heading, rows)) in sections.into_iter().enumerate() {
+            let mut group = CommandGroup::new();
+            if let Some(h) = heading {
+                group = group.label(h.to_uppercase());
+            }
+            for (r, (name, body, _)) in rows.into_iter().enumerate() {
+                let selected = current == Some(IndexPath::new(r).section(section));
+                let ink = if selected {
+                    t.kit.accent_foreground
+                } else {
+                    t.fg
+                };
+                let body = match body {
+                    Body::Create(text_) => text(text_).font(ty::ui(13.0)).color(t.accent),
+                    Body::Format(f) => {
+                        glyph_name(t, ink, None, f, format_name(f).to_string(), None)
+                    }
+                    Body::Extra(n) => text(n).font(ty::ui(13.0)).color(ink),
+                    Body::Relation(emoji, n, format) => {
+                        glyph_name(t, ink, emoji, &format, n, Some(format.clone()))
+                    }
+                };
+                group = group.item(row_item(name, body));
+            }
+            groups.push(group);
+        }
+
+        let key = self.key.clone();
+        let mut palette = Command::new(format!("{key}-command"), &command)
             .filterable(false)
             .bordered(false)
             .placeholder("Filter or create a property…")
-            .max_h(px(280.))
-            .on_query(move |_, _, cx| {
-                let _ = on_query.update(cx, |_, cx| cx.notify());
-            })
-            .on_confirm(move |ix, window, cx| {
-                let Some(target) = targets
-                    .iter()
-                    .find(|(p, _)| *p == ix)
-                    .map(|(_, t)| t.clone())
-                else {
-                    return;
-                };
-                let _ = entity.update(cx, |this, cx| this.confirm(target, window, cx));
-            })
-            .empty(|_, _, _| {
-                empty_note("No properties yet — type a name to create one.")
-                    .p(px(6.))
-                    .text_size(px(12.))
-            });
+            .max_h(280.0)
+            .fill(t.panel)
+            .text_color(t.fg)
+            .empty(el().padding(6.0).child(empty_note(
+                t,
+                "No properties yet — type a name to create one.",
+                12.0,
+            )));
         for group in groups {
-            command = command.group(group);
+            palette = palette.group(group);
         }
-        if limits {
-            let panel = self.limit_panel(&raw, cx);
-            command = command.footer(move |_, _, _| panel());
+        if limits && let Some(lens) = &self.lens {
+            palette = palette.footer(limit_panel(s, t, st, &raw, lens, &self.on_event));
+        }
+        if let Some(lens) = self.lens.clone() {
+            let on_event = self.on_event.clone();
+            let targets = Rc::new(targets);
+            let (l1, l2, l3, l4) = (lens.clone(), lens.clone(), lens.clone(), lens.clone());
+            let (e1, e2) = (on_event.clone(), on_event.clone());
+            let step_k = step.clone();
+            palette = palette
+                .on_state(move |s: &mut State| &mut l1(s).command)
+                .on_select(move |s: &mut State, _, _: &mut Tx| {
+                    let st = l2(s);
+                    st.highlighted_for = Some(st.step());
+                })
+                .on_query(move |s: &mut State, _: &str, _: &mut Tx| {
+                    l3(s).highlighted_for = None;
+                })
+                .on_key(
+                    move |s: &mut State, ev: &KeyEvent, _: &mut Tx| match ev.key {
+                        Key::Escape => {
+                            emit(&e1, s, SuggestEvent::Dismissed);
+                            true
+                        }
+                        // Step 3 has no row to confirm: Enter creates the property.
+                        Key::Enter if limits => {
+                            create(s, &l4, &e1);
+                            true
+                        }
+                        Key::Up | Key::Down => {
+                            // Arrows move from the placed highlight, not the palette's own.
+                            let st = l4(s);
+                            if st.highlighted_for.as_ref() != Some(&step_k) {
+                                if want.is_some() {
+                                    st.command.set_highlighted(want);
+                                }
+                                st.highlighted_for = Some(step_k.clone());
+                            }
+                            false
+                        }
+                        _ => false,
+                    },
+                )
+                .on_confirm(move |s: &mut State, ix: IndexPath, _: &mut Tx| {
+                    let Some(target) = targets
+                        .iter()
+                        .find(|(p, _)| *p == ix)
+                        .map(|(_, t)| t.clone())
+                    else {
+                        return;
+                    };
+                    confirm(s, &lens, &e2, target);
+                });
         }
 
-        div()
-            .id("property-suggest")
-            .track_focus(&self.focus)
-            .w(px(280.))
-            .max_h(px(340.))
-            .overflow_hidden()
-            .flex()
-            .flex_col()
-            .bg(theme::panel())
-            .border_1()
-            .border_color(theme::border())
-            .rounded(theme::radius::menu())
-            .p(px(4.))
-            .shadow(pop_shadow())
-            .text_color(theme::fg())
-            .occlude()
-            .on_mouse_down_out(cx.listener(|_, _, _, cx| cx.emit(SuggestEvent::Dismissed)))
-            // Step 3 has no row to confirm: Enter creates the property.
-            .capture_action(cx.listener(move |this, _: &Confirm, window, cx| {
-                if limits {
-                    cx.stop_propagation();
-                    this.create(window, cx);
-                }
-            }))
-            .capture_action(cx.listener(|_, _: &Escape, _, cx| {
-                cx.stop_propagation();
-                cx.emit(SuggestEvent::Dismissed);
-            }))
-            .capture_action(cx.listener(|_, _: &Cancel, _, cx| {
-                cx.stop_propagation();
-                cx.emit(SuggestEvent::Dismissed);
-            }))
-            .on_key_down(cx.listener(|_, ev: &KeyDownEvent, _, cx| {
-                if ev.keystroke.key == "escape" {
-                    cx.emit(SuggestEvent::Dismissed);
-                }
-            }))
-            .child(command.bg(theme::panel()).flex_1().min_h_0())
+        let panel = col()
+            .key(key.clone())
+            .w(280.0)
+            .max_h(340.0)
+            .fill(t.panel)
+            .border(1.0, t.border)
+            .radius(radius::MENU)
+            .clip_rounded(radius::MENU)
+            .padding(4.0)
+            .box_shadow(pop_shadow())
+            .items_stretch()
+            .child(palette.build(t).shrink().min_h(0.0));
+        let on_event = self.on_event.clone();
+        dismissable(
+            panel,
+            &key,
+            move |s: &mut State| emit(&on_event, s, SuggestEvent::Dismissed),
+            layer,
+        )
     }
 }
 
-/// Type picker with filter input.
-pub struct TypeSuggest {
+fn emit<T>(on_event: &Option<EventFn<T>>, s: &mut State, ev: SuggestEvent<T>) {
+    if let Some(f) = on_event {
+        f(s, ev);
+    }
+}
+
+fn confirm(
+    s: &mut State,
+    lens: &Lens<PropertySuggestState>,
+    on_event: &Option<EventFn<PropertyPick>>,
+    target: Target,
+) {
+    match target {
+        Target::Create => {
+            let st = lens(s);
+            st.creating = true;
+            st.highlighted_for = None;
+        }
+        Target::Format(f) => choose(s, lens, on_event, f),
+        Target::Extra(key) => emit(on_event, s, SuggestEvent::Picked(PropertyPick::Extra(key))),
+        Target::Relation(rel) => emit(
+            on_event,
+            s,
+            SuggestEvent::Picked(PropertyPick::Relation(rel)),
+        ),
+    }
+}
+
+/// A new property's type is always asked: an Object then asks which types it may link.
+fn choose(
+    s: &mut State,
+    lens: &Lens<PropertySuggestState>,
+    on_event: &Option<EventFn<PropertyPick>>,
+    format: &str,
+) {
+    let st = lens(s);
+    st.create_format = format.to_string();
+    st.highlighted_for = None;
+    if format != "object" {
+        create(s, lens, on_event);
+    }
+}
+
+/// Creates the property named by the query; `Picked` follows when the daemon answers
+/// (unless the host closed the menu by then).
+fn create(
+    s: &mut State,
+    lens: &Lens<PropertySuggestState>,
+    on_event: &Option<EventFn<PropertyPick>>,
+) {
+    let st = lens(s);
+    let name = st.raw();
+    let (format, types, space) = (
+        st.create_format.clone(),
+        st.create_types.clone(),
+        st.space_id.clone(),
+    );
+    let alive: Weak<()> = Rc::downgrade(&st.alive);
+    let task = create_relation(&name, &format, &types, &space, s);
+    let on_event = on_event.clone();
+    s.rt.spawn(async move |cx| match task.await {
+        Ok(rel) => {
+            if alive.upgrade().is_some() {
+                cx.update(|s| {
+                    emit(
+                        &on_event,
+                        s,
+                        SuggestEvent::Picked(PropertyPick::Relation(rel)),
+                    )
+                });
+            }
+        }
+        Err(error) => log::error!("create property: {error:#}"),
+    })
+    .detach();
+}
+
+/// The step-3 panel (an Object's type limits + Back / Create), shown under
+/// the list once a format that needs it is chosen.
+fn limit_panel(
+    s: &State,
+    t: &Theme,
+    st: &PropertySuggestState,
+    raw: &str,
+    lens: &Lens<PropertySuggestState>,
+    on_event: &Option<EventFn<PropertyPick>>,
+) -> El {
+    let (toggle, back, make) = (lens.clone(), lens.clone(), lens.clone());
+    let on_event = on_event.clone();
+    col()
+        .key("limits")
+        .gap(4.0)
+        .padding(4.0)
+        .items_stretch()
+        .child(
+            el().px(6.0).pt(6.0).pb(2.0).child(
+                text(format!("Object “{raw}” links to").to_uppercase())
+                    .font(ty::ui(10.0))
+                    .color(t.muted),
+            ),
+        )
+        .child(type_limit_picker(
+            s,
+            t,
+            "type-limit",
+            &st.create_types,
+            &st.space_id,
+            Rc::new(move |s: &mut State, id: &str| {
+                let st = toggle(s);
+                st.create_types = toggled(&st.create_types, id);
+            }),
+        ))
+        .child(
+            row()
+                .gap(6.0)
+                .justify_end()
+                .pt(6.0)
+                .child(
+                    act_button(t, "back", "Back", false)
+                        .on_press(move |s: &mut State| {
+                            let st = back(s);
+                            st.create_format.clear();
+                            st.highlighted_for = None;
+                        })
+                        .build(t),
+                )
+                .child(
+                    act_button(t, "create-it", "Create", false)
+                        .on_press(move |s: &mut State| create(s, &make, &on_event))
+                        .build(t),
+                ),
+        )
+}
+
+/// A TypeSuggest menu's state, kept by the host while the menu is open.
+#[derive(Clone)]
+pub struct TypeSuggestState {
     space_id: String,
     exclude: Vec<String>,
-    command: Entity<CommandState>,
-    placeholder: SharedString,
-    _subs: Vec<Subscription>,
+    command: CommandState,
+    placeholder: String,
 }
 
-impl EventEmitter<SuggestEvent<String>> for TypeSuggest {}
-
-impl Focusable for TypeSuggest {
-    fn focus_handle(&self, cx: &App) -> FocusHandle {
-        self.command.focus_handle(cx)
-    }
-}
-
-impl TypeSuggest {
-    /// The types of `space_id` (plus Query and Collection) minus `exclude` keys.
-    pub fn new(
-        space_id: String,
-        exclude: Vec<String>,
-        placeholder: SharedString,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Self {
-        let command = cx.new(|cx| CommandState::new(window, cx));
-        let subs = vec![cx.observe(&Store::global(cx), |_, _, cx| cx.notify())];
-        let c = command.clone();
-        window.defer(cx, move |window, cx| {
-            c.update(cx, |c, cx| c.focus(window, cx))
-        });
+impl TypeSuggestState {
+    /// The types of `space_id` (plus Query and Collection) minus `exclude` keys. The query
+    /// field is focused on the menu's first frame.
+    pub fn new(space_id: String, exclude: Vec<String>, placeholder: String) -> Self {
+        let mut command = CommandState::new();
+        command.focus();
         Self {
             space_id,
             exclude,
             command,
             placeholder,
-            _subs: subs,
         }
     }
 
     /// Replace the excluded keys (the host's list changed).
-    pub(crate) fn set_exclude(&mut self, exclude: Vec<String>, cx: &mut Context<Self>) {
+    pub fn set_exclude(&mut self, exclude: Vec<String>) {
         if self.exclude != exclude {
             self.exclude = exclude;
-            cx.notify();
         }
     }
 
     /// The space's types, name/key prefix matches first, then the rest that contain the query.
-    fn matches(&self, cx: &App) -> Vec<TypeDef> {
-        let store = Store::global(cx).read(cx);
-        let q = self.command.read(cx).query(cx).trim().to_lowercase();
+    fn matches(&self, s: &State) -> Vec<TypeDef> {
+        let store = &s.store;
+        let q = self.command.query().trim().to_lowercase();
         let space = if self.space_id.is_empty() {
             store
                 .channels
@@ -622,86 +692,134 @@ impl TypeSuggest {
     }
 }
 
-impl Render for TypeSuggest {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let matches = self.matches(cx);
-        let store = Store::global(cx).read(cx);
+/// Type picker with filter input: the menu body (the host gives it a surface).
+pub struct TypeSuggest {
+    key: String,
+    state: TypeSuggestState,
+    lens: Option<Lens<TypeSuggestState>>,
+    on_event: Option<EventFn<String>>,
+}
+
+impl TypeSuggest {
+    pub fn new(key: impl Into<String>, state: &TypeSuggestState) -> Self {
+        Self {
+            key: key.into(),
+            state: state.clone(),
+            lens: None,
+            on_event: None,
+        }
+    }
+
+    /// Where the host keeps this menu's state.
+    pub fn on_state(
+        mut self,
+        f: impl for<'a> Fn(&'a mut State) -> &'a mut TypeSuggestState + 'static,
+    ) -> Self {
+        self.lens = Some(lens(f));
+        self
+    }
+
+    /// Picked(type key) / Dismissed; the host closes the menu here (drops the state).
+    pub fn on_event(mut self, f: impl Fn(&mut State, SuggestEvent<String>) + 'static) -> Self {
+        self.on_event = Some(Rc::new(f));
+        self
+    }
+
+    pub fn build(self, s: &State, _cx: &mut Cx<State>, t: &Theme, layer: &mut Vec<El>) -> El {
+        let st = &self.state;
+        let matches = st.matches(s);
+        let paths: Vec<(IndexPath, ())> = (0..matches.len())
+            .map(|r| (IndexPath::new(r), ()))
+            .collect();
+        let current = shown_highlight(&st.command, &paths);
         let keys: Rc<Vec<String>> = Rc::new(matches.iter().map(|t| t.key.clone()).collect());
         let items: Vec<CommandItem> = matches
             .iter()
-            .map(|t| {
-                let icon = if t.icon.is_empty() {
-                    type_glyph(store, &t.key, &self.space_id)
+            .enumerate()
+            .map(|(r, ty_)| {
+                let icon = if ty_.icon.is_empty() {
+                    type_glyph(&s.store, &ty_.key, &st.space_id)
                 } else {
-                    t.icon.clone()
+                    ty_.icon.clone()
                 };
-                let name = if t.name.is_empty() {
-                    t.key.clone()
+                let name = if ty_.name.is_empty() {
+                    ty_.key.clone()
                 } else {
-                    t.name.clone()
+                    ty_.name.clone()
                 };
-                let key = t.key.clone();
-                row_item(name.clone(), move || {
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(8.))
-                        .w_full()
-                        .text_size(px(13.))
+                let ink = if current == Some(IndexPath::new(r)) {
+                    t.kit.accent_foreground
+                } else {
+                    t.fg
+                };
+                row_item(
+                    name.clone(),
+                    row()
+                        .grow(1.0)
+                        .shrink()
+                        .min_w(0.0)
+                        .center_y()
+                        .gap(8.0)
                         .child(
-                            div()
-                                .flex_none()
-                                .w(px(20.))
-                                .text_center()
-                                .child(icon.clone()),
+                            el().w(20.0)
+                                .center()
+                                .child(text(icon).font(ty::ui(13.0)).color(ink)),
                         )
-                        .child(div().flex_1().child(name.clone()))
                         .child(
-                            div()
-                                .text_size(px(11.))
-                                .text_color(theme::muted())
-                                .child(key.clone()),
+                            text(name)
+                                .font(ty::ui(13.0))
+                                .color(ink)
+                                .truncate()
+                                .grow(1.0)
+                                .shrink()
+                                .min_w(0.0),
                         )
-                })
+                        .child(text(ty_.key.clone()).font(ty::ui(11.0)).color(t.muted)),
+                )
             })
             .collect();
-        let entity = cx.entity().downgrade();
-        let on_query = entity.clone();
-        div()
-            .flex()
-            .flex_col()
-            .min_w(px(240.))
-            .text_color(theme::fg())
-            .capture_action(cx.listener(|_, _: &Escape, _, cx| {
-                cx.stop_propagation();
-                cx.emit(SuggestEvent::Dismissed);
-            }))
-            .capture_action(cx.listener(|_, _: &Cancel, _, cx| {
-                cx.stop_propagation();
-                cx.emit(SuggestEvent::Dismissed);
-            }))
-            .child(
-                Command::new(&self.command)
-                    .filterable(false)
-                    .bordered(false)
-                    .placeholder(self.placeholder.clone())
-                    .max_h(px(240.))
-                    .bg(theme::panel())
-                    .items(items)
-                    .on_query(move |_, _, cx| {
-                        let _ = on_query.update(cx, |_, cx| cx.notify());
-                    })
-                    .on_confirm(move |ix, _, cx| {
-                        if let Some(key) = keys.get(ix.row).cloned() {
-                            let _ = entity.update(cx, |_, cx| cx.emit(SuggestEvent::Picked(key)));
-                        }
-                    })
-                    .empty(|_, _, _| {
-                        empty_note("No matching types.")
-                            .px(px(8.))
-                            .py(px(6.))
-                            .text_size(px(12.))
-                    }),
-            )
+        let key = self.key.clone();
+        let mut palette = Command::new(format!("{key}-command"), &st.command)
+            .filterable(false)
+            .bordered(false)
+            .placeholder(st.placeholder.clone())
+            .max_h(240.0)
+            .fill(t.panel)
+            .text_color(t.fg)
+            .items(items)
+            .empty(
+                el().px(8.0)
+                    .py(6.0)
+                    .child(empty_note(t, "No matching types.", 12.0)),
+            );
+        if let Some(lens) = self.lens.clone() {
+            let (e1, e2) = (self.on_event.clone(), self.on_event.clone());
+            palette = palette
+                .on_state(move |s: &mut State| &mut lens(s).command)
+                .on_key(move |s: &mut State, ev: &KeyEvent, _: &mut Tx| {
+                    if ev.key == Key::Escape {
+                        emit(&e1, s, SuggestEvent::Dismissed);
+                        return true;
+                    }
+                    false
+                })
+                .on_confirm(move |s: &mut State, ix: IndexPath, _: &mut Tx| {
+                    if let Some(k) = keys.get(ix.row).cloned() {
+                        emit(&e2, s, SuggestEvent::Picked(k));
+                    }
+                });
+        }
+        let body = col()
+            .key(key.clone())
+            .min_w(240.0)
+            .items_stretch()
+            .child(palette.build(t).shrink().min_h(0.0));
+        let on_event = self.on_event.clone();
+        dismissable(
+            body,
+            &key,
+            move |s: &mut State| emit(&on_event, s, SuggestEvent::Dismissed),
+            layer,
+        )
     }
 }

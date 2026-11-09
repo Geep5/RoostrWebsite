@@ -18,6 +18,9 @@ use serde_json::{Map, Value as Json};
 #[cfg(target_family = "wasm")]
 pub const WEB_KEY: &str = "roostr-gpui.ui-state";
 
+/// The key of the colour theme preference ([`UiState::theme_name`]).
+pub const THEME_KEY: &str = "theme";
+
 /// The stored UI state ([`crate::State::ui`]).
 pub struct UiState {
     #[cfg(not(target_family = "wasm"))]
@@ -71,6 +74,20 @@ impl UiState {
         if self.values.remove(key).is_some() {
             self.save();
         }
+    }
+
+    /// The colour theme the person picked in Settings (`"dark"`, `"light"` or `"system"`;
+    /// roostr-ui's `ThemePref::from_name` reads it). `"dark"`, today's look, until one is picked.
+    pub fn theme_name(&self) -> &str {
+        self.values
+            .get(THEME_KEY)
+            .and_then(Json::as_str)
+            .unwrap_or("dark")
+    }
+
+    /// Remember the picked colour theme (see [`Self::theme_name`]).
+    pub fn set_theme_name(&mut self, name: &str) {
+        self.set(THEME_KEY, &name);
     }
 
     #[cfg(target_family = "wasm")]

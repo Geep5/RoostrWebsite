@@ -3,68 +3,502 @@
 //! the More menu with every item and submenu, the pane button with its badge,
 //! and the delete-property modal (1623-1638).
 
-use std::cell::Cell;
-use std::rc::Rc;
-
-use gpui_kit::component::badge::Badge;
-use gpui_kit::component::breadcrumb::{Breadcrumb, BreadcrumbItem};
-use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
-use gpui_kit::component::input::{InputEvent, InputState};
-use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
-use gpui_kit::component::{ElementExt as _, Icon, IconNamed as _, WindowExt as _};
-use gpui_kit::prelude::FluentBuilder as _;
-use gpui_kit::*;
 use roostr_core::cover;
-use roostr_core::nav::{Navigator, Route, navigate, open_tab};
-use roostr_core::objects::{is_image_icon, object_icon, type_glyph};
-use roostr_core::store::Store;
+use roostr_core::nav::{Route, navigate, open_tab};
+use roostr_core::objects::{object_icon, type_glyph};
 use roostr_core::types::{Block, Fields, RelationDef, Value, pos};
-use roostr_core::{Glyph, PaneState, api, theme, ui};
+use roostr_core::{State, api};
+use roostr_ui::{
+    CountBadge, Glyph, Input, PopupMenu, PopupMenuItem, Theme, danger_button, disabled, glyph,
+    icon_button, outline_button, radius, ty, ty::Weights as _,
+};
+use rune::{Cursor, Cx, El, Tx, col, el, row, text};
 use serde_json::json;
 
-use crate::modal::{first_height, small_dialog, track_height};
-use crate::workspace::Workspace;
-use crate::{Search, TIP_DELAY, Tip as _};
+use crate::shell::{Shell, current_space, open_object_id, shell, space_id};
 
-pub(crate) fn init(_: &mut App) {}
-
-/// The open More menu: gpui-kit's [`PopupMenu`] with its Change type flyout.
-pub(crate) struct MoreMenu {
-    menu: Entity<PopupMenu>,
-    /// What `menu` was last filled from.
-    model: Option<MoreModel>,
-    /// The Change type flyout, refilled as its search changes.
-    types: Entity<PopupMenu>,
-    type_search: Entity<InputState>,
-    _subscriptions: Vec<Subscription>,
+/// The delete-property confirmation.
+pub(crate) struct DeleteProp {
+    rel: RelationDef,
+    /// Objects holding a value (`None` while counting).
+    usage: Option<usize>,
+    deleting: bool,
 }
 
-/// What the More menu shows (a change refills it).
-#[derive(Clone, PartialEq)]
-struct MoreModel {
-    id: String,
-    /// A phone leads with Graph (its header has no graph link) instead of
-    /// Open in new tab (it has no tabs).
+/// Which of the More menu's flyouts is open.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Flyout {
+    Collections,
+    Types,
+}
+
+/// The More menu's flyout (a slot: only the header reads it).
+#[derive(Default)]
+struct MoreFlyout(Option<Flyout>);
+
+fn refresh(s: &mut State) {
+    s.store.refresh_all();
+}
+
+/// The page header for the active route (`wide`: queries, sets and
+/// collections run full width; others a 952 pt column).
+pub(crate) fn view(
+    s: &State,
+    _cx: &mut Cx<State>,
+    t: &Theme,
+    wide: bool,
+    _layer: &mut Vec<El>,
+) -> El {
+    let object_id = open_object_id(s);
+    let route = s.nav.route().clone();
+    let (path_icon, path_name, graph_path) = header_path(s, &route);
+    let has_more = object_id.as_ref().is_some_and(|id| {
+        s.store.relations.iter().any(|r| r.id == *id)
+            || s.store.summary(id).is_some()
+            || s.store.space(id).is_some()
+    });
+    // The pane button opens Chat (Properties without one) while it is collapsed.
+    let primary = s.pane.primary();
+    let pane_closed = (s.pane.available && !s.pane.is_open(primary)).then_some(primary);
+
+    // The path pill: the whole pill opens search; the crumb itself takes no press.
+    let icon = if graph_path {
+        glyph(Glyph::Graph, 15.).color(t.fg)
+    } else if roostr_ui::is_image_icon(&path_icon) {
+        crate::shell::emoji_or_image(s, &path_icon, 18.)
+    } else {
+        text(path_icon).font(ty::ui(15.))
+    };
+    let path = crate::shell::fill("path", t.hover)
+        .shrink()
+        .min_w(0.)
+        .px(10.)
+        .py(4.)
+        .gap(8.)
+        .radius(radius::MD)
+        .label(path_name.clone())
+        .child(icon)
+        .child(
+            text(path_name)
+                .font(ty::ui(14.).semibold())
+                .color(t.fg)
+                .truncate()
+                .shrink()
+                .min_w(0.),
+        )
+        .on_press(crate::search::open);
+    let path = roostr_ui::tooltip(path, "Search (⌘K)");
+
+    let graph_focus = object_id.clone();
+    let mut right = row().gap(2.).items_center().child(
+        icon_button("graph-link", Glyph::Graph)
+            .accessibility_label("Graph")
+            .tooltip("Graph")
+            .on_press(move |s: &mut State| {
+                navigate(
+                    Route::Graph {
+                        focus: graph_focus.clone(),
+                    },
+                    s,
+                )
+            })
+            .build(t),
+    );
+    if has_more {
+        right = right.child(more_button(t));
+    }
+    if let Some(primary) = pane_closed {
+        // `.hbtn` at 30 pt with a border (muted under the pointer) and the
+        // pane's message count (hidden at 0, capped at 99+).
+        let button = row()
+            .key("pane-open")
+            .size(30., 30.)
+            .center()
+            .radius(radius::TAB)
+            .border(1., t.border)
+            .border_layout()
+            .cursor(Cursor::Pointer)
+            .hover(t.hover)
+            .press(t.hover)
+            .hover_group()
+            .label("Chat & properties")
+            .child(crate::shell::fill_glyph(t, Glyph::Pane, 16.))
+            .on_press(move |s: &mut State| s.pane.set_open(primary, true, &mut s.ui));
+        right = right.child(
+            CountBadge::new(roostr_ui::tooltip(button, "Chat & properties"))
+                .count(s.pane.count)
+                .max(99)
+                .color(t.accent)
+                .build(t),
+        );
+    }
+
+    let mut header = row()
+        .key("page-header")
+        .w_full()
+        .items_center()
+        .gap(8.)
+        .h(roostr_ui::HEADER_H)
+        .pt(18.)
+        .px(16.)
+        .pb(8.)
+        .border_sides([0., 0., 1., 0.], t.border)
+        .border_layout()
+        .fill(t.bg)
+        .child(
+            row()
+                .gap(2.)
+                .items_center()
+                .child(
+                    icon_button("back", Glyph::NavBack)
+                        .accessibility_label("Back")
+                        .tooltip("Back")
+                        .on_press(|s: &mut State| s.nav.back(&mut s.ui))
+                        .build(t),
+                )
+                .child(
+                    icon_button("forward", Glyph::NavForward)
+                        .accessibility_label("Forward")
+                        .tooltip("Forward")
+                        .on_press(|s: &mut State| s.nav.forward(&mut s.ui))
+                        .build(t),
+                ),
+        )
+        .child(row().grow(1.).min_w(0.).justify_center().child(path))
+        .child(right);
+    if !wide {
+        header = header.max_w(952.);
+    }
+    header
+}
+
+/// The ⋯ button (`more`): the menu anchors under it.
+fn more_button(t: &Theme) -> El {
+    roostr_ui::Button::new("more")
+        .ghost()
+        .accessibility_label("More")
+        .tooltip("More")
+        .child(text("⋯").font(ty::ui(16.)).color(t.muted))
+        .on_press(toggle_more)
+        .build(t)
+        .size(28., 28.)
+        .radius(radius::TAB)
+        .cursor(Cursor::Pointer)
+}
+
+/// `headerPath` of `route`: (icon, name, is the graph).
+pub(crate) fn header_path(s: &State, route: &Route) -> (String, String, bool) {
+    let store = &s.store;
+    let active = s.nav.space();
+    let current = current_space(s);
+    let space_icon = |icon: &str| {
+        if icon.is_empty() {
+            "◍".to_string()
+        } else {
+            icon.to_string()
+        }
+    };
+    match route {
+        Route::Object(id) => {
+            if let Some(o) = store.summary(id) {
+                (
+                    object_icon(store, &o.icon, &o.type_key, active),
+                    crate::shell::or_untitled(&o.name),
+                    false,
+                )
+            } else if let Some(c) = store.space(id) {
+                (space_icon(&c.icon), c.name.clone(), false)
+            } else {
+                ("▨".into(), "…".into(), false)
+            }
+        }
+        Route::Graph { .. } => (
+            String::new(),
+            format!(
+                "Graph — {}",
+                current.map(|c| c.name.clone()).unwrap_or_default()
+            ),
+            true,
+        ),
+        _ => match current {
+            Some(c) => (space_icon(&c.icon), c.name.clone(), false),
+            None => ("◍".into(), "glon".into(), false),
+        },
+    }
+}
+
+/// Open or close the More menu.
+pub(crate) fn toggle_more(s: &mut State) {
+    let shell = s.slot::<Shell>();
+    shell.more = !shell.more;
+    if shell.more {
+        shell.type_search = roostr_ui::InputState::new();
+        s.slot::<MoreFlyout>().0 = None;
+    }
+}
+
+fn close_more(s: &mut State) {
+    s.slot::<Shell>().more = false;
+    s.slot::<MoreFlyout>().0 = None;
+}
+
+const BLOCKED_TIP: &str = "Types and properties Roostr or your queries rely on can't be deleted";
+
+/// A red row with the bin glyph (Move to bin, Delete property).
+fn danger_item(t: &Theme, key: &str, label: &'static str) -> PopupMenuItem {
+    PopupMenuItem::element(
+        row()
+            .key(key.to_string())
+            .gap(8.)
+            .items_center()
+            .child(glyph(Glyph::Trash, 12.).color(t.red))
+            .child(text(label).font(ty::ui(14.)).color(t.red)),
+    )
+}
+
+/// A plain row with a leading glyph.
+fn item(label: &str, g: Glyph) -> PopupMenuItem {
+    PopupMenuItem::new(label.to_string()).icon(g)
+}
+
+/// The disabled row saying why the object can't be deleted; it still
+/// explains itself in a tooltip.
+fn blocked_item(t: &Theme, blocker: &str) -> PopupMenuItem {
+    let line = row()
+        .key("more-blocked")
+        .gap(8.)
+        .items_center()
+        .child(glyph(Glyph::Lock, 12.).color(t.kit.muted_foreground))
+        .child(
+            text(format!("Can't delete: {blocker}"))
+                .font(ty::ui(12.))
+                .color(t.kit.muted_foreground)
+                .wrap()
+                .shrink(),
+        );
+    PopupMenuItem::element(roostr_ui::tooltip(line, BLOCKED_TIP)).disabled(true)
+}
+
+/// The open More menu (desktop and phone), anchored under the ⋯ keyed
+/// `more`. A desktop press outside closes it; a phone's ⋯ toggles it.
+pub(crate) fn more_overlay(
+    s: &State,
+    _cx: &mut Cx<State>,
+    t: &Theme,
     mobile: bool,
-    /// Why the object can't be deleted (empty: it can).
-    blocker: String,
-    /// The phone's cover actions: `Some(has a cover)` on a page that can have one.
-    cover: Option<bool>,
-    kind: MoreKind,
+    layer: &mut Vec<El>,
+) {
+    let Some(menu) = more_menu(s, t, mobile) else {
+        return;
+    };
+    let mut flyouts = Vec::new();
+    let panel = menu.panel(t, "more-menu", &mut flyouts);
+    let panel = roostr_ui::overlay::anchored(panel, "more", roostr_ui::Placement::BottomEnd, 4.);
+    if mobile {
+        layer.push(panel);
+    } else {
+        let panel = roostr_ui::overlay::dismissable(panel, "more-menu", close_more, layer);
+        layer.push(panel);
+    }
+    layer.extend(flyouts);
 }
 
-#[derive(Clone, PartialEq)]
-enum MoreKind {
-    Property,
-    Object {
-        channel_id: String,
-        pinned: bool,
-        /// The space's collections: (id, "icon name").
-        collections: Vec<(String, String)>,
-        can_retype: bool,
-        copy_id: bool,
-    },
-    Space,
+/// The More menu's rows for the open object, `None` without one.
+fn more_menu(s: &State, t: &Theme, mobile: bool) -> Option<PopupMenu> {
+    let id = open_object_id(s)?;
+    let sh = shell(s)?;
+    let flyout = s.get::<MoreFlyout>().and_then(|f| f.0);
+    let blocker = if sh.delete_blocker.0 == id {
+        sh.delete_blocker.1.clone()
+    } else {
+        String::new()
+    };
+    let store = &s.store;
+    let mut menu = PopupMenu::new().min_w(234.);
+    // A phone leads with Graph (its header has no graph link) instead of
+    // Open in new tab (it has no tabs).
+    let target = id.clone();
+    menu = menu.item(if mobile {
+        PopupMenuItem::element(
+            row()
+                .key("more-graph")
+                .gap(8.)
+                .items_center()
+                .child(glyph(Glyph::Graph, 12.).color(t.kit.foreground))
+                .child(text("Graph").font(ty::ui(14.)).color(t.kit.foreground)),
+        )
+        .on_press(move |s: &mut State| {
+            close_more(s);
+            navigate(
+                Route::Graph {
+                    focus: Some(target.clone()),
+                },
+                s,
+            );
+        })
+    } else {
+        item("Open in new tab", Glyph::ExternalLink).on_press(move |s: &mut State| {
+            close_more(s);
+            open_tab(Route::Object(target.clone()), true, s);
+        })
+    });
+    // A phone has no hover: its cover actions live here.
+    if mobile && let Some(object) = store.object(&id).filter(|o| cover::can_have_cover(o)) {
+        let has_cover = cover::cover_file(&object.fields).is_some();
+        let target = id.clone();
+        let label = if has_cover { "Cover" } else { "Add cover" };
+        menu = menu.separator().item(
+            PopupMenuItem::element(
+                row()
+                    .key("more-cover")
+                    .gap(8.)
+                    .items_center()
+                    .child(
+                        glyph(
+                            if has_cover {
+                                Glyph::Palette
+                            } else {
+                                Glyph::Plus
+                            },
+                            12.,
+                        )
+                        .color(t.kit.foreground),
+                    )
+                    .child(text(label).font(ty::ui(14.)).color(t.kit.foreground)),
+            )
+            .on_press(move |s: &mut State| {
+                close_more(s);
+                cover::ask(&target, s);
+            }),
+        );
+        menu = menu.separator();
+    }
+    let copy_id = {
+        let id = id.clone();
+        item("Copy ID", Glyph::Hash).on_press_tx(move |s: &mut State, tx: &mut Tx| {
+            close_more(s);
+            tx.copy(id.clone());
+        })
+    };
+    if store.relations.iter().any(|r| r.id == id) {
+        let delete = if blocker.is_empty() {
+            let target = id.clone();
+            danger_item(t, "more-delete-prop", "Delete property").on_press(move |s: &mut State| {
+                let rel = s.store.relations.iter().find(|r| r.id == target).cloned();
+                if let Some(rel) = rel {
+                    open_delete_property(s, rel);
+                }
+            })
+        } else {
+            blocked_item(t, &blocker)
+        };
+        return Some(menu.item(copy_id).separator().item(delete));
+    }
+    if let Some(summary) = store.summary(&id) {
+        let active = s.nav.space();
+        let pinned = roostr_core::pins::space_of(store, &summary.channel_id)
+            .is_some_and(|sp| sp.pinned_ids.contains(&summary.id));
+        let (target, channel) = (id.clone(), summary.channel_id.clone());
+        menu = menu.item(
+            item(
+                if pinned {
+                    "Unpin from space"
+                } else {
+                    "Pin to space"
+                },
+                if pinned { Glyph::StarOff } else { Glyph::Star },
+            )
+            .on_press(move |s: &mut State| {
+                close_more(s);
+                if let Some(space) = roostr_core::pins::space_of(&s.store, &channel) {
+                    roostr_core::pins::set_pinned(&target, &space, !pinned, s)
+                        .detach_and_log_err(&s.rt);
+                }
+            }),
+        );
+        // Add to collection: the space's collections.
+        let collections_space = if !summary.channel_id.is_empty() {
+            summary.channel_id.clone()
+        } else {
+            space_id(s)
+        };
+        let mut sub = PopupMenu::new();
+        let collections: Vec<(String, String)> = store
+            .summaries
+            .iter()
+            .filter(|o| {
+                o.type_key == "collection" && o.id != id && o.channel_id == collections_space
+            })
+            .map(|o| {
+                let icon = object_icon(store, &o.icon, &o.type_key, active);
+                (
+                    o.id.clone(),
+                    format!("{icon} {}", crate::shell::or_untitled(&o.name)),
+                )
+            })
+            .collect();
+        if collections.is_empty() {
+            sub = sub.label("No collections in this space");
+        }
+        for (cid, label) in collections {
+            let target = id.clone();
+            sub = sub.item(PopupMenuItem::new(label).on_press(move |s: &mut State| {
+                close_more(s);
+                add_to_collection(s, &target, &cid);
+            }));
+        }
+        menu = menu.item(
+            PopupMenuItem::submenu(
+                "Add to collection",
+                sub,
+                flyout == Some(Flyout::Collections),
+            )
+            .icon(Glyph::FolderPlus)
+            .on_toggle(|s: &mut State, open: bool| {
+                s.slot::<MoreFlyout>().0 = open.then_some(Flyout::Collections);
+            }),
+        );
+        if !matches!(summary.type_key.as_str(), "query" | "collection" | "set") {
+            menu = menu.item(
+                PopupMenuItem::submenu(
+                    "Change type",
+                    type_menu(s, t, &id, sh),
+                    flyout == Some(Flyout::Types),
+                )
+                .icon(Glyph::ArrowLeftRight)
+                .on_toggle(|s: &mut State, open: bool| {
+                    s.slot::<MoreFlyout>().0 = open.then_some(Flyout::Types);
+                    if open {
+                        s.slot::<Shell>().type_search.focus();
+                    }
+                }),
+            );
+        }
+        let target = id.clone();
+        menu = menu.item(
+            item("Duplicate", Glyph::Copy).on_press(move |s: &mut State| {
+                close_more(s);
+                duplicate_object(s, &target);
+            }),
+        );
+        if store.space(&summary.channel_id).is_some() {
+            menu = menu.item(copy_id);
+        }
+        let delete = if blocker.is_empty() {
+            let target = id.clone();
+            danger_item(t, "more-bin", "Move to bin").on_press(move |s: &mut State| {
+                close_more(s);
+                move_to_bin(s, &target);
+            })
+        } else {
+            blocked_item(t, &blocker)
+        };
+        return Some(menu.separator().item(delete));
+    }
+    if store.space(&id).is_some() {
+        return Some(menu.item(copy_id));
+    }
+    None
 }
 
 /// A Change type choice.
@@ -74,920 +508,70 @@ struct TypeChoice {
     name: String,
 }
 
-/// The delete-property confirmation.
-pub(crate) struct DeleteProp {
-    rel: RelationDef,
-    /// Objects holding a value (`None` while counting).
-    usage: Option<usize>,
-    deleting: bool,
-    /// The card's laid-out height, to seat it in the window's middle.
-    height: Rc<Cell<Pixels>>,
-}
-
-fn refresh(cx: &mut App) {
-    Store::global(cx).update(cx, |s, cx| s.refresh_all(cx));
-}
-
-impl Workspace {
-    pub(crate) fn render_header(
-        &mut self,
-        wide: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Div {
-        let object_id = Self::open_object_id(cx);
-        let route = Navigator::global(cx).read(cx).route().clone();
-        let (path_icon, path_name, graph_path) = self.header_path(&route, cx);
-        let (has_more, pane_closed, count) = {
-            let store = Store::global(cx).read(cx);
-            let has_more = object_id.as_ref().is_some_and(|id| {
-                store.relations.iter().any(|r| r.id == *id)
-                    || store.summary(id).is_some()
-                    || store.space(id).is_some()
-            });
-            let pane = PaneState::global(cx).read(cx);
-            // The pane button opens Chat (Properties without one) while it is collapsed.
-            let primary = pane.primary();
-            let closed = (pane.available && !pane.is_open(primary)).then_some(primary);
-            (has_more, closed, pane.count)
-        };
-        // The path pill: one ghost kit button (the whole pill opens search).
-        let path = crate::fill_button("path", theme::hover(), cx)
-            .flex_shrink(1.)
-            .max_w(relative(0.6))
-            .min_w_0()
-            .h_auto()
-            .px(px(10.))
-            .py(px(4.))
-            .rounded(theme::radius::md())
-            .text_color(theme::fg())
-            .accessibility_label(SharedString::from(path_name.clone()))
-            // The kit sizes its own content box: the pill's 14/600 text and
-            // the icon + crumb row live on a child.
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(8.))
-                    .min_w_0()
-                    .text_size(px(14.))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .line_height(relative(1.2))
-                    .text_color(theme::fg())
-                    .map(|d| {
-                        if graph_path {
-                            d.child(
-                                svg()
-                                    .path(Glyph::Graph.path())
-                                    .size(px(15.))
-                                    .flex_none()
-                                    .text_color(theme::fg()),
-                            )
-                        } else if is_image_icon(&path_icon) {
-                            d.child(ui::emoji_or_image_icon(&path_icon, px(18.)))
-                        } else {
-                            d.child(
-                                div()
-                                    .flex_none()
-                                    .text_size(px(15.))
-                                    .child(path_icon.clone()),
-                            )
-                        }
-                    })
-                    // The path is one crumb (the open object, space or
-                    // graph); the whole pill opens search, so the crumb
-                    // itself takes no click.
-                    .child(
-                        Breadcrumb::new()
-                            .min_w_0()
-                            .overflow_hidden()
-                            .text_size(px(14.))
-                            .child(
-                                BreadcrumbItem::new(path_name)
-                                    .min_w_0()
-                                    .truncate()
-                                    .text_color(theme::fg()),
-                            ),
-                    ),
-            )
-            .tooltip_with_action("Search", &Search, None)
-            .tooltip_show_delay(TIP_DELAY)
-            .on_click(cx.listener(|this, _, window, cx| this.open_search(window, cx)));
-
-        let graph_focus = object_id.clone();
-        let right = div()
-            .flex()
-            .flex_none()
-            .items_center()
-            .gap(px(2.))
-            .child(
-                ui::icon_button("graph-link", Glyph::Graph)
-                    .accessibility_label("Graph")
-                    .tip("Graph")
-                    .on_click(move |_, _, cx| {
-                        navigate(
-                            Route::Graph {
-                                focus: graph_focus.clone(),
-                            },
-                            cx,
-                        )
-                    }),
-            )
-            .when(has_more, |d| d.child(self.render_more(window, cx)))
-            .when_some(pane_closed, |d, primary| {
-                // `.hbtn` at 30px with a border (muted under the pointer)
-                // and the pane's message count (hidden at 0, capped at 99+).
-                let fill = ButtonCustomVariant::new(cx)
-                    .color(theme::muted())
-                    .foreground(theme::fg())
-                    .hover(theme::hover())
-                    .active(theme::hover())
-                    .shadow(false);
-                d.child(
-                    Badge::new()
-                        .count(count)
-                        .max(99)
-                        .color(theme::accent())
-                        .child(
-                            Button::new("pane-open")
-                                .custom(fill)
-                                .rounded(theme::radius::tab())
-                                .size(px(30.))
-                                .p_0()
-                                .border_1()
-                                .border_color(theme::border())
-                                .bg(transparent_black())
-                                .text_color(theme::muted())
-                                .cursor_pointer()
-                                .child(Icon::new(Glyph::Pane).size(px(16.)))
-                                .accessibility_label("Chat & properties")
-                                .tip("Chat & properties")
-                                .on_click(move |_, _, cx| {
-                                    PaneState::global(cx)
-                                        .update(cx, |p, cx| p.set_open(primary, true, cx))
-                                }),
-                        ),
-                )
-            });
-
-        div()
-            .w_full()
-            .mx_auto()
-            .when(!wide, |d| d.max_w(px(952.)))
-            .flex()
-            .items_center()
-            .gap(px(8.))
-            .h(px(theme::HEADER_H))
-            .pt(px(18.))
-            .px(px(16.))
-            .pb(px(8.))
-            .border_b_1()
-            .line_height(relative(1.2))
-            .border_color(theme::border())
-            .bg(theme::bg())
-            .child(
-                div()
-                    .flex()
-                    .flex_none()
-                    .items_center()
-                    .gap(px(2.))
-                    .child(
-                        ui::icon_button("back", Glyph::NavBack)
-                            .accessibility_label("Back")
-                            .tip("Back")
-                            .on_click(|_, _, cx| {
-                                Navigator::global(cx).update(cx, |n, cx| n.back(cx))
-                            }),
-                    )
-                    .child(
-                        ui::icon_button("forward", Glyph::NavForward)
-                            .accessibility_label("Forward")
-                            .tip("Forward")
-                            .on_click(|_, _, cx| {
-                                Navigator::global(cx).update(cx, |n, cx| n.forward(cx))
-                            }),
-                    ),
-            )
-            .child(div().flex_1().min_w_0().flex().justify_center().child(path))
-            .child(right)
-    }
-
-    /// `headerPath` of `route`: (icon, name, is the graph).
-    pub(crate) fn header_path(&self, route: &Route, cx: &App) -> (String, String, bool) {
-        let store = Store::global(cx).read(cx);
-        let active = Navigator::global(cx).read(cx).space().to_string();
-        let current = Self::current_space(cx);
-        match route {
-            Route::Object(id) => {
-                if let Some(s) = store.summary(id) {
-                    let name = if s.name.is_empty() {
-                        "Untitled".into()
-                    } else {
-                        s.name.clone()
-                    };
-                    (
-                        object_icon(store, &s.icon, &s.type_key, &active),
-                        name,
-                        false,
-                    )
-                } else if let Some(c) = store.space(id) {
-                    (
-                        if c.icon.is_empty() {
-                            "◍".into()
-                        } else {
-                            c.icon.clone()
-                        },
-                        c.name.clone(),
-                        false,
-                    )
-                } else {
-                    ("▨".into(), "…".into(), false)
-                }
-            }
-            Route::Graph { .. } => (
-                String::new(),
-                format!("Graph — {}", current.map(|c| c.name).unwrap_or_default()),
-                true,
-            ),
-            _ => match current {
-                Some(c) => (
-                    if c.icon.is_empty() {
-                        "◍".into()
-                    } else {
-                        c.icon
-                    },
-                    c.name,
-                    false,
-                ),
-                None => ("◍".into(), "glon".into(), false),
-            },
-        }
-    }
-
-    /// Open or close the More menu. The menu is gpui-kit's [`PopupMenu`]
-    /// (keyboard: arrows, Enter, Escape, ← → into the flyouts); it is filled
-    /// from [`MoreModel`] and refilled when that changes (a delete blocker
-    /// resolving, a pin toggling elsewhere).
-    pub(crate) fn toggle_more(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.more.take().is_some() {
-            cx.notify();
-            return;
-        }
-        let menu = PopupMenu::build(window, cx, |menu, _, _| menu.min_w(px(234.)));
-        let types = PopupMenu::build(window, cx, |menu, _, _| {
-            menu.min_w(px(220.)).max_h(px(360.)).scrollable(true)
-        });
-        let input = cx.new(|cx| InputState::new(window, cx).placeholder("Search types..."));
-        let subscriptions = vec![
-            // Escape, an item, or (desktop) a click outside closes it. A
-            // phone has no click-away: its ⋯ toggles, and items close it.
-            cx.subscribe_in(&menu, window, |this, _, _: &DismissEvent, window, cx| {
-                if window.last_input_was_keyboard() || !roostr_core::layout::is_mobile(window) {
-                    this.more = None;
-                    cx.notify();
-                }
-            }),
-            cx.subscribe_in(
-                &input,
-                window,
-                |this, input, event: &InputEvent, window, cx| match event {
-                    InputEvent::Change => this.fill_type_menu(window, cx),
-                    // Enter takes the first match.
-                    InputEvent::PressEnter { .. } => {
-                        let filter = input.read(cx).value().to_string();
-                        let Some(id) = Self::open_object_id(cx) else {
-                            return;
-                        };
-                        if let Some(choice) = type_choices(&id, &filter, cx).into_iter().next() {
-                            this.more = None;
-                            cx.notify();
-                            change_type(&id, &choice.key, cx);
-                        }
-                    }
-                    _ => {}
-                },
-            ),
-        ];
-        menu.focus_handle(cx).focus(window, cx);
-        self.more = Some(MoreMenu {
-            menu,
-            model: None,
-            types,
-            type_search: input,
-            _subscriptions: subscriptions,
-        });
-        self.fill_type_menu(window, cx);
-        cx.notify();
-    }
-
-    fn render_more(&mut self, _: &mut Window, cx: &mut Context<Self>) -> Div {
-        div()
-            .relative()
-            .flex_none()
-            .child(
-                Button::new("more")
-                    .ghost()
-                    .rounded(theme::radius::tab())
-                    .size(px(28.))
-                    .p_0()
-                    .text_color(theme::muted())
-                    .cursor_pointer()
-                    .child(div().text_size(px(16.)).child("⋯"))
-                    .accessibility_label("More")
-                    .tip("More")
-                    .on_click(cx.listener(|this, _, window, cx| this.toggle_more(window, cx))),
-            )
-            .child(self.anchor_probe("more"))
-    }
-
-    /// What the More menu shows for the open object, `None` without one.
-    fn more_model(&self, mobile: bool, cx: &App) -> Option<MoreModel> {
-        let id = Self::open_object_id(cx)?;
-        let blocker = if self.delete_blocker.0 == id {
-            self.delete_blocker.1.clone()
-        } else {
-            String::new()
-        };
-        let store = Store::global(cx).read(cx);
-        let kind = if store.relations.iter().any(|r| r.id == id) {
-            MoreKind::Property
-        } else if let Some(summary) = store.summary(&id) {
-            let active = Navigator::global(cx).read(cx).space().to_string();
-            let pinned = roostr_core::pins::space_of(store, &summary.channel_id)
-                .is_some_and(|s| s.pinned_ids.contains(&summary.id));
-            let collections_space = if !summary.channel_id.is_empty() {
-                summary.channel_id.clone()
-            } else if !active.is_empty() {
-                active.clone()
-            } else {
-                store
-                    .channels
-                    .first()
-                    .map(|c| c.id.clone())
-                    .unwrap_or_default()
-            };
-            let collections = store
-                .summaries
-                .iter()
-                .filter(|s| {
-                    s.type_key == "collection" && s.id != id && s.channel_id == collections_space
-                })
-                .map(|s| {
-                    let name = if s.name.is_empty() {
-                        "Untitled"
-                    } else {
-                        s.name.as_str()
-                    };
-                    let icon = object_icon(store, &s.icon, &s.type_key, &active);
-                    (s.id.clone(), format!("{icon} {name}"))
-                })
-                .collect();
-            MoreKind::Object {
-                channel_id: summary.channel_id.clone(),
-                pinned,
-                collections,
-                can_retype: !matches!(summary.type_key.as_str(), "query" | "collection" | "set"),
-                copy_id: store.space(&summary.channel_id).is_some(),
-            }
-        } else if store.space(&id).is_some() {
-            MoreKind::Space
-        } else {
-            return None;
-        };
-        // A phone has no hover: its cover actions live here.
-        let cover = store
-            .object(&id)
-            .filter(|o| mobile && cover::can_have_cover(o))
-            .map(|o| cover::cover_file(&o.fields).is_some());
-        Some(MoreModel {
-            id,
-            mobile,
-            blocker,
-            cover,
-            kind,
-        })
-    }
-
-    /// The open More menu, refilled first if what it shows changed.
-    pub(crate) fn render_more_menu(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Stateful<Div> {
-        let model = self.more_model(roostr_core::layout::is_mobile(window), cx);
-        let workspace = cx.entity().downgrade();
-        let Some(more) = &mut self.more else {
-            return div().id("more-menu");
-        };
-        let Some(model) = model else {
-            return div().id("more-menu");
-        };
-        if more.model.as_ref() != Some(&model) {
-            more.model = Some(model.clone());
-            let types = more.types.clone();
-            more.menu.update(cx, |menu, cx| {
-                menu.rebuild(window, cx, move |menu, window, cx| {
-                    more_items(menu, &model, &workspace, &types, window, cx)
-                })
-            });
-        }
-        div()
-            .id("more-menu")
-            .line_height(relative(1.2))
-            .child(more.menu.clone())
-    }
-
-    /// Fill the Change type flyout: its search, then the space's other
-    /// types matching it.
-    fn fill_type_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(more) = &self.more else { return };
-        let Some(id) = Self::open_object_id(cx) else {
-            return;
-        };
-        let input = more.type_search.clone();
-        let filter = input.read(cx).value().trim().to_string();
-        let choices = type_choices(&id, &filter, cx);
-        let workspace = cx.entity().downgrade();
-        more.types.update(cx, |menu, cx| {
-            let menu_focus = menu.focus_handle(cx);
-            menu.rebuild(window, cx, move |mut menu, _, _| {
-                // The search takes the keys while the flyout shows: at once
-                // under the pointer, once → enters it from the keyboard.
-                menu = menu.item(
-                    PopupMenuItem::element(move |window, cx| {
-                        let focused = input.read(cx).focus_handle(cx).is_focused(window);
-                        if !focused
-                            && (!window.last_input_was_keyboard() || menu_focus.is_focused(window))
-                        {
-                            let input = input.clone();
-                            window.defer(cx, move |window, cx| {
-                                input.update(cx, |input, cx| input.focus(window, cx))
-                            });
-                        }
-                        crate::create_menu::type_search(&input).flex_1().mx_0()
-                    })
-                    .disabled(true),
-                );
-                if choices.is_empty() {
-                    return menu.label(format!("No type matches “{filter}”"));
-                }
-                for choice in choices {
-                    let target = id.clone();
-                    let workspace = workspace.clone();
-                    // The New menu's row: its icon column, 8px gap, 13px name.
-                    let (icon, name) = (choice.icon.clone(), choice.name.clone());
-                    menu = menu.item(
-                        // An element row keeps its height: a plain item's fixed
-                        // 26px shrank to fit when the list overflowed its 360px.
-                        PopupMenuItem::element(move |_, _| {
-                            div()
-                                .flex()
-                                .flex_1()
-                                .items_center()
-                                .gap(px(8.))
-                                .py(px(3.))
-                                .text_size(px(13.))
-                                .whitespace_nowrap()
-                                .child(crate::sidebar::obj_icon(&icon))
-                                .child(name.clone())
-                        })
-                        .on_click(move |_, _, cx| {
-                            close_more(&workspace, cx);
-                            change_type(&target, &choice.key, cx);
-                        }),
-                    );
-                }
-                menu
-            })
-        });
-    }
-
-    fn open_delete_property(
-        &mut self,
-        rel: RelationDef,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.more = None;
-        self.delete_prop = Some(DeleteProp {
-            rel: rel.clone(),
-            usage: None,
-            deleting: false,
-            height: first_height(),
-        });
-        self.open_delete_dialog(window, cx);
-        let query = api::query(
-            json!({ "filters": [{ "key": rel.key, "condition": "exists" }], "limit": 1000 }),
-            cx,
-        );
-        cx.spawn(async move |this, cx| {
-            let Ok(res) = query.await else { return };
-            let usage = res
-                .records
-                .iter()
-                .filter(|r| r.id != rel.id && r.type_key != "relation" && r.type_key != "type")
-                .count();
-            let _ = this.update(cx, |this, cx| {
-                if let Some(d) = &mut this.delete_prop
-                    && d.rel.id == rel.id
-                {
-                    d.usage = Some(usage);
-                    cx.notify();
-                }
-            });
-        })
-        .detach();
-        cx.notify();
-    }
-
-    /// Strip the value from every object holding it (paging until none),
-    /// then vanish the relation.
-    fn delete_property(&mut self, cx: &mut Context<Self>) {
-        let Some(d) = &mut self.delete_prop else {
-            return;
-        };
-        if d.deleting {
-            return;
-        }
-        d.deleting = true;
-        let rel = d.rel.clone();
-        cx.notify();
-        cx.spawn(async move |this, cx| {
-            let result: anyhow::Result<()> = async {
-                loop {
-                    let query = cx.update(|cx| {
-                        api::query(json!({ "filters": [{ "key": rel.key, "condition": "exists" }], "limit": 1000 }), cx)
-                    });
-                    let res = query.await?;
-                    let victims: Vec<String> = res
-                        .records
-                        .into_iter()
-                        .filter(|r| r.id != rel.id && r.type_key != "relation" && r.type_key != "type")
-                        .map(|r| r.id)
-                        .collect();
-                    if victims.is_empty() {
-                        break;
-                    }
-                    for victim in victims {
-                        cx.update(|cx| api::note::delete_field(&victim, &rel.key, cx)).await?;
-                    }
-                }
-                cx.update(|cx| api::note::vanish(std::slice::from_ref(&rel.id), cx)).await?;
-                Ok(())
-            }
-            .await;
-            let _ = this.update(cx, |this, cx| {
-                if let Some(d) = &mut this.delete_prop {
-                    d.deleting = false;
-                }
-                if result.is_ok() {
-                    this.delete_prop = None;
-                    refresh(cx);
-                    navigate(Route::Home, cx);
-                } else if let Err(error) = result {
-                    log::warn!("delete property failed: {error:#}");
-                }
-                cx.notify();
-            });
-        })
-        .detach();
-    }
-
-    /// The delete-property confirmation (`.prop-del-modal`) in the window's
-    /// dialog layer, drawn from [`Self::delete_prop`] each frame and taken
-    /// down once that clears. A click outside or Escape cancels, except
-    /// while deleting.
-    fn open_delete_dialog(&self, window: &mut Window, cx: &mut Context<Self>) {
-        let this = cx.weak_entity();
-        window.open_dialog(cx, move |dialog, window, cx| {
-            let Some(d) = this
-                .upgrade()
-                .and_then(|ws| ws.read(cx).delete_prop.as_ref().map(DeleteView::of))
-            else {
-                window.defer(cx, |window, cx| window.close_dialog(cx));
-                return dialog.close_button(false);
-            };
-            let (cancel, back, delete) = (this.clone(), this.clone(), this.clone());
-            small_dialog(dialog, "prop-del-appear", &d.height, window, cx)
-                .overlay_closable(!d.deleting)
-                .keyboard(!d.deleting)
-                .on_cancel(move |_, _, cx| {
-                    cancel
-                        .update(cx, |this, cx| {
-                            let busy = this.delete_prop.as_ref().is_some_and(|d| d.deleting);
-                            if !busy {
-                                this.delete_prop = None;
-                                cx.notify();
-                            }
-                            !busy
-                        })
-                        .unwrap_or(true)
-                })
-                .child(
-                    div()
-                        .id("prop-del-modal")
-                        .flex()
-                        .flex_col()
-                        .child(
-                            div()
-                                .mb(px(8.))
-                                .text_size(px(16.))
-                                .font_weight(FontWeight::BOLD)
-                                .child(format!("Delete \"{}\"?", d.name)),
-                        )
-                        .child(
-                            div()
-                                .mb(px(14.))
-                                .text_size(px(13.))
-                                .line_height(relative(1.5))
-                                .text_color(theme::muted())
-                                .child(format!(
-                                    "This deletes the property and removes its value from {} — on every device, forever. This cannot be undone.",
-                                    d.usage
-                                )),
-                        )
-                        .child(
-                            div()
-                                .flex()
-                                .justify_end()
-                                .gap(px(8.))
-                                .child(
-                                    ui::disabled(
-                                        ui::outline_button("prop-del-cancel", "Cancel"),
-                                        d.deleting,
-                                    )
-                                    .on_click(move |_, _, cx| {
-                                        let _ = back.update(cx, |this, cx| {
-                                            this.delete_prop = None;
-                                            cx.notify();
-                                        });
-                                    }),
-                                )
-                                .child(
-                                    ui::disabled(
-                                        ui::danger_button(
-                                            "prop-del-ok",
-                                            if d.deleting {
-                                                "Deleting…"
-                                            } else {
-                                                "Delete property"
-                                            },
-                                        ),
-                                        d.deleting,
-                                    )
-                                    .on_click(move |_, _, cx| {
-                                        let _ =
-                                            delete.update(cx, |this, cx| this.delete_property(cx));
-                                    }),
-                                ),
-                        )
-                        .on_prepaint(track_height(d.height.clone())),
-                )
-        });
-    }
-}
-
-/// What the delete-property card shows this frame.
-struct DeleteView {
-    name: String,
-    usage: String,
-    deleting: bool,
-    height: Rc<Cell<Pixels>>,
-}
-
-impl DeleteView {
-    fn of(d: &DeleteProp) -> Self {
-        Self {
-            name: if d.rel.name.is_empty() {
-                d.rel.key.clone()
-            } else {
-                d.rel.name.clone()
-            },
-            usage: match d.usage {
-                None => "…".to_string(),
-                Some(n) => format!("{n} object{}", if n == 1 { "" } else { "s" }),
-            },
-            deleting: d.deleting,
-            height: d.height.clone(),
-        }
-    }
-}
-
-/// Close the More menu from one of its items.
-fn close_more(workspace: &WeakEntity<Workspace>, cx: &mut App) {
-    let _ = workspace.update(cx, |this, cx| {
-        this.more = None;
-        cx.notify();
-    });
-}
-
-const BLOCKED_TIP: &str = "Types and properties Roostr or your queries rely on can't be deleted";
-
-/// A red row with the bin glyph (Move to bin, Delete property).
-fn danger_item(label: &'static str) -> PopupMenuItem {
-    PopupMenuItem::element(move |_, _| div().text_color(theme::red()).child(label))
-        .icon(Icon::new(Glyph::Trash).text_color(theme::red()))
-}
-
-/// The disabled row saying why the object can't be deleted; it still
-/// explains itself in a tooltip.
-fn blocked_item(blocker: &str) -> PopupMenuItem {
-    let text = SharedString::from(format!("Can't delete: {blocker}"));
-    PopupMenuItem::element(move |_, _| {
-        div()
-            .id("more-blocked")
-            .flex_1()
-            .text_size(px(12.))
-            .child(text.clone())
-            .tooltip(ui::tooltip(BLOCKED_TIP))
-    })
-    .icon(Icon::new(Glyph::Lock))
-    .disabled(true)
-}
-
-/// The More menu's rows for `m`.
-fn more_items(
-    menu: PopupMenu,
-    m: &MoreModel,
-    workspace: &WeakEntity<Workspace>,
-    types: &Entity<PopupMenu>,
-    window: &mut Window,
-    cx: &mut Context<PopupMenu>,
-) -> PopupMenu {
-    let id = m.id.clone();
-    let lead = if m.mobile {
-        let (ws, focus) = (workspace.clone(), id.clone());
-        Some(
-            PopupMenuItem::element(|_, _| {
-                div().debug_selector(|| "more-graph".into()).child("Graph")
-            })
-            .icon(Icon::new(Glyph::Graph))
-            .on_click(move |_, _, cx| {
-                close_more(&ws, cx);
-                navigate(
-                    Route::Graph {
-                        focus: Some(focus.clone()),
-                    },
-                    cx,
-                );
-            }),
-        )
-    } else {
-        let (ws, target) = (workspace.clone(), id.clone());
-        Some(
-            PopupMenuItem::new("Open in new tab")
-                .icon(Icon::new(Glyph::ExternalLink))
-                .on_click(move |_, _, cx| {
-                    close_more(&ws, cx);
-                    open_tab(Route::Object(target.clone()), true, cx);
-                }),
-        )
-    };
-    let copy_id = {
-        let (ws, id) = (workspace.clone(), id.clone());
-        PopupMenuItem::new("Copy ID")
-            .icon(Icon::new(Glyph::Hash))
-            .on_click(move |_, _, cx| {
-                close_more(&ws, cx);
-                cx.write_to_clipboard(ClipboardItem::new_string(id.clone()));
-            })
-    };
-    let menu = menu.when_some(lead, |menu, lead| menu.item(lead));
-    let menu = match m.cover {
-        Some(has_cover) => cover_items(menu.separator(), &id, has_cover, workspace).separator(),
-        None => menu,
-    };
-    match &m.kind {
-        MoreKind::Property => menu.item(copy_id).separator().item(if m.blocker.is_empty() {
-            let ws = workspace.clone();
-            danger_item("Delete property").on_click(move |_, window, cx| {
-                let rel = Store::global(cx)
-                    .read(cx)
-                    .relations
-                    .iter()
-                    .find(|r| r.id == id)
-                    .cloned();
-                if let Some(rel) = rel {
-                    let _ = ws.update(cx, |this, cx| this.open_delete_property(rel, window, cx));
-                }
-            })
-        } else {
-            blocked_item(&m.blocker)
-        }),
-        MoreKind::Object {
-            channel_id,
-            pinned,
-            collections,
-            can_retype,
-            copy_id: has_copy_id,
-        } => {
-            let pinned = *pinned;
-            let (ws, target, channel) = (workspace.clone(), id.clone(), channel_id.clone());
-            let mut menu = menu.item(
-                PopupMenuItem::new(if pinned {
-                    "Unpin from space"
-                } else {
-                    "Pin to space"
-                })
-                .icon(Icon::new(if pinned { Glyph::StarOff } else { Glyph::Star }))
-                .on_click(move |_, _, cx| {
-                    close_more(&ws, cx);
-                    let space = roostr_core::pins::space_of(Store::global(cx).read(cx), &channel);
-                    if let Some(space) = space {
-                        roostr_core::pins::set_pinned(&target, &space, !pinned, cx)
-                            .detach_and_log_err(cx);
-                    }
-                }),
-            );
-            let (ws, target, entries) = (workspace.clone(), id.clone(), collections.clone());
-            menu = menu.submenu_with_icon(
-                Some(Icon::new(Glyph::FolderPlus)),
-                "Add to collection",
-                window,
-                cx,
-                move |mut sub, _, _| {
-                    if entries.is_empty() {
-                        return sub.label("No collections in this space");
-                    }
-                    for (cid, label) in &entries {
-                        let (ws, target, cid) = (ws.clone(), target.clone(), cid.clone());
-                        sub = sub.item(PopupMenuItem::new(label.clone()).on_click(
-                            move |_, _, cx| {
-                                close_more(&ws, cx);
-                                add_to_collection(&target, &cid, cx);
-                            },
-                        ));
-                    }
-                    sub
-                },
-            );
-            if *can_retype {
-                menu = menu.item(
-                    PopupMenuItem::submenu("Change type", types.clone())
-                        .icon(Icon::new(Glyph::ArrowLeftRight)),
-                );
-            }
-            let (ws, target) = (workspace.clone(), id.clone());
-            menu = menu.item(
-                PopupMenuItem::new("Duplicate")
-                    .icon(Icon::new(Glyph::Copy))
-                    .on_click(move |_, _, cx| {
-                        close_more(&ws, cx);
-                        duplicate_object(&target, cx);
-                    }),
-            );
-            if *has_copy_id {
-                menu = menu.item(copy_id);
-            }
-            menu.separator().item(if m.blocker.is_empty() {
-                let ws = workspace.clone();
-                danger_item("Move to bin").on_click(move |_, _, cx| {
-                    close_more(&ws, cx);
-                    move_to_bin(&id, cx);
-                })
-            } else {
-                blocked_item(&m.blocker)
-            })
-        }
-        MoreKind::Space => menu.item(copy_id),
-    }
-}
-
-/// The phone's cover entry for the open page: one item opening the cover
-/// menu, where every cover action lives (as the desktop's one Cover button).
-fn cover_items(
-    menu: PopupMenu,
-    id: &str,
-    has_cover: bool,
-    workspace: &WeakEntity<Workspace>,
-) -> PopupMenu {
-    let (ws, target) = (workspace.clone(), id.to_string());
-    let label = if has_cover { "Cover" } else { "Add cover" };
-    menu.item(
-        PopupMenuItem::element(move |_, _| {
-            div().debug_selector(|| "more-cover".into()).child(label)
-        })
-        .icon(Icon::new(if has_cover { Glyph::Palette } else { Glyph::Plus }))
-        .on_click(move |_, _, cx| {
-            close_more(&ws, cx);
-            cover::ask(&target, cx);
-        }),
+/// The Change type flyout: its search (which takes the keys while the
+/// flyout shows), then the space's other types matching it.
+fn type_menu(s: &State, t: &Theme, id: &str, sh: &Shell) -> PopupMenu {
+    let filter = sh.type_search.value().trim().to_string();
+    let choices = type_choices(s, id, &filter);
+    // `.type-search`: the kit input at margin 4×6, padding 5×8, 13px, bg
+    // `--bg`, 1px border, radius 6 (h28).
+    let target = id.to_string();
+    let search = crate::create_menu::type_search(
+        t,
+        Input::new("type-search", &sh.type_search).placeholder("Search types..."),
     )
+    .on_edit(|s: &mut State| &mut s.slot::<Shell>().type_search)
+    // Enter takes the first match.
+    .on_submit(move |s: &mut State, _: &mut Tx| {
+        let filter = s.slot::<Shell>().type_search.value().trim().to_string();
+        if let Some(choice) = type_choices(s, &target, &filter).into_iter().next() {
+            close_more(s);
+            change_type(s, &target, &choice.key);
+        }
+    })
+    .build(t);
+    let mut menu = PopupMenu::new()
+        .min_w(220.)
+        .max_h(360.)
+        .item(PopupMenuItem::element(el().w_full().mx(-2.).my(4.).child(search)).disabled(false));
+    if choices.is_empty() {
+        return menu.label(format!("No type matches “{filter}”"));
+    }
+    for choice in choices {
+        let target = id.to_string();
+        let key = choice.key.clone();
+        // The New menu's row: its icon column, 8 pt gap, 13 pt name.
+        menu = menu.item(
+            PopupMenuItem::element(
+                row()
+                    .gap(8.)
+                    .py(3.)
+                    .items_center()
+                    .child(crate::shell::obj_icon(s, t, &choice.icon))
+                    .child(text(choice.name).font(ty::ui(13.)).color(t.kit.foreground)),
+            )
+            .on_press(move |s: &mut State| {
+                close_more(s);
+                change_type(s, &target, &key);
+            }),
+        );
+    }
+    menu
 }
 
 /// The space's types an object can change to, matching `filter`.
-fn type_choices(object_id: &str, filter: &str, cx: &App) -> Vec<TypeChoice> {
-    let store = Store::global(cx).read(cx);
+fn type_choices(s: &State, object_id: &str, filter: &str) -> Vec<TypeChoice> {
+    let store = &s.store;
     let Some(summary) = store.summary(object_id) else {
         return Vec::new();
     };
-    let active = Navigator::global(cx).read(cx).space().to_string();
-    let space_id = Workspace::space_id(cx);
+    let active = s.nav.space();
+    let space = space_id(s);
     let filter = filter.trim().to_lowercase();
     store
         .types
         .iter()
-        .filter(|t| t.space == space_id && t.key != summary.type_key)
+        .filter(|t| t.space == space && t.key != summary.type_key)
         .filter_map(|t| {
             let name = if t.name.is_empty() {
                 t.key.clone()
@@ -997,7 +581,7 @@ fn type_choices(object_id: &str, filter: &str, cx: &App) -> Vec<TypeChoice> {
             (filter.is_empty() || name.to_lowercase().contains(&filter)).then(|| TypeChoice {
                 key: t.key.clone(),
                 icon: if t.icon.is_empty() {
-                    type_glyph(store, &t.key, &active)
+                    type_glyph(store, &t.key, active)
                 } else {
                     t.icon.clone()
                 },
@@ -1008,10 +592,10 @@ fn type_choices(object_id: &str, filter: &str, cx: &App) -> Vec<TypeChoice> {
 }
 
 /// `addToCollection`: append the object to the collection's members.
-fn add_to_collection(object_id: &str, collection_id: &str, cx: &mut App) {
-    let fetch = Store::global(cx).read(cx).fetch_object(collection_id, cx);
+fn add_to_collection(s: &mut State, object_id: &str, collection_id: &str) {
+    let fetch = s.store.fetch_object(collection_id);
     let (object_id, collection_id) = (object_id.to_string(), collection_id.to_string());
-    cx.spawn(async move |cx| {
+    s.rt.spawn(async move |cx| {
         let Ok(col) = fetch.await else { return };
         let ids: Vec<String> = col
             .field("collectionIds")
@@ -1028,8 +612,8 @@ fn add_to_collection(object_id: &str, collection_id: &str, cx: &mut App) {
                 .chain(std::iter::once(&object_id))
                 .map(|id| Value::string(id.clone()))
                 .collect();
-            let task = cx.update(|cx| {
-                api::note::set_field(&collection_id, "collectionIds", Value::values(items), cx)
+            let task = cx.update(|s| {
+                api::note::set_field(&collection_id, "collectionIds", Value::values(items), s)
             });
             let _ = task.await;
         }
@@ -1038,22 +622,22 @@ fn add_to_collection(object_id: &str, collection_id: &str, cx: &mut App) {
     .detach();
 }
 
-fn change_type(object_id: &str, type_key: &str, cx: &mut App) {
-    let task = api::note::set_type(object_id, type_key, cx);
-    cx.spawn(async move |cx| {
+fn change_type(s: &mut State, object_id: &str, type_key: &str) {
+    let task = api::note::set_type(object_id, type_key, s);
+    s.rt.spawn(async move |cx| {
         let _ = task.await;
         cx.update(refresh);
     })
     .detach();
 }
 
-fn move_to_bin(object_id: &str, cx: &mut App) {
-    let task = api::note::delete(object_id, cx);
-    cx.spawn(async move |cx| {
+fn move_to_bin(s: &mut State, object_id: &str) {
+    let task = api::note::delete(object_id, s);
+    s.rt.spawn(async move |cx| {
         if task.await.is_ok() {
-            cx.update(|cx| {
-                refresh(cx);
-                navigate(Route::Home, cx);
+            cx.update(|s| {
+                refresh(s);
+                navigate(Route::Home, s);
             });
         }
     })
@@ -1062,9 +646,9 @@ fn move_to_bin(object_id: &str, cx: &mut App) {
 
 /// `duplicateObject`: same fields (name + " copy"), the whole block tree in
 /// DFS order (roots appended, children INNER-appended), then open it.
-fn duplicate_object(object_id: &str, cx: &mut App) {
-    let fetch = Store::global(cx).read(cx).fetch_object(object_id, cx);
-    cx.spawn(async move |cx| {
+fn duplicate_object(s: &mut State, object_id: &str) {
+    let fetch = s.store.fetch_object(object_id);
+    s.rt.spawn(async move |cx| {
         let Ok(src) = fetch.await else { return };
         let base = if src.name().is_empty() {
             "Untitled"
@@ -1075,7 +659,7 @@ fn duplicate_object(object_id: &str, cx: &mut App) {
         let mut fields: Fields = src.fields.clone();
         fields.insert("name".into(), Value::string(name.clone()));
         let type_key = src.type_key.clone();
-        let task = cx.update(|cx| api::note::create(&name, Some(&type_key), Some(fields), cx));
+        let task = cx.update(|s| api::note::create(&name, Some(&type_key), Some(fields), s));
         let Ok(id) = task.await else { return };
         let mut parent_of = std::collections::HashMap::new();
         for b in &src.blocks {
@@ -1094,14 +678,171 @@ fn duplicate_object(object_id: &str, cx: &mut App) {
             } else {
                 pos::NONE
             };
-            let task = cx.update(|cx| {
-                api::note::block_add(&id, &block, parent.as_deref().unwrap_or(""), position, cx)
+            let task = cx.update(|s| {
+                api::note::block_add(&id, &block, parent.as_deref().unwrap_or(""), position, s)
             });
             if task.await.is_err() {
                 return;
             }
         }
-        cx.update(|cx| navigate(Route::Object(id), cx));
+        cx.update(|s| navigate(Route::Object(id), s));
     })
     .detach();
+}
+
+// ------------------------------------------------------------ delete property
+
+fn open_delete_property(s: &mut State, rel: RelationDef) {
+    close_more(s);
+    s.slot::<Shell>().delete_prop = Some(DeleteProp {
+        rel: rel.clone(),
+        usage: None,
+        deleting: false,
+    });
+    let query = api::query(
+        json!({ "filters": [{ "key": rel.key, "condition": "exists" }], "limit": 1000 }),
+        s,
+    );
+    s.rt.spawn(async move |cx| {
+        let Ok(res) = query.await else { return };
+        let usage = res
+            .records
+            .iter()
+            .filter(|r| r.id != rel.id && r.type_key != "relation" && r.type_key != "type")
+            .count();
+        cx.update(|s| {
+            if let Some(d) = &mut s.slot::<Shell>().delete_prop
+                && d.rel.id == rel.id
+            {
+                d.usage = Some(usage);
+            }
+        });
+    })
+    .detach();
+}
+
+fn cancel_delete(s: &mut State) {
+    let shell = s.slot::<Shell>();
+    if !shell.delete_prop.as_ref().is_some_and(|d| d.deleting) {
+        shell.delete_prop = None;
+    }
+}
+
+/// Strip the value from every object holding it (paging until none),
+/// then vanish the relation.
+fn delete_property(s: &mut State) {
+    let Some(d) = &mut s.slot::<Shell>().delete_prop else {
+        return;
+    };
+    if d.deleting {
+        return;
+    }
+    d.deleting = true;
+    let rel = d.rel.clone();
+    s.rt.spawn(async move |cx| {
+        let result: anyhow::Result<()> = async {
+            loop {
+                let query = cx.update(|s| {
+                    api::query(
+                        json!({ "filters": [{ "key": rel.key, "condition": "exists" }], "limit": 1000 }),
+                        s,
+                    )
+                });
+                let res = query.await?;
+                let victims: Vec<String> = res
+                    .records
+                    .into_iter()
+                    .filter(|r| r.id != rel.id && r.type_key != "relation" && r.type_key != "type")
+                    .map(|r| r.id)
+                    .collect();
+                if victims.is_empty() {
+                    break;
+                }
+                for victim in victims {
+                    cx.update(|s| api::note::delete_field(&victim, &rel.key, s))
+                        .await?;
+                }
+            }
+            cx.update(|s| api::note::vanish(std::slice::from_ref(&rel.id), s))
+                .await?;
+            Ok(())
+        }
+        .await;
+        cx.update(|s| {
+            let shell = s.slot::<Shell>();
+            if let Some(d) = &mut shell.delete_prop {
+                d.deleting = false;
+            }
+            match result {
+                Ok(()) => {
+                    shell.delete_prop = None;
+                    refresh(s);
+                    navigate(Route::Home, s);
+                }
+                Err(error) => log::warn!("delete property failed: {error:#}"),
+            }
+        });
+    })
+    .detach();
+}
+
+/// The delete-property confirmation (`.prop-del-modal`) while it is open. A
+/// press outside or Escape cancels, except while deleting.
+pub(crate) fn delete_overlay(s: &State, t: &Theme, layer: &mut Vec<El>) {
+    let Some(d) = shell(s).and_then(|sh| sh.delete_prop.as_ref()) else {
+        return;
+    };
+    let name = if d.rel.name.is_empty() {
+        d.rel.key.clone()
+    } else {
+        d.rel.name.clone()
+    };
+    let usage = match d.usage {
+        None => "…".to_string(),
+        Some(n) => format!("{n} object{}", if n == 1 { "" } else { "s" }),
+    };
+    let body = col()
+        .key("prop-del-modal")
+        .child(
+            text(format!("Delete \"{name}\"?"))
+                .font(ty::ui(16.).bold())
+                .color(t.fg)
+                .mb(8.),
+        )
+        .child(
+            text(format!(
+                "This deletes the property and removes its value from {usage} — on every device, forever. This cannot be undone."
+            ))
+            .font(ty::ui(13.).lh(13. * 1.5))
+            .color(t.muted)
+            .wrap()
+            .mb(14.),
+        )
+        .child(
+            row()
+                .justify_end()
+                .gap(8.)
+                .child(
+                    disabled(outline_button("prop-del-cancel", "Cancel"), d.deleting)
+                        .on_press(|s: &mut State| s.slot::<Shell>().delete_prop = None)
+                        .build(t),
+                )
+                .child(
+                    disabled(
+                        danger_button(
+                            "prop-del-ok",
+                            if d.deleting {
+                                "Deleting…"
+                            } else {
+                                "Delete property"
+                            },
+                        ),
+                        d.deleting,
+                    )
+                    .on_press(delete_property)
+                    .build(t),
+                ),
+        );
+    let dismiss: Option<fn(&mut State)> = (!d.deleting).then_some(cancel_delete as fn(&mut State));
+    crate::modal::small_dialog(t, "prop-del", body, dismiss, layer);
 }

@@ -1,116 +1,79 @@
 //! Small private building blocks shared by this crate's views: popover
 //! surfaces anchored under their trigger, the click-away backdrop, the text
-//! field skins the web app uses, and a few text helpers.
+//! field skins the web app uses, a few text helpers, and the plumbing every
+//! view uses to reach its state (lenses, deferred opens).
 
 use std::rc::Rc;
 
-use gpui_kit::component::Sizable as _;
-use gpui_kit::component::alert::Alert;
-use gpui_kit::component::button::Button;
-use gpui_kit::component::empty::Empty;
-use gpui_kit::component::input::{Input, InputState, Textarea, TextareaState};
-use gpui_kit::component::label::Label;
-use gpui_kit::component::separator::Separator;
-use gpui_kit::*;
-pub(crate) use roostr_core::ui::{menu_shadow, tooltip as tip};
-use roostr_core::{motion, theme};
+use roostr_core::State;
+use roostr_ui::{
+    Alert, Button, Input, KitSize, Placement, Textarea, Theme, motion, radius, shadow, ty,
+};
+use rune::{Color, Effect, El, Shadow, Spring, SpringPair, Transition, Vec2, col, el, row, text};
+
+pub(crate) use roostr_ui::tooltip as tip;
+
+/// Borrows one piece of state out of [`State`] (a host's menu state, an
+/// editor in this crate's slot). Handlers call it; views never do.
+pub(crate) type Lens<T> = Rc<dyn for<'a> Fn(&'a mut State) -> &'a mut T>;
+
+/// Makes a [`Lens`] from a closure (ties its returned borrow to the state).
+pub(crate) fn lens<T: ?Sized + 'static>(
+    f: impl for<'a> Fn(&'a mut State) -> &'a mut T + 'static,
+) -> Rc<dyn for<'a> Fn(&'a mut State) -> &'a mut T> {
+    Rc::new(f)
+}
+
+/// Runs `f` with the state at the next poll: how a view (which only reads
+/// the state) opens its own per-object state on first draw, as GPUI's
+/// `new` did. `f` must be idempotent: a view may ask more than once before
+/// the poll runs it.
+pub(crate) fn later(s: &State, f: impl FnOnce(&mut State) + 'static) {
+    s.rt.spawn(async move |cx| cx.update(f)).detach();
+}
 
 /// `0 12px 32px rgba(0,0,0,.45)`: the popovers' shadow.
-pub(crate) fn pop_shadow() -> Vec<BoxShadow> {
-    vec![BoxShadow {
-        color: hsla(0., 0., 0., 0.45),
-        offset: point(px(0.), px(12.)),
-        blur_radius: px(32.),
-        spread_radius: px(0.),
-        inset: false,
-    }]
+pub(crate) fn pop_shadow() -> Shadow {
+    shadow::gpui(12.0, 32.0, 0.0, 0.45)
 }
 
-/// Hang `content` below the element it is placed in (which must be
-/// `.relative()`), `gap` under its bottom edge, kept on screen. It drops in
-/// as it opens (`id` keys that, unique among the view's open popovers) and
-/// takes input from its first frame.
-pub(crate) fn below(
-    id: impl Into<ElementId>,
-    gap: f32,
-    content: impl IntoElement,
-) -> impl IntoElement {
-    div().absolute().left_0().top_full().child(
-        deferred(
-            anchored()
-                .anchor(Anchor::TopLeft)
-                .snap_to_window_with_margin(px(8.))
-                .child(Appear {
-                    id: id.into(),
-                    gap,
-                    content: content.into_any_element(),
-                }),
-        )
-        .with_priority(2),
-    )
+/// The menus' shadow (`roostr_core::ui::menu_shadow`).
+pub(crate) fn menu_shadow() -> Shadow {
+    shadow::menu()
 }
 
-/// [`below`]'s panel, entering with [`motion::appear`].
-#[derive(IntoElement)]
-struct Appear {
-    id: ElementId,
-    gap: f32,
-    content: AnyElement,
-}
-
-impl RenderOnce for Appear {
-    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
-        motion::appear_frame(self.id, -4., window, cx)
-            .apply(div().mt(px(self.gap)).child(self.content))
-    }
-}
-
-/// A row the user just added entering its list: opacity 0 → 1 while it rises
-/// 6px into place over [`motion::CONTROL`]. Removal is immediate.
-pub(crate) fn enter_frame(
-    id: impl Into<ElementId>,
-    window: &mut Window,
-    cx: &mut App,
-) -> motion::Frame {
-    let enter = motion::Motion::new(motion::Target::default())
-        .initial(motion::Target::default().y(6.).opacity(0.))
-        .transition(motion::CONTROL.transition());
-    motion::use_motion(id, window, cx, motion::MotionState::default)
-        .update(cx, |state, cx| state.frame(enter, window, cx))
+/// Hangs `content` below the element keyed `anchor`, `gap` under its bottom
+/// edge, start-aligned and kept on screen; it drops in as it opens
+/// ([`motion::appear`]) and takes input from its first frame.
+pub(crate) fn below(layer: &mut Vec<El>, anchor: &str, gap: f32, content: El) {
+    layer.push(roostr_ui::overlay::anchored(
+        content,
+        anchor,
+        Placement::BottomStart,
+        gap,
+    ));
 }
 
 /// An invisible full-window layer under an open popover: a press anywhere
-/// outside the popover closes it (the web app's `.backdrop` / window
-/// pointerdown handlers).
-pub(crate) fn backdrop(
-    id: impl Into<ElementId>,
-    on_close: impl Fn(&mut Window, &mut App) + 'static,
-) -> impl IntoElement {
-    let on_close = Rc::new(on_close);
-    deferred(
-        anchored()
-            .position(point(px(0.), px(0.)))
-            .position_mode(AnchoredPositionMode::Window)
-            .child(
-                div()
-                    .id(id.into())
-                    .w(px(10000.))
-                    .h(px(10000.))
-                    .occlude()
-                    .on_mouse_down(MouseButton::Left, {
-                        let on_close = on_close.clone();
-                        move |_, window, cx| {
-                            cx.stop_propagation();
-                            on_close(window, cx)
-                        }
-                    })
-                    .on_mouse_down(MouseButton::Right, move |_, window, cx| {
-                        cx.stop_propagation();
-                        on_close(window, cx)
-                    }),
-            ),
-    )
-    .with_priority(1)
+/// outside the popover closes it (the web app's `.backdrop`). Push it before
+/// the popover so the popover draws above it.
+pub(crate) fn backdrop(layer: &mut Vec<El>, key: &str, close: impl Fn(&mut State) + 'static) {
+    layer.push(roostr_ui::overlay::scrim(key.to_string(), close));
+}
+
+/// A row the user just added entering its list: opacity 0 → 1 while it rises
+/// 6px into place over [`motion::CONTROL`]. Removal is immediate. Rune runs
+/// it when the element first appears after the first frame (keep it keyed).
+pub(crate) fn enter(e: El) -> El {
+    e.transition(Transition {
+        insertion: Effect {
+            offset: Vec2::new(0.0, 6.0),
+            ..Effect::opacity(0.0)
+        },
+        removal: Effect::IDENTITY,
+        springs: SpringPair::new(motion::CONTROL.spring(), Spring::NONE),
+        ..Transition::identity()
+    })
 }
 
 /// The look of a single-line text box.
@@ -120,191 +83,186 @@ pub(crate) enum FieldSkin {
     Value,
     /// Anytype's filter field: filled `hl-light` (focus `hl-med`), borderless, radius 10, 8px 12px.
     Filter,
-    /// The emoji picker's search: `--bg`, border, radius 7, 5px 9px.
+    /// The emoji picker's search: `--bg`, border (accent when focused), radius 7, 5px 9px.
     Emoji,
     /// Repeat editor fields: white 5% fill, 1px border, radius 6, 3px 6px, 12.5px.
     Compact,
 }
 
-/// A styled single-line text box around `state`.
-pub(crate) fn field(state: &Entity<InputState>, skin: FieldSkin, window: &Window, cx: &App) -> Div {
-    let focused = state.focus_handle(cx).is_focused(window);
-    let (text, line) = match skin {
-        FieldSkin::Compact => (px(12.5), px(17.)),
-        _ => (px(13.), px(17.)),
+/// A styled single-line text box around `input` (bound by the caller with
+/// `on_edit`, `on_change`, `on_submit`, `on_key`, `placeholder`). `focused`
+/// is the field state's `is_focused()`.
+pub(crate) fn field(t: &Theme, input: Input, focused: bool, skin: FieldSkin) -> El {
+    let size = match skin {
+        FieldSkin::Compact => 12.5,
+        _ => 13.0,
     };
-    let input = Input::new(state)
+    let input = input
         .appearance(false)
-        .text_size(text)
-        .p_0()
-        .h(line)
-        .w_full();
-    let base = div()
-        .flex()
-        .items_center()
-        .min_w_0()
-        .text_color(theme::fg())
-        .text_size(text)
-        .child(input);
+        .text_size(size)
+        .line_height(17.0)
+        .text_color(t.fg)
+        .px(0.0)
+        .py(0.0)
+        .h(17.0)
+        .build(t);
+    let base = row().items_center().min_w(0.0).child(input);
     match skin {
         FieldSkin::Value => base
-            .bg(theme::bg())
-            .border_1()
-            .border_color(theme::border())
-            .rounded(theme::radius::sm())
-            .px(px(8.))
-            .py(px(5.)),
+            .fill(t.bg)
+            .border(1.0, t.border)
+            .radius(radius::SM)
+            .px(8.0)
+            .py(5.0),
         FieldSkin::Filter => base
-            .bg(if focused {
-                theme::hl_med()
-            } else {
-                theme::hl_light()
-            })
-            .rounded(theme::radius::menu())
-            .px(px(12.))
-            .py(px(8.)),
+            .fill(if focused { t.hl_med } else { t.hl_light })
+            .radius(radius::MENU)
+            .px(12.0)
+            .py(8.0),
         FieldSkin::Emoji => base
-            .bg(theme::bg())
-            .border_1()
-            .border_color(if focused {
-                theme::accent()
-            } else {
-                theme::border()
-            })
-            .rounded(px(7.))
-            .px(px(9.))
-            .py(px(5.)),
+            .fill(t.bg)
+            .border(1.0, if focused { t.accent } else { t.border })
+            .radius(7.0)
+            .px(9.0)
+            .py(5.0),
         FieldSkin::Compact => base
-            .bg(hsla(0., 0., 1., 0.05))
-            .border_1()
-            .border_color(theme::border())
-            .rounded(theme::radius::sm())
-            .px(px(6.))
-            .py(px(3.)),
+            .fill(Color::WHITE.alpha(0.05))
+            .border(1.0, t.border)
+            .radius(radius::SM)
+            .px(6.0)
+            .py(3.0),
     }
 }
 
-/// A styled multi-line text box: the value editors' textarea.
+/// A styled multi-line text box: the value editors' textarea. `focused` is
+/// the area state's `is_focused()`; `pad` is (vertical, horizontal).
 pub(crate) fn text_area(
-    state: &Entity<TextareaState>,
-    window: &Window,
-    cx: &App,
-    bg: Hsla,
-    radius: Pixels,
+    t: &Theme,
+    area: Textarea,
+    focused: bool,
+    bg: Color,
+    radius: f32,
     pad: (f32, f32),
-) -> Div {
-    let focused = state.focus_handle(cx).is_focused(window);
-    div()
+) -> El {
+    col()
         .w_full()
-        .min_w_0()
-        .bg(bg)
-        .border_1()
-        .border_color(if focused {
-            theme::accent()
-        } else {
-            theme::border()
-        })
-        .rounded(radius)
-        .py(px(pad.0))
-        .px(px(pad.1))
-        .text_size(px(13.))
-        .text_color(theme::fg())
+        .min_w(0.0)
+        .fill(bg)
+        .border(1.0, if focused { t.accent } else { t.border })
+        .radius(radius)
+        .py(pad.0)
+        .px(pad.1)
         .child(
-            Textarea::new(state)
-                .appearance(false)
-                .text_size(px(13.))
-                .p_0()
-                .w_full(),
+            area.appearance(false)
+                .text_size(13.0)
+                .text_color(t.fg)
+                .px(0.0)
+                .py(0.0)
+                .build(t),
         )
 }
 
 /// An empty row value: one faint dash; the hint replaces it while the row
-/// (`group`) is hovered.
-pub(crate) fn placeholder(group: SharedString, hint: impl Into<SharedString>) -> Div {
-    // Visibility, not display: a hover style may not change layout between
-    // prepaint and paint.
-    div()
-        .relative()
-        .text_color(theme::muted())
-        .opacity(0.6)
-        .whitespace_nowrap()
+/// around it (an ancestor with `.hover_group()`) is hovered.
+pub(crate) fn placeholder(t: &Theme, hint: impl Into<String>) -> El {
+    let style = ty::ui(13.0);
+    el().opacity(0.6)
+        .child(text("—").font(style).color(t.muted).group_opacity(1.0, 0.0))
         .child(
-            div()
-                .group_hover(group.clone(), |s| s.invisible())
-                .child("—"),
-        )
-        .child(
-            div()
-                .absolute()
-                .top_0()
-                .left_0()
-                .invisible()
-                .group_hover(group, |s| s.visible())
-                .child(hint.into()),
+            text(hint.into())
+                .font(style)
+                .color(t.muted)
+                .absolute(0.0, 0.0)
+                .group_opacity(0.0, 1.0),
         )
 }
 
-/// A list's one-line empty note as the kit `Empty`, restyled to Roostr's
-/// quiet left-aligned muted line; callers set its padding and text size.
-pub(crate) fn empty_note(text: impl Into<SharedString>) -> Empty {
-    Empty::new()
-        .flex_none()
-        .items_start()
-        .justify_start()
-        .gap_0()
-        .p_0()
-        .rounded_none()
-        .text_left()
-        .text_color(theme::muted())
-        .child(text.into())
+/// A list's one-line empty note: Roostr's quiet left-aligned muted line at
+/// `size`; callers set its padding.
+pub(crate) fn empty_note(t: &Theme, note: impl Into<String>, size: f32) -> El {
+    text(note.into()).font(ty::ui(size)).color(t.muted).wrap()
 }
 
-/// A plain outline action button (`.act`): kit outline [`Button`], bg, 1px
-/// border, radius 7, 5px 12px, 12px label (on the child: the kit's inner
-/// content box sets its own text size); kit hover fill; `disabled` greys it
-/// and blocks clicks.
+/// A plain outline action button (`.act`): bg, 1px border, radius 7, 5px
+/// 12px, 12px label; kit hover fill; `disabled` greys it and blocks presses.
+/// The caller adds `on_press` and builds it.
 pub(crate) fn act_button(
-    id: impl Into<ElementId>,
-    label: impl Into<SharedString>,
+    t: &Theme,
+    key: impl Into<String>,
+    label: impl Into<String>,
     disabled: bool,
 ) -> Button {
-    let label: SharedString = label.into();
-    roostr_core::ui::disabled(
-        Button::new(id)
+    let label: String = label.into();
+    roostr_ui::disabled(
+        Button::new(key)
             .outline()
-            .small()
+            .size(KitSize::Small)
             .accessibility_label(label.clone())
-            .rounded(px(7.))
+            .label(label)
+            .radius(7.0)
             .h_auto()
-            .px(px(12.))
-            .py(px(5.))
-            .bg(theme::bg())
-            .border_color(theme::border())
-            .text_color(theme::fg())
-            .child(div().text_size(px(12.)).child(label)),
+            .px(12.0)
+            .py(5.0)
+            .bg(t.bg)
+            .border_color(t.border)
+            .text_color(t.fg)
+            .text_size(12.0),
         disabled,
     )
 }
 
-/// A muted one-line note (kit [`Label`]): `size`px in the muted colour.
-pub(crate) fn note(text: impl Into<SharedString>, size: f32) -> Label {
-    Label::new(text)
-        .text_size(px(size))
-        .text_color(theme::muted())
+/// A muted one-line note: `size`pt in the muted colour.
+pub(crate) fn note(t: &Theme, line: impl Into<String>, size: f32) -> El {
+    text(line.into()).font(ty::ui(size)).color(t.muted).wrap()
 }
 
-/// An error line under a control: the kit destructive [`Alert`], compact.
-pub(crate) fn error_alert(id: impl Into<ElementId>, text: impl Into<SharedString>) -> Alert {
-    let text: SharedString = text.into();
-    Alert::error(id, text).xsmall().text_size(px(12.))
+/// An error line under a control: the kit destructive alert, compact.
+pub(crate) fn error_alert(t: &Theme, key: impl Into<String>, line: impl Into<String>) -> El {
+    Alert::error(key, line).size(KitSize::XSmall).build(t)
 }
 
-/// A 1px horizontal rule in the border colour (kit [`Separator`]).
-pub(crate) fn rule() -> Separator {
-    Separator::horizontal().color(theme::border())
+/// A 1px horizontal rule in the border colour.
+pub(crate) fn rule(t: &Theme) -> El {
+    el().h(1.0).w_full().fill(t.border)
+}
+
+/// Recolours `child` (text or icon) to `color` while the nearest ancestor
+/// with `.hover_group()` is hovered.
+pub(crate) fn hover_tint(child: El, color: Color) -> El {
+    child.group_color(color)
 }
 
 /// The first `n` characters of `s` (char-safe `slice(0, n)`).
 pub(crate) fn prefix(s: &str, n: usize) -> String {
     s.chars().take(n).collect()
+}
+
+/// roostr-core's glyph (what `type_glyph` and friends return) as the
+/// roostr-ui glyph that draws it (same names).
+pub(crate) fn ui_glyph(g: roostr_core::Glyph) -> roostr_ui::Glyph {
+    roostr_ui::Glyph::from_name(g.name()).expect("roostr-ui has every Roostr glyph")
+}
+
+/// An object/space icon in a `size` square ([`roostr_ui::emoji_or_image_icon`])
+/// with the window's image cache; an image icon stays an empty square where
+/// there is none (headless tests).
+pub(crate) fn icon_el(s: &State, icon: &str, size: f32) -> El {
+    match s.get::<roostr_ui::Images>() {
+        Some(images) => roostr_ui::emoji_or_image_icon(icon, size, images),
+        None if roostr_ui::is_image_icon(icon) => el().size(size, size),
+        None => row()
+            .size(size, size)
+            .center()
+            .child(text(icon.to_owned()).font(ty::ui(size * 0.9).lh(size))),
+    }
+}
+
+/// A row icon as text in the row's `style`, or a `size` square image
+/// ([`roostr_ui::icon_text`]) with the window's image cache.
+pub(crate) fn icon_text_el(s: &State, icon: &str, size: f32, style: rune::TextStyle) -> El {
+    match s.get::<roostr_ui::Images>() {
+        Some(images) => roostr_ui::icon_text(icon, size, style, images),
+        None if roostr_ui::is_image_icon(icon) => el().size(size, size),
+        None => text(icon.to_owned()).font(style),
+    }
 }

@@ -3,22 +3,22 @@
 //! into the search box and picked from the first cell; with images on, a
 //! pasted image URL or an uploaded image file becomes the icon.
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::rc::Rc;
 use std::sync::LazyLock;
 
 use base64::Engine as _;
-use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
-use gpui_kit::component::input::{InputEvent, InputState};
-use gpui_kit::component::label::Label;
-use gpui_kit::prelude::FluentBuilder as _;
-use gpui_kit::*;
 use regex::Regex;
-use roostr_core::theme;
-use roostr_core::ui::disabled;
+use roostr_core::State;
+use roostr_ui::ty::Weights as _;
+use roostr_ui::{
+    Button, ButtonCustomVariant, Input, InputState, ScrollArea, Theme, disabled, radius, ty,
+};
+use rune::{Cursor, El, col, el, row, text};
 use serde::Deserialize;
 
-use crate::widgets::{FieldSkin, empty_note, error_alert, field, menu_shadow};
+use crate::widgets::{FieldSkin, empty_note, error_alert, field, icon_el, later, menu_shadow};
 
 #[derive(Deserialize)]
 struct EmojiData {
@@ -32,6 +32,18 @@ struct EmojiData {
 /// > crates/roostr-properties/src/emoji_data.json` (see `examples/gen-emoji.rs`).
 static DATA: LazyLock<EmojiData> = LazyLock::new(|| {
     serde_json::from_str(include_str!("emoji_data.json")).expect("valid emoji data")
+});
+
+/// Indices into `DATA.emoji` of each group, in group order.
+static BY_GROUP: LazyLock<Vec<Vec<usize>>> = LazyLock::new(|| {
+    let data = &*DATA;
+    let mut groups = vec![Vec::new(); data.groups.len()];
+    for (i, e) in data.emoji.iter().enumerate() {
+        if let Some(g) = groups.get_mut(e.2) {
+            g.push(i);
+        }
+    }
+    groups
 });
 
 /// Extra search words for emoji whose CLDR name misses the obvious query.
@@ -145,23 +157,22 @@ const MAX_ICON_BYTES: usize = 200_000;
 /// Cells per grid row: 320px wide, 8px padding, 32px cells with 2px gaps.
 const PER_ROW: usize = 9;
 
-type PickFn = Rc<dyn Fn(&str, &mut Window, &mut App)>;
-type CloseFn = Rc<dyn Fn(&mut Window, &mut App)>;
+type PickFn = Rc<dyn Fn(&mut State, &str)>;
+type CloseFn = Rc<dyn Fn(&mut State)>;
 
-/// Emoji (and optional image) icon picker body; host puts it in a Popover.
-#[derive(IntoElement)]
+/// Emoji (and optional image) icon picker panel; the host anchors it under the icon.
 pub struct EmojiPicker {
-    id: ElementId,
+    key: String,
     with_image: bool,
     on_pick: Option<PickFn>,
     on_close: Option<CloseFn>,
 }
 
 impl EmojiPicker {
-    /// A picker keyed by `id` (its search and scroll persist while rendered under that id).
-    pub fn new(id: impl Into<ElementId>) -> Self {
+    /// A picker keyed by `key` (its search persists while it stays open under that key).
+    pub fn new(key: impl Into<String>) -> Self {
         Self {
-            id: id.into(),
+            key: key.into(),
             with_image: false,
             on_pick: None,
             on_close: None,
@@ -175,428 +186,350 @@ impl EmojiPicker {
     }
 
     /// Emoji text, or an image URL / data URI when with_image; "" removes the icon.
-    pub fn on_pick(mut self, f: impl Fn(&str, &mut Window, &mut App) + 'static) -> Self {
+    pub fn on_pick(mut self, f: impl Fn(&mut State, &str) + 'static) -> Self {
         self.on_pick = Some(Rc::new(f));
         self
     }
 
-    /// Escape was pressed in the picker.
-    pub fn on_close(mut self, f: impl Fn(&mut Window, &mut App) + 'static) -> Self {
+    /// Escape was pressed in the picker, or a press landed outside it.
+    pub fn on_close(mut self, f: impl Fn(&mut State) + 'static) -> Self {
         self.on_close = Some(Rc::new(f));
         self
     }
 }
 
-impl RenderOnce for EmojiPicker {
-    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let state = window.use_keyed_state(self.id.clone(), cx, |window, cx| {
-            EmojiState::new(window, cx)
-        });
-        state.update(cx, |s, _| {
-            s.with_image = self.with_image;
-            s.on_pick = self.on_pick.clone();
-            s.on_close = self.on_close.clone();
-        });
-        state
-    }
-}
-
-enum Row {
-    Header(usize),
-    /// Indices into `DATA.emoji`.
-    Cells(Vec<usize>),
-    /// The pasted emoji / image URL as the first cell.
-    Pasted,
-    None,
-}
-
+/// One open picker: its search field and upload progress.
 struct EmojiState {
-    query: Entity<InputState>,
-    with_image: bool,
-    on_pick: Option<PickFn>,
-    on_close: Option<CloseFn>,
-    rows: Vec<Row>,
-    /// Row index of each group header (browse mode only).
-    headers: Vec<(usize, usize)>,
-    list: ListState,
+    query: InputState,
     upload_error: String,
     uploading: bool,
-    _sub: Subscription,
-    placeholder: &'static str,
 }
 
 impl EmojiState {
-    fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let query = cx.new(|cx| InputState::new(window, cx));
-        let sub = cx.subscribe(&query, |this: &mut Self, _, ev: &InputEvent, cx| {
-            if matches!(ev, InputEvent::Change) {
-                this.rebuild(cx);
-                cx.notify();
-            }
-        });
-        let focus = query.clone();
-        window.defer(cx, move |window, cx| {
-            focus.update(cx, |s, cx| s.focus(window, cx))
-        });
-        let mut this = Self {
+    /// A fresh picker, its search focused.
+    fn new() -> Self {
+        let mut query = InputState::new();
+        query.focus();
+        Self {
             query,
-            with_image: false,
-            on_pick: None,
-            on_close: None,
-            rows: Vec::new(),
-            headers: Vec::new(),
-            list: ListState::new(0, ListAlignment::Top, px(200.)),
             upload_error: String::new(),
             uploading: false,
-            _sub: sub,
-            placeholder: "",
-        };
-        this.rebuild(cx);
-        this
-    }
-
-    fn q(&self, cx: &App) -> String {
-        self.query.read(cx).value().trim().to_string()
-    }
-
-    fn is_emoji_query(q: &str) -> bool {
-        !q.is_empty() && PICTOGRAPHIC.is_match(q)
-    }
-
-    fn is_url_query(&self, q: &str) -> bool {
-        self.with_image && IMAGE_URL.is_match(q)
-    }
-
-    fn rebuild(&mut self, cx: &App) {
-        let raw = self.q(cx);
-        let q = raw.to_lowercase();
-        let data = &*DATA;
-        let mut rows = Vec::new();
-        let mut headers = Vec::new();
-        let pasted = self.is_url_query(&raw) || Self::is_emoji_query(&raw);
-        if pasted {
-            rows.push(Row::Pasted);
         }
-        if q.is_empty() || Self::is_emoji_query(&raw) {
-            for (gi, _) in data.groups.iter().enumerate() {
-                headers.push((rows.len(), gi));
-                rows.push(Row::Header(gi));
-                let items: Vec<usize> = data
-                    .emoji
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, e)| e.2 == gi)
-                    .map(|(i, _)| i)
-                    .collect();
-                rows.extend(items.chunks(PER_ROW).map(|c| Row::Cells(c.to_vec())));
-            }
-        } else {
-            let items: Vec<usize> = data
-                .emoji
-                .iter()
-                .enumerate()
-                .filter(|(_, (e, name, _, keywords))| {
-                    name.contains(&q)
-                        || keywords.contains(&q)
-                        || ALIASES
-                            .iter()
-                            .find(|(a, _)| a == e)
-                            .is_some_and(|(_, words)| words.contains(&q))
-                })
-                .map(|(i, _)| i)
-                .collect();
-            if items.is_empty() {
-                rows.push(Row::None);
-            }
-            rows.extend(items.chunks(PER_ROW).map(|c| Row::Cells(c.to_vec())));
-        }
-        self.rows = rows;
-        self.headers = headers;
-        self.list.reset(self.rows.len());
     }
 }
 
-impl EmojiState {
-    fn pick(&self, value: &str, window: &mut Window, cx: &mut App) {
-        if let Some(f) = &self.on_pick {
-            f(value, window, cx);
-        }
-    }
+/// Every open picker by key; an entry goes when its picker closes or picks.
+#[derive(Default)]
+struct Pickers(HashMap<String, EmojiState>);
 
-    fn random(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let n = DATA.emoji.len();
-        let i = (uuid::Uuid::new_v4().as_u128() % n as u128) as usize;
-        let e = DATA.emoji[i].0.clone();
-        self.pick(&e, window, cx);
-    }
+fn state_mut<'a>(s: &'a mut State, key: &str) -> &'a mut EmojiState {
+    s.slot::<Pickers>()
+        .0
+        .entry(key.to_string())
+        .or_insert_with(EmojiState::new)
+}
 
-    fn upload(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if roostr_core::io::WEB {
-            self.upload_error = roostr_core::io::NO_FILE_PICKER.to_string();
-            cx.notify();
+fn is_emoji_query(q: &str) -> bool {
+    !q.is_empty() && PICTOGRAPHIC.is_match(q)
+}
+
+fn is_url_query(with_image: bool, q: &str) -> bool {
+    with_image && IMAGE_URL.is_match(q)
+}
+
+/// The emoji a search finds: name, CLDR keywords or Roostr's aliases contain `q` (lowercase).
+fn search(q: &str) -> Vec<usize> {
+    DATA.emoji
+        .iter()
+        .enumerate()
+        .filter(|(_, (e, name, _, keywords))| {
+            name.contains(q)
+                || keywords.contains(q)
+                || ALIASES
+                    .iter()
+                    .find(|(a, _)| a == e)
+                    .is_some_and(|(_, words)| words.contains(q))
+        })
+        .map(|(i, _)| i)
+        .collect()
+}
+
+/// Drops the picker's state and hands `value` to the host.
+fn pick(s: &mut State, key: &str, on_pick: &Option<PickFn>, value: &str) {
+    s.slot::<Pickers>().0.remove(key);
+    if let Some(f) = on_pick {
+        f(s, value);
+    }
+}
+
+fn random(s: &mut State, key: &str, on_pick: &Option<PickFn>) {
+    let n = DATA.emoji.len();
+    let i = (uuid::Uuid::new_v4().as_u128() % n as u128) as usize;
+    let e = DATA.emoji[i].0.clone();
+    pick(s, key, on_pick, &e);
+}
+
+/// Picks a file through the host's file dialog and turns it into an icon data URL.
+fn upload(s: &mut State, key: String, on_pick: Option<PickFn>) {
+    let picker = s.pick_file.as_ref().map(|p| p.0.clone());
+    let Some(picker) = picker.filter(|_| !roostr_core::io::WEB) else {
+        state_mut(s, &key).upload_error = roostr_core::io::NO_FILE_PICKER.to_string();
+        return;
+    };
+    let chosen = picker(s);
+    s.rt.spawn(async move |cx| {
+        let Some(path) = chosen.await else { return };
+        let open = cx.update(|s| match s.slot::<Pickers>().0.get_mut(&key) {
+            Some(me) => {
+                me.upload_error.clear();
+                me.uploading = true;
+                true
+            }
+            None => false,
+        });
+        if !open {
             return;
         }
-        let paths = cx.prompt_for_paths(PathPromptOptions {
-            files: true,
-            directories: false,
-            multiple: false,
-            prompt: Some("Choose".into()),
-        });
-        cx.spawn_in(window, async move |this, cx| {
-            let Ok(Ok(Some(paths))) = paths.await else { return };
-            let Some(path) = paths.into_iter().next() else { return };
-            let _ = this.update(cx, |this, cx| {
-                this.upload_error.clear();
-                this.uploading = true;
-                cx.notify();
-            });
-            let result = cx.background_spawn(async move { icon_from_file(&path) }).await;
-            let _ = this.update_in(cx, |this, window, cx| {
-                this.uploading = false;
-                match result {
-                    Ok(icon) if icon.len() > MAX_ICON_BYTES => {
-                        this.upload_error = format!(
-                            "that image is too big for an icon ({} KB after resizing; up to {} KB) - try a simpler image",
-                            (icon.len() as f64 / 1000.).round(),
-                            MAX_ICON_BYTES / 1000
-                        );
-                    }
-                    Ok(icon) => this.pick(&icon, window, cx),
-                    Err(error) => this.upload_error = error.to_string(),
+        let result = cx.background(async move { icon_from_file(&path) }).await;
+        cx.update(|s| {
+            let Some(me) = s.slot::<Pickers>().0.get_mut(&key) else {
+                return;
+            };
+            me.uploading = false;
+            match result {
+                Ok(icon) if icon.len() > MAX_ICON_BYTES => {
+                    me.upload_error = format!(
+                        "that image is too big for an icon ({} KB after resizing; up to {} KB) - try a simpler image",
+                        (icon.len() as f64 / 1000.).round(),
+                        MAX_ICON_BYTES / 1000
+                    );
                 }
-                cx.notify();
-            });
-        })
-        .detach();
-    }
-
-    /// One emoji: a kit ghost [`Button`] (32px, 19px glyph, named in its
-    /// tooltip). Off the tab order: the grid is thousands of cells.
-    fn cell(&self, i: usize, cx: &mut Context<Self>) -> AnyElement {
-        let (emoji, name, _, _) = &DATA.emoji[i];
-        let value = emoji.clone();
-        cell_button(("emoji", i), cx)
-            .accessibility_label(name.clone())
-            .tooltip(name.clone())
-            .on_click(cx.listener(move |this, _, window, cx| this.pick(&value, window, cx)))
-            .child(div().text_size(px(19.)).child(emoji.clone()))
-            .into_any_element()
-    }
-
-    fn render_row(&self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
-        let Some(row) = self.rows.get(ix) else {
-            return div().into_any_element();
-        };
-        match row {
-            Row::Header(gi) => group_header(&DATA.groups[*gi], ix == 0).into_any_element(),
-            Row::Cells(cells) => div()
-                .flex()
-                .gap(px(2.))
-                .pb(px(2.))
-                .children(cells.iter().map(|&i| self.cell(i, cx)))
-                .into_any_element(),
-            Row::None => empty_note("No matches — paste any emoji instead.")
-                .p(px(8.))
-                .text_size(px(12.))
-                .into_any_element(),
-            Row::Pasted => {
-                let q = self.q(cx);
-                let value = q.clone();
-                let url = self.is_url_query(&q);
-                let tip = if url {
-                    "Use image".to_string()
-                } else {
-                    format!("Use {q}")
-                };
-                div()
-                    .pb(px(2.))
-                    .child(
-                        cell_button("pasted", cx)
-                            .accessibility_label(tip.clone())
-                            .tooltip(tip)
-                            .when(!url, |b| {
-                                b.border_1()
-                                    .border_dashed()
-                                    .border_color(theme::accent())
-                                    .child(div().text_size(px(19.)).child(q.clone()))
-                            })
-                            .when(url, |b| {
-                                b.child(
-                                    img(q.to_string())
-                                        .size(px(26.))
-                                        .rounded(theme::radius::sm())
-                                        .object_fit(ObjectFit::Cover),
-                                )
-                            })
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.pick(&value, window, cx)
-                            })),
-                    )
-                    .into_any_element()
+                Ok(icon) => pick(s, &key, &on_pick, &icon),
+                Err(error) => me.upload_error = error.to_string(),
             }
-        }
-    }
+        });
+    })
+    .detach();
 }
 
-/// A grid cell: kit [`Button`] (hover fill), 32px square.
-fn cell_button(id: impl Into<ElementId>, cx: &App) -> Button {
-    Button::new(id)
-        .custom(
-            ButtonCustomVariant::new(cx)
-                .foreground(theme::fg())
-                .hover(theme::hover())
-                .active(theme::hover()),
+/// A grid cell: 32px square, hover fill, radius sm, named in its tooltip.
+/// Off the tab order: the grid is thousands of cells.
+fn cell_el(t: &Theme, key: String, child: El) -> El {
+    row()
+        .key(key)
+        .size(32.0, 32.0)
+        .center()
+        .radius(radius::SM)
+        .hover(t.hover)
+        .press(t.hover)
+        .cursor(Cursor::Pointer)
+        .child(child)
+}
+
+/// A group's caption: uppercase 10.5px semibold muted on the panel, so it
+/// can also cover rows as the sticky header.
+fn group_header(t: &Theme, label: &str, first: bool) -> El {
+    el().w_full()
+        .fill(t.panel)
+        .px(2.0)
+        .pt(if first { 0.0 } else { 6.0 })
+        .pb(3.0)
+        .child(
+            text(label.to_uppercase())
+                .font(ty::ui(10.5).semibold())
+                .color(t.muted),
         )
-        .tab_stop(false)
-        .size(px(32.))
-        .p_0()
-        .rounded(theme::radius::sm())
-        .cursor_pointer()
 }
 
-/// A group's caption (kit [`Label`]): uppercase 10.5px semibold muted on
-/// the panel, so it can also cover rows as the sticky header.
-fn group_header(label: &str, first: bool) -> Label {
-    Label::new(label.to_uppercase())
-        .w_full()
-        .bg(theme::panel())
-        .text_color(theme::muted())
-        .text_size(px(10.5))
-        .font_weight(FontWeight::SEMIBOLD)
-        .px(px(2.))
-        .pt(px(if first { 0. } else { 6. }))
-        .pb(px(3.))
-}
+impl EmojiPicker {
+    pub fn build(self, s: &State, _cx: &mut rune::Cx<State>, t: &Theme, layer: &mut Vec<El>) -> El {
+        let key = self.key;
+        let fallback;
+        let me = match s.get::<Pickers>().and_then(|p| p.0.get(&key)) {
+            Some(me) => me,
+            None => {
+                let open = key.clone();
+                later(s, move |s| {
+                    state_mut(s, &open);
+                });
+                fallback = EmojiState::new();
+                &fallback
+            }
+        };
+        let with_image = self.with_image;
+        let on_pick = self.on_pick;
+        let on_close = self.on_close;
+        let raw = me.query.value().trim().to_string();
+        let q = raw.to_lowercase();
+        let url = is_url_query(with_image, &raw);
+        let emoji_query = is_emoji_query(&raw);
 
-impl Render for EmojiState {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let placeholder = if self.with_image {
+        let pick_el = |k: String, value: String, child: El, tip: String| {
+            let (pk, f) = (key.clone(), on_pick.clone());
+            cell_el(t, k, child)
+                .help(tip.clone())
+                .label(tip)
+                .on_press(move |s: &mut State| pick(s, &pk, &f, &value))
+        };
+        let cells_row = |items: &[usize]| {
+            row().gap(2.0).pb(2.0).children(items.iter().map(|&i| {
+                let (emoji, name, _, _) = &DATA.emoji[i];
+                pick_el(
+                    format!("emoji-{i}"),
+                    emoji.clone(),
+                    text(emoji.clone()).font(ty::ui(19.0)),
+                    name.clone(),
+                )
+            }))
+        };
+
+        let mut list = col().w_full();
+        if url || emoji_query {
+            let tip = if url {
+                "Use image".to_string()
+            } else {
+                format!("Use {raw}")
+            };
+            let cell = if url {
+                pick_el(
+                    "pasted".into(),
+                    raw.clone(),
+                    icon_el(s, &raw, 26.0)
+                        .radius(radius::SM)
+                        .clip_rounded(radius::SM),
+                    tip,
+                )
+            } else {
+                pick_el(
+                    "pasted".into(),
+                    raw.clone(),
+                    text(raw.clone()).font(ty::ui(19.0)),
+                    tip,
+                )
+                .border(1.0, t.accent)
+                .border_dash(4.0, 3.0)
+            };
+            list = list.child(row().pb(2.0).child(cell));
+        }
+        if q.is_empty() || emoji_query {
+            for (gi, group) in DATA.groups.iter().enumerate() {
+                list = list.child(
+                    col()
+                        .w_full()
+                        .child(group_header(t, group, gi == 0).sticky_top(0.0))
+                        .children(BY_GROUP[gi].chunks(PER_ROW).map(&cells_row)),
+                );
+            }
+        } else {
+            let items = search(&q);
+            if items.is_empty() {
+                list = list.child(
+                    empty_note(t, "No matches — paste any emoji instead.", 12.0).padding(8.0),
+                );
+            }
+            list = list.children(items.chunks(PER_ROW).map(&cells_row));
+        }
+
+        let placeholder = if with_image {
             "Search, paste an emoji or an image URL…"
         } else {
             "Search or paste an emoji…"
         };
-        if self.placeholder != placeholder {
-            self.placeholder = placeholder;
-            self.query
-                .update(cx, |s, cx| s.set_placeholder(placeholder, window, cx));
-        }
-        let this = cx.entity().downgrade();
-        let list = list(self.list.clone(), move |ix, _, cx| {
-            this.upgrade().map_or_else(
-                || div().into_any_element(),
-                |e| e.update(cx, |s, cx| s.render_row(ix, cx)),
-            )
-        })
-        .size_full();
-        // The sticky group header: the group the top row belongs to.
-        let top = self.list.logical_scroll_top();
-        let sticky = (top.item_ix > 0 || top.offset_in_item > px(0.))
-            .then(|| {
-                self.headers
-                    .iter()
-                    .rev()
-                    .find(|(row, _)| *row <= top.item_ix)
-                    .map(|(_, g)| *g)
-            })
-            .flatten();
-        let top_variant = ButtonCustomVariant::new(cx).foreground(theme::muted());
-        let top_button = |id: &'static str, label: &'static str, title: &'static str| {
-            Button::new(id)
-                .custom(top_variant)
-                .flex_none()
-                .size(px(28.))
-                .p_0()
-                .rounded(theme::radius::tab())
-                .text_color(theme::muted())
-                .cursor_pointer()
+        let lens_key = key.clone();
+        let input = Input::new("query", &me.query)
+            .placeholder(placeholder)
+            .on_edit(move |s: &mut State| &mut state_mut(s, &lens_key).query);
+        let top_button = |k: &'static str, label: &'static str, title: &'static str| {
+            Button::new(k)
+                .custom(ButtonCustomVariant::new(t).foreground(t.muted))
+                .square(28.0)
+                .p(0.0)
+                .radius(radius::TAB)
+                .text_color(t.muted)
+                .pointer()
                 .accessibility_label(title)
                 .tooltip(title)
-                .child(div().text_size(px(16.)).child(label))
+                .child(text(label).font(ty::ui(16.0)).color(t.muted))
         };
-        div()
-            .id("emoji-picker")
-            .w(px(320.))
-            .flex()
-            .flex_col()
-            .bg(theme::panel())
-            .border_1()
-            .border_color(theme::border())
-            .rounded(theme::radius::pane())
-            .shadow(menu_shadow())
-            .overflow_hidden()
-            .text_color(theme::fg())
-            .on_key_down(cx.listener(|this, ev: &KeyDownEvent, window, cx| {
-                if ev.keystroke.key == "escape"
-                    && let Some(f) = this.on_close.clone()
-                {
-                    cx.stop_propagation();
-                    f(window, cx);
-                }
-            }))
+        let mut top = row()
+            .items_center()
+            .gap(6.0)
+            .padding(8.0)
+            .border_sides([0.0, 0.0, 1.0, 0.0], t.border)
             .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(6.))
-                    .p(px(8.))
-                    .border_b_1()
-                    .border_color(theme::border())
-                    .child(field(&self.query, FieldSkin::Emoji, window, cx).flex_1())
-                    .child(
-                        top_button("random", "🎲", "Random")
-                            .on_click(cx.listener(|this, _, window, cx| this.random(window, cx))),
-                    )
-                    .when(self.with_image, |d| {
-                        d.child(
-                            disabled(
-                                top_button(
-                                    "upload",
-                                    "⬆️",
-                                    "Upload an image (PNG, JPG, WebP, GIF or SVG)",
-                                ),
-                                self.uploading,
-                            )
-                            .on_click(cx.listener(
-                                |this, _, window, cx| {
-                                    if !this.uploading {
-                                        this.upload(window, cx)
-                                    }
-                                },
-                            )),
-                        )
-                    })
-                    .child(
-                        top_button("remove", "×", "Remove icon")
-                            .on_click(cx.listener(|this, _, window, cx| this.pick("", window, cx))),
+                field(t, input, me.query.is_focused(), FieldSkin::Emoji)
+                    .grow(1.0)
+                    .shrink(),
+            )
+            .child({
+                let (k, f) = (key.clone(), on_pick.clone());
+                top_button("random", "🎲", "Random")
+                    .on_press(move |s: &mut State| random(s, &k, &f))
+                    .build(t)
+            });
+        if with_image {
+            let (k, f) = (key.clone(), on_pick.clone());
+            top = top.child(
+                disabled(
+                    top_button(
+                        "upload",
+                        "⬆️",
+                        "Upload an image (PNG, JPG, WebP, GIF or SVG)",
                     ),
-            )
-            .when(!self.upload_error.is_empty(), |d| {
-                d.child(
-                    div()
-                        .px(px(8.))
-                        .py(px(6.))
-                        .border_b_1()
-                        .border_color(theme::border())
-                        .child(error_alert("upload-error", self.upload_error.clone())),
+                    me.uploading,
                 )
-            })
-            .child(
-                div()
-                    .relative()
-                    .h(px(300.))
-                    .p(px(8.))
-                    .child(list)
-                    .when_some(sticky, |d, g| {
-                        d.child(
-                            div()
-                                .absolute()
-                                .top(px(0.))
-                                .left(px(8.))
-                                .right(px(8.))
-                                .child(group_header(&DATA.groups[g], false)),
-                        )
-                    }),
-            )
+                .on_press(move |s: &mut State| {
+                    if !state_mut(s, &k).uploading {
+                        upload(s, k.clone(), f.clone());
+                    }
+                })
+                .build(t),
+            );
+        }
+        top = top.child({
+            let (k, f) = (key.clone(), on_pick.clone());
+            top_button("remove", "×", "Remove icon")
+                .on_press(move |s: &mut State| pick(s, &k, &f, ""))
+                .build(t)
+        });
+
+        let mut panel = col()
+            .key(key.clone())
+            .w(320.0)
+            .fill(t.panel)
+            .border(1.0, t.border)
+            .radius(radius::PANE)
+            .box_shadow(menu_shadow())
+            .clip_rounded(radius::PANE)
+            .child(top);
+        if !me.upload_error.is_empty() {
+            panel = panel.child(
+                el().px(8.0)
+                    .py(6.0)
+                    .border_sides([0.0, 0.0, 1.0, 0.0], t.border)
+                    .child(error_alert(t, "upload-error", me.upload_error.clone())),
+            );
+        }
+        panel = panel.child(
+            col().h(300.0).padding(8.0).child(
+                ScrollArea::vertical("emoji-list", list)
+                    .grow()
+                    .w_full()
+                    .build(t),
+            ),
+        );
+        let close_key = key.clone();
+        roostr_ui::overlay::dismissable(
+            panel,
+            &key,
+            move |s: &mut State| {
+                s.slot::<Pickers>().0.remove(&close_key);
+                if let Some(f) = &on_close {
+                    f(s);
+                }
+            },
+            layer,
+        )
     }
 }
 
@@ -633,4 +566,31 @@ fn icon_from_file(path: &Path) -> anyhow::Result<String> {
     let mut out = std::io::Cursor::new(Vec::new());
     resized.write_to(&mut out, image::ImageFormat::Png)?;
     Ok(format!("data:image/png;base64,{}", b64(out.get_ref())))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn aliases_find_emoji() {
+        let pin = DATA.emoji.iter().position(|e| e.0 == "📌").expect("📌");
+        assert!(search("pin").contains(&pin));
+        let bot = DATA.emoji.iter().position(|e| e.0 == "🤖").expect("🤖");
+        assert!(search("agent").contains(&bot));
+    }
+
+    #[test]
+    fn pasted_queries() {
+        assert!(is_emoji_query("🦀"));
+        assert!(!is_emoji_query("crab"));
+        assert!(is_url_query(true, "https://example.com/a.png"));
+        assert!(!is_url_query(false, "https://example.com/a.png"));
+    }
+
+    #[test]
+    fn every_emoji_has_a_group() {
+        let n: usize = BY_GROUP.iter().map(Vec::len).sum();
+        assert_eq!(n, DATA.emoji.len());
+    }
 }

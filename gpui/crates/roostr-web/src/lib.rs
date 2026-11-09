@@ -1,59 +1,70 @@
 //! Roostr in a browser tab: the desktop app's views compiled for
-//! `wasm32-unknown-unknown`, serving all of roostr.space. The website pages
-//! (`/`, `/guide`, `/privacy`, and `/j` without an identity on this tab) show
-//! on their own, like the Svelte site's static pages; the workspace (`/app`)
-//! starts a vault. By default the tab is its own replica, like the Svelte
-//! app in browser mode: the engine (`engine.wasm` beside the page),
-//! IndexedDB and the relays, with the identity in `localStorage`. The
-//! alternative is the daemon and harness on the visitor's own computer
-//! (`http://127.0.0.1:7333`, `:7334`), like the hosted Svelte app in paired
-//! mode; the choice is kept per browser ([`roostr_core::mode`]).
+//! `wasm32-unknown-unknown` on Rune's web target, serving all of
+//! roostr.space. The website pages (`/`, `/guide`, `/privacy`, and `/j`
+//! without an identity on this tab) show on their own, like the Svelte
+//! site's static pages; the workspace (`/app`) starts a vault. By default the
+//! tab is its own replica, like the Svelte app in browser mode: the engine
+//! (`engine.wasm` beside the page), IndexedDB and the relays, with the
+//! identity in `localStorage`. The alternative is the daemon and harness on
+//! the visitor's own computer (`http://127.0.0.1:7333`, `:7334`), like the
+//! hosted Svelte app in paired mode; the choice is kept per browser
+//! ([`roostr_core::mode`]).
 //!
 //! `www/main.js` loads the module and calls [`run`] with the page's base path
-//! (`""` at the site root). GPUI's web platform draws into one canvas with one
-//! window: a website page, or in paired mode the pairing gate until this tab
-//! holds a session, then the workspace (whose own gate asks a replica without
-//! a key to sign in).
+//! (`""` at the site root). Rune draws into one canvas (WebGPU, else WebGL2):
+//! a website page, or in paired mode the pairing gate until this tab holds a
+//! session, then the workspace (whose own gate asks a replica without a key
+//! to sign in). One [`State`] runs the whole tab: unopened while a website
+//! page or the gate shows, opened ([`State::open`]) when the vault starts.
 
 #![cfg(target_family = "wasm")]
 
 mod pair_gate;
 mod router;
 
-use std::cell::RefCell;
-use std::rc::Rc;
 use std::sync::Arc;
+use std::time::Duration;
 
 use futures::StreamExt as _;
 use futures::channel::mpsc;
-use gpui_kit::web::{CanvasFontFallback, WebBackendPreference, WebPlatform};
-use gpui_kit::*;
+use roostr_core::State;
 use roostr_core::harness::Harness;
 use roostr_core::mode::{self, Mode};
-use roostr_core::nav::{Route, SitePage};
-use roostr_core::theme;
+use roostr_core::nav::{NavEvent, Route, SitePage};
 use roostr_core::web::{self as transport, WebDaemonBackend};
-use roostr_core::{Navigator, UiState};
 use roostr_replica::ReplicaBackend;
-use roostr_shell::{NewObject, OpenSettings, Workspace};
+use roostr_ui::ty;
+use roostr_ui::ty::Weights as _;
+use rune::{AppSpec, Cursor, Cx, El, KeyEvent, Tx, col, el, text};
 use wasm_bindgen::prelude::*;
-
-use crate::pair_gate::{PairGate, Paired};
-
-thread_local! {
-    /// Keeps the application alive for the life of the page.
-    static APPLICATION: RefCell<Option<ApplicationHandle>> = const { RefCell::new(None) };
-}
 
 /// `sessionStorage` flag: the pairing went away while the app ran; the gate
 /// after the reload says so.
 const UNPAIRED_FLAG: &str = "roostr-gpui.unpaired";
 
+/// What the tab shows.
+#[derive(Default)]
+enum Stage {
+    /// While the replica opens.
+    #[default]
+    Starting,
+    /// A website page (the route's), before any vault opens.
+    Site,
+    /// The pairing gate.
+    Gate,
+    /// The workspace over the open vault.
+    App,
+    /// The replica could not open (no IndexedDB, no engine).
+    Failed(String),
+}
+
+/// The page's base path, kept for the replica's engine URL.
+struct Base(String);
+
 /// Start Roostr in this page. `base` is the path the page is served under
 /// (`""` at the root), so `<base>/app/object/<id>` opens that object.
 #[wasm_bindgen]
 pub fn run(base: String) -> Result<(), JsValue> {
-    gpui_kit::platform::web_init();
     log::set_max_level(log::LevelFilter::Warn);
     let tracing = web_sys::window()
         .and_then(|w| w.local_storage().ok().flatten())
@@ -68,82 +79,39 @@ pub fn run(base: String) -> Result<(), JsValue> {
         "sync tracing on ({} = 1)",
         roostr_core::sync_trace::STORAGE_KEY
     );
-
-    // Until the bundled color emoji font arrives (`load_emoji_font`), emoji
-    // and any glyph the bundled fonts lack come from the browser's own fonts
-    // through Canvas.
-    let platform = Rc::new(WebPlatform::new_with_backend_and_font_fallback(
-        false,
-        WebBackendPreference::Auto,
-        CanvasFontFallback::Emoji,
-    ));
-    let http_client = Arc::new(platform.fetch_http_client());
-    let app = Application::with_platform(platform)
-        .with_http_client(http_client)
-        .with_assets(roostr_core::Assets);
-
-    let handle = app.run_embedded(move |cx| {
-        gpui_kit::init(cx);
-        follow_reduce_motion(cx);
-        // Fonts (Inter as the UI, IBM Plex Sans for `.SystemUIFont`) and the
-        // palette, before the first window measures any text.
-        theme::init(cx);
-        // `secondary`: Command in a Mac browser (vendor/gpui-pre-web), Control
-        // elsewhere.
-        cx.bind_keys([
-            roostr_core::ui::secondary_binding("secondary-,", OpenSettings, None, cx),
-            roostr_core::ui::secondary_binding("secondary-n", NewObject, None, cx),
-        ]);
-        let base = base.trim_end_matches('/').to_string();
-        load_emoji_font(&base, cx);
-        if let Err(error) = open_window(WindowOptions::default(), cx, move |window, cx| {
-            cx.new(|cx| WebRoot::new(base, window, cx))
-        }) {
-            log::error!("could not open the Roostr window: {error:#}");
-        }
-        cx.activate(true);
-    });
-    APPLICATION.with(|application| *application.borrow_mut() = Some(handle));
-    Ok(())
+    let base = base.trim_end_matches('/').to_string();
+    let spec = AppSpec {
+        on_key: Some(on_key),
+        ..roostr_host::spec("Roostr", (1280., 800.), State::unopened, view)
+    };
+    let emoji = format!("{base}/{}", roostr_ui::fonts::EMOJI_FONT_PATH);
+    rune::App::new(spec)
+        .font_url(&emoji)
+        .init(move || start(base))
+        .try_run()
+        .map_err(|error| JsValue::from_str(&error))
 }
 
-/// Fetch the color emoji font from beside the page and add it once it
-/// arrives (see [`theme::EMOJI_FONT_PATH`]); the first frames do not wait.
-fn load_emoji_font(base: &str, cx: &mut App) {
-    let url = format!("{base}/{}", theme::EMOJI_FONT_PATH);
-    cx.spawn(async move |cx| {
-        let bytes = async {
-            let response = transport::fetch("GET", &url, &[], None, None).await?;
-            anyhow::ensure!(response.ok(), "HTTP {}", response.status());
-            transport::response_bytes(&response).await
+/// The tab's state: every feature registered on an unopened vault, the
+/// router following the address bar, then the first route's stage.
+fn start(base: String) -> State {
+    let mut s = State::unopened();
+    roostr_app::register(&mut s);
+    s.on_nav(follow_site);
+    router::start(&mut s, &base);
+    let initial = router::initial_route(&base);
+    s.put(Base(base));
+    match initial {
+        Route::Site(page) if shows_without_vault(&page) => {
+            *s.slot::<Stage>() = Stage::Site;
+            roostr_core::nav::navigate(Route::Site(page), &mut s);
         }
-        .await;
-        match bytes {
-            Ok(bytes) => cx.update(|cx| theme::add_emoji_font(bytes, cx)),
-            Err(error) => log::warn!("could not load the emoji font {url}: {error:#}"),
+        route => {
+            router::open_when_ready(&mut s, route);
+            boot(&mut s);
         }
-    })
-    .detach();
-}
-
-enum Stage {
-    /// While the root is being built, and while the replica opens.
-    Starting,
-    /// A website page, before any vault opens.
-    Site(SitePage, Entity<roostr_site::SiteView>),
-    Gate(Entity<PairGate>),
-    App(Entity<Workspace>),
-    /// The replica could not open (no IndexedDB, no engine).
-    Failed(SharedString),
-}
-
-/// The window content: a website page, or the pairing gate, then the app.
-struct WebRoot {
-    base: String,
-    stage: Stage,
-    router: router::Router,
-    _tasks: Vec<Task<()>>,
-    _subscriptions: Vec<Subscription>,
+    }
+    s
 }
 
 /// A choice made here wins; otherwise a tab that paired before stays
@@ -182,252 +150,192 @@ fn shows_without_vault(page: &SitePage) -> bool {
     }
 }
 
-impl WebRoot {
-    fn new(base: String, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        // The Navigator outlives the website stage: `roostr_core::init` keeps it.
-        UiState::init(cx);
-        Navigator::init(cx);
-        let initial = router::initial_route(&base);
-        let router = router::start(&base, cx);
-        let mut this = Self {
-            base,
-            stage: Stage::Starting,
-            router,
-            _tasks: Vec::new(),
-            _subscriptions: Vec::new(),
-        };
-        match initial {
-            Route::Site(page) if shows_without_vault(&page) => {
-                this.show_site(page, window, cx);
-            }
-            route => {
-                this.router.open_when_ready(route);
-                this.boot(window, cx);
-            }
-        }
-        this
-    }
+fn stage(s: &State) -> &Stage {
+    static STARTING: Stage = Stage::Starting;
+    s.get::<Stage>().unwrap_or(&STARTING)
+}
 
-    /// Show `page` on its own and follow the Navigator: another website
-    /// page replaces it, a workspace route starts the vault.
-    fn show_site(&mut self, page: SitePage, window: &mut Window, cx: &mut Context<Self>) {
-        roostr_site::init(cx);
-        let navigator = Navigator::global(cx);
-        self._subscriptions.push(cx.observe_in(
-            &navigator,
-            window,
-            |this, navigator, window, cx| {
-                if !matches!(this.stage, Stage::Site(..)) {
-                    return;
-                }
-                match navigator.read(cx).route().clone() {
-                    Route::Site(page) => this.set_site_page(page, window, cx),
-                    route => {
-                        this.router.leave_site(route, cx);
-                        this.boot(window, cx);
-                    }
-                }
-            },
-        ));
-        self.set_site_page(page.clone(), window, cx);
-        roostr_core::nav::navigate(Route::Site(page), cx);
+/// While a website page shows: another website page replaces it (the view
+/// draws the route's), a workspace route starts the vault.
+fn follow_site(s: &mut State, event: &NavEvent) {
+    if *event != NavEvent::Navigated || !matches!(stage(s), Stage::Site) {
+        return;
     }
-
-    fn set_site_page(&mut self, page: SitePage, window: &mut Window, cx: &mut Context<Self>) {
-        if matches!(&self.stage, Stage::Site(shown, _) if *shown == page) {
-            return;
-        }
-        let view = cx.new(|cx| roostr_site::SiteView::new(page.clone(), window, cx));
-        self.stage = Stage::Site(page, view);
-        cx.notify();
-    }
-
-    /// Start the vault in the chosen mode: the browser's replica, or the
-    /// paired daemon (the pairing gate until this tab holds a session).
-    fn boot(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.stage = Stage::Starting;
-        cx.notify();
-        if chosen_mode() == Mode::Replica {
-            self.open_replica(window, cx);
-            return;
-        }
-        self.watch_pairing(window, cx);
-        if transport::paired_session().is_some() {
-            self.start_app(window, cx);
-        } else {
-            let notice = take_unpaired_flag().then(|| {
-                SharedString::from(
-                    "Pairing expired or was removed. Obtain a fresh terminal code to reconnect.",
-                )
-            });
-            self.show_gate(notice, window, cx);
-        }
-    }
-
-    fn show_gate(
-        &mut self,
-        notice: Option<SharedString>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let gate = cx.new(|cx| PairGate::new(notice, window, cx));
-        self._subscriptions.push(cx.subscribe_in(
-            &gate,
-            window,
-            |this, _, _: &Paired, window, cx| {
-                this.start_app(window, cx);
-            },
-        ));
-        self.stage = Stage::Gate(gate);
-        cx.notify();
-    }
-
-    /// Open this browser's replica: the engine from beside the page, the
-    /// IndexedDB store, the `localStorage` identity.
-    fn open_replica(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let source = roostr_engine::WebSource::under(&format!("{}/", self.base));
-        self._tasks.push(cx.spawn_in(window, async move |this, cx| {
-            let opened = ReplicaBackend::open_browser(&source).await;
-            let _ = this.update_in(cx, |this, window, cx| match opened {
-                Ok(backend) => this.start_replica(backend, window, cx),
-                Err(error) => {
-                    log::error!("could not open the browser replica: {error:#}");
-                    this.stage = Stage::Failed(
-                        format!("This browser can't keep Roostr's replica: {error:#}").into(),
-                    );
-                    cx.notify();
-                }
-            });
-        }));
-    }
-
-    /// The desktop start-up over the replica; no harness, so computer
-    /// features show their "Roostr isn't running on this computer" states.
-    #[allow(clippy::arc_with_non_send_sync)]
-    fn start_replica(
-        &mut self,
-        backend: ReplicaBackend,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        watch_visibility(backend.clone());
-        roostr_core::init(Arc::new(backend), None, cx);
-        roostr_app::init(cx);
-        let workspace = roostr_app::workspace(window, cx);
-        self.stage = Stage::App(workspace);
-        cx.notify();
-    }
-
-    /// The same start-up as the desktop binary, over the browser transport.
-    fn start_app(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if matches!(self.stage, Stage::App(_)) {
-            return;
-        }
-        roostr_core::init(
-            Arc::new(WebDaemonBackend::default()),
-            Some(Arc::new(Harness::web())),
-            cx,
-        );
-        roostr_app::init(cx);
-        let workspace = roostr_app::workspace(window, cx);
-        self.expire_with_session(cx);
-        self.stage = Stage::App(workspace);
-        cx.notify();
-    }
-
-    /// Drop the session when it expires (`scheduleExpiry`).
-    fn expire_with_session(&mut self, cx: &mut Context<Self>) {
-        let Some(session) = transport::paired_session() else {
-            return;
-        };
-        let left = (session.expires_at - js_sys::Date::now()).max(0.);
-        let timer = cx
-            .background_executor()
-            .timer(std::time::Duration::from_millis(left as u64));
-        self._tasks.push(cx.spawn(async move |_, _| {
-            timer.await;
-            if transport::paired_session().is_none_or(|s| s.token == session.token) {
-                transport::unpair();
-            }
-        }));
-    }
-
-    /// React to the pairing changing here or in another tab: a running app
-    /// that lost it reloads into the gate; a gate whose origin got paired
-    /// elsewhere opens the app.
-    fn watch_pairing(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let (tx, mut rx) = mpsc::unbounded::<()>();
-        transport::on_pairing_change(move || {
-            let _ = tx.unbounded_send(());
-        });
-        self._tasks.push(cx.spawn_in(window, async move |this, cx| {
-            while rx.next().await.is_some() {
-                let paired = transport::paired_session().is_some();
-                let Ok(()) = this.update_in(cx, |this, window, cx| match (&this.stage, paired) {
-                    (Stage::App(_), false) => {
-                        set_unpaired_flag();
-                        reload();
-                    }
-                    (Stage::Gate(_), true) => this.start_app(window, cx),
-                    _ => {}
-                }) else {
-                    return;
-                };
-            }
-        }));
+    let route = s.nav.route().clone();
+    if !matches!(route, Route::Site(_)) {
+        router::leave_site(s, route);
+        boot(s);
     }
 }
 
-impl Render for WebRoot {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        let body: AnyElement = match &self.stage {
-            Stage::Starting => div().into_any_element(),
-            Stage::Site(_, page) => page.clone().into_any_element(),
-            Stage::Gate(gate) => gate.clone().into_any_element(),
-            Stage::App(workspace) => workspace.clone().into_any_element(),
-            Stage::Failed(message) => div()
-                .size_full()
-                .flex()
-                .flex_col()
+/// Start the vault in the chosen mode: the browser's replica, or the
+/// paired daemon (the pairing gate until this tab holds a session).
+fn boot(s: &mut State) {
+    *s.slot::<Stage>() = Stage::Starting;
+    if chosen_mode() == Mode::Replica {
+        open_replica(s);
+        return;
+    }
+    watch_pairing(s);
+    if transport::paired_session().is_some() {
+        start_app(s);
+    } else {
+        let notice = take_unpaired_flag().then(|| {
+            "Pairing expired or was removed. Obtain a fresh terminal code to reconnect.".to_string()
+        });
+        pair_gate::open(s, notice);
+        *s.slot::<Stage>() = Stage::Gate;
+    }
+}
+
+/// Open this browser's replica: the engine from beside the page, the
+/// IndexedDB store, the `localStorage` identity.
+fn open_replica(s: &mut State) {
+    let base = s.get::<Base>().map_or_else(String::new, |b| b.0.clone());
+    let source = roostr_engine::WebSource::under(&format!("{base}/"));
+    s.rt.spawn(async move |cx| {
+        let opened = ReplicaBackend::open_browser(&source).await;
+        cx.update(|s| match opened {
+            Ok(backend) => start_replica(s, backend),
+            Err(error) => {
+                log::error!("could not open the browser replica: {error:#}");
+                *s.slot::<Stage>() = Stage::Failed(format!(
+                    "This browser can't keep Roostr's replica: {error:#}"
+                ));
+            }
+        });
+    })
+    .detach();
+}
+
+/// The desktop start-up over the replica; no harness, so computer features
+/// show their "Roostr isn't running on this computer" states.
+#[allow(clippy::arc_with_non_send_sync)]
+fn start_replica(s: &mut State, backend: ReplicaBackend) {
+    watch_visibility(backend.clone());
+    s.open(Arc::new(backend), None);
+    *s.slot::<Stage>() = Stage::App;
+}
+
+/// This tab holds a session (the gate paired it).
+pub(crate) fn paired(s: &mut State) {
+    pair_gate::close(s);
+    start_app(s);
+}
+
+/// The same start-up as the desktop binary, over the browser transport.
+fn start_app(s: &mut State) {
+    if matches!(stage(s), Stage::App) {
+        return;
+    }
+    s.open(
+        Arc::new(WebDaemonBackend::default()),
+        Some(Arc::new(Harness::web())),
+    );
+    expire_with_session(s);
+    *s.slot::<Stage>() = Stage::App;
+}
+
+/// Drop the session when it expires (`scheduleExpiry`).
+fn expire_with_session(s: &mut State) {
+    let Some(session) = transport::paired_session() else {
+        return;
+    };
+    let left = (session.expires_at - js_sys::Date::now()).max(0.);
+    s.rt.spawn(async move |cx| {
+        cx.timer(Duration::from_millis(left as u64)).await;
+        if transport::paired_session().is_none_or(|s| s.token == session.token) {
+            transport::unpair();
+        }
+    })
+    .detach();
+}
+
+/// React to the pairing changing here or in another tab: a running app
+/// that lost it reloads into the gate; a gate whose origin got paired
+/// elsewhere opens the app.
+fn watch_pairing(s: &mut State) {
+    let (tx, mut rx) = mpsc::unbounded::<()>();
+    transport::on_pairing_change(move || {
+        let _ = tx.unbounded_send(());
+    });
+    s.rt.spawn(async move |cx| {
+        while rx.next().await.is_some() {
+            let session = transport::paired_session().is_some();
+            cx.update(|s| match (stage(s), session) {
+                (Stage::App, false) => {
+                    set_unpaired_flag();
+                    reload();
+                }
+                (Stage::Gate, true) => paired(s),
+                _ => {}
+            });
+        }
+    })
+    .detach();
+}
+
+fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
+    match stage(s) {
+        Stage::App => roostr_app::on_key(s, ev, tx),
+        Stage::Site => roostr_site::on_key(s, ev, tx),
+        Stage::Starting | Stage::Gate | Stage::Failed(_) => false,
+    }
+}
+
+fn view(s: &State, cx: &mut Cx<State>) -> El {
+    let t = roostr_shell::theme(s, cx);
+    match stage(s) {
+        Stage::App => roostr_shell::view(s, cx),
+        Stage::Site => {
+            let page = match s.nav.route() {
+                Route::Site(page) => roostr_site::view(s, cx, page),
+                _ => el(),
+            };
+            roostr_ui::root(col().w_full().h_full().fill(t.gutter).child(page), [])
+        }
+        Stage::Gate => roostr_ui::root(pair_gate::view(s, cx, t), []),
+        Stage::Starting => roostr_ui::root(el().w_full().h_full().fill(t.gutter), []),
+        Stage::Failed(message) => roostr_ui::root(
+            col()
+                .w_full()
+                .h_full()
                 .items_center()
-                .gap(px(14.))
-                .pt(px(120.))
-                .px(px(24.))
-                .bg(theme::bg())
+                .gap(14.)
+                .pt(120.)
+                .px(24.)
+                .fill(t.bg)
                 .child(
-                    div()
-                        .text_size(px(16.))
-                        .font_weight(FontWeight::BOLD)
-                        .child("Roostr can't open in this browser"),
+                    text("Roostr can't open in this browser")
+                        .font(ty::ui(16.).bold())
+                        .color(t.fg),
                 )
                 .child(
-                    div()
-                        .text_size(px(13.))
-                        .text_color(theme::muted())
-                        .child(message.clone()),
+                    text(message.clone())
+                        .font(ty::ui(13.))
+                        .color(t.muted)
+                        .wrap(),
                 )
                 .child(
-                    div()
-                        .id("use-daemon")
-                        .px(px(14.))
-                        .py(px(8.))
-                        .rounded(px(8.))
-                        .border_1()
-                        .border_color(theme::border())
-                        .cursor_pointer()
-                        .text_size(px(13.))
-                        .child("Pair with Roostr on this computer instead")
-                        .on_click(|_, _, cx| mode::switch(Mode::Daemon, cx)),
-                )
-                .into_any_element(),
-        };
-        div()
-            .size_full()
-            .bg(theme::gutter())
-            .font_family(theme::fonts::UI)
-            .line_height(relative(theme::LINE_HEIGHT_NORMAL))
-            .text_color(theme::fg())
-            .child(body)
+                    el().key("use-daemon")
+                        .px(14.)
+                        .py(8.)
+                        .radius(8.)
+                        .border(1., t.border)
+                        .cursor(Cursor::Pointer)
+                        .hover(t.hover)
+                        .on_press(|_: &mut State| {
+                            // The browser reloads, paired mode next.
+                            let _ = mode::switch(Mode::Daemon);
+                        })
+                        .child(
+                            text("Pair with Roostr on this computer instead")
+                                .font(ty::ui(13.))
+                                .color(t.fg),
+                        ),
+                ),
+            [],
+        ),
     }
 }
 
@@ -466,27 +374,6 @@ fn watch_visibility(backend: ReplicaBackend) {
         .add_event_listener_with_callback("visibilitychange", listener.as_ref().unchecked_ref());
     // Lives as long as the page.
     listener.forget();
-}
-
-/// `prefers-reduced-motion: reduce`, followed live: with it on, every
-/// transition snaps (`roostr_core::motion`) and the looping indicators hold
-/// still, as the Svelte app's `@media (prefers-reduced-motion)` stopped them.
-fn follow_reduce_motion(cx: &mut App) {
-    let Some(query) = web_sys::window()
-        .and_then(|window| window.match_media("(prefers-reduced-motion: reduce)").ok())
-        .flatten()
-    else {
-        return;
-    };
-    let (tx, changes) = mpsc::unbounded();
-    let target = query.clone();
-    let listener = Closure::<dyn FnMut()>::new(move || {
-        let _ = tx.unbounded_send(target.matches());
-    });
-    let _ = query.add_event_listener_with_callback("change", listener.as_ref().unchecked_ref());
-    // Lives as long as the page.
-    listener.forget();
-    roostr_core::motion::follow_reduce_motion(query.matches(), changes, cx);
 }
 
 fn reload() {

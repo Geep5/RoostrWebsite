@@ -4,24 +4,26 @@
 //! key (Settings lists and edits the same key).
 
 use std::collections::HashSet;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
-use gpui_kit::{App, AppContext as _};
-use roostr_core::UiState;
+use parking_lot::Mutex;
+use roostr_core::{State, UiState};
 
 use crate::spell::{Dictionary, Misspelling};
 
 const IGNORE_KEY: &str = "spell-ignore";
 
-static DICTIONARY: OnceLock<Option<Arc<Dictionary>>> = OnceLock::new();
-static LOADING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// `None` until loaded; `Some(None)` when it could not load.
+static DICTIONARY: Mutex<Option<Option<Arc<Dictionary>>>> = Mutex::new(None);
+static LOADING: AtomicBool = AtomicBool::new(false);
 
 /// Start loading the word lists (once per process).
-pub fn ensure_loaded(cx: &mut App) {
-    if DICTIONARY.get().is_some() || LOADING.swap(true, std::sync::atomic::Ordering::SeqCst) {
+pub fn ensure_loaded(s: &State) {
+    if DICTIONARY.lock().is_some() || LOADING.swap(true, Ordering::SeqCst) {
         return;
     }
-    cx.background_spawn(async move {
+    s.rt.background(async move {
         let dict = match Dictionary::load() {
             Ok(d) => Some(Arc::new(d)),
             Err(error) => {
@@ -29,19 +31,19 @@ pub fn ensure_loaded(cx: &mut App) {
                 None
             }
         };
-        let _ = DICTIONARY.set(dict);
+        *DICTIONARY.lock() = Some(dict);
     })
     .detach();
 }
 
 /// The dictionary, once loaded (nothing is flagged before).
 pub fn dictionary() -> Option<Arc<Dictionary>> {
-    DICTIONARY.get().and_then(Clone::clone)
+    DICTIONARY.lock().clone().flatten()
 }
 
 /// The user's ignore list, re-read every time so edits in Settings apply.
-pub fn ignored(cx: &App) -> HashSet<String> {
-    UiState::get::<Vec<String>>(cx, IGNORE_KEY)
+pub fn ignored(ui: &UiState) -> HashSet<String> {
+    ui.get::<Vec<String>>(IGNORE_KEY)
         .unwrap_or_default()
         .into_iter()
         .map(|w| w.to_lowercase())
@@ -49,13 +51,13 @@ pub fn ignored(cx: &App) -> HashSet<String> {
 }
 
 /// "Add to dictionary".
-pub fn add_to_dictionary(word: &str, cx: &mut App) {
-    let mut words: Vec<String> = UiState::get(cx, IGNORE_KEY).unwrap_or_default();
+pub fn add_to_dictionary(word: &str, ui: &mut UiState) {
+    let mut words: Vec<String> = ui.get(IGNORE_KEY).unwrap_or_default();
     let w = word.to_lowercase();
     if !words.contains(&w) {
         words.push(w);
     }
-    UiState::set(cx, IGNORE_KEY, &words);
+    ui.set(IGNORE_KEY, &words);
 }
 
 /// Misspellings per text (blocking; run in the background).

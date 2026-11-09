@@ -4,343 +4,355 @@
 //! affordance opening name + the 10-swatch palette + Delete option. Select
 //! (status) picks one; multi-select (tag) toggles.
 
-use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::input::{InputEvent, InputState};
-use gpui_kit::component::list::ListItem;
-use gpui_kit::component::{Icon, IconName, Sizable as _, h_flex};
-use gpui_kit::prelude::FluentBuilder as _;
-use gpui_kit::*;
-use roostr_core::options::{
-    TAG_COLORS, add_option, delete_option, rename_option, set_option_color,
-};
-use roostr_core::ui::TagPill;
-use roostr_core::{Glyph, RelationDef, RelationOption, Store, theme};
+use std::rc::Rc;
 
-use crate::widgets::{FieldSkin, empty_note, field, tip};
+use roostr_core::options::{add_option, delete_option, rename_option, set_option_color};
+use roostr_core::{RelationDef, RelationOption, State};
+use roostr_ui::tags::TAG_COLORS;
+use roostr_ui::{Button, Glyph, Input, InputState, ListItem, TagPill, Theme, glyph, radius, ty};
+use rune::{Color, Cursor, El, col, el, row, text};
 
-pub(crate) enum OptionEvent {
-    /// Toggle/select this option text.
-    Pick(String),
-}
+use crate::widgets::{FieldSkin, Lens, empty_note, field, tip};
 
-pub(crate) struct OptionPicker {
-    rel: RelationDef,
-    selected: Vec<String>,
-    multi: bool,
-    query: Entity<InputState>,
-    placeholder: &'static str,
+/// The "Delete option" red.
+const DELETE_RED: u32 = 0xe05555;
+
+/// A picker's own state (in the value editor's slot entry).
+#[derive(Default)]
+pub(crate) struct OptionPickerState {
+    query: InputState,
     /// Option id with the edit panel open.
     editing: String,
-    name_draft: Entity<InputState>,
-    _subs: Vec<Subscription>,
+    name_draft: InputState,
+    /// The relation the open edit panel renames in.
+    edit_rel: Option<RelationDef>,
+    /// The name box had focus at the last poll (its blur commits the rename).
+    name_had_focus: bool,
 }
 
-impl EventEmitter<OptionEvent> for OptionPicker {}
+/// A rename the name box's blur asks for.
+pub(crate) struct Rename {
+    rel: RelationDef,
+    id: String,
+    next: String,
+}
 
-impl OptionPicker {
-    pub(crate) fn new(
-        rel: RelationDef,
-        selected: Vec<String>,
-        multi: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Self {
-        let query = cx.new(|cx| InputState::new(window, cx));
-        let name_draft = cx.new(|cx| InputState::new(window, cx));
-        let subs = vec![
-            cx.subscribe_in(
-                &query,
-                window,
-                |this, _, ev: &InputEvent, window, cx| match ev {
-                    InputEvent::Change => cx.notify(),
-                    InputEvent::PressEnter { .. } => this.enter(window, cx),
-                    _ => {}
-                },
-            ),
-            cx.subscribe_in(&name_draft, window, |this, _, ev: &InputEvent, _, cx| {
-                if matches!(ev, InputEvent::PressEnter { .. } | InputEvent::Blur) {
-                    this.commit_rename(cx);
-                }
-            }),
-            cx.observe(&Store::global(cx), |_, _, cx| cx.notify()),
-        ];
-        Self {
-            rel,
-            selected,
-            multi,
-            query,
-            editing: String::new(),
-            name_draft,
-            placeholder: "",
-            _subs: subs,
-        }
+impl OptionPickerState {
+    /// Called every poll: the name box just lost focus → its rename (and the
+    /// panel closes), as GPUI's `InputEvent::Blur` did.
+    pub(crate) fn blurred_rename(&mut self) -> Option<Rename> {
+        let focused = self.name_draft.is_focused();
+        let blurred = self.name_had_focus && !focused;
+        self.name_had_focus = focused;
+        if blurred { self.take_rename() } else { None }
     }
 
-    /// New props from the value editor.
-    pub(crate) fn set_props(
-        &mut self,
-        rel: RelationDef,
-        selected: Vec<String>,
-        multi: bool,
-        cx: &mut Context<Self>,
-    ) {
-        if self.rel != rel || self.selected != selected || self.multi != multi {
-            self.rel = rel;
-            self.selected = selected;
-            self.multi = multi;
-            cx.notify();
-        }
-    }
-
-    /// The relation as the store has it now (options change under us).
-    fn rel(&self, cx: &App) -> RelationDef {
-        Store::global(cx)
-            .read(cx)
-            .relations
-            .iter()
-            .find(|r| r.id == self.rel.id)
-            .cloned()
-            .unwrap_or_else(|| self.rel.clone())
-    }
-
-    fn q(&self, cx: &App) -> String {
-        self.query.read(cx).value().trim().to_lowercase()
-    }
-
-    fn matches(&self, rel: &RelationDef, cx: &App) -> Vec<RelationOption> {
-        let q = self.q(cx);
-        rel.options
-            .iter()
-            .filter(|o| q.is_empty() || o.text.to_lowercase().contains(&q))
-            .cloned()
-            .collect()
-    }
-
-    fn can_create(&self, rel: &RelationDef, cx: &App) -> bool {
-        let q = self.q(cx);
-        !q.is_empty() && !rel.options.iter().any(|o| o.text.to_lowercase() == q)
-    }
-
-    fn enter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let rel = self.rel(cx);
-        if let Some(first) = self.matches(&rel, cx).into_iter().next() {
-            cx.emit(OptionEvent::Pick(first.text));
-        } else if self.can_create(&rel, cx) {
-            self.create(window, cx);
-        }
-    }
-
-    fn create(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let rel = self.rel(cx);
-        let text = self.query.read(cx).value().trim().to_string();
-        let task = add_option(&rel, &text, cx);
-        cx.spawn_in(window, async move |this, cx| match task.await {
-            Ok(opt) => {
-                let _ = this.update_in(cx, |this, window, cx| {
-                    this.query.update(cx, |s, cx| s.set_value("", window, cx));
-                    cx.emit(OptionEvent::Pick(opt.text));
-                });
-            }
-            Err(error) => log::error!("add option: {error:#}"),
-        })
-        .detach();
-    }
-
-    fn open_edit(&mut self, opt: &RelationOption, window: &mut Window, cx: &mut Context<Self>) {
-        self.editing = if self.editing == opt.id {
-            String::new()
-        } else {
-            opt.id.clone()
-        };
-        self.name_draft
-            .update(cx, |s, cx| s.set_value(opt.text.clone(), window, cx));
-        cx.notify();
-    }
-
-    fn commit_rename(&mut self, cx: &mut Context<Self>) {
+    fn take_rename(&mut self) -> Option<Rename> {
         if self.editing.is_empty() {
-            return;
+            return None;
         }
         let id = std::mem::take(&mut self.editing);
-        let rel = self.rel(cx);
-        let next = self.name_draft.read(cx).value().to_string();
-        rename_option(&rel, &id, &next, cx).detach_and_log_err(cx);
-        cx.notify();
+        let rel = self.edit_rel.take()?;
+        Some(Rename {
+            rel,
+            id,
+            next: self.name_draft.value().to_string(),
+        })
     }
 }
 
-impl Render for OptionPicker {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let rel = self.rel(cx);
-        let placeholder = if rel.options.is_empty() {
-            "Type to create an option…"
-        } else {
-            "Filter or create…"
-        };
-        if self.placeholder != placeholder {
-            self.placeholder = placeholder;
-            self.query
-                .update(cx, |s, cx| s.set_placeholder(placeholder, window, cx));
-        }
-        let matches = self.matches(&rel, cx);
-        let can_create = self.can_create(&rel, cx);
-        let raw = self.query.read(cx).value().trim().to_string();
-        let mut list = div().flex().flex_col().gap(px(2.)).min_w(px(220.));
-        list = list.child(div().mb(px(2.)).child(field(
-            &self.query,
-            FieldSkin::Filter,
-            window,
-            cx,
-        )));
-        if can_create {
-            list = list.child(
-                ListItem::new("create")
-                    .px(px(6.))
-                    .py(px(4.))
-                    .rounded(theme::radius::sm())
-                    .text_size(px(13.))
-                    .text_color(theme::accent())
-                    .cursor_pointer()
-                    .on_click(cx.listener(|this, _, window, cx| this.create(window, cx)))
-                    .child(format!("＋ Create option “{raw}”")),
-            );
-        }
-        for opt in &matches {
-            let on = self.selected.contains(&opt.text);
-            let text = opt.text.clone();
-            let o = opt.clone();
-            let group: SharedString = format!("opt-{}", opt.id).into();
-            list = list.child(
-                div()
-                    .id(SharedString::from(format!("wrap-{}", opt.id)))
-                    .group(group.clone())
-                    .flex()
-                    .items_center()
-                    .gap(px(2.))
-                    .child(
-                        ListItem::new(SharedString::from(format!("row-{}", opt.id)))
-                            .flex_1()
-                            .px(px(6.))
-                            .py(px(4.))
-                            .rounded(theme::radius::sm())
-                            .text_size(px(13.))
-                            .cursor_pointer()
-                            .on_click(cx.listener(move |_, _, _, cx| {
-                                cx.emit(OptionEvent::Pick(text.clone()))
-                            }))
-                            .child(
-                                h_flex()
-                                    .gap(px(8.))
-                                    .child(TagPill::new(opt.text.clone(), opt.color.clone()))
-                                    .when(on, |d| {
-                                        d.child(
-                                            Icon::new(Glyph::Check)
-                                                .ml_auto()
-                                                .size(px(13.))
-                                                .text_color(theme::muted()),
-                                        )
-                                    }),
-                            ),
-                    )
-                    .child(
-                        Button::new(SharedString::from(format!("more-{}", opt.id)))
-                            .ghost()
-                            .xsmall()
-                            .icon(IconName::Ellipsis)
-                            .text_color(theme::muted())
-                            .opacity(0.5)
-                            .group_hover(group, |s| s.opacity(1.))
-                            .tooltip("Edit option")
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.open_edit(&o, window, cx)
-                            })),
-                    ),
-            );
-            if self.editing == opt.id {
-                let mut palette = div().flex().flex_wrap().gap(px(4.));
-                for c in TAG_COLORS {
-                    let active = opt.color == c.name;
-                    let rel2 = rel.clone();
-                    let oid = opt.id.clone();
-                    palette = palette.child(
-                        div()
-                            .id(c.name)
-                            .size(px(18.))
-                            .rounded_full()
-                            .bg(c.hex())
-                            .border_2()
-                            .border_color(if active {
-                                theme::fg()
-                            } else {
-                                transparent_black()
-                            })
-                            .cursor_pointer()
-                            .tooltip(tip(c.name))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.editing.clear();
-                                set_option_color(&rel2, &oid, c.name, cx).detach_and_log_err(cx);
-                                cx.notify();
-                            })),
-                    );
-                }
-                let rel3 = rel.clone();
-                let oid = opt.id.clone();
-                list = list.child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap(px(6.))
-                        .pt(px(6.))
-                        .px(px(8.))
-                        .pb(px(8.))
-                        .border_1()
-                        .border_color(theme::border())
-                        .rounded(theme::radius::md())
-                        .mt(px(2.))
-                        .mb(px(4.))
-                        .child(field(&self.name_draft, FieldSkin::Filter, window, cx))
-                        .child(palette)
-                        .child(
-                            Button::new("delete")
-                                .ghost()
-                                .xsmall()
-                                .self_start()
-                                .px(px(2.))
-                                .text_color(rgb(0xe05555))
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.editing.clear();
-                                    delete_option(&rel3, &oid, cx).detach_and_log_err(cx);
-                                    cx.notify();
-                                }))
-                                .child(div().text_size(px(12.)).child("Delete option")),
-                        ),
-                );
+/// Runs a rename against the relation as the store has it now.
+pub(crate) fn rename(s: &mut State, r: Rename) {
+    let rel = current(s, &r.rel);
+    rename_option(&rel, &r.id, &r.next, s).detach_and_log_err(&s.rt);
+}
+
+/// The relation as the store has it now (options change under us).
+fn current(s: &State, rel: &RelationDef) -> RelationDef {
+    s.store
+        .relations
+        .iter()
+        .find(|r| r.id == rel.id)
+        .cloned()
+        .unwrap_or_else(|| rel.clone())
+}
+
+fn q(st: &OptionPickerState) -> String {
+    st.query.value().trim().to_lowercase()
+}
+
+fn matches(rel: &RelationDef, q: &str) -> Vec<RelationOption> {
+    rel.options
+        .iter()
+        .filter(|o| q.is_empty() || o.text.to_lowercase().contains(q))
+        .cloned()
+        .collect()
+}
+
+fn can_create(rel: &RelationDef, q: &str) -> bool {
+    !q.is_empty() && !rel.options.iter().any(|o| o.text.to_lowercase() == q)
+}
+
+/// What the picker hands back to its value editor.
+#[derive(Clone)]
+pub(crate) struct OptionHooks {
+    pub(crate) lens: Lens<OptionPickerState>,
+    /// The editor still exists (an async create lands only then).
+    pub(crate) alive: Rc<dyn Fn(&State) -> bool>,
+    /// Toggle / select this option text.
+    pub(crate) on_pick: Rc<dyn Fn(&mut State, String)>,
+}
+
+fn create(s: &mut State, rel: &RelationDef, hooks: &OptionHooks) {
+    let rel = current(s, rel);
+    let text = (hooks.lens)(s).query.value().trim().to_string();
+    let task = add_option(&rel, &text, s);
+    let hooks = hooks.clone();
+    s.rt.spawn(async move |cx| match task.await {
+        Ok(opt) => cx.update(move |s| {
+            if !(hooks.alive)(s) {
+                return;
             }
-        }
-        if matches.is_empty() && !can_create {
-            list = list.child(
-                empty_note("No options yet — type a name.")
-                    .px(px(6.))
-                    .py(px(2.))
-                    .text_size(px(12.)),
-            );
-        }
-        if !self.multi && !self.selected.is_empty() {
-            let first = self.selected[0].clone();
-            list = list.child(
-                ListItem::new("clear")
-                    .px(px(6.))
-                    .py(px(4.))
-                    .rounded(theme::radius::sm())
-                    .text_size(px(13.))
-                    .text_color(theme::muted())
-                    .cursor_pointer()
-                    .on_click(
-                        cx.listener(move |_, _, _, cx| cx.emit(OptionEvent::Pick(first.clone()))),
-                    )
-                    .child("Clear"),
-            );
-        }
-        list
+            (hooks.lens)(s).query.clear();
+            (hooks.on_pick)(s, opt.text);
+        }),
+        Err(error) => log::error!("add option: {error:#}"),
+    })
+    .detach();
+}
+
+fn enter(s: &mut State, rel: &RelationDef, hooks: &OptionHooks) {
+    let rel = current(s, rel);
+    let q = q((hooks.lens)(s));
+    if let Some(first) = matches(&rel, &q).into_iter().next() {
+        (hooks.on_pick)(s, first.text);
+    } else if can_create(&rel, &q) {
+        create(s, &rel, hooks);
     }
+}
+
+fn open_edit(s: &mut State, rel: &RelationDef, opt: &RelationOption, hooks: &OptionHooks) {
+    let st = (hooks.lens)(s);
+    if st.editing == opt.id {
+        st.editing.clear();
+        st.edit_rel = None;
+    } else {
+        st.editing = opt.id.clone();
+        st.edit_rel = Some(rel.clone());
+    }
+    st.name_draft.set_value(opt.text.clone());
+}
+
+/// The option list (min 220 wide): filter box, create row, options with
+/// their edit panels, the empty note and (status) Clear.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn option_picker(
+    s: &State,
+    t: &Theme,
+    rel: &RelationDef,
+    selected: &[String],
+    multi: bool,
+    st: &OptionPickerState,
+    hooks: OptionHooks,
+) -> El {
+    let rel = current(s, rel);
+    let placeholder = if rel.options.is_empty() {
+        "Type to create an option…"
+    } else {
+        "Filter or create…"
+    };
+    let q = q(st);
+    let found = matches(&rel, &q);
+    let creatable = can_create(&rel, &q);
+    let raw = st.query.value().trim().to_string();
+
+    let query = {
+        let lens = hooks.lens.clone();
+        let (r, h) = (rel.clone(), hooks.clone());
+        Input::new("option-query", &st.query)
+            .placeholder(placeholder)
+            .on_edit(move |s: &mut State| &mut lens(s).query)
+            .on_submit(move |s: &mut State, _| enter(s, &r, &h))
+    };
+    let mut list = col().gap(2.0).min_w(220.0).child(el().mb(2.0).child(field(
+        t,
+        query,
+        st.query.is_focused(),
+        FieldSkin::Filter,
+    )));
+    if creatable {
+        let (r, h) = (rel.clone(), hooks.clone());
+        list = list.child(
+            ListItem::new("create")
+                .px(6.0)
+                .py(4.0)
+                .radius(radius::SM)
+                .text_size(13.0)
+                .text_color(t.accent)
+                .pointer()
+                .label(format!("＋ Create option “{raw}”"))
+                .on_press(move |s: &mut State| create(s, &r, &h))
+                .build(t),
+        );
+    }
+    for opt in &found {
+        let on = selected.contains(&opt.text);
+        let mut line = row()
+            .grow(1.0)
+            .center_y()
+            .gap(8.0)
+            .child(TagPill::new(opt.text.clone(), opt.color.clone()).build(t));
+        if on {
+            line = line
+                .child(el().grow(1.0))
+                .child(glyph(Glyph::Check, 13.0).color(t.muted));
+        }
+        let pick = {
+            let (text, h) = (opt.text.clone(), hooks.clone());
+            move |s: &mut State| (h.on_pick)(s, text.clone())
+        };
+        let edit = {
+            let (r, o, h) = (rel.clone(), opt.clone(), hooks.clone());
+            move |s: &mut State| open_edit(s, &r, &o, &h)
+        };
+        list = list.child(
+            row()
+                .key(format!("wrap-{}", opt.id))
+                .hover_group()
+                .items_center()
+                .gap(2.0)
+                .child(
+                    ListItem::new(format!("row-{}", opt.id))
+                        .grow()
+                        .px(6.0)
+                        .py(4.0)
+                        .radius(radius::SM)
+                        .text_size(13.0)
+                        .pointer()
+                        .child(line)
+                        .on_press(pick)
+                        .build(t),
+                )
+                .child(
+                    Button::new(format!("more-{}", opt.id))
+                        .ghost()
+                        .xsmall()
+                        .icon(Glyph::Ellipsis)
+                        .text_color(t.muted)
+                        .tooltip("Edit option")
+                        .on_press(edit)
+                        .build(t)
+                        .group_opacity(0.5, 1.0),
+                ),
+        );
+        if st.editing == opt.id {
+            list = list.child(edit_panel(t, &rel, opt, st, &hooks));
+        }
+    }
+    if found.is_empty() && !creatable {
+        list = list.child(el().px(6.0).py(2.0).child(empty_note(
+            t,
+            "No options yet — type a name.",
+            12.0,
+        )));
+    }
+    if !multi && let Some(first) = selected.first() {
+        let (first, h) = (first.clone(), hooks.clone());
+        list = list.child(
+            ListItem::new("clear")
+                .px(6.0)
+                .py(4.0)
+                .radius(radius::SM)
+                .text_size(13.0)
+                .text_color(t.muted)
+                .pointer()
+                .label("Clear")
+                .on_press(move |s: &mut State| (h.on_pick)(s, first.clone()))
+                .build(t),
+        );
+    }
+    list
+}
+
+/// Name + the 10-swatch palette + Delete option, under the edited row.
+fn edit_panel(
+    t: &Theme,
+    rel: &RelationDef,
+    opt: &RelationOption,
+    st: &OptionPickerState,
+    hooks: &OptionHooks,
+) -> El {
+    let mut palette = row().flex_wrap().gap(4.0);
+    for c in TAG_COLORS {
+        let active = opt.color == c.name;
+        let (r, oid, lens) = (rel.clone(), opt.id.clone(), hooks.lens.clone());
+        let name = c.name;
+        palette = palette.child(tip(
+            el().key(name)
+                .size(18.0, 18.0)
+                .radius(9.0)
+                .fill(c.hex())
+                .border(2.0, if active { t.fg } else { Color::TRANSPARENT })
+                .cursor(Cursor::Pointer)
+                .on_press(move |s: &mut State| {
+                    let st = lens(s);
+                    st.editing.clear();
+                    st.edit_rel = None;
+                    let rel = current(s, &r);
+                    set_option_color(&rel, &oid, name, s).detach_and_log_err(&s.rt);
+                }),
+            name,
+        ));
+    }
+    let name = {
+        let lens = hooks.lens.clone();
+        let commit = hooks.lens.clone();
+        Input::new("option-name", &st.name_draft)
+            .on_edit(move |s: &mut State| &mut lens(s).name_draft)
+            .on_submit(move |s: &mut State, _| {
+                if let Some(r) = commit(s).take_rename() {
+                    rename(s, r);
+                }
+            })
+    };
+    let delete = {
+        let (r, oid, lens) = (rel.clone(), opt.id.clone(), hooks.lens.clone());
+        Button::new("delete")
+            .ghost()
+            .xsmall()
+            .px(2.0)
+            .text_color(roostr_ui::color::rgb(DELETE_RED))
+            .child(
+                text("Delete option")
+                    .font(ty::ui(12.0))
+                    .color(roostr_ui::color::rgb(DELETE_RED)),
+            )
+            .on_press(move |s: &mut State| {
+                let st = lens(s);
+                st.editing.clear();
+                st.edit_rel = None;
+                let rel = current(s, &r);
+                delete_option(&rel, &oid, s).detach_and_log_err(&s.rt);
+            })
+            .build(t)
+            .self_start()
+    };
+    col()
+        .key(format!("edit-{}", opt.id))
+        .gap(6.0)
+        .pt(6.0)
+        .px(8.0)
+        .pb(8.0)
+        .border(1.0, t.border)
+        .radius(radius::MD)
+        .mt(2.0)
+        .mb(4.0)
+        .child(field(
+            t,
+            name,
+            st.name_draft.is_focused(),
+            FieldSkin::Filter,
+        ))
+        .child(palette)
+        .child(delete)
 }

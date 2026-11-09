@@ -12,21 +12,21 @@ use std::rc::Rc;
 use anyhow::{Result, anyhow};
 use futures::StreamExt as _;
 use futures::channel::{mpsc, oneshot};
-use gpui_kit::{App, AppContext as _, Task};
-use roostr_core::JsonMap;
+use roostr_core::{JsonMap, State};
+use roostr_rt::Task;
 
-type Work = Box<dyn FnOnce(&mut App) -> Task<Result<JsonMap>>>;
+type Work = Box<dyn FnOnce(&mut State) -> Task<Result<JsonMap>>>;
 
 pub struct WriteQueue {
     tx: mpsc::UnboundedSender<(Work, oneshot::Sender<Result<JsonMap>>)>,
     issued: Rc<Cell<usize>>,
-    _runner: Task<()>,
+    runner: Option<Task<()>>,
 }
 
 impl WriteQueue {
-    pub fn new(cx: &mut App) -> Self {
+    pub fn new(s: &State) -> Self {
         let (tx, mut rx) = mpsc::unbounded::<(Work, oneshot::Sender<Result<JsonMap>>)>();
-        let runner = cx.spawn(async move |cx| {
+        let runner = s.rt.spawn(async move |cx| {
             while let Some((work, reply)) = rx.next().await {
                 let task = cx.update(work);
                 let _ = reply.send(task.await);
@@ -35,29 +35,29 @@ impl WriteQueue {
         Self {
             tx,
             issued: Rc::new(Cell::new(0)),
-            _runner: runner,
+            runner: Some(runner),
         }
     }
 
     /// Run `work` after every earlier write has settled.
     pub fn run(
         &self,
-        cx: &App,
-        work: impl FnOnce(&mut App) -> Task<Result<JsonMap>> + 'static,
+        s: &State,
+        work: impl FnOnce(&mut State) -> Task<Result<JsonMap>> + 'static,
     ) -> Task<Result<JsonMap>> {
         self.issued.set(self.issued.get() + 1);
         let (reply, done) = oneshot::channel();
         if self.tx.unbounded_send((Box::new(work), reply)).is_err() {
             return Task::ready(Err(anyhow!("the editor closed")));
         }
-        cx.background_spawn(async move {
+        s.rt.spawn(async move |_| {
             done.await
                 .unwrap_or_else(|_| Err(anyhow!("the editor closed")))
         })
     }
 
     /// Resolves once every write issued so far has settled.
-    pub fn idle(&self, cx: &App) -> Task<()> {
+    pub fn idle(&self, s: &State) -> Task<()> {
         let (reply, done) = oneshot::channel();
         if self
             .tx
@@ -66,7 +66,7 @@ impl WriteQueue {
         {
             return Task::ready(());
         }
-        cx.background_spawn(async move {
+        s.rt.spawn(async move |_| {
             let _ = done.await;
         })
     }
@@ -74,5 +74,13 @@ impl WriteQueue {
     /// How many writes have been issued: a read started before a later write may be stale.
     pub fn issued(&self) -> usize {
         self.issued.get()
+    }
+
+    /// The editor is going away: the writes already queued still land, in order.
+    pub fn finish(mut self) {
+        self.tx.close_channel();
+        if let Some(runner) = self.runner.take() {
+            runner.detach();
+        }
     }
 }

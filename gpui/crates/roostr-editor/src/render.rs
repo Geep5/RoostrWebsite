@@ -2,2634 +2,1657 @@
 //! `TableBlock.svelte` + `RelationBlock.svelte`): every block kind, the
 //! drag rail, drop hints, selection, and the floating menus.
 
-use std::collections::{HashMap, HashSet};
-use std::rc::Rc;
+use std::collections::{BTreeMap, HashMap, HashSet};
 
-use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
-use gpui_kit::component::collapsible::Collapsible;
-use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
-use gpui_kit::component::separator::Separator;
-use gpui_kit::component::tag::Tag;
-use gpui_kit::component::toolbar::Toolbar;
-use gpui_kit::component::{Disableable as _, Icon, Sizable as _, Size, ThemeStyled as _};
-use gpui_kit::prelude::FluentBuilder as _;
-use gpui_kit::*;
-use roostr_core::motion::{self, HoverMotion};
-use roostr_core::types::{Block, BlockContent, layout, mark, pos, style};
-use roostr_core::{Glyph, Route, Store, theme};
+use roostr_core::State;
+use roostr_core::nav::Route;
+use roostr_core::types::{Block, BlockContent, layout, pos, style};
+use roostr_ui::ty::Weights as _;
+use roostr_ui::{
+    Button, Glyph, PopupMenu, PopupMenuItem, Theme, glyph, motion, radius, shadow, ty,
+};
+use rune::{Align, Color, Cursor, Cx, El, Phase, RichStyle, col, el, row, text, text_input};
 
-use crate::editor::{Editor, RowGeom};
-use crate::file_block::FileBlock;
+use crate::editor::{Editor, RowGeom, edit_of, editor, with_editor};
+use crate::keys::{self, editor_key, row_key, text_key};
 use crate::look::{self, Look, Squiggle};
-use crate::text::RichText;
 use crate::toggles;
 
-/// The block being dragged by its handle.
-#[derive(Clone)]
-pub struct DraggedBlock {
-    pub id: String,
-    pub label: SharedString,
-}
+/// Where the platform checks spelling in text fields itself (AppKit, Windows): the fields
+/// do it, with the system's suggestions in their menu. Elsewhere the editor's own
+/// dictionary underlines misspellings (`spellcheck.rs`).
+pub(crate) const NATIVE_SPELLCHECK: bool = cfg!(any(target_os = "macos", target_os = "windows"));
 
-/// The floating copy that follows the pointer while a block is dragged.
-pub struct DragPreview {
-    label: SharedString,
-}
-
-impl Render for DragPreview {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .max_w(px(360.))
-            .px(px(10.))
-            .py(px(6.))
-            .rounded(px(6.))
-            .bg(theme::panel())
-            .shadow(roostr_core::ui::drag_shadow())
-            .opacity(0.95)
-            .text_size(px(15.))
-            .text_color(theme::fg())
-            .overflow_hidden()
-            .whitespace_nowrap()
-            .text_ellipsis()
-            .child(self.label.clone())
-    }
-}
+/// How far past the window (in window heights) a long page still builds its blocks.
+const BUILD_MARGIN: f32 = 1.0;
+/// The window position steps that re-run the view while the page scrolls.
+const SCROLL_STEP: f32 = 200.0;
 
 /// Data shared by every block while one frame renders.
-struct Frame {
-    by_id: HashMap<String, Block>,
+struct Frame<'a> {
+    t: &'a Theme,
+    e: &'a Editor,
+    by_id: HashMap<&'a str, &'a Block>,
     roots: Vec<String>,
     all_roots: Vec<String>,
     space: String,
+    narrow: bool,
+}
+
+impl Frame<'_> {
+    /// `.gutter`: the 48pt drag rail; at ≤720pt it collapses to the shared 16pt gutter.
+    fn gutter_w(&self) -> f32 {
+        if self.narrow { 16. } else { crate::GUTTER_W }
+    }
+
+    /// `.handle`'s `right`: 6pt, 2pt in the 16pt gutter.
+    fn handle_right(&self) -> f32 {
+        if self.narrow { 2. } else { 6. }
+    }
+
+    fn oid(&self) -> String {
+        self.e.object_id.clone()
+    }
+}
+
+/// The body editor of `object_id` (opened with [`crate::open`]): its blocks, and its
+/// floating parts pushed into `layer`.
+pub fn view(s: &State, cx: &mut Cx<State>, t: &Theme, layer: &mut Vec<El>, object_id: &str) -> El {
+    let Some(e) = editor(s, object_id) else {
+        return el();
+    };
+    let narrow = cx
+        .layout_with("kit-root", |r| roostr_ui::layout::is_mobile(r[2]))
+        .unwrap_or(false);
+    let f = Frame {
+        t,
+        e,
+        by_id: e.blocks.iter().map(|b| (b.id.as_str(), b)).collect(),
+        roots: e.root_ids(),
+        all_roots: crate::doc::root_order(&e.blocks),
+        space: roostr_core::relations::object_space_id(&s.store, &e.object_fields()),
+        narrow,
+    };
+    let oid = f.oid();
+    let key = editor_key(&oid);
+    let unscrolled_top = cx.layout_with(&key, |r| r[1]).unwrap_or(0.);
+    let window_h = cx.layout_with("kit-root", |r| r[3]).unwrap_or(900.);
+    let blocks = windowed_blocks(&f, s, cx, layer, &key);
+    let empty = f.roots.is_empty();
+    let loaded = e.object.is_some();
+
+    let mut body = col()
+        .key(key.clone())
+        .w_full()
+        .min_h(240.)
+        .pb(120.)
+        .cursor(if e.read_only {
+            Cursor::Default
+        } else {
+            Cursor::Text
+        })
+        .children(blocks);
+    if !e.read_only {
+        // With blocks selected the editor itself takes the keyboard.
+        let (k, d, u, r, l, drop, hover, mv) = (
+            oid.clone(),
+            oid.clone(),
+            oid.clone(),
+            oid.clone(),
+            oid.clone(),
+            oid.clone(),
+            oid.clone(),
+            oid.clone(),
+        );
+        body = body
+            .focusable(true)
+            .focus_ring(0., 0., Color::TRANSPARENT)
+            .on_key(move |s: &mut State, ev, tx| keys::editor_keys(s, &k, ev, tx))
+            // The page background: a rubber band, or a click that puts the caret on a line.
+            .on_drag(move |s: &mut State, drag, tx| {
+                let [x, y] = drag.window_point();
+                with_editor(s, &d, |e, s| match drag.phase {
+                    Phase::Down => e.arm_drag(None, (x, y), tx.mods(), s),
+                    Phase::Move => {
+                        e.sel_update((x, y), s);
+                        if !e.selected.is_empty() {
+                            tx.focus(editor_key(&e.object_id), false);
+                        }
+                    }
+                    Phase::Up => e.drag_release((x, y), s),
+                });
+            })
+            .on_layout_tx(move |s: &mut State, rect, tx| {
+                with_editor(s, &l, |e, _| {
+                    e.bounds = rect;
+                    e.narrow = narrow;
+                    e.unscrolled_top = unscrolled_top;
+                    e.window_h = window_h;
+                });
+                tx.live_only();
+            })
+            .on_drop_hover(move |s: &mut State, over, _| {
+                with_editor(s, &hover, |e, _| {
+                    e.file_drag = over;
+                    if over {
+                        e.build_drag_rects();
+                    } else {
+                        e.drag_rects.clear();
+                        e.drop_hint = None;
+                        e.last_valid_drop = None;
+                    }
+                });
+            })
+            .on_drop_move(move |s: &mut State, p, _| {
+                with_editor(s, &mv, |e, _| {
+                    let hit = e.resolve_drop((p.window_x, p.window_y));
+                    if let Some(h) = &hit {
+                        e.last_valid_drop = Some(h.clone());
+                    }
+                    e.drop_hint = hit;
+                });
+            })
+            .on_drop_files(move |s: &mut State, files, _| {
+                let files = files.to_vec();
+                with_editor(s, &drop, |e, s| e.drop_external(files, s));
+            });
+        let _ = (u, r);
+    }
+    if empty && loaded && !e.read_only {
+        let o = oid.clone();
+        body = body.child(
+            el().key(format!("ed-{oid}-empty-hint"))
+                .ml(f.gutter_w())
+                .py(8.)
+                .cursor(Cursor::Text)
+                .child(
+                    text("Click to start writing…")
+                        .font(ty::ui(15.))
+                        .color(t.muted),
+                )
+                .on_press(move |s: &mut State| {
+                    with_editor(s, &o, |e, s| e.append_block(s));
+                }),
+        );
+    }
+    if !loaded && let Some(err) = &e.load_error {
+        body = body.child(
+            el().ml(f.gutter_w())
+                .child(text(err.clone()).font(ty::ui(13.)).color(t.muted)),
+        );
+    }
+    overlays(&f, s, cx, layer);
+    body
+}
+
+/// The root blocks to build this frame, in order, with spacers sized by the
+/// blocks' last heights standing in for the rest: a long page builds only the
+/// blocks in, or a window's height around, the window. Blocks in use (typing,
+/// selected, open menus) are always built, and every block is while
+/// something is dragged (drop targets come from what's laid out).
+fn windowed_blocks(
+    f: &Frame,
+    s: &State,
+    cx: &mut Cx<State>,
+    layer: &mut Vec<El>,
+    key: &str,
+) -> Vec<El> {
+    let e = f.e;
+    let dragging = e.dragging.is_some() || e.file_drag || e.drag_sel.is_some();
+    // The root each id lives under (blocks nest under toggles, lists, columns).
+    let mut root_of: HashMap<&str, &str> = HashMap::new();
+    for root in &f.roots {
+        let mut stack = vec![root.as_str()];
+        while let Some(id) = stack.pop() {
+            root_of.insert(id, root.as_str());
+            if let Some(b) = f.by_id.get(id) {
+                stack.extend(b.children_ids.iter().map(String::as_str));
+            }
+        }
+    }
+    let mut pinned: HashSet<&str> = HashSet::new();
+    for id in e
+        .active
+        .iter()
+        .chain(e.selected.iter())
+        .chain(std::iter::once(&e.last_focused))
+        .chain(e.focus_request.as_ref().map(|(id, _)| id))
+        .chain(e.slash.as_ref().map(|sl| &sl.block))
+        .chain(e.block_menu.as_ref().map(|m| &m.block))
+        .chain(e.property_suggest.as_ref().map(|p| &p.block))
+        .chain(e.toolbar.as_ref().map(|tb| &tb.block))
+        .chain(
+            e.texts
+                .iter()
+                .filter(|(_, t)| t.focused())
+                .map(|(id, _)| id),
+        )
+    {
+        if let Some(root) = root_of.get(id.as_str()) {
+            pinned.insert(root);
+        }
+    }
+    // The window, in the editor's own coordinates.
+    let view_h = cx.layout_with("kit-root", |r| r[3]).unwrap_or(900.);
+    let top = cx
+        .window_layout_with(key, |r| (r[1] / SCROLL_STEP).floor() * SCROLL_STEP)
+        .unwrap_or(0.);
+    let (lo, hi) = (
+        -top - BUILD_MARGIN * view_h,
+        -top + (1. + BUILD_MARGIN) * view_h,
+    );
+    let typical = if e.block_heights.is_empty() {
+        32.
+    } else {
+        e.block_heights.values().sum::<f32>() / e.block_heights.len() as f32
+    };
+    let mut blocks = Vec::new();
+    let mut gap = 0.;
+    let mut y = 0.;
+    for id in &f.roots {
+        let h = e.block_heights.get(id).copied().unwrap_or(typical);
+        let near = y + h >= lo && y <= hi;
+        y += h;
+        if !(dragging || near || pinned.contains(id.as_str())) {
+            gap += h;
+            continue;
+        }
+        if gap > 0. {
+            blocks.push(el().h(gap));
+            gap = 0.;
+        }
+        if let Some(block) = render_block(id, f, s, cx, layer) {
+            let (oid, rid) = (f.oid(), id.clone());
+            blocks.push(col().w_full().child(block).on_layout_tx(
+                move |s: &mut State, rect, tx| {
+                    with_editor(s, &oid, |e, _| {
+                        e.block_heights.insert(rid.clone(), rect[3]);
+                    });
+                    tx.live_only();
+                },
+            ));
+        }
+    }
+    if gap > 0. {
+        blocks.push(el().h(gap));
+    }
+    blocks
+}
+
+/// Record a row's laid-out rect in window points (drag targeting, rubber band).
+fn geom(el: El, f: &Frame, id: &str, gutter: bool, bot: bool) -> El {
+    let (oid, id) = (f.oid(), id.to_string());
+    el.on_layout_tx(move |s: &mut State, rect, tx| {
+        with_editor(s, &oid, |e, _| {
+            let g = RowGeom {
+                bounds: rect,
+                gutter,
+            };
+            if bot {
+                e.bot_strips.insert(id.clone(), g);
+            } else {
+                e.rows.insert(id.clone(), g);
+            }
+        });
+        tx.live_only();
+    })
+}
+
+/// What a dragged block shows: its text, else its custom content type.
+pub(crate) fn drag_label(c: &BlockContent) -> String {
+    c.text.as_ref().map(|t| t.text.clone()).unwrap_or_else(|| {
+        c.custom
+            .as_ref()
+            .map(|c| c.content_type.clone())
+            .unwrap_or_default()
+    })
+}
+
+/// The 48pt rail with the drag handle (Anytype .icon.commonDnd): it shows
+/// while the row is hovered; a click opens the block menu, a drag moves the block.
+fn gutter(f: &Frame, id: &str) -> El {
+    let t = f.t;
+    let rail = el().w(f.gutter_w()).self_stretch();
+    if f.e.read_only {
+        return rail;
+    }
+    let dots = col()
+        .gap(3.)
+        .children((0..3).map(|_| el().size(2., 2.).radius(1.).fill(t.muted)));
+    let (open_oid, open_id) = (f.oid(), id.to_string());
+    let (drag_oid, drag_id) = (f.oid(), id.to_string());
+    let edge = f.gutter_w() - f.handle_right();
+    let handle = col()
+        .key(format!("handle-{id}"))
+        .pin(None, Some(0.), Some(f.handle_right()), Some(0.))
+        .min_h(24.)
+        .w(12.)
+        .border(1., t.border)
+        .radius(6.)
+        .center()
+        .cursor(Cursor::Grab)
+        .hover(t.hover)
+        .group_opacity(0., 1.)
+        .hover_motion(motion::HOVER_REVEAL.anim(), motion::HOVER_REVEAL.anim())
+        .help("Click for actions; drag to move")
+        .child(dots)
+        .on_press(move |s: &mut State| {
+            with_editor(s, &open_oid, |e, s| {
+                if std::mem::take(&mut e.handle_dragged) {
+                    return;
+                }
+                let at = e
+                    .rows
+                    .get(&open_id)
+                    .map(|g| (g.bounds[0] + edge + 8., g.bounds[1]))
+                    .unwrap_or_default();
+                e.open_block_menu(&open_id, at, s);
+            });
+        })
+        .on_drag(move |s: &mut State, drag, tx| {
+            let [x, y] = drag.window_point();
+            with_editor(s, &drag_oid, |e, s| match drag.phase {
+                Phase::Down => e.handle_dragged = false,
+                Phase::Move => {
+                    if e.dragging.is_none() && drag.dx.abs() + drag.dy.abs() > 4. {
+                        e.handle_dragged = true;
+                        e.begin_drag(&drag_id);
+                    }
+                    if e.dragging.is_some() {
+                        e.drag_move_to((x, y));
+                        edge_scroll(e, s, tx);
+                    }
+                }
+                Phase::Up => {
+                    if e.dragging.is_some() {
+                        // The pointer can be between targets on the frame the drop lands.
+                        let hint = e.drop_hint.clone().or_else(|| {
+                            e.last_valid_drop
+                                .clone()
+                                .filter(|h| !e.drop_forbidden(&h.id))
+                        });
+                        let hint = if drag.cancelled() { None } else { hint };
+                        e.finish_drag(hint, s);
+                    }
+                }
+            });
+        });
+    rail.child(handle)
+}
+
+/// While a block is dragged near the window's top or bottom edge, the page scrolls (and keeps
+/// scrolling while the pointer rests there).
+fn edge_scroll(e: &mut Editor, _s: &mut State, tx: &mut rune::Tx) {
+    let (_, y) = e.drag_point;
+    let h = e.window_h;
+    let dy = Editor::edge_scroll(y, h);
+    if dy != 0. {
+        let offset = e.unscrolled_top - e.bounds[1];
+        tx.scroll_to_y(editor_key(&e.object_id), (offset + dy).max(0.));
+        tx.drag_repeat_after(std::time::Duration::from_millis(50));
+    }
+}
+
+/// Drop-hint lines and the selection overlay over a row.
+fn row_decor(f: &Frame, id: &str) -> Vec<El> {
+    let t = f.t;
+    let mut out = Vec::new();
+    let zone = match &f.e.drop_hint {
+        Some(h) if h.id == id && !h.bot => h.position,
+        _ => 0,
+    };
+    let line = |e: El| e.fill(t.accent);
+    match zone {
+        pos::TOP => out.push(line(el().pin(Some(0.), Some(-2.), Some(0.), None).h(2.))),
+        pos::BOTTOM => out.push(line(el().pin(Some(0.), None, Some(0.), Some(-2.)).h(2.))),
+        pos::LEFT => out.push(line(el().pin(Some(-3.), Some(0.), None, Some(0.)).w(3.))),
+        pos::RIGHT => out.push(line(el().pin(None, Some(0.), Some(-3.), Some(0.)).w(3.))),
+        pos::INNER_FIRST => out.push(
+            el().pin(Some(0.), Some(0.), Some(0.), Some(0.))
+                .radius(4.)
+                .fill(t.block_selection),
+        ),
+        _ => {}
+    }
+    if f.e.selected.iter().any(|x| x == id) {
+        out.push(
+            el().key(format!("selected-{id}"))
+                .pin(Some(0.), Some(0.), Some(0.), Some(0.))
+                .radius(2.)
+                .fill(t.block_selection)
+                .inert(),
+        );
+    }
+    out
+}
+
+/// The `.block` row wrapper shared by every kind: a press beside the text
+/// selects (with modifiers) or arms a rubber band; right-click opens the block menu.
+fn block_row(f: &Frame, id: &str, gutter: bool) -> El {
+    let r = row()
+        .key(row_key(id))
+        .w_full()
+        .items_start()
+        .py(1.)
+        .radius(4.)
+        .hover_group();
+    let r = if f.narrow { r.pr(16.) } else { r };
+    let r = geom(r, f, id, gutter, false);
+    if f.e.read_only {
+        return r;
+    }
+    let (doid, did) = (f.oid(), id.to_string());
+    let (moid, mid) = (f.oid(), id.to_string());
+    r.on_drag(move |s: &mut State, drag, tx| {
+        let [x, y] = drag.window_point();
+        with_editor(s, &doid, |e, s| match drag.phase {
+            Phase::Down => e.arm_drag(Some(&did), (x, y), tx.mods(), s),
+            Phase::Move => e.sel_update((x, y), s),
+            Phase::Up => {
+                if let Some(drag) = e.drag_sel.take() {
+                    if !drag.moved && drag.mode == crate::editor::SelMode::Replace {
+                        e.selected.clear();
+                    }
+                }
+                e.sel_rect = None;
+            }
+        });
+        if with_editor(s, &doid, |e, _| !e.selected.is_empty()).unwrap_or(false) {
+            tx.focus(editor_key(&doid), false);
+        }
+    })
+    .on_secondary_press(move |s: &mut State, p, tx| {
+        with_editor(s, &moid, |e, s| e.row_context_menu(&mid, (p.x, p.y), s, tx));
+    })
 }
 
 impl Editor {
-    fn row_id(prefix: &str, id: &str) -> ElementId {
-        ElementId::Name(format!("{prefix}-{id}").into())
-    }
-
-    /// Record a row's bounds every frame (drag targeting, rubber band).
-    fn geom(&self, id: &str, gutter: bool, bot: bool) -> impl IntoElement {
-        let rows = if bot {
-            self.bot_strips.clone()
-        } else {
-            self.rows.clone()
-        };
-        let id = id.to_string();
-        canvas(
-            move |bounds, _, _| {
-                rows.borrow_mut()
-                    .insert(id.clone(), RowGeom { bounds, gutter });
-            },
-            |_, _, _, _| {},
-        )
-        .absolute()
-        .inset_0()
-    }
-
-    /// `.gutter`: the 48px drag rail; at ≤720px it collapses to the shared
-    /// 16px gutter (BlockNode.svelte `@media (max-width: 720px)`).
-    pub(crate) fn gutter_w(&self) -> Pixels {
-        if self.narrow { px(16.) } else { px(crate::GUTTER_W) }
-    }
-
-    /// `.handle`'s `right`: 6px, 2px in the 16px gutter (6px there pushed
-    /// the 12px handle to x = -2, clipped at the screen edge).
-    fn handle_right(&self) -> Pixels {
-        if self.narrow { px(2.) } else { px(6.) }
-    }
-
-    /// The handle's hover reveal (`.block:hover > .gutter .handle`,
-    /// `transition: opacity 0.1s`) and the state the row's on_hover feeds:
-    /// none on a touch screen (`@media (hover: hover)`) or without a handle.
-    fn handle_reveal(
-        &self,
-        id: &str,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> (f32, Option<Entity<HoverMotion>>) {
-        if self.read_only || roostr_core::layout::is_touch() {
-            return (0., None);
-        }
-        let (t, state) = motion::hover(
-            Self::row_id("handle-reveal", id),
-            motion::HOVER_REVEAL,
-            window,
-            cx,
-        );
-        (t, Some(state))
-    }
-
-    /// The 48px rail with the drag handle (Anytype .icon.commonDnd), at
-    /// `reveal` ([`Self::handle_reveal`]).
-    fn gutter(
-        &self,
-        id: &str,
-        label: SharedString,
-        reveal: f32,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let editor = cx.entity();
-        let open_id = id.to_string();
-        let drag_id = id.to_string();
-        // `@media (hover: none)`: a touch screen can't hover, so the handle
-        // shows only on the ACTIVE block (its text focused), at 0.7.
-        let touch = roostr_core::layout::is_touch();
-        let active = touch && self.has_focus && self.active.as_deref() == Some(id);
-        let dots = div()
-            .flex()
-            .flex_col()
-            .gap(px(3.))
-            .children((0..3).map(|_| {
-                div()
-                    .size(px(2.))
-                    .rounded_full()
-                    .bg(gpui_kit::transparent_black())
-                    .bg(theme::muted())
-            }));
-        div()
-            .w(self.gutter_w())
-            .flex_none()
-            .relative()
-            .self_stretch()
-            .when(!self.read_only, |d| {
-                d.child(
-                    div()
-                        .id(Self::row_id("handle", id))
-                        .absolute()
-                        .right(self.handle_right())
-                        .top_0()
-                        .h_full()
-                        .min_h(px(24.))
-                        .w(px(12.))
-                        .border_1()
-                        .border_color(theme::border())
-                        .rounded(px(6.))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .text_color(theme::muted())
-                        .cursor_grab()
-                        .opacity(if active { 0.7 } else { reveal })
-                        .hover(|s| {
-                            s.bg(theme::hover())
-                                .border_color(theme::hover())
-                                .text_color(theme::fg())
-                        })
-                        // A `title`: a touch screen never shows it (a long
-                        // press there lifts the row).
-                        .when(!touch, |d| {
-                            d.tooltip(roostr_core::ui::tooltip("Click for actions; drag to move"))
-                        })
-                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            let edge = this.gutter_w() - this.handle_right();
-                            let at =
-                                this.rows.borrow().get(&open_id).map(|g| {
-                                    point(g.bounds.left() + edge + px(8.), g.bounds.top())
-                                });
-                            this.open_block_menu(&open_id, at.unwrap_or_default(), window, cx);
-                        }))
-                        .on_drag(
-                            DraggedBlock { id: drag_id, label },
-                            move |drag, _, _, cx| {
-                                let id = drag.id.clone();
-                                editor.update(cx, |e, cx| {
-                                    e.begin_drag(&id);
-                                    cx.notify();
-                                });
-                                cx.new(|_| DragPreview {
-                                    label: drag.label.clone(),
-                                })
-                            },
-                        )
-                        .child(dots),
-                )
-            })
-            .into_any_element()
-    }
-
-    /// Drop-hint lines and the selection overlay over a row.
-    fn row_decor(&self, id: &str) -> Vec<AnyElement> {
-        let mut out = Vec::new();
-        let zone = match &self.drop_hint {
-            Some(h) if h.id == id && !h.bot => h.position,
-            _ => 0,
-        };
-        let line = |d: Div| d.absolute().bg(theme::accent()).into_any_element();
-        match zone {
-            pos::TOP => out.push(line(div().left_0().right_0().top(px(-2.)).h(px(2.)))),
-            pos::BOTTOM => out.push(line(div().left_0().right_0().bottom(px(-2.)).h(px(2.)))),
-            pos::LEFT => out.push(line(div().top_0().bottom_0().left(px(-3.)).w(px(3.)))),
-            pos::RIGHT => out.push(line(div().top_0().bottom_0().right(px(-3.)).w(px(3.)))),
-            pos::INNER_FIRST => out.push(
-                div()
-                    .absolute()
-                    .inset_0()
-                    .rounded(px(4.))
-                    .bg(theme::block_selection())
-                    .into_any_element(),
-            ),
-            _ => {}
-        }
-        if self.selected.iter().any(|s| s == id) {
-            out.push(
-                div()
-                    .absolute()
-                    .inset_0()
-                    .rounded(px(2.))
-                    .bg(theme::block_selection())
-                    .into_any_element(),
-            );
-        }
-        out
-    }
-
-    /// The `.block` row wrapper shared by every kind; its hover feeds `hovers`.
-    fn row(
-        &self,
-        id: &str,
-        gutter: bool,
-        hovers: Vec<Entity<HoverMotion>>,
-        cx: &mut Context<Self>,
-    ) -> Stateful<Div> {
-        let down_id = id.to_string();
-        let menu_id = id.to_string();
-        let selector = format!("block-{id}");
-        div()
-            .id(Self::row_id("row", id))
-            .debug_selector(move || selector)
-            .when(!hovers.is_empty(), |d| {
-                d.on_hover(move |hovered: &bool, _, cx| {
-                    for state in &hovers {
-                        HoverMotion::set(state, *hovered, cx);
-                    }
-                })
-            })
-            .relative()
-            .flex()
-            .items_start()
-            .py(px(1.))
-            // `@media (max-width: 720px)`: `.block { padding-right: 16px }`.
-            .when(self.narrow, |d| d.pr(px(16.)))
-            .rounded(px(4.))
-            .child(self.geom(id, gutter, false))
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, ev: &MouseDownEvent, window, cx| {
-                    cx.stop_propagation();
-                    this.row_mouse_down(&down_id, ev, window, cx);
-                }),
-            )
-            .on_mouse_down(
-                MouseButton::Right,
-                cx.listener(move |this, ev: &MouseDownEvent, window, cx| {
-                    cx.stop_propagation();
-                    this.row_context_menu(&menu_id, ev.position, window, cx);
-                }),
-            )
-    }
-
-    /// Mouse down on a row outside its text: modifiers select, else a rubber band arms.
-    pub(crate) fn row_mouse_down(
-        &mut self,
-        id: &str,
-        ev: &MouseDownEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.read_only {
-            return;
-        }
-        self.spell_menu = None;
-        self.paste_menu = None;
-        window.focus(&self.focus_handle, cx);
-        let m = ev.modifiers;
-        if m.shift || m.platform || m.control {
-            if m.shift {
-                self.range_select(id);
-            } else {
-                self.toggle_select(id);
-            }
-            cx.notify();
-            return;
-        }
-        if let Some(a) = self.active.take() {
-            self.flush_save(&a, cx);
-            self.sync_texts();
-        }
-        self.toolbar = None;
-        self.arm_drag(ev, false, false);
-        cx.notify();
-    }
-
     /// Right-click: a live multi-selection owns it; the focused text keeps the
-    /// platform's menu (none here); anything else opens the block action menu.
-    pub(crate) fn row_context_menu(
-        &mut self,
-        id: &str,
-        at: Point<Pixels>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    /// field's own menu; anything else opens the block action menu.
+    fn row_context_menu(&mut self, id: &str, at: (f32, f32), s: &mut State, tx: &mut rune::Tx) {
         if self.read_only {
             return;
         }
-        if self.texts.contains_key(id) && self.open_spell_menu(id, at, cx) {
+        if !NATIVE_SPELLCHECK && self.texts.contains_key(id) && self.open_spell_menu(id, s) {
             return;
         }
         if self.selected.len() > 1 {
-            let hit = if self.selected.iter().any(|s| s == id) {
+            let hit = if self.selected.iter().any(|x| x == id) {
                 id.to_string()
             } else {
                 self.selected[0].clone()
             };
-            self.open_block_menu(&hit, at, window, cx);
+            self.open_block_menu(&hit, at, s);
             return;
         }
-        if self.has_focus && self.active.as_deref() == Some(id) {
+        if self.editing() == Some(id) {
             return;
         }
-        self.open_block_menu(id, at, window, cx);
+        let _ = tx;
+        self.open_block_menu(id, at, s);
     }
+}
 
-    fn input_hook(&self, cx: &mut Context<Self>) -> crate::text::InputHook {
-        let editor = cx.entity();
-        let focus = self.focus_handle.clone();
-        Rc::new(move |bounds, window, cx| {
-            window.handle_input(&focus, ElementInputHandler::new(bounds, editor.clone()), cx)
-        })
-    }
-
-    /// One block's editable text.
-    fn rich_text(
-        &self,
-        id: &str,
-        look: &Look,
-        align: TextAlign,
-        placeholder: Option<&'static str>,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let Some(t) = self.texts.get(id) else {
-            return div().into_any_element();
-        };
-        let mut squiggles: Vec<Squiggle> = Vec::new();
-        if let Some(ranges) = self.misspelled.get(id) {
-            for r in ranges.iter().filter(|r| r.end <= t.text.len()) {
-                squiggles.push(Squiggle {
-                    range: r.clone(),
-                    color: rgb(0xe2400c).into(),
-                    thickness: px(1.),
-                    wavy: true,
-                });
-            }
-        }
-        if let Some(problems) = self.lint.get(id) {
-            for p in problems.iter().filter(|p| p.to <= t.text.len()) {
-                let color = if p.severity == crate::codelint::Severity::Error {
-                    theme::red()
-                } else {
-                    theme::lint_warning()
-                };
-                squiggles.push(Squiggle {
-                    range: p.from..p.to,
-                    color,
-                    thickness: px(1.5),
-                    wavy: true,
-                });
-            }
-        }
-        if let Some(m) = &t.marked {
+/// One block's text: an editable Rune field, or (read-only) selectable text.
+fn rich_text(
+    f: &Frame,
+    id: &str,
+    look: &Look,
+    align: Align,
+    placeholder: Option<&'static str>,
+) -> El {
+    let (t, e) = (f.t, f.e);
+    let Some(live) = e.texts.get(id) else {
+        return el();
+    };
+    let mut squiggles: Vec<Squiggle> = Vec::new();
+    if let Some(ranges) = e.misspelled.get(id) {
+        for r in ranges.iter().filter(|r| r.end <= live.text().len()) {
             squiggles.push(Squiggle {
-                range: m.clone(),
-                color: look.color,
-                thickness: px(1.),
-                wavy: false,
+                range: r.clone(),
+                color: roostr_ui::color::rgb(0xe2400c),
             });
         }
-        let runs = look::runs(&t.text, &t.spans, look, &squiggles);
-        let active = self.active.as_deref() == Some(id) && !self.read_only;
-        let focused = active && self.has_focus;
-        let placeholder = placeholder
-            .filter(|_| focused && t.text.is_empty())
-            .map(|p| {
-                (
-                    SharedString::from(p),
-                    look.plain_run(p.len(), theme::muted().opacity(0.6)),
-                )
+    }
+    if let Some(problems) = e.lint.get(id) {
+        for p in problems.iter().filter(|p| p.to <= live.text().len()) {
+            let color = if p.severity == crate::codelint::Severity::Error {
+                t.red
+            } else {
+                t.lint_warning
+            };
+            squiggles.push(Squiggle {
+                range: p.from..p.to,
+                color,
             });
-        let caret =
-            (focused && self.caret_on && t.sel.is_empty()).then(|| (t.cursor(), theme::fg()));
-        let selection = (active && !t.sel.is_empty()).then(|| (t.sel.clone(), theme::mark()));
-        let el = RichText {
-            key: id.to_string(),
-            text: t.text.clone().into(),
-            runs,
-            font_size: look.size,
-            line_height: look.line_height,
-            align,
-            placeholder,
-            selection,
-            caret,
-            input: active.then(|| (self.focus_handle.clone(), self.input_hook(cx))),
-            layouts: self.layouts.clone(),
-        };
-        let down = id.to_string();
-        let right = id.to_string();
-        let moved = id.to_string();
-        let on_link = self.link_hover.as_deref() == Some(id);
-        div()
-            .id(Self::row_id("text", id))
+        }
+    }
+    let paints = look::paints(t, live.text(), &live.spans, look, &squiggles);
+    let rich = RichStyle {
+        code_fg: None,
+        code_bg: t.panel,
+        code_block_bg: t.panel,
+        link: t.accent,
+        quote_bar: t.accent,
+        marker: Some(t.muted),
+    };
+    if e.read_only {
+        let content = live.text().to_string();
+        let mut out = text(content)
+            .key(text_key(id))
+            .font(look.style)
+            .color(look.color)
             .w_full()
-            .when(!self.read_only, |d| d.cursor(CursorStyle::IBeam))
-            // A link or mention under the pointer: a click opens it.
-            .when(on_link, |d| {
-                d.cursor(CursorStyle::PointingHand)
-                    .debug_selector(|| "editor-link-hover".into())
-            })
-            .on_mouse_move(cx.listener(move |this, ev: &MouseMoveEvent, _, cx| {
-                let over = ev.pressed_button.is_none() && this.link_under(&moved, ev.position);
-                if over != (this.link_hover.as_deref() == Some(moved.as_str())) {
-                    this.link_hover = over.then(|| moved.clone());
-                    cx.notify();
+            .align(align)
+            .spans(paints)
+            .rich_style(rich)
+            .selectable(true)
+            .selection_color(t.mark)
+            .on_link(|s: &mut State, url: &str, tx| keys::open_link(s, url, tx));
+        for m in live.edit.marks() {
+            match &m.mark {
+                rune::Mark::Strike => out = out.strike(m.start, m.end, None),
+                rune::Mark::Link(url) => {
+                    out = out.link(rune::Link::new(m.start..m.end, url.clone()));
                 }
-            }))
-            .on_hover(cx.listener({
-                let id = id.to_string();
-                move |this, hovered: &bool, _, cx| {
-                    if !*hovered && this.link_hover.as_deref() == Some(id.as_str()) {
-                        this.link_hover = None;
-                        cx.notify();
-                    }
-                }
-            }))
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, ev: &MouseDownEvent, window, cx| {
-                    cx.stop_propagation();
-                    this.text_mouse_down(&down, ev, window, cx);
-                }),
-            )
-            .on_mouse_down(
-                MouseButton::Right,
-                cx.listener(move |this, ev: &MouseDownEvent, window, cx| {
-                    cx.stop_propagation();
-                    this.row_context_menu(&right, ev.position, window, cx);
-                }),
-            )
-            .child(el)
-            .into_any_element()
+                _ => {}
+            }
+        }
+        return out;
     }
+    let focused = live.focused();
+    let placeholder = placeholder
+        .filter(|_| focused && live.text().is_empty())
+        .unwrap_or("");
+    let (eo, ei) = (f.oid(), id.to_string());
+    let (ko, ki) = (f.oid(), id.to_string());
+    let (co, ci) = (f.oid(), id.to_string());
+    let (po, pi) = (f.oid(), id.to_string());
+    let code = e.style_of(id) == Some(style::CODE);
+    text_input(&live.edit, look.style)
+        .key(text_key(id))
+        .w_full()
+        .align(align)
+        .color(look.color)
+        .caret(t.fg, t.mark)
+        .placeholder(placeholder, t.muted.alpha(0.6))
+        .rich_style(rich)
+        .spans(paints)
+        .spellcheck(NATIVE_SPELLCHECK && !code)
+        .on_edit(move |s: &mut State| edit_of(s, &eo, &ei))
+        .on_input_key(move |s: &mut State, ev, tx| keys::input_key(s, &ko, &ki, ev, tx))
+        .on_input_change(move |s: &mut State, _| keys::input_changed(s, &co, &ci))
+        .on_input_paste(move |s: &mut State, content, tx| {
+            keys::input_paste(s, &po, &pi, content, tx)
+        })
+        .on_link(|s: &mut State, url: &str, tx| keys::open_link(s, url, tx))
+}
 
-    fn render_block(
-        &self,
-        id: &str,
-        f: &Frame,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
-        let block = f.by_id.get(id)?.clone();
-        let c = &block.content;
-        if let Some(l) = &c.layout {
-            if l.style == layout::ROW {
-                // Columns share the row by their `width` field (else equally).
-                let kids: Vec<AnyElement> = block
-                    .children_ids
-                    .iter()
-                    .filter_map(|cid| {
-                        let width = f
-                            .by_id
-                            .get(cid)
-                            .and_then(|b| b.fields.as_ref())
-                            .and_then(|m| m.entries.get("width"))
-                            .and_then(|v| v.as_number())
-                            .unwrap_or(0.);
-                        let el = self.render_block(cid, f, window, cx)?;
-                        Some(if width > 0. {
-                            div()
-                                .min_w_0()
-                                .w(relative(width as f32))
-                                .child(el)
-                                .into_any_element()
-                        } else {
-                            div().min_w_0().flex_1().child(el).into_any_element()
-                        })
-                    })
-                    .collect();
-                return Some(
-                    div()
-                        .flex()
-                        .gap(px(24.))
-                        .my(px(2.))
-                        .children(kids)
-                        .into_any_element(),
-                );
-            }
-            if l.style == layout::COLUMN {
-                let kids: Vec<AnyElement> = block
-                    .children_ids
-                    .iter()
-                    .filter_map(|cid| self.render_block(cid, f, window, cx))
-                    .collect();
-                return Some(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .min_w_0()
-                        .children(kids)
-                        .into_any_element(),
-                );
-            }
-        }
-        let label = drag_label(c);
-        let dragging = self.dragging.as_deref() == Some(id);
-        if c.table.is_some() {
-            let (reveal, hover) = self.handle_reveal(id, window, cx);
-            let row = self
-                .row(id, true, hover.into_iter().collect(), cx)
-                .when(dragging, |d| d.opacity(0.4))
-                .child(self.gutter(id, label, reveal, cx))
-                .child(self.render_table(&block, f, window, cx))
-                .children(self.row_decor(id));
-            return Some(row.into_any_element());
-        }
-        if let Some(t) = &c.text {
-            return Some(self.render_text_block(&block, t, f, dragging, label, window, cx));
-        }
-        let custom = c.custom.as_ref()?;
-        let meta = custom.meta.clone().unwrap_or_default();
-        let body: AnyElement = match custom.content_type.as_str() {
-            "divider" => {
-                let dots = meta.get("style").map(String::as_str) == Some("dots");
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .h(px(16.))
-                    .relative()
-                    .flex()
-                    .items_center()
-                    .when(dots, |d| {
-                        d.justify_center().gap(px(18.)).children(
-                            (0..3).map(|_| div().size(px(2.)).rounded_full().bg(theme::accent())),
-                        )
-                    })
-                    .when(!dots, |d| {
-                        d.child(Separator::horizontal().color(theme::border()).w_full())
-                    })
-                    .into_any_element()
-            }
-            "relation" => self.render_relation(&block, &meta, f, cx),
-            "file" => match self.file_views.get(id) {
-                Some(view) => div()
-                    .flex_1()
-                    .min_w_0()
-                    .child(view.clone())
-                    .into_any_element(),
-                None => div().into_any_element(),
-            },
-            "embed" => self.render_embed(&meta, id, cx),
-            "bookmark" => render_bookmark(&meta, id),
-            "link" => self.render_link(&block, &meta, f, window, cx),
-            other => {
-                // Unknown custom content: a chip, children nested below.
-                let kids: Vec<AnyElement> = block
-                    .children_ids
-                    .iter()
-                    .filter_map(|cid| self.render_block(cid, f, window, cx))
-                    .collect();
-                let chip = div()
-                    .relative()
-                    .flex()
-                    .py(px(1.))
-                    .child(self.geom(id, false, false))
-                    .child(
-                        Tag::custom(
-                            gpui_kit::transparent_black(),
-                            theme::muted(),
-                            theme::border(),
-                        )
-                        .rounded(px(6.))
-                        .text_size(px(11.))
-                        .line_height(px(15.))
-                        .px(px(8.))
-                        .py(px(2.))
-                        .child(other.to_string()),
-                    )
-                    .children(self.row_decor(id));
-                return Some(
-                    div()
-                        .relative()
-                        .rounded(px(4.))
-                        .child(chip)
-                        .when(!kids.is_empty(), |d| {
-                            d.child(div().pl(px(26.)).children(kids))
-                        })
-                        .into_any_element(),
-                );
-            }
-        };
-        let (reveal, hover) = self.handle_reveal(id, window, cx);
-        let row = self
-            .row(id, true, hover.into_iter().collect(), cx)
-            .when(dragging, |d| d.opacity(0.4))
-            .child(self.gutter(id, label, reveal, cx))
-            .child(body)
-            .children(self.row_decor(id));
-        Some(row.into_any_element())
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn render_text_block(
-        &self,
-        block: &Block,
-        t: &roostr_core::types::TextContent,
-        f: &Frame,
-        dragging: bool,
-        label: SharedString,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let id = block.id.as_str();
-        let s = t.style;
-        let checked = t.checked.unwrap_or(false);
-        let look = Look::for_style(s, checked, t.color.as_deref().unwrap_or(""));
-        let align = match block.align.unwrap_or(0) {
-            1 => TextAlign::Center,
-            2 => TextAlign::Right,
-            _ => TextAlign::Left,
-        };
-        let is_toggle = s == style::TOGGLE;
-        let open = is_toggle && toggles::is_toggle_open(&self.object_id, id, cx);
-        // `.toggle-arrow` (`transition: transform 0.2s ease`); the opened
-        // children fade in with it and leave at once (they may hold the caret).
-        let turn = if is_toggle {
-            motion::progress(
-                Self::row_id("toggle-turn", id),
-                open,
-                motion::DISCLOSURE,
-                window,
-                cx,
-            )
-        } else {
-            1.
-        };
-        let placeholder = if s == style::TITLE {
-            "Untitled"
-        } else {
-            "Type / for commands"
-        };
-        let text = self.rich_text(id, &look, align, Some(placeholder), cx);
-        let mut text_box = div().flex_1().min_w(px(60.)).px(px(2.)).py(px(3.));
-        match s {
-            style::QUOTE => {
-                text_box = text_box
-                    .border_l(px(3.))
-                    .border_color(theme::accent())
-                    .pl(px(12.))
-            }
-            style::CODE => {
-                text_box = text_box
-                    .bg(theme::panel())
-                    .rounded(px(6.))
-                    .px(px(10.))
-                    .py(px(8.))
-            }
-            style::CALLOUT => {
-                text_box = text_box
-                    .bg(theme::panel())
-                    .rounded(px(8.))
-                    .px(px(12.))
-                    .py(px(10.))
-            }
-            _ => {}
-        }
-        let (reveal, handle_hover) = self.handle_reveal(id, window, cx);
-        let mut hovers: Vec<_> = handle_hover.into_iter().collect();
-        // `.block:hover .code-copy` (`transition: opacity 0.12s`).
-        let copy_reveal = if s == style::CODE {
-            let (t, state) =
-                motion::hover(Self::row_id("copy-reveal", id), motion::FADE, window, cx);
-            hovers.push(state);
-            t
-        } else {
-            0.
-        };
-        let mut row = self
-            .row(id, true, hovers, cx)
-            .child(self.gutter(id, label, reveal, cx));
-        match s {
-            style::CHECKBOX => {
-                let toggle_id = id.to_string();
-                let read_only = self.read_only;
-                row = row.child(
-                    div()
-                        .size(px(24.))
-                        .flex_none()
-                        .mt(px(3.))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                        .child(
-                            roostr_core::ui::checkbox(Self::row_id("check", id), checked)
-                                .with_size(Size::Medium)
-                                .when(read_only, |c| c.tab_stop(false))
-                                .when(!read_only, |c| {
-                                    c.on_change(cx.listener(move |this, done: &bool, _, cx| {
-                                        cx.stop_propagation();
-                                        this.toggle_checked(&toggle_id, *done, cx)
-                                    }))
-                                }),
-                        ),
-                );
-            }
-            style::BULLET => {
-                row = row.child(
-                    div()
-                        .pt(px(4.))
-                        .text_color(theme::muted())
-                        .flex_none()
-                        .text_size(px(16.))
-                        .line_height(px(19.))
-                        .child("•"),
-                )
-            }
-            style::NUMBERED => {
-                let n = self.ordinal(id, f);
-                row = row.child(
-                    div()
-                        .pt(px(4.))
-                        .text_color(theme::muted())
-                        .flex_none()
-                        .text_size(px(16.))
-                        .line_height(px(19.))
-                        .child(format!("{n}.")),
-                );
-            }
-            style::TOGGLE => {
-                let flip = id.to_string();
-                row = row.child(
-                    Button::new(Self::row_id("toggle", id))
-                        .ghost()
-                        .xsmall()
-                        .size(px(24.))
-                        .p_0()
-                        .flex_none()
-                        .mr(px(6.))
-                        .text_color(theme::fg())
-                        .accessibility_label(if open { "Collapse" } else { "Expand" })
-                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                        .on_click(cx.listener(move |this, _, _, cx| this.flip_toggle(&flip, cx)))
-                        .child(
-                            Icon::new(Glyph::ChevronRight)
-                                .size(px(16.))
-                                .text_color(theme::fg())
-                                .when(turn > 0., |i| {
-                                    i.rotate(radians(std::f32::consts::FRAC_PI_2 * turn))
-                                }),
-                        ),
-                );
-            }
-            _ => {}
-        }
-        row = row.child(text_box.child(text));
-        if s == style::CODE {
-            let copied = self.copied.contains(id);
-            let copy_id = id.to_string();
-            row = row.child(
-                Button::new(Self::row_id("copy", id))
-                    .outline()
-                    .xsmall()
-                    .accessibility_label("Copy code")
-                    .child(
-                        div()
-                            .text_size(px(11.))
-                            .child(if copied { "Copied" } else { "Copy" }),
-                    )
-                    .absolute()
-                    .top(px(7.))
-                    .right(px(6.))
-                    .w(px(58.))
-                    .opacity(if copied { 1. } else { copy_reveal })
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .on_click(cx.listener(move |this, _, _, cx| this.copy_code(&copy_id, cx))),
-            );
-        }
-        row = row.children(self.row_decor(id));
-
-        // A toggle's children are its collapsible content (shown only while
-        // open, so a closed toggle neither holds the caret nor reports row
-        // geometry); the arrow turn and the children fade share `turn`.
-        let shown = !is_toggle || open;
-        let mut tree = Collapsible::new()
-            .open(shown)
-            .relative()
-            .rounded(px(4.))
-            .when(dragging, |d| d.opacity(0.4));
-        if let Some(bg) = block.background_color.as_deref().and_then(look::css_color) {
-            tree = tree.bg(bg);
-        }
-        tree = tree.child(row);
-        if s == style::CODE
-            && let Some(problems) = self.lint.get(id)
-            && !problems.is_empty()
-        {
-            tree = tree.child(
-                div()
-                    .ml(self.gutter_w())
-                    .mt(px(4.))
-                    .mb(px(2.))
-                    .px(px(10.))
-                    .text_size(px(12.))
-                    .line_height(px(18.))
-                    .children(problems.iter().map(|p| {
-                        let dot = if p.severity == crate::codelint::Severity::Error {
-                            theme::red()
-                        } else {
-                            theme::lint_warning()
-                        };
-                        div()
-                            .flex()
-                            .items_baseline()
-                            .gap(px(6.))
-                            .text_color(theme::muted())
-                            .child(div().text_size(px(9.)).text_color(dot).child("●"))
-                            .child(
-                                div().child(
-                                    div()
-                                        .font_family(theme::fonts::MONO)
-                                        .child(format!("Line {}:{}", p.line, p.col)),
-                                ),
-                            )
-                            .child(div().child(p.message.clone()))
-                    })),
-            );
-        }
-        if !block.children_ids.is_empty() && shown {
-            let kids: Vec<AnyElement> = block
+fn render_block(
+    id: &str,
+    f: &Frame,
+    s: &State,
+    cx: &mut Cx<State>,
+    layer: &mut Vec<El>,
+) -> Option<El> {
+    let block = *f.by_id.get(id)?;
+    let c = &block.content;
+    let t = f.t;
+    if let Some(l) = &c.layout {
+        if l.style == layout::ROW {
+            // Columns share the row by their `width` field (else equally).
+            let kids: Vec<El> = block
                 .children_ids
                 .iter()
-                .filter_map(|cid| self.render_block(cid, f, window, cx))
+                .filter_map(|cid| {
+                    let width = f
+                        .by_id
+                        .get(cid.as_str())
+                        .and_then(|b| b.fields.as_ref())
+                        .and_then(|m| m.entries.get("width"))
+                        .and_then(|v| v.as_number())
+                        .unwrap_or(0.);
+                    let el = render_block(cid, f, s, cx, layer)?;
+                    Some(if width > 0. {
+                        col().min_w(0.).w_frac(width as f32).child(el)
+                    } else {
+                        col().min_w(0.).grow(1.).child(el)
+                    })
+                })
                 .collect();
-            tree = tree.content(div().pl(px(26.)).opacity(turn).children(kids));
-            // Anytype targetBot: a thin strip below the children; a drop there lands after the subtree.
-            let over = matches!(&self.drop_hint, Some(h) if h.id == block.id && h.bot);
-            tree = tree.content(
-                div()
-                    .absolute()
-                    .left_0()
-                    .right_0()
-                    .bottom(px(-4.))
-                    .h(px(10.))
-                    .child(self.geom(id, false, true))
-                    .when(over, |d| {
-                        d.child(
-                            div()
-                                .absolute()
-                                .left_0()
-                                .right_0()
-                                .bottom_0()
-                                .h(px(2.))
-                                .bg(theme::accent()),
-                        )
-                    }),
-            );
-        } else if is_toggle && shown && !self.read_only {
-            let empty_id = id.to_string();
-            tree = tree.content(
-                div()
-                    .id(Self::row_id("empty-toggle", id))
-                    .ml(px(30.))
-                    .opacity(turn)
-                    .py(px(2.))
-                    .text_size(px(15.))
-                    .text_color(theme::muted())
-                    .cursor_pointer()
-                    .whitespace_nowrap()
-                    .overflow_hidden()
-                    .text_ellipsis()
-                    .hover(|s| s.text_color(theme::fg()))
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .on_click(
-                        cx.listener(move |this, _, _, cx| this.on_empty_toggle(&empty_id, cx)),
-                    )
-                    .child("Empty toggle. Click or drop Block inside"),
-            );
+            return Some(row().w_full().gap(24.).my(2.).children(kids));
         }
-        tree.into_any_element()
+        if l.style == layout::COLUMN {
+            let kids: Vec<El> = block
+                .children_ids
+                .iter()
+                .filter_map(|cid| render_block(cid, f, s, cx, layer))
+                .collect();
+            return Some(col().w_full().min_w(0.).children(kids));
+        }
     }
-
-    /// A numbered item's number: its place in the run of numbered siblings.
-    fn ordinal(&self, id: &str, f: &Frame) -> usize {
-        let siblings = f
-            .by_id
-            .values()
-            .find(|b| b.children_ids.iter().any(|c| c == id))
-            .map(|b| b.children_ids.clone())
-            .unwrap_or_else(|| f.all_roots.clone());
-        let mut n = 0;
-        for sid in &siblings {
-            n = if f
-                .by_id
-                .get(sid)
-                .and_then(|b| b.content.text.as_ref())
-                .map(|t| t.style)
-                == Some(style::NUMBERED)
-            {
-                n + 1
+    let dragging = f.e.dragging.as_deref() == Some(id);
+    if c.table.is_some() {
+        let r = block_row(f, id, true)
+            .opacity(if dragging { 0.4 } else { 1. })
+            .child(gutter(f, id))
+            .child(render_table(block, f))
+            .children(row_decor(f, id));
+        return Some(r);
+    }
+    if let Some(text) = &c.text {
+        return Some(render_text_block(block, text, f, s, cx, layer, dragging));
+    }
+    let custom = c.custom.as_ref()?;
+    let meta = custom.meta.clone().unwrap_or_default();
+    let body: El = match custom.content_type.as_str() {
+        "divider" => {
+            let dots = meta.get("style").map(String::as_str) == Some("dots");
+            let line = row().grow(1.).min_w(0.).h(16.).items_center();
+            if dots {
+                line.justify_center()
+                    .gap(18.)
+                    .children((0..3).map(|_| el().size(2., 2.).radius(1.).fill(t.accent)))
             } else {
-                0
-            };
-            if sid == id {
-                return n;
+                line.child(el().w_full().h(1.).fill(t.border))
             }
         }
-        1
-    }
-
-    /// TableBlock: cells are ordinary text blocks "<rowId>-<colId>".
-    fn render_table(
-        &self,
-        block: &Block,
-        f: &Frame,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let (cols, rows) = self.table_shape(&block.id);
-        let table_id = block.id.clone();
-        let ro = self.read_only;
-        // `.table-wrap:hover` reveals the gutters and add edges
-        // (`transition: opacity 0.1s`).
-        let (reveal, hover) = if ro {
-            (0., None)
-        } else {
-            let (t, state) = motion::hover(
-                Self::row_id("table-reveal", &block.id),
-                motion::HOVER_REVEAL,
-                window,
-                cx,
-            );
-            (t, Some(state))
-        };
-        // `×` row/column deletes: muted marks whose `×` turns red under the
-        // pointer (a group hover: the kit button owns its own hover style).
-        let del_look = ButtonCustomVariant::new(cx).foreground(theme::muted());
-        let mini = |id: ElementId, enabled: bool, tip: &'static str| {
-            Button::new(id)
-                .custom(del_look)
-                .xsmall()
-                .group("table-del")
-                .h(px(14.))
-                .px(px(4.))
-                .tooltip(tip)
-                .accessibility_label(tip)
-                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .disabled(!enabled)
-                .when(!enabled, |b| b.opacity(0.3))
-                .child(
-                    div()
-                        .text_size(px(12.))
-                        .line_height(px(14.))
-                        .when(enabled, |d| {
-                            d.group_hover("table-del", |s| s.text_color(theme::red()))
-                        })
-                        .child("×"),
-                )
-        };
-        // Dashed `+` edges that add a row or a column; under the pointer the
-        // border (the custom colour) and the `+` (a group hover) turn accent.
-        let add_look = ButtonCustomVariant::new(cx)
-            .foreground(theme::muted())
-            .color(theme::accent());
-        let add = |id: ElementId, tip: &'static str| {
-            Button::new(id)
-                .custom(add_look)
-                .xsmall()
-                .group("table-add")
-                .bg(gpui_kit::transparent_black())
-                .border_1()
-                .border_dashed()
-                .border_color(theme::border())
-                .rounded(px(6.))
-                .opacity(reveal)
-                .tooltip(tip)
-                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .accessibility_label(tip)
-                .child(
-                    div()
-                        .text_size(px(13.))
-                        .group_hover("table-add", |s| s.text_color(theme::accent()))
-                        .child("+"),
-                )
-        };
-        let mut wrap = div()
-            .id(Self::row_id("table", &block.id))
-            .when_some(hover, |d, state| {
-                d.on_hover(move |hovered: &bool, _, cx| HoverMotion::set(&state, *hovered, cx))
-            })
-            .flex_1()
-            .min_w_0()
-            .py(px(4.))
-            .flex()
-            .flex_col();
-        if !ro {
-            let can = cols.len() > 1;
-            wrap =
-                wrap.child(
-                    div()
-                        .flex()
-                        .h(px(14.))
-                        .mr(px(20.))
-                        .opacity(reveal)
-                        .children(cols.iter().enumerate().map(|(i, col)| {
-                            let (t, c) = (table_id.clone(), col.clone());
-                            div().flex_1().flex().justify_center().child(
-                                mini(
-                                    ElementId::Name(format!("delcol-{}-{i}", table_id).into()),
-                                    can,
-                                    "Delete column",
-                                )
-                                .on_click(cx.listener(
-                                    move |this, _, _, cx| this.table_col_remove(&t, &c, cx),
-                                )),
-                            )
-                        })),
-                );
-        }
-        let mut grid = div()
-            .flex_1()
-            .min_w_0()
-            .flex()
-            .flex_col()
-            .border_t_1()
-            .border_l_1()
-            .border_color(theme::border());
-        for (ri, row_id) in rows.iter().enumerate() {
-            let header = f
-                .by_id
-                .get(row_id)
-                .and_then(|b| b.content.table_row.as_ref())
-                .and_then(|r| r.is_header)
-                .unwrap_or(false);
-            let mut tr = div().flex().w_full();
-            for col in &cols {
-                let cell = format!("{row_id}-{col}");
-                let has_text = f.by_id.get(&cell).is_some_and(|b| b.content.text.is_some());
-                let look = Look::table_cell(header);
-                tr =
-                    tr.child(
-                        div()
-                            .flex_1()
-                            .flex_basis(px(0.))
-                            .min_w(px(60.))
-                            .border_r_1()
-                            .border_b_1()
-                            .border_color(theme::border())
-                            .when(header, |d| d.bg(theme::hover()))
-                            .relative()
-                            .child(self.geom(&cell, false, false))
-                            .children(self.row_decor(&cell))
-                            .when(has_text, |d| {
-                                d.child(
-                                    div().px(px(8.)).py(px(6.)).min_h(px(20.)).child(
-                                        self.rich_text(&cell, &look, TextAlign::Left, None, cx),
-                                    ),
-                                )
-                            }),
-                    );
-            }
-            let _ = ri;
-            grid = grid.child(tr);
-        }
-        let mut grid_row = div().flex().items_stretch().gap(px(2.)).child(grid);
-        if !ro {
-            // Row deletes sit in a column beside the grid, one per row.
-            let can = rows.len() > 1;
-            grid_row = div().flex().items_stretch().gap(px(2.)).child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .flex()
-                    .child(grid_row.flex_1())
-                    .child(
-                        div()
-                            .w(px(18.))
-                            .flex_none()
-                            .flex()
-                            .flex_col()
-                            .opacity(reveal)
-                            .children(rows.iter().enumerate().map(|(i, r)| {
-                                let r = r.clone();
-                                let h = self
-                                    .rows
-                                    .borrow()
-                                    .get(&format!(
-                                        "{r}-{}",
-                                        cols.first().cloned().unwrap_or_default()
-                                    ))
-                                    .map(|g| g.bounds.size.height)
-                                    .unwrap_or(px(33.));
-                                div().h(h).flex().items_center().justify_center().child(
-                                    mini(
-                                        ElementId::Name(format!("delrow-{}-{i}", block.id).into()),
-                                        can,
-                                        "Delete row",
-                                    )
-                                    .on_click(cx.listener(
-                                        move |this, _, _, cx| this.table_row_remove(&r, cx),
-                                    )),
-                                )
-                            })),
+        "relation" => render_relation(block, &meta, f, s, cx, layer),
+        "file" => col()
+            .grow(1.)
+            .min_w(0.)
+            .child(crate::file_block::file_block_view(s, cx, t, f.e, id, layer)),
+        "embed" => crate::embed_view::embed_view(s, cx, t, f.e, &meta, id),
+        "bookmark" => crate::embed_view::bookmark_view(s, cx, t, &meta, id),
+        "link" => render_link(block, &meta, f, s),
+        other => {
+            // Unknown custom content: a chip, children nested below.
+            let kids: Vec<El> = block
+                .children_ids
+                .iter()
+                .filter_map(|cid| render_block(cid, f, s, cx, layer))
+                .collect();
+            let chip = geom(
+                row().key(row_key(id)).py(1.).child(
+                    row().radius(6.).border(1., t.border).px(8.).py(2.).child(
+                        text(other.to_string())
+                            .font(ty::ui(11.).lh(15.))
+                            .color(t.muted),
                     ),
-            );
-            let t = table_id.clone();
-            grid_row = grid_row.child(
-                add(Self::row_id("addcol", &block.id), "Add column")
-                    .w(px(16.))
-                    .h_auto()
-                    .mr(px(2.))
-                    .flex_none()
-                    .on_click(cx.listener(move |this, _, _, cx| this.table_col_add(&t, cx))),
-            );
+                ),
+                f,
+                id,
+                false,
+                false,
+            )
+            .children(row_decor(f, id));
+            let mut out = col().w_full().radius(4.).child(chip);
+            if !kids.is_empty() {
+                out = out.child(col().w_full().pl(26.).children(kids));
+            }
+            return Some(out);
         }
-        wrap = wrap.child(grid_row);
-        if !ro {
-            let t = table_id.clone();
-            wrap = wrap.child(
-                add(Self::row_id("addrow", &block.id), "Add row")
-                    .mt(px(2.))
-                    .h(px(16.))
-                    .mr(px(20.))
-                    .on_click(cx.listener(move |this, _, _, cx| this.table_row_add(&t, cx))),
-            );
-        }
-        wrap.into_any_element()
-    }
+    };
+    Some(
+        block_row(f, id, true)
+            .opacity(if dragging { 0.4 } else { 1. })
+            .child(gutter(f, id))
+            .child(body)
+            .children(row_decor(f, id)),
+    )
+}
 
-    /// RelationBlock: "Name  value", edited through the shared PropertyValue.
-    fn render_relation(
-        &self,
-        block: &Block,
-        meta: &std::collections::BTreeMap<String, String>,
-        f: &Frame,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let key = meta.get("key").cloned().unwrap_or_default();
-        let store = Store::global(cx).read(cx);
-        let rel = roostr_core::relations::space_relations(&store.relations, &f.space)
-            .into_iter()
-            .find(|r| r.key == key)
-            .cloned();
-        let Some(rel) = rel else {
-            return div()
-                .flex_1()
-                .italic()
-                .text_color(theme::muted())
-                .child(format!("Unknown property \"{key}\""))
-                .into_any_element();
+fn render_text_block(
+    block: &Block,
+    tc: &roostr_core::types::TextContent,
+    f: &Frame,
+    s: &State,
+    cx: &mut Cx<State>,
+    layer: &mut Vec<El>,
+    dragging: bool,
+) -> El {
+    let t = f.t;
+    let id = block.id.as_str();
+    let st = tc.style;
+    let checked = tc.checked.unwrap_or(false);
+    let look = Look::for_style(t, st, checked, tc.color.as_deref().unwrap_or(""));
+    let align = match block.align.unwrap_or(0) {
+        1 => Align::Center,
+        2 => Align::End,
+        _ => Align::Start,
+    };
+    let is_toggle = st == style::TOGGLE;
+    let open = is_toggle && toggles::is_toggle_open(&f.e.object_id, id, &s.ui);
+    let placeholder = if st == style::TITLE {
+        "Untitled"
+    } else {
+        "Type / for commands"
+    };
+    let field = rich_text(f, id, &look, align, Some(placeholder));
+    let mut text_box = col().grow(1.).min_w(60.).px(2.).py(3.);
+    match st {
+        style::QUOTE => {
+            text_box = text_box
+                .border_sides([0., 0., 0., 3.], t.accent)
+                .border_layout()
+                .pl(12.)
+        }
+        style::CODE => text_box = text_box.fill(t.panel).radius(6.).px(10.).py(8.),
+        style::CALLOUT => text_box = text_box.fill(t.panel).radius(8.).px(12.).py(10.),
+        _ => {}
+    }
+    let mut r = block_row(f, id, true).child(gutter(f, id));
+    match st {
+        style::CHECKBOX => {
+            let (oid, bid) = (f.oid(), id.to_string());
+            let mut check = roostr_ui::checkbox(format!("check-{id}"), checked)
+                .size(roostr_ui::KitSize::Medium);
+            check = if f.e.read_only {
+                check.tab_stop(false)
+            } else {
+                check.on_change(move |s: &mut State, done: bool| {
+                    with_editor(s, &oid, |e, s| e.toggle_checked(&bid, done, s));
+                })
+            };
+            r = r.child(row().size(24., 24.).mt(3.).center().child(check.build(t)));
+        }
+        style::BULLET => {
+            r = r.child(
+                el().pt(4.)
+                    .child(text("•").font(ty::ui(16.).lh(19.)).color(t.muted)),
+            )
+        }
+        style::NUMBERED => {
+            let n = ordinal(id, f);
+            r = r.child(
+                el().pt(4.).child(
+                    text(format!("{n}."))
+                        .font(ty::ui(16.).lh(19.))
+                        .color(t.muted),
+                ),
+            );
+        }
+        style::TOGGLE => {
+            let (oid, bid) = (f.oid(), id.to_string());
+            let arrow = glyph(Glyph::ChevronRight, 16.)
+                .color(t.fg)
+                .rotate(if open {
+                    std::f32::consts::FRAC_PI_2
+                } else {
+                    0.
+                })
+                .rotate_motion(motion::DISCLOSURE.anim());
+            r = r.child(
+                Button::new(format!("toggle-{id}"))
+                    .ghost()
+                    .xsmall()
+                    .square(24.)
+                    .p(0.)
+                    .accessibility_label(if open { "Collapse" } else { "Expand" })
+                    .child(arrow)
+                    .on_press(move |s: &mut State| {
+                        with_editor(s, &oid, |e, s| e.flip_toggle(&bid, s));
+                    })
+                    .build(t)
+                    .mr(6.),
+            );
+        }
+        _ => {}
+    }
+    r = r.child(text_box.child(field));
+    if st == style::CODE {
+        let copied = f.e.copied.contains(id);
+        let (oid, bid) = (f.oid(), id.to_string());
+        r = r.child(
+            el().pin(None, Some(7.), Some(6.), None)
+                .w(58.)
+                .group_opacity(if copied { 1. } else { 0. }, 1.)
+                .hover_motion(motion::FADE.anim(), motion::FADE.anim())
+                .child(
+                    Button::new(format!("copy-{id}"))
+                        .outline()
+                        .xsmall()
+                        .w(58.)
+                        .accessibility_label("Copy code")
+                        .child(
+                            text(if copied { "Copied" } else { "Copy" })
+                                .font(ty::ui(11.))
+                                .color(t.fg),
+                        )
+                        .on_press_tx(move |s: &mut State, tx| {
+                            with_editor(s, &oid, |e, s| e.copy_code(&bid, s, tx));
+                        })
+                        .build(t),
+                ),
+        );
+    }
+    r = r.children(row_decor(f, id));
+
+    // A toggle's children are its collapsible content (shown only while
+    // open, so a closed toggle neither holds the caret nor reports row
+    // geometry).
+    let shown = !is_toggle || open;
+    let mut tree = col()
+        .w_full()
+        .radius(4.)
+        .opacity(if dragging { 0.4 } else { 1. });
+    if let Some(bg) = block.background_color.as_deref().and_then(look::css_color) {
+        tree = tree.fill(bg);
+    }
+    tree = tree.child(r);
+    if st == style::CODE
+        && let Some(problems) = f.e.lint.get(id)
+        && !problems.is_empty()
+    {
+        tree = tree.child(col().ml(f.gutter_w()).mt(4.).mb(2.).px(10.).children(
+            problems.iter().map(|p| {
+                let dot = if p.severity == crate::codelint::Severity::Error {
+                    t.red
+                } else {
+                    t.lint_warning
+                };
+                row()
+                    .gap(6.)
+                    .items_center()
+                    .child(text("●").font(ty::ui(9.)).color(dot))
+                    .child(
+                        text(format!("Line {}:{}", p.line, p.col))
+                            .font(ty::mono(12.).lh(18.))
+                            .color(t.muted),
+                    )
+                    .child(
+                        text(p.message.clone())
+                            .font(ty::ui(12.).lh(18.))
+                            .color(t.muted)
+                            .wrap(),
+                    )
+            }),
+        ));
+    }
+    if !block.children_ids.is_empty() && shown {
+        let kids: Vec<El> = block
+            .children_ids
+            .iter()
+            .filter_map(|cid| render_block(cid, f, s, cx, layer))
+            .collect();
+        tree = tree.child(
+            col()
+                .w_full()
+                .pl(26.)
+                .children(kids)
+                .transition(rune::Transition::opacity())
+                .opacity_motion(motion::DISCLOSURE.anim()),
+        );
+        // Anytype targetBot: a thin strip below the children; a drop there lands after the subtree.
+        let over = matches!(&f.e.drop_hint, Some(h) if h.id == block.id && h.bot);
+        let strip = el().w_full().h(10.).mt(-4.).mb(-6.);
+        let strip = if over {
+            strip.child(
+                el().pin(Some(0.), None, Some(0.), Some(0.))
+                    .h(2.)
+                    .fill(t.accent),
+            )
+        } else {
+            strip
         };
-        let value = self
-            .object
+        tree = tree.child(geom(strip, f, id, false, true));
+    } else if is_toggle && shown && !f.e.read_only {
+        let (oid, bid) = (f.oid(), id.to_string());
+        tree = tree.child(
+            el().key(format!("empty-toggle-{id}"))
+                .ml(30.)
+                .py(2.)
+                .cursor(Cursor::Pointer)
+                .hover_group()
+                .child(
+                    text("Empty toggle. Click or drop Block inside")
+                        .font(ty::ui(15.))
+                        .color(t.muted)
+                        .group_color(t.fg)
+                        .truncate(),
+                )
+                .on_press(move |s: &mut State| {
+                    with_editor(s, &oid, |e, s| e.on_empty_toggle(&bid, s));
+                }),
+        );
+    }
+    tree
+}
+
+/// A numbered item's number: its place in the run of numbered siblings.
+fn ordinal(id: &str, f: &Frame) -> usize {
+    let siblings = f
+        .by_id
+        .values()
+        .find(|b| b.children_ids.iter().any(|c| c == id))
+        .map(|b| b.children_ids.clone())
+        .unwrap_or_else(|| f.all_roots.clone());
+    let mut n = 0;
+    for sid in &siblings {
+        n = if f
+            .by_id
+            .get(sid.as_str())
+            .and_then(|b| b.content.text.as_ref())
+            .map(|t| t.style)
+            == Some(style::NUMBERED)
+        {
+            n + 1
+        } else {
+            0
+        };
+        if sid == id {
+            return n;
+        }
+    }
+    1
+}
+
+/// TableBlock: cells are ordinary text blocks "<rowId>-<colId>".
+fn render_table(block: &Block, f: &Frame) -> El {
+    let (t, e) = (f.t, f.e);
+    let (cols, rows) = e.table_shape(&block.id);
+    let table_id = block.id.clone();
+    let ro = e.read_only;
+    // `×` row/column deletes: muted marks whose `×` turns red under the pointer.
+    let mini = |key: String, enabled: bool, tip: &'static str| {
+        let mark = text("×").font(ty::ui(12.).lh(14.)).color(t.muted);
+        let mark = if enabled {
+            mark.group_color(t.red)
+        } else {
+            mark
+        };
+        el().key(key)
+            .h(14.)
+            .px(4.)
+            .center()
+            .radius(radius::KIT)
+            .hover_group()
+            .help(tip)
+            .label(tip)
+            .opacity(if enabled { 1. } else { 0.3 })
+            .cursor(if enabled {
+                Cursor::Pointer
+            } else {
+                Cursor::Default
+            })
+            .child(mark)
+    };
+    // Dashed `+` edges that add a row or a column; under the pointer the border and the `+` turn accent.
+    let add = |key: String, tip: &'static str| {
+        el().key(key)
+            .center()
+            .radius(6.)
+            .border(1., t.border)
+            .border_dash(3., 3.)
+            .hover_group()
+            .help(tip)
+            .label(tip)
+            .cursor(Cursor::Pointer)
+            .group_opacity(0., 1.)
+            .hover_motion(motion::HOVER_REVEAL.anim(), motion::HOVER_REVEAL.anim())
+            .child(
+                text("+")
+                    .font(ty::ui(13.))
+                    .color(t.muted)
+                    .group_color(t.accent),
+            )
+    };
+    let mut wrap = col()
+        .key(format!("table-{}", block.id))
+        .grow(1.)
+        .min_w(0.)
+        .py(4.)
+        .hover_group();
+    if !ro {
+        let can = cols.len() > 1;
+        wrap = wrap.child(
+            row()
+                .h(14.)
+                .mr(20.)
+                .group_opacity(0., 1.)
+                .hover_motion(motion::HOVER_REVEAL.anim(), motion::HOVER_REVEAL.anim())
+                .children(cols.iter().enumerate().map(|(i, c)| {
+                    let (oid, tid, c) = (f.oid(), table_id.clone(), c.clone());
+                    let m = mini(format!("delcol-{table_id}-{i}"), can, "Delete column");
+                    let m = if can {
+                        m.on_press(move |s: &mut State| {
+                            with_editor(s, &oid, |e, s| e.table_col_remove(&tid, &c, s));
+                        })
+                    } else {
+                        m
+                    };
+                    row().grow(1.).justify_center().child(m)
+                })),
+        );
+    }
+    let mut grid = col()
+        .grow(1.)
+        .min_w(0.)
+        .border_sides([1., 0., 0., 1.], t.border)
+        .border_layout();
+    for row_id in &rows {
+        let header = f
+            .by_id
+            .get(row_id.as_str())
+            .and_then(|b| b.content.table_row.as_ref())
+            .and_then(|r| r.is_header)
+            .unwrap_or(false);
+        let mut tr = row().w_full().items_stretch();
+        for c in &cols {
+            let cell = format!("{row_id}-{c}");
+            let has_text = f
+                .by_id
+                .get(cell.as_str())
+                .is_some_and(|b| b.content.text.is_some());
+            let look = Look::table_cell(t, header);
+            let mut td = col()
+                .key(row_key(&cell))
+                .grow(1.)
+                .min_w(60.)
+                .border_sides([0., 1., 1., 0.], t.border)
+                .border_layout();
+            if header {
+                td = td.fill(t.hover);
+            }
+            td = geom(td, f, &cell, false, false).children(row_decor(f, &cell));
+            if has_text {
+                td = td.child(col().px(8.).py(6.).min_h(20.).child(rich_text(
+                    f,
+                    &cell,
+                    &look,
+                    Align::Start,
+                    None,
+                )));
+            }
+            tr = tr.child(td);
+        }
+        grid = grid.child(tr);
+    }
+    let mut grid_row = row().w_full().items_stretch().gap(2.).child(grid);
+    if !ro {
+        // Row deletes sit in a column beside the grid, one per row.
+        let can = rows.len() > 1;
+        let first_col = cols.first().cloned().unwrap_or_default();
+        grid_row = grid_row.child(
+            col()
+                .w(18.)
+                .group_opacity(0., 1.)
+                .hover_motion(motion::HOVER_REVEAL.anim(), motion::HOVER_REVEAL.anim())
+                .children(rows.iter().enumerate().map(|(i, r)| {
+                    let h = e
+                        .rows
+                        .get(&format!("{r}-{first_col}"))
+                        .map(|g| g.bounds[3])
+                        .unwrap_or(33.);
+                    let (oid, r) = (f.oid(), r.clone());
+                    let m = mini(format!("delrow-{}-{i}", block.id), can, "Delete row");
+                    let m = if can {
+                        m.on_press(move |s: &mut State| {
+                            with_editor(s, &oid, |e, s| e.table_row_remove(&r, s));
+                        })
+                    } else {
+                        m
+                    };
+                    row().h(h).center().child(m)
+                })),
+        );
+        let (oid, tid) = (f.oid(), table_id.clone());
+        grid_row = grid_row.child(
+            add(format!("addcol-{}", block.id), "Add column")
+                .w(16.)
+                .self_stretch()
+                .mr(2.)
+                .on_press(move |s: &mut State| {
+                    with_editor(s, &oid, |e, s| e.table_col_add(&tid, s));
+                }),
+        );
+    }
+    wrap = wrap.child(grid_row);
+    if !ro {
+        let (oid, tid) = (f.oid(), table_id.clone());
+        wrap = wrap.child(
+            add(format!("addrow-{}", block.id), "Add row")
+                .mt(2.)
+                .h(16.)
+                .mr(20.)
+                .on_press(move |s: &mut State| {
+                    with_editor(s, &oid, |e, s| e.table_row_add(&tid, s));
+                }),
+        );
+    }
+    wrap
+}
+
+/// RelationBlock: "Name  value", edited through the shared PropertyValue.
+fn render_relation(
+    block: &Block,
+    meta: &BTreeMap<String, String>,
+    f: &Frame,
+    s: &State,
+    cx: &mut Cx<State>,
+    layer: &mut Vec<El>,
+) -> El {
+    let t = f.t;
+    let key = meta.get("key").cloned().unwrap_or_default();
+    let rel = roostr_core::relations::space_relations(&s.store.relations, &f.space)
+        .into_iter()
+        .find(|r| r.key == key)
+        .cloned();
+    let Some(rel) = rel else {
+        return row().grow(1.).child(
+            text(format!("Unknown property \"{key}\""))
+                .font(rune::TextStyle {
+                    italic: true,
+                    ..ty::ui(14.)
+                })
+                .color(t.muted),
+        );
+    };
+    let value =
+        f.e.object
             .as_ref()
             .and_then(|o| o.fields.get(&key))
             .cloned();
-        let editor = cx.entity();
-        let save_key = key.clone();
-        let name = if rel.name.is_empty() {
-            rel.key.clone()
-        } else {
-            rel.name.clone()
-        };
-        div()
-            .flex_1()
-            .min_w_0()
-            .flex()
-            .items_center()
-            .gap(px(12.))
-            .py(px(3.))
-            .text_size(px(14.))
-            .child(
-                div()
-                    .id(Self::row_id("rel-name", &block.id))
-                    .w(px(140.))
-                    .flex_none()
-                    .text_size(px(13.))
-                    .text_color(theme::muted())
-                    .whitespace_nowrap()
-                    .overflow_hidden()
-                    .text_ellipsis()
-                    .tooltip(roostr_core::ui::tooltip(rel.format.clone()))
-                    .child(name),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .child(
-                        roostr_properties::PropertyValue::new(
-                            Self::row_id("rel-value", &block.id),
-                            rel,
-                            value,
-                        )
-                        .space(f.space.clone())
-                        .read_only(self.read_only)
-                        .on_save(move |v, _, cx| {
-                            let v = v.clone();
-                            let key = save_key.clone();
-                            editor.update(cx, |e, cx| {
-                                let task = e.w_set_field(&key, v, cx);
-                                e.await_then_refresh(vec![task], cx);
-                            });
-                        }),
-                    ),
-            )
-            .into_any_element()
-    }
-
-    /// Anytype BlockType.Link: icon + name (text) or a bordered card; a ghost row when the target is gone.
-    fn render_link(
-        &self,
-        block: &Block,
-        meta: &std::collections::BTreeMap<String, String>,
-        f: &Frame,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let store = Store::global(cx).read(cx);
-        let target_id = meta.get("target").cloned().unwrap_or_default();
-        let target = store.summary(&target_id).cloned();
-        let card = meta.get("style").map(String::as_str) == Some("card");
-        let justify = block.align.unwrap_or(0);
-        let wrap = div()
-            .flex_1()
-            .min_w_0()
-            .flex()
-            .px(px(2.))
-            .py(px(3.))
-            .when(justify == 1, |d| d.justify_center())
-            .when(justify == 2, |d| d.justify_end());
-        let Some(target) = target else {
-            return wrap
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(8.))
-                        .text_color(theme::muted())
-                        .child(div().text_size(px(18.)).line_height(px(20.)).child("⌀"))
-                        .child(
-                            div()
-                                .font_weight(FontWeight::MEDIUM)
-                                .child("Deleted object"),
-                        ),
-                )
-                .into_any_element();
-        };
-        let icon = roostr_core::objects::object_icon(
-            store,
-            &target.icon,
-            &target.type_key,
-            &target.channel_id,
-        );
-        let name = if target.name.is_empty() {
-            "Untitled".to_string()
-        } else {
-            target.name.clone()
-        };
-        let type_name = store
-            .types
-            .iter()
-            .find(|t| t.key == target.type_key)
-            .map(|t| t.name.clone())
-            .unwrap_or_else(|| target.type_key.clone());
-        let _ = f;
-        let open = target.id.clone();
-        let group: SharedString = format!("link-{}", block.id).into();
-        let click = move |ev: &ClickEvent, _: &mut Window, cx: &mut App| {
-            if ev.modifiers().platform {
-                roostr_core::nav::open_tab(Route::Object(open.clone()), true, cx);
-            } else {
-                roostr_core::nav::navigate(Route::Object(open.clone()), cx);
-            }
-        };
-        let body = if card {
-            // `.link-card:hover` (`transition: border-color 0.15s`).
-            let (tint, hover) = motion::hover(
-                Self::row_id("link-tint", &block.id),
-                motion::CONTROL,
-                window,
-                cx,
-            );
-            div()
-                .id(Self::row_id("link", &block.id))
-                .flex()
-                .flex_col()
-                .justify_center()
-                .gap(px(2.))
-                .border_1()
-                .border_color(motion::mix(theme::border(), theme::muted(), tint))
-                .rounded(px(8.))
-                .p(px(16.))
-                .min_w(px(240.))
-                .max_w_full()
-                .text_color(theme::fg())
-                .cursor_pointer()
-                .on_hover(move |hovered: &bool, _, cx| HoverMotion::set(&hover, *hovered, cx))
-                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .on_click(click)
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(8.))
-                        .min_w_0()
-                        .child(
-                            div()
-                                .flex_none()
-                                .child(roostr_core::ui::emoji_or_image_icon(&icon, px(18.))),
-                        )
-                        .child(
-                            div()
-                                .font_weight(FontWeight::MEDIUM)
-                                .overflow_hidden()
-                                .whitespace_nowrap()
-                                .text_ellipsis()
-                                .child(name),
-                        ),
-                )
-                .child(
-                    div()
-                        .text_size(px(12.))
-                        .line_height(px(16.))
-                        .text_color(theme::muted())
-                        .child(type_name),
-                )
-        } else {
-            div()
-                .id(Self::row_id("link", &block.id))
-                .group(group.clone())
-                .flex()
-                .items_center()
-                .gap(px(8.))
-                .min_w_0()
-                .text_color(theme::fg())
-                .cursor_pointer()
-                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .on_click(click)
-                .child(
-                    div()
-                        .flex_none()
-                        .child(roostr_core::ui::emoji_or_image_icon(&icon, px(18.))),
-                )
-                .child(
-                    div()
-                        .font_weight(FontWeight::MEDIUM)
-                        .border_b_1()
-                        .border_color(theme::border())
-                        .group_hover(group, |s| s.border_color(theme::fg()))
-                        .overflow_hidden()
-                        .whitespace_nowrap()
-                        .text_ellipsis()
-                        .child(name),
-                )
-        };
-        wrap.child(body).into_any_element()
-    }
-
-    /// `.touch-ghost`: the lifted row's copy, riding just ABOVE the
-    /// fingertip so neither the thumb nor the copy hides the drop line under
-    /// the finger, while the original stays dimmed in place.
-    fn touch_ghost(&self) -> Option<AnyElement> {
-        let lift = self.touch_lift.as_ref()?;
-        let origin = self.bounds.get().origin;
-        Some(
-            deferred(
-                div()
-                    .absolute()
-                    .left(lift.row.left() + (lift.at.x - lift.x0) - origin.x)
-                    .top(lift.at.y - lift.row.size.height - px(12.) - origin.y)
-                    .w(lift.row.size.width)
-                    .min_h(lift.row.size.height)
-                    .pl(self.gutter_w())
-                    .py(px(1.))
-                    .rounded(px(6.))
-                    .bg(theme::panel())
-                    .shadow(vec![BoxShadow {
-                        color: hsla(0., 0., 0., 0.45),
-                        offset: point(px(0.), px(10.)),
-                        blur_radius: px(28.),
-                        spread_radius: px(0.),
-                        inset: false,
-                    }])
-                    .opacity(0.95)
-                    .text_size(px(15.))
-                    .text_color(theme::fg())
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .text_ellipsis()
-                    .child(lift.label.clone()),
-            )
-            .with_priority(1)
-            .into_any_element(),
-        )
-    }
-
-    /// Floating pieces: menus, toolbar, notice, rubber band.
-    fn overlays(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        let mut out = Vec::new();
-        let viewport = window.viewport_size();
-        if !self.file_notice.is_empty() {
-            let w = px(560.).min(viewport.width - px(32.));
-            out.push(
-                deferred(
-                    anchored()
-                        .position(point(
-                            (viewport.width - w) / 2.,
-                            viewport.height - px(24.) - px(64.),
-                        ))
-                        .child(
-                            div()
-                                .id("file-notice")
-                                .occlude()
-                                .w(w)
-                                .flex()
-                                .items_center()
-                                .gap(px(12.))
-                                .px(px(14.))
-                                .py(px(10.))
-                                .border_1()
-                                .border_color(theme::border())
-                                .rounded(px(10.))
-                                .bg(theme::bg())
-                                .shadow(vec![BoxShadow {
-                                    color: hsla(0., 0., 0., 0.18),
-                                    offset: point(px(0.), px(6.)),
-                                    blur_radius: px(24.),
-                                    spread_radius: px(0.),
-                                    inset: false,
-                                }])
-                                .text_color(theme::fg())
-                                .text_size(px(13.))
-                                .line_height(px(19.))
-                                .child(div().flex_1().child(self.file_notice.clone()))
-                                .child(
-                                    Button::new("file-notice-dismiss")
-                                        .outline()
-                                        .small()
-                                        .flex_none()
-                                        .rounded(px(7.))
-                                        .px(px(10.))
-                                        .text_color(theme::muted())
-                                        .accessibility_label("Dismiss")
-                                        .child(div().text_size(px(13.)).child("Dismiss"))
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.file_notice.clear();
-                                            cx.notify();
-                                        })),
-                                ),
-                        ),
-                )
-                .with_priority(1)
-                .into_any_element(),
-            );
-        }
-        if let Some(menu) = self.spell_menu.clone() {
-            let popup = match menu.popup.clone() {
-                Some(popup) => popup,
-                None => {
-                    let popup = self.build_spell_popup(&menu, window, cx);
-                    if let Some(m) = self.spell_menu.as_mut() {
-                        m.popup = Some(popup.clone());
-                    }
-                    popup
-                }
-            };
-            out.push(
-                deferred(
-                    anchored()
-                        .position(point(menu.pos.x, menu.pos.y + px(6.)))
-                        .snap_to_window_with_margin(px(8.))
-                        .child(popup_holder("spell-menu").child(popup)),
-                )
-                .with_priority(5)
-                .into_any_element(),
-            );
-        }
-        if let Some(rect) = self.sel_rect {
-            out.push(
-                deferred(
-                    anchored().position(rect.origin).child(
-                        div()
-                            .w(rect.size.width)
-                            .h(rect.size.height)
-                            .bg(theme::block_selection())
-                            .border_1()
-                            .border_color(rgb(0x2aa7ee))
-                            .rounded(px(2.)),
-                    ),
-                )
-                .with_priority(1)
-                .into_any_element(),
-            );
-        }
-        if let Some(open) = &self.block_menu {
-            out.push(open.menu.clone().into_any_element());
-        }
-        if let Some((_, picker, at, _)) = &self.link_picker {
-            out.push(
-                anchored()
-                    .position(*at)
-                    .snap_to_window_with_margin(px(8.))
-                    .child(picker.clone())
-                    .into_any_element(),
-            );
-        }
-        if let Some((_, view, at, _)) = &self.property_suggest {
-            // PropertySuggest.svelte: a 280×320 picker kept on screen, flipped
-            // above the caret when there's no room below.
-            let (w, h) = (px(280.), px(320.));
-            let top = if at.y + h > viewport.height - px(12.) {
-                (at.y - h - px(28.)).max(px(12.))
-            } else {
-                at.y
-            };
-            out.push(
-                anchored()
-                    .position(point(at.x.min(viewport.width - w - px(12.)), top))
-                    .snap_to_window_with_margin(px(8.))
-                    .child(view.clone())
-                    .into_any_element(),
-            );
-        }
-        if let Some(menu) = self.paste_menu.clone() {
-            let popup = match menu.popup.clone() {
-                Some(popup) => popup,
-                None => {
-                    let popup = self.build_paste_popup(&menu, window, cx);
-                    if let Some(m) = self.paste_menu.as_mut() {
-                        m.popup = Some(popup.clone());
-                    }
-                    popup
-                }
-            };
-            out.push(
-                deferred(
-                    anchored()
-                        .position(menu.pos)
-                        .snap_to_window_with_margin(px(8.))
-                        .child(popup_holder("paste-menu").child(popup)),
-                )
-                .with_priority(5)
-                .into_any_element(),
-            );
-        }
-        if let Some(tb) = self.toolbar.clone() {
-            let block = tb.block.clone();
-            let mk = |kind: u32| {
-                let block = block.clone();
-                cx.listener(move |this: &mut Editor, _: &ClickEvent, _, cx| {
-                    this.apply_mark(&block, kind, None, cx)
-                })
-            };
-            let bar = Toolbar::new("marks-toolbar")
-                .h_auto()
-                .gap(px(2.))
-                .bg(theme::panel())
-                .border_1()
-                .border_color(theme::border())
-                .rounded(px(8.))
-                .p(px(4.))
-                .shadow(vec![BoxShadow {
-                    color: hsla(0., 0., 0., 0.35),
-                    offset: point(px(0.), px(8.)),
-                    blur_radius: px(24.),
-                    spread_radius: px(0.),
-                    inset: false,
-                }])
-                .content(tool_button(
-                    "tb-bold",
-                    "Bold (⌘B)",
-                    div()
-                        .font_weight(FontWeight::BOLD)
-                        .child("B")
-                        .into_any_element(),
-                    mk(mark::BOLD),
-                ))
-                .content(tool_button(
-                    "tb-italic",
-                    "Italic (⌘I)",
-                    div().italic().child("I").into_any_element(),
-                    mk(mark::ITALIC),
-                ))
-                .content(tool_button(
-                    "tb-underline",
-                    "Underline (⌘U)",
-                    div().underline().child("U").into_any_element(),
-                    mk(mark::UNDERLINE),
-                ))
-                .content(tool_button(
-                    "tb-strike",
-                    "Strikethrough (⌘⇧S)",
-                    div().line_through().child("S").into_any_element(),
-                    mk(mark::STRIKETHROUGH),
-                ))
-                .content(tool_button(
-                    "tb-code",
-                    "Code (⌘E)",
-                    div().child("<>").into_any_element(),
-                    mk(mark::INLINE_CODE),
-                ))
-                .content(tool_button(
-                    "tb-link",
-                    "Link",
-                    div().child("🔗").into_any_element(),
-                    cx.listener(|this, _, window, cx| this.add_link(window, cx)),
-                ))
-                .content(tool_button_wide(
-                    "tb-object",
-                    "Turn into object",
-                    div()
-                        .text_size(px(12.))
-                        .whitespace_nowrap()
-                        .child("↗ Object")
-                        .into_any_element(),
-                    cx.listener(|this, _, window, cx| this.open_turn_into(window, cx)),
-                ));
-            let bar = div().occlude().child(bar);
-            // translateX(-50%) at the selection's center, 44px above it.
-            let w = px(7. * 32. + 50.);
-            out.push(
-                deferred(
-                    anchored()
-                        .position(point(tb.x - w / 2., tb.y - px(44.)))
-                        .snap_to_window_with_margin(px(4.))
-                        .child(bar),
-                )
-                .with_priority(4)
-                .into_any_element(),
-            );
-        }
-        if let Some((tb, view, _)) = &self.turn_into {
-            out.push(
-                anchored()
-                    .position(point(px(8.).max(tb.x - px(130.)), tb.y + px(8.)))
-                    .snap_to_window_with_margin(px(8.))
-                    .child(
-                        div()
-                            .id("turn-pop")
-                            .occlude()
-                            .w(px(260.))
-                            .popover_style(cx)
-                            .p(px(6.))
-                            .child(view.clone()),
-                    )
-                    .into_any_element(),
-            );
-        }
-        // Pickers with inputs stay on the focus path (no `deferred`): their keys and actions must reach them.
-        if let Some((tb, prompt, _)) = &self.link_prompt {
-            out.push(
-                anchored()
-                    .position(point(tb.x - px(160.), tb.y - px(130.)))
-                    .snap_to_window_with_margin(px(8.))
-                    .child(prompt.clone())
-                    .into_any_element(),
-            );
-        }
-        if let Some(slash) = self.render_slash(window, cx) {
-            out.push(slash);
-        }
-        out
-    }
-
-    fn table_row_add(&mut self, table: &str, cx: &mut Context<Self>) {
-        let (oid, t) = (self.object_id.clone(), table.to_string());
-        let task = self
-            .writes
-            .run(cx, move |cx| roostr_core::api::table::row_add(&oid, &t, cx));
-        self.await_then_refresh(vec![task], cx);
-    }
-
-    fn table_col_add(&mut self, table: &str, cx: &mut Context<Self>) {
-        let (oid, t) = (self.object_id.clone(), table.to_string());
-        let task = self
-            .writes
-            .run(cx, move |cx| roostr_core::api::table::col_add(&oid, &t, cx));
-        self.await_then_refresh(vec![task], cx);
-    }
-
-    fn table_row_remove(&mut self, row: &str, cx: &mut Context<Self>) {
-        let task = self.w_block_remove(row, cx);
-        self.await_then_refresh(vec![task], cx);
-    }
-
-    fn table_col_remove(&mut self, table: &str, col: &str, cx: &mut Context<Self>) {
-        let (oid, t, c) = (self.object_id.clone(), table.to_string(), col.to_string());
-        let task = self.writes.run(cx, move |cx| {
-            roostr_core::api::table::col_remove(&oid, &t, &c, cx)
-        });
-        self.await_then_refresh(vec![task], cx);
-    }
-
-    /// Keep one FileBlock view per file block (they hold the loaded bytes).
-    fn sync_file_views(&mut self, cx: &mut Context<Self>) {
-        let mut live = std::collections::HashSet::new();
-        for b in &self.blocks {
-            let Some(custom) = &b.content.custom else {
-                continue;
-            };
-            if custom.content_type != "file" {
-                continue;
-            }
-            live.insert(b.id.clone());
-            let meta = custom.meta.clone().unwrap_or_default();
-            match self.file_views.get(&b.id) {
-                Some(view) => view.update(cx, |v, cx| v.set_meta(meta, self.read_only, cx)),
-                None => {
-                    let editor = cx.entity().downgrade();
-                    let block_id = b.id.clone();
-                    let ro = self.read_only;
-                    let view = cx.new(|cx| FileBlock::new(block_id, meta, ro, editor, cx));
-                    self.file_views.insert(b.id.clone(), view);
-                }
-            }
-        }
-        self.file_views.retain(|id, _| live.contains(id));
-    }
-
-    /// The root blocks to build this frame and their slots (`Some(id)` a
-    /// block, `None` a spacer), in order - see [`Editor::render`].
-    fn windowed_blocks(
-        &mut self,
-        frame: &Frame,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> (Vec<AnyElement>, Vec<Option<String>>) {
-        let dragging = self.dragging.is_some()
-            || self.file_drag.is_some()
-            || self.touch_lift.is_some()
-            || self.drag_sel.is_some()
-            || self.text_drag.is_some();
-        // The root each id lives under (blocks nest under toggles, lists, columns).
-        let mut root_of: HashMap<&str, &str> = HashMap::new();
-        for root in &frame.roots {
-            let mut stack = vec![root.as_str()];
-            while let Some(id) = stack.pop() {
-                root_of.insert(id, root.as_str());
-                if let Some(b) = frame.by_id.get(id) {
-                    stack.extend(b.children_ids.iter().map(String::as_str));
-                }
-            }
-        }
-        let mut pinned: HashSet<&str> = HashSet::new();
-        for id in self
-            .active
-            .iter()
-            .chain(self.selected.iter())
-            .chain(std::iter::once(&self.last_focused))
-            .chain(self.focus_request.as_ref().map(|(id, _)| id))
-            .chain(self.link_picker.as_ref().map(|(id, ..)| id))
-            .chain(self.property_suggest.as_ref().map(|(id, ..)| id))
-        {
-            if let Some(root) = root_of.get(id.as_str()) {
-                pinned.insert(root);
-            }
-        }
-        // The window, in the editor's own coordinates (last frame's place).
-        let view_h = f32::from(window.viewport_size().height);
-        let editor = self.bounds.get();
-        let seen = self.visible.get();
-        let (lo, hi) = if seen.size.height > px(0.) {
-            let top = f32::from(seen.top() - editor.top());
-            (top - view_h, top + f32::from(seen.size.height) + view_h)
-        } else {
-            (-view_h, 2. * view_h)
-        };
-        let heights = self.block_heights.borrow().clone();
-        let typical = if heights.is_empty() {
-            32.
-        } else {
-            heights.values().sum::<f32>() / heights.len() as f32
-        };
-        let mut blocks = Vec::new();
-        let mut slots = Vec::new();
-        let mut gap = 0.;
-        let mut y = 0.;
-        for id in &frame.roots {
-            let h = heights.get(id).copied().unwrap_or(typical);
-            let near = y + h >= lo && y <= hi;
-            y += h;
-            if !(dragging || near || pinned.contains(id.as_str())) {
-                gap += h;
-                continue;
-            }
-            if gap > 0. {
-                blocks.push(div().flex_none().h(px(gap)).into_any_element());
-                slots.push(None);
-                gap = 0.;
-            }
-            if let Some(el) = self.render_block(id, frame, window, cx) {
-                blocks.push(el);
-                slots.push(Some(id.clone()));
-            }
-        }
-        if gap > 0. {
-            blocks.push(div().flex_none().h(px(gap)).into_any_element());
-            slots.push(None);
-        }
-        (blocks, slots)
-    }
-
-    fn update_present_relations(&mut self, cx: &App) {
-        let store = Store::global(cx).read(cx);
-        let fields = self.object_fields();
-        let space = roostr_core::relations::object_space_id(store, &fields);
-        self.present_relations = roostr_core::relations::space_relations(&store.relations, &space)
-            .into_iter()
-            .filter(|r| {
-                !r.hidden
-                    && !roostr_core::relations::is_reserved_key(&r.key)
-                    && fields.contains_key(&r.key)
+    let name = if rel.name.is_empty() {
+        rel.key.clone()
+    } else {
+        rel.name.clone()
+    };
+    let format = rel.format.clone();
+    let oid = f.oid();
+    let value_el =
+        roostr_properties::PropertyValue::new(format!("rel-value-{}", block.id), rel, value)
+            .space(f.space.clone())
+            .read_only(f.e.read_only)
+            .on_save(move |s: &mut State, v| {
+                let key = key.clone();
+                with_editor(s, &oid, |e, s| {
+                    let task = e.w_set_field(&key, v, s);
+                    e.await_then_refresh(vec![task], s);
+                });
             })
-            .map(|r| (r.key.clone(), r.name.clone(), r.format.clone()))
-            .collect();
-    }
-}
-
-impl Editor {
-    /// The poster for an embed URL, fetched once per URL in the background.
-    fn poster(
-        &self,
-        processor: crate::embed::Processor,
-        url: &str,
-        cx: &mut Context<Self>,
-    ) -> Option<crate::embed::Poster> {
-        if let Some(p) = self.posters.borrow().get(url) {
-            return p.clone();
-        }
-        self.posters.borrow_mut().insert(url.to_string(), None);
-        let url = url.to_string();
-        cx.spawn(async move |this, cx| {
-            let fetch_url = url.clone();
-            let poster = roostr_core::io::spawn_async(cx, async move {
-                crate::embed::fetch_poster(processor, &fetch_url).await
-            })
-            .await;
-            let _ = this.update(cx, |this, cx| {
-                this.posters.borrow_mut().insert(url, Some(poster));
-                cx.notify();
-            });
-        })
-        .detach();
-        None
-    }
-
-    /// A web embed (YouTube, Vimeo, Spotify). GPUI has no web view: the
-    /// player is a card with the player's still and title that opens the
-    /// URL in the browser; sized like the iframe (16:9, Spotify 152px).
-    fn render_embed(
-        &self,
-        meta: &std::collections::BTreeMap<String, String>,
-        id: &str,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let url = meta.get("url").cloned().unwrap_or_default();
-        let processor = meta
-            .get("processor")
-            .and_then(|p| crate::embed::Processor::from_key(p));
-        let poster = processor
-            .and_then(|p| self.poster(p, &url, cx))
-            .unwrap_or_default();
-        let label = processor.map_or("Embed", |p| p.label());
-        let open = url.clone();
-        let card = div()
-            .id(ElementId::Name(format!("embed-{id}").into()))
-            .flex_1()
-            .min_w_0()
-            .my(px(4.))
-            .rounded(px(10.))
-            .overflow_hidden()
-            .relative()
-            .cursor_pointer()
-            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .on_click(move |_, _, cx| cx.open_url(&open));
-        let play = |size: f32, bg: Hsla, fg: Hsla| {
-            div()
-                .size(px(size))
-                .flex_none()
-                .rounded_full()
-                .bg(bg)
-                .flex()
-                .items_center()
-                .justify_center()
-                .text_color(fg)
-                .text_size(px(size * 0.4))
-                .child("▶")
-        };
-        if processor == Some(crate::embed::Processor::Spotify) {
-            // Spotify's compact player: cover art, title, provider, play.
-            return card
-                .h(px(152.))
-                .bg(theme::panel())
-                .flex()
-                .items_center()
-                .gap(px(16.))
-                .p(px(16.))
-                .child(
-                    div()
-                        .size(px(120.))
-                        .flex_none()
-                        .rounded(px(8.))
-                        .overflow_hidden()
-                        .bg(theme::hover())
-                        .when_some(poster.thumb, |d, t| {
-                            d.child(
-                                img(SharedUri::from(t))
-                                    .size_full()
-                                    .rounded(px(8.))
-                                    .object_fit(ObjectFit::Cover),
-                            )
-                        }),
-                )
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .h_full()
-                        .flex()
-                        .flex_col()
-                        .justify_between()
-                        .child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .gap(px(4.))
-                                .child(
-                                    div()
-                                        .text_size(px(15.))
-                                        .font_weight(FontWeight::BOLD)
-                                        .text_color(theme::fg())
-                                        .truncate()
-                                        .child(poster.title.unwrap_or_else(|| url.clone())),
-                                )
-                                .child(
-                                    div()
-                                        .text_size(px(13.))
-                                        .text_color(theme::muted())
-                                        .child(label),
-                                ),
-                        )
-                        .child(div().flex().justify_end().child(play(
-                            32.,
-                            theme::white(),
-                            rgb(0x000000).into(),
-                        ))),
-                )
-                .into_any_element();
-        }
-        card.aspect_ratio(16. / 9.)
-            .bg(rgb(0x000000))
-            .when_some(poster.thumb, |d, t| {
-                d.child(
-                    img(SharedUri::from(t))
-                        .absolute()
-                        .inset_0()
-                        .size_full()
-                        .rounded(px(10.))
-                        .object_fit(ObjectFit::Cover),
-                )
-            })
-            .child(
-                div()
-                    .absolute()
-                    .inset_0()
-                    .flex()
-                    .flex_col()
-                    .items_center()
-                    .justify_center()
-                    .gap(px(8.))
-                    .child(play(56., hsla(0., 0., 0., 0.6), theme::white()))
-                    .child(
-                        div()
-                            .max_w(relative(0.9))
-                            .px(px(10.))
-                            .py(px(4.))
-                            .rounded(px(6.))
-                            .bg(hsla(0., 0., 0., 0.6))
-                            .text_size(px(12.))
-                            .text_color(theme::white())
-                            .truncate()
-                            .child(format!(
-                                "{label} · {}",
-                                poster.title.unwrap_or_else(|| url.clone())
-                            )),
-                    ),
-            )
-            .into_any_element()
-    }
-}
-
-/// What a dragged block shows: its text, else its custom content type.
-pub(crate) fn drag_label(c: &BlockContent) -> SharedString {
-    c.text
-        .as_ref()
-        .map(|t| t.text.clone())
-        .unwrap_or_else(|| {
-            c.custom
-                .as_ref()
-                .map(|c| c.content_type.clone())
-                .unwrap_or_default()
-        })
-        .into()
-}
-
-/// A bookmark card: favicon, title (else host), URL; opens in the browser.
-fn render_bookmark(meta: &std::collections::BTreeMap<String, String>, id: &str) -> AnyElement {
-    let url = meta.get("url").cloned().unwrap_or_default();
-    let host = url::Url::parse(&url)
-        .ok()
-        .and_then(|u| u.host_str().map(str::to_string))
-        .unwrap_or_else(|| url.clone());
-    let title = meta
-        .get("title")
-        .cloned()
-        .filter(|t| !t.is_empty())
-        .unwrap_or_else(|| host.clone());
-    let favicon = format!("https://www.google.com/s2/favicons?domain={host}&sz=32");
-    let open = url.clone();
-    div()
-        .id(ElementId::Name(format!("bookmark-{id}").into()))
-        .flex_1()
-        .min_w_0()
-        .flex()
+            .build(s, cx, t, layer);
+    row()
+        .grow(1.)
+        .min_w(0.)
         .items_center()
-        .gap(px(10.))
-        .border_1()
-        .border_color(theme::border())
-        .rounded(px(10.))
-        .px(px(12.))
-        .py(px(10.))
-        .my(px(4.))
-        .cursor_pointer()
-        .text_color(theme::fg())
-        .hover(|s| s.bg(theme::hover()))
-        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-        .on_click(move |_, _, cx| cx.open_url(&open))
-        .child(
-            img(SharedUri::from(favicon))
-                .size(px(20.))
-                .rounded(px(4.))
-                .flex_none(),
-        )
-        .child(
-            div()
-                .flex()
-                .flex_col()
-                .min_w_0()
+        .gap(12.)
+        .py(3.)
+        .child(roostr_ui::tooltip(
+            el().key(format!("rel-name-{}", block.id))
+                .w(140.)
+                .child(text(name).font(ty::ui(13.)).color(t.muted).truncate()),
+            &format,
+        ))
+        .child(col().grow(1.).min_w(0.).child(value_el))
+}
+
+/// Anytype BlockType.Link: icon + name (text) or a bordered card; a ghost row when the target is gone.
+fn render_link(block: &Block, meta: &BTreeMap<String, String>, f: &Frame, s: &State) -> El {
+    let t = f.t;
+    let store = &s.store;
+    let target_id = meta.get("target").cloned().unwrap_or_default();
+    let target = store.summary(&target_id).cloned();
+    let card = meta.get("style").map(String::as_str) == Some("card");
+    let wrap = row().grow(1.).min_w(0.).px(2.).py(3.);
+    let wrap = match block.align.unwrap_or(0) {
+        1 => wrap.justify_center(),
+        2 => wrap.justify_end(),
+        _ => wrap,
+    };
+    let Some(target) = target else {
+        return wrap.child(
+            row()
+                .items_center()
+                .gap(8.)
+                .child(text("⌀").font(ty::ui(18.).lh(20.)).color(t.muted))
                 .child(
-                    div()
-                        .text_size(px(13.))
-                        .font_weight(FontWeight(550.))
-                        .child(title),
-                )
-                .child(
-                    div()
-                        .text_size(px(11.))
-                        .text_color(theme::muted())
-                        .whitespace_nowrap()
-                        .overflow_hidden()
-                        .text_ellipsis()
-                        .child(url),
+                    text("Deleted object")
+                        .font(ty::ui(15.).medium())
+                        .color(t.muted),
                 ),
-        )
-        .into_any_element()
-}
-
-impl Render for Editor {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.narrow = roostr_core::layout::is_mobile(window);
-        if self.file_drag.is_some() && !cx.has_active_drag() {
-            // The file drag left the window (or was cancelled) without a drop.
-            self.file_drag = None;
-            self.drag_rects.clear();
-            self.drop_hint = None;
-            self.last_valid_drop = None;
+        );
+    };
+    let icon = roostr_core::objects::object_icon(
+        store,
+        &target.icon,
+        &target.type_key,
+        &target.channel_id,
+    );
+    let name = if target.name.is_empty() {
+        "Untitled".to_string()
+    } else {
+        target.name.clone()
+    };
+    let type_name = store
+        .types
+        .iter()
+        .find(|ty| ty.key == target.type_key)
+        .map(|ty| ty.name.clone())
+        .unwrap_or_else(|| target.type_key.clone());
+    let images = s.get::<roostr_ui::Images>();
+    let icon_el = match images {
+        Some(images) => roostr_ui::emoji_or_image_icon(&icon, 18., images),
+        None => text(icon.clone()).font(ty::ui(16.)),
+    };
+    let open = target.id.clone();
+    let click = move |s: &mut State, tx: &mut rune::Tx| {
+        if tx.mods().cmd {
+            roostr_core::nav::open_tab(Route::Object(open.clone()), true, s);
+        } else {
+            roostr_core::nav::navigate(Route::Object(open.clone()), s);
         }
-        if let Some((id, offset)) = self.focus_request.clone()
-            && self.texts.contains_key(&id)
-        {
-            self.focus_request = None;
-            self.focus_block(&id, offset, cx);
-        }
-        if self.focus_pending {
-            self.focus_pending = false;
-            cx.defer_in(window, |this, window, cx| {
-                window.focus(&this.focus_handle, cx)
-            });
-        }
-        self.update_present_relations(cx);
-        self.sync_file_views(cx);
-        self.rows.borrow_mut().clear();
-        self.bot_strips.borrow_mut().clear();
-
-        let store = Store::global(cx).read(cx);
-        let frame = Frame {
-            by_id: self
-                .blocks
-                .iter()
-                .map(|b| (b.id.clone(), b.clone()))
-                .collect(),
-            roots: self.root_ids(),
-            all_roots: crate::doc::root_order(&self.blocks),
-            space: roostr_core::relations::object_space_id(store, &self.object_fields()),
-        };
-        // A long page builds only the root blocks in, or a window's height
-        // around, the window: the page scrolls the editor, and each frame of
-        // it built every block (hundreds of text fields). Spacers sized by the
-        // blocks' last drawn heights stand in for the rest. Blocks in use
-        // (typing, selected, open menus) are always built, and every block
-        // is while something is dragged (drop targets come from what's drawn).
-        let (blocks, slots) = self.windowed_blocks(&frame, window, cx);
-        let empty = frame.roots.is_empty();
-        let loaded = self.object.is_some();
-        let overlays = self.overlays(window, cx);
-        let ghost = self.touch_ghost();
-
-        let entity = cx.entity();
-        let bounds_cell = self.bounds.clone();
-        let visible_cell = self.visible.clone();
-        let heights = self.block_heights.clone();
-        div()
-            .on_children_prepainted(move |bounds, _, _| {
-                // Children: the gesture canvas, then the slots in order.
-                // A block's share is from its top to the next slot's, so its
-                // margins count too; the last one's is its own height.
-                let mut heights = heights.borrow_mut();
-                let placed = bounds.get(1..1 + slots.len()).unwrap_or(&[]);
-                for (i, (slot, b)) in slots.iter().zip(placed).enumerate() {
-                    if let Some(id) = slot {
-                        let h = match placed.get(i + 1) {
-                            Some(next) => next.top() - b.top(),
-                            None => b.size.height,
-                        };
-                        heights.insert(id.clone(), f32::from(h));
-                    }
-                }
-            })
-            .id("roostr-editor")
-            .key_context("RoostrEditor")
-            .track_focus(&self.focus_handle)
-            .relative()
-            .w_full()
-            .min_h(px(240.))
-            .pb(px(120.))
-            .text_color(theme::fg())
-            .cursor(if self.read_only {
-                CursorStyle::Arrow
-            } else {
-                CursorStyle::IBeam
-            })
-            .on_action(cx.listener(Self::on_enter))
-            .on_action(cx.listener(Self::on_shift_enter))
-            .on_action(cx.listener(Self::on_tab))
-            .on_action(cx.listener(Self::on_shift_tab))
-            .on_action(cx.listener(Self::on_backspace))
-            .on_action(cx.listener(Self::on_delete))
-            .on_action(cx.listener(Self::on_delete_word_left))
-            .on_action(cx.listener(Self::on_delete_line_left))
-            .on_action(cx.listener(Self::on_delete_word_right))
-            .on_action(cx.listener(Self::on_delete_line_right))
-            .on_action(cx.listener(Self::on_left))
-            .on_action(cx.listener(Self::on_right))
-            .on_action(cx.listener(Self::on_select_left))
-            .on_action(cx.listener(Self::on_select_right))
-            .on_action(cx.listener(Self::on_word_left))
-            .on_action(cx.listener(Self::on_word_right))
-            .on_action(cx.listener(Self::on_select_word_left))
-            .on_action(cx.listener(Self::on_select_word_right))
-            .on_action(cx.listener(Self::on_line_start))
-            .on_action(cx.listener(Self::on_line_end))
-            .on_action(cx.listener(Self::on_select_line_start))
-            .on_action(cx.listener(Self::on_select_line_end))
-            .on_action(cx.listener(Self::on_doc_start))
-            .on_action(cx.listener(Self::on_doc_end))
-            .on_action(cx.listener(Self::on_select_doc_start))
-            .on_action(cx.listener(Self::on_select_doc_end))
-            .on_action(cx.listener(Self::on_up))
-            .on_action(cx.listener(Self::on_down))
-            .on_action(cx.listener(Self::on_select_up))
-            .on_action(cx.listener(Self::on_select_down))
-            .on_action(cx.listener(Self::on_select_all))
-            .on_action(cx.listener(Self::on_bold))
-            .on_action(cx.listener(Self::on_italic))
-            .on_action(cx.listener(Self::on_underline))
-            .on_action(cx.listener(Self::on_strikethrough))
-            .on_action(cx.listener(Self::on_inline_code))
-            .on_action(cx.listener(Self::on_escape))
-            .on_action(cx.listener(Self::on_undo))
-            .on_action(cx.listener(Self::on_redo))
-            .on_action(cx.listener(Self::on_copy))
-            .on_action(cx.listener(Self::on_cut))
-            .on_action(cx.listener(Self::on_paste))
-            .on_action(cx.listener(Self::on_character_palette))
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, ev: &MouseDownEvent, window, cx| {
-                    this.spell_menu = None;
-                    this.paste_menu = None;
-                    if this.read_only {
-                        return;
-                    }
-                    window.focus(&this.focus_handle, cx);
-                    if let Some(a) = this.active.take() {
-                        this.flush_save(&a, cx);
-                        this.sync_texts();
-                    }
-                    this.toolbar = None;
-                    this.arm_drag(ev, false, true);
-                    cx.notify();
-                }),
-            )
-            .on_drag_move(
-                cx.listener(|this, ev: &DragMoveEvent<DraggedBlock>, window, cx| {
-                    if this.dragging.is_none() {
-                        let id = ev.drag(cx).id.clone();
-                        this.begin_drag(&id);
-                    }
-                    this.drag_move_to(ev.event.position, window, cx);
-                }),
-            )
-            .on_drag_move(
-                cx.listener(|this, ev: &DragMoveEvent<ExternalPaths>, _, cx| {
-                    if this.read_only {
-                        return;
-                    }
-                    let inside = ev.bounds.contains(&ev.event.position);
-                    if !inside {
-                        if this.file_drag.is_some() {
-                            this.file_drag = None;
-                            this.drag_rects.clear();
-                            this.drop_hint = None;
-                            this.last_valid_drop = None;
-                            cx.notify();
-                        }
-                        return;
-                    }
-                    if this.file_drag.is_none() {
-                        this.file_drag = Some(ev.drag(cx).paths().to_vec());
-                        this.build_drag_rects();
-                    }
-                    let hit = this.resolve_drop(ev.event.position);
-                    if let Some(h) = &hit {
-                        this.last_valid_drop = Some(h.clone());
-                    }
-                    if hit != this.drop_hint {
-                        this.drop_hint = hit;
-                        cx.notify();
-                    }
-                }),
-            )
+    };
+    let body = if card {
+        // `.link-card:hover` (`transition: border-color 0.15s`).
+        col()
+            .key(format!("link-{}", block.id))
+            .justify_center()
+            .gap(2.)
+            .border(1., t.border)
+            .hover(t.muted.alpha(0.0))
+            .radius(8.)
+            .padding(16.)
+            .min_w(240.)
+            .cursor(Cursor::Pointer)
             .child(
-                canvas(
-                    move |bounds, window, _| {
-                        bounds_cell.set(bounds);
-                        visible_cell.set(bounds.intersect(&window.content_mask().bounds));
-                        window.insert_hitbox(bounds, HitboxBehavior::Normal)
-                    },
-                    move |_, hitbox, window, _| {
-                        // A touch hold on a row lifts it (Editor.svelte onTouchPress),
-                        // unless something over the editor took the touch.
-                        let e = entity.clone();
-                        window.on_mouse_event(move |ev: &LongPressEvent, phase, window, cx| {
-                            if phase != DispatchPhase::Bubble {
-                                return;
-                            }
-                            match ev.phase {
-                                TouchPhase::Started => {
-                                    if !hitbox.is_hovered(window) {
-                                        return;
-                                    }
-                                    let lifted = e.update(cx, |this, cx| {
-                                        this.touch_lift_at(
-                                            ev.start_position,
-                                            ev.position,
-                                            window,
-                                            cx,
-                                        )
-                                    });
-                                    if lifted {
-                                        window.capture_long_press(&e);
-                                        window.prevent_default();
-                                        cx.stop_propagation();
-                                    }
-                                }
-                                TouchPhase::Moved if window.has_long_press_capture(&e) => {
-                                    e.update(cx, |this, cx| {
-                                        this.touch_move(ev.position, window, cx)
-                                    });
-                                }
-                                TouchPhase::Ended if window.has_long_press_capture(&e) => {
-                                    e.update(cx, |this, cx| this.touch_drop(Some(ev.position), cx));
-                                }
-                                TouchPhase::Cancelled if window.has_long_press_capture(&e) => {
-                                    e.update(cx, |this, cx| this.touch_drop(None, cx));
-                                }
-                                _ => {}
-                            }
-                        });
-                        // Registered every frame (a press and release can land before the
-                        // next paint), acting only while a drag of some kind is armed.
-                        let e = entity.clone();
-                        window.on_mouse_event(move |ev: &MouseMoveEvent, phase, window, cx| {
-                            if phase != DispatchPhase::Bubble {
-                                return;
-                            }
-                            e.update(cx, |this, cx| {
-                                if this.text_drag.is_none() && this.drag_sel.is_none() {
-                                    return;
-                                }
-                                if ev.pressed_button == Some(MouseButton::Left) {
-                                    this.drag_mouse_move(ev.position, window, cx);
-                                } else {
-                                    // The release happened outside the window.
-                                    this.drag_mouse_up(ev.position, cx);
-                                }
-                            });
-                        });
-                        let e = entity.clone();
-                        window.on_mouse_event(move |ev: &MouseUpEvent, phase, _, cx| {
-                            if phase != DispatchPhase::Bubble {
-                                return;
-                            }
-                            e.update(cx, |this, cx| {
-                                if this.text_drag.is_some() || this.drag_sel.is_some() {
-                                    this.drag_mouse_up(ev.position, cx);
-                                }
-                                if this.dragging.is_some() {
-                                    // The pointer can be between targets on the frame the drop lands.
-                                    let hint = this.drop_hint.clone().or_else(|| {
-                                        this.last_valid_drop
-                                            .clone()
-                                            .filter(|h| !this.drop_forbidden(&h.id))
-                                    });
-                                    this.finish_drag(hint, cx);
-                                }
-                                if this.file_drag.is_some() && cx.has_active_drag() {
-                                    this.drop_external(cx);
-                                    cx.stop_propagation();
-                                }
-                            });
-                        });
-                    },
-                )
-                .absolute()
-                .inset_0(),
+                row()
+                    .items_center()
+                    .gap(8.)
+                    .min_w(0.)
+                    .child(icon_el)
+                    .child(text(name).font(ty::ui(15.).medium()).color(t.fg).truncate()),
             )
-            .children(blocks)
-            .when(empty && loaded && !self.read_only, |d| {
-                d.child(
-                    div()
-                        .id("empty-hint")
-                        // `.empty-hint`: 48px, 16px at ≤720px.
-                        .ml(self.gutter_w())
-                        .py(px(8.))
-                        .text_size(px(15.))
-                        .text_color(theme::muted())
-                        .cursor(CursorStyle::IBeam)
-                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                        .on_click(cx.listener(|this, _, _, cx| this.append_block(cx)))
-                        .child("Click to start writing…"),
-                )
-            })
-            .when_some(self.load_error.clone().filter(|_| !loaded), |d, e| {
-                d.child(
-                    div()
-                        .ml(self.gutter_w())
-                        .text_color(theme::muted())
-                        .text_size(px(13.))
-                        .child(e),
-                )
-            })
-            .children(ghost)
-            .children(overlays)
-    }
+            .child(text(type_name).font(ty::ui(12.).lh(16.)).color(t.muted))
+            .on_press_tx(click)
+    } else {
+        row()
+            .key(format!("link-{}", block.id))
+            .items_center()
+            .gap(8.)
+            .min_w(0.)
+            .cursor(Cursor::Pointer)
+            .hover_group()
+            .child(icon_el)
+            .child(
+                el().border_sides([0., 0., 1., 0.], t.border)
+                    .child(text(name).font(ty::ui(15.).medium()).color(t.fg).truncate()),
+            )
+            .on_press_tx(click)
+    };
+    wrap.child(body)
 }
 
-impl Editor {
-    /// The spelling menu: suggestions, then "Add … to dictionary" with a
-    /// close button. Outside clicks and picks dismiss it.
-    fn build_spell_popup(
-        &self,
-        menu: &crate::editor::SpellMenu,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Entity<PopupMenu> {
-        let editor = cx.entity().downgrade();
-        let word = menu.word.clone();
-        let options = menu.options.clone();
-        let popup = PopupMenu::build(window, cx, move |mut m, _, _| {
-            m = m.min_w(px(180.));
-            if options.is_empty() {
-                let word = word.clone();
-                m = m.item(
-                    PopupMenuItem::element(move |_, _| {
-                        div()
-                            .text_size(px(13.))
-                            .text_color(theme::muted())
-                            .max_w(px(240.))
-                            .overflow_hidden()
-                            .text_ellipsis()
-                            .whitespace_nowrap()
-                            .child(format!("No suggestions for \"{word}\""))
-                    })
-                    .disabled(true),
-                );
-            } else {
-                for (i, option) in options.iter().enumerate() {
-                    let label = option.clone();
-                    let pick = option.clone();
-                    let editor = editor.clone();
-                    m = m.item(
-                        PopupMenuItem::element(move |_, _| {
-                            div()
-                                .id(ElementId::Name(format!("spell-opt-{i}").into()))
-                                .text_size(px(13.))
-                                .font_weight(FontWeight::MEDIUM)
-                                .child(label.clone())
+/// Floating pieces: menus, toolbar, notice, rubber band, the dragged block.
+fn overlays(f: &Frame, s: &State, cx: &mut Cx<State>, layer: &mut Vec<El>) {
+    let (t, e) = (f.t, f.e);
+    let oid = f.oid();
+    let (win_w, win_h) = cx
+        .layout_with("kit-root", |r| (r[2], r[3]))
+        .unwrap_or((1280., 900.));
+    if !e.file_notice.is_empty() {
+        let w = 560f32.min(win_w - 32.);
+        let o = oid.clone();
+        layer.push(
+            row()
+                .key(format!("ed-{oid}-file-notice"))
+                .absolute((win_w - w) / 2., win_h - 24. - 64.)
+                .w(w)
+                .items_center()
+                .gap(12.)
+                .px(14.)
+                .py(10.)
+                .border(1., t.border)
+                .radius(10.)
+                .fill(t.bg)
+                .shadow(6., 48., Color::BLACK.alpha(0.18))
+                .child(
+                    text(e.file_notice.clone())
+                        .font(ty::ui(13.).lh(19.))
+                        .color(t.fg)
+                        .wrap()
+                        .grow(1.),
+                )
+                .child(
+                    Button::new(format!("ed-{oid}-file-notice-dismiss"))
+                        .outline()
+                        .small()
+                        .px(10.)
+                        .accessibility_label("Dismiss")
+                        .child(text("Dismiss").font(ty::ui(13.)).color(t.muted))
+                        .on_press(move |s: &mut State| {
+                            with_editor(s, &o, |e, _| e.file_notice.clear());
                         })
-                        .on_click(move |_, _, cx| {
-                            let _ =
-                                editor.update(cx, |this, cx| this.replace_misspelling(&pick, cx));
-                        }),
-                    );
-                }
-                m = m.separator();
-            }
-            let add = editor.clone();
-            let close = editor.clone();
-            let word = word.clone();
-            m.item(
-                PopupMenuItem::element(move |_, _| {
-                    let close = close.clone();
-                    div()
-                        .flex()
-                        .flex_1()
-                        .items_center()
-                        .justify_between()
-                        .gap(px(8.))
-                        .text_size(px(13.))
-                        .text_color(theme::muted())
-                        .child(
-                            div()
-                                .id("spell-add")
-                                .child(format!("Add \"{word}\" to dictionary")),
-                        )
-                        .child(
-                            div()
-                                .id("spell-close")
-                                .px(px(6.))
-                                .py(px(2.))
-                                .rounded(px(5.))
-                                .cursor_pointer()
-                                .hover(|s| s.bg(theme::hl_med()).text_color(theme::fg()))
-                                .on_click(move |_, _, cx| {
-                                    // Not the row's "Add".
-                                    cx.stop_propagation();
-                                    let _ = close.update(cx, |this, cx| {
-                                        this.spell_menu = None;
-                                        cx.notify();
-                                    });
-                                })
-                                .child("✕"),
-                        )
-                })
-                .on_click(move |_, _, cx| {
-                    let _ = add.update(cx, |this, cx| this.spell_add_word(cx));
-                }),
-            )
-        });
-        cx.subscribe(&popup, |this, popup, _: &DismissEvent, cx| {
-            if this.spell_menu.as_ref().and_then(|m| m.popup.as_ref()) == Some(&popup) {
-                this.spell_menu = None;
-                cx.notify();
-            }
-        })
-        .detach();
-        popup
+                        .build(t),
+                ),
+        );
     }
-
-    /// "Paste as": Embed (when a processor knows the URL), Bookmark, Link, Text.
-    fn build_paste_popup(
-        &self,
-        menu: &crate::editor::PasteMenu,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Entity<PopupMenu> {
-        let editor = cx.entity().downgrade();
-        let embed = menu.processor.is_some();
-        let popup = PopupMenu::build(window, cx, move |mut m, _, _| {
-            m = m.min_w(px(160.)).item(
-                PopupMenuItem::element(|_, _| {
-                    div()
-                        .text_size(px(10.))
-                        .text_color(theme::muted())
-                        .pt(px(2.))
-                        .child("PASTE AS")
-                })
+    // The caret's rect in window points, for menus opened at it.
+    let caret = |cx: &mut Cx<State>, id: &str| cx.caret(&text_key(id));
+    if let Some(menu) = &e.spell_menu {
+        let at = caret(cx, &menu.block)
+            .map(|c| (c[0], c[1] + c[3] + 6.))
+            .unwrap_or_else(|| e.anchor_under(&menu.block));
+        let mut m = PopupMenu::new().min_w(180.);
+        if menu.options.is_empty() {
+            m = m.item(
+                PopupMenuItem::element(
+                    text(format!("No suggestions for \"{}\"", menu.word))
+                        .font(ty::ui(13.))
+                        .color(t.muted)
+                        .truncate()
+                        .max_w(240.),
+                )
                 .disabled(true),
             );
-            // (id, label, as a block, embed / link)
-            let choices: [(&'static str, &'static str, bool, bool); 4] = [
-                ("paste-embed", "Embed", true, true),
-                ("paste-bookmark", "Bookmark", true, false),
-                ("paste-link", "Link", false, true),
-                ("paste-text", "Text", false, false),
-            ];
-            for (id, label, block, flag) in choices {
-                if id == "paste-embed" && !embed {
-                    continue;
-                }
-                let editor = editor.clone();
+        } else {
+            for (i, option) in menu.options.iter().enumerate() {
+                let (o, pick) = (oid.clone(), option.clone());
                 m = m.item(
-                    PopupMenuItem::element(move |_, _| {
-                        div().id(id).text_size(px(13.)).child(label)
-                    })
-                    .on_click(move |_, _, cx| {
-                        let _ = editor.update(cx, |this, cx| {
-                            if block {
-                                this.paste_as_block(flag, cx)
-                            } else {
-                                this.paste_as_text(flag, cx)
-                            }
-                        });
+                    PopupMenuItem::element(
+                        text(option.clone())
+                            .key(format!("spell-opt-{i}"))
+                            .font(ty::ui(13.).medium())
+                            .color(t.fg),
+                    )
+                    .on_press(move |s: &mut State| {
+                        with_editor(s, &o, |e, s| e.replace_misspelling(&pick, s));
                     }),
                 );
             }
-            m
-        });
-        cx.subscribe(&popup, |this, popup, _: &DismissEvent, cx| {
-            if this.paste_menu.as_ref().and_then(|m| m.popup.as_ref()) == Some(&popup) {
-                this.paste_menu = None;
-                cx.notify();
+            m = m.separator();
+        }
+        let o = oid.clone();
+        m = m.item(
+            PopupMenuItem::element(
+                text(format!("Add \"{}\" to dictionary", menu.word))
+                    .key("spell-add")
+                    .font(ty::ui(13.))
+                    .color(t.muted),
+            )
+            .on_press(move |s: &mut State| {
+                with_editor(s, &o, |e, s| e.spell_add_word(s));
+            }),
+        );
+        let o = oid.clone();
+        roostr_ui::DropdownMenu::new(format!("ed-{oid}-spell"))
+            .menu(m)
+            .open(true)
+            .at(at.0, at.1)
+            .on_close(move |s: &mut State| {
+                with_editor(s, &o, |e, _| e.spell_menu = None);
+            })
+            .build(t, layer);
+    }
+    if let Some(rect) = e.sel_rect {
+        layer.push(
+            el().absolute(rect[0], rect[1])
+                .size(rect[2], rect[3])
+                .fill(t.block_selection)
+                .border(1., roostr_ui::color::rgb(0x2aa7ee))
+                .radius(2.)
+                .inert(),
+        );
+    }
+    if e.block_menu.is_some() {
+        crate::block_menu::block_menu_view(s, cx, t, e, layer);
+    }
+    if e.link_picker.is_some() {
+        crate::link_picker::link_picker_view(s, cx, t, e, layer);
+    }
+    if let Some(open) = &e.property_suggest {
+        // PropertySuggest.svelte: a 280×320 picker kept on screen, flipped
+        // above the caret when there's no room below.
+        let (w, h) = (280., 320.);
+        let (x, y) = open.at;
+        let top = if y + h > win_h - 12. {
+            (y - h - 28.).max(12.)
+        } else {
+            y
+        };
+        let (lo, eo) = (oid.clone(), oid.clone());
+        let menu =
+            roostr_properties::PropertySuggest::new(format!("ed-{oid}-prop-suggest"), &open.state)
+                .on_state(move |s: &mut State| {
+                    &mut s
+                        .slot::<crate::Editors>()
+                        .map
+                        .get_mut(&lo)
+                        .and_then(|e| e.property_suggest.as_mut())
+                        .expect("the property picker is open")
+                        .state
+                })
+                .on_event(move |s: &mut State, ev| {
+                    with_editor(s, &eo, |e, s| e.property_picked(ev, s));
+                })
+                .build(s, cx, t, layer);
+        layer.push(
+            menu.absolute(x.min(win_w - w - 12.).max(8.), top)
+                .w(w)
+                .max_h(h),
+        );
+    }
+    if let Some(menu) = &e.paste_menu {
+        let at = caret(cx, &menu.block)
+            .map(|c| (c[0], c[1] + c[3] + 6.))
+            .unwrap_or((120., 126.));
+        let mut m = PopupMenu::new().min_w(160.).item(
+            PopupMenuItem::element(text("PASTE AS").font(ty::ui(10.)).color(t.muted).pt(2.))
+                .disabled(true),
+        );
+        // (key, label, as a block, embed / link)
+        let choices: [(&'static str, &'static str, bool, bool); 4] = [
+            ("paste-embed", "Embed", true, true),
+            ("paste-bookmark", "Bookmark", true, false),
+            ("paste-link", "Link", false, true),
+            ("paste-text", "Text", false, false),
+        ];
+        for (key, label, block, flag) in choices {
+            if key == "paste-embed" && menu.processor.is_none() {
+                continue;
             }
-        })
-        .detach();
-        popup
+            let o = oid.clone();
+            m = m.item(
+                PopupMenuItem::element(text(label).key(key).font(ty::ui(13.)).color(t.fg))
+                    .on_press(move |s: &mut State| {
+                        with_editor(s, &o, |e, s| {
+                            if block {
+                                e.paste_as_block(flag, s)
+                            } else {
+                                e.paste_as_text(flag, s)
+                            }
+                        });
+                    }),
+            );
+        }
+        let o = oid.clone();
+        roostr_ui::DropdownMenu::new(format!("ed-{oid}-paste"))
+            .menu(m)
+            .open(true)
+            .at(at.0, at.1)
+            .on_close(move |s: &mut State| {
+                with_editor(s, &o, |e, s| {
+                    if let Some(menu) = e.paste_menu.take() {
+                        e.focus_block(&menu.block, menu.at, s);
+                    }
+                });
+            })
+            .build(t, layer);
+    }
+    if let Some(tb) = &e.toolbar
+        && e.link_prompt.is_none()
+        && e.turn_into.is_none()
+        && let Some(c) = caret(cx, &tb.block)
+    {
+        layer.push(marks_toolbar(f, tb, c, win_w));
+    }
+    if let Some(open) = &e.turn_into {
+        let (x, y) = open.pos;
+        let (lo, eo) = (oid.clone(), oid.clone());
+        let menu = roostr_properties::TypeSuggest::new(format!("ed-{oid}-turn-into"), &open.state)
+            .on_state(move |s: &mut State| {
+                &mut s
+                    .slot::<crate::Editors>()
+                    .map
+                    .get_mut(&lo)
+                    .and_then(|e| e.turn_into.as_mut())
+                    .expect("the type picker is open")
+                    .state
+            })
+            .on_event(move |s: &mut State, ev| {
+                with_editor(s, &eo, |e, s| e.turn_into_picked(ev, s));
+            })
+            .build(s, cx, t, layer);
+        layer.push(
+            col()
+                .key(format!("ed-{oid}-turn-pop"))
+                .absolute((x - 130.).max(8.).min(win_w - 268.), y + 8.)
+                .w(260.)
+                .fill(t.kit.popover)
+                .radius(radius::KIT)
+                .with_shadows(shadow::kit_popover(t))
+                .padding(6.)
+                .child(menu),
+        );
+    }
+    if e.link_prompt.is_some() {
+        crate::link_picker::link_prompt_view(s, cx, t, e, layer);
+    }
+    crate::slash_menu::slash_view(s, cx, t, e, layer);
+    if let Some(id) = &e.dragging
+        && let Some(b) = e.block(id)
+    {
+        let (x, y) = e.drag_point;
+        layer.push(
+            el().absolute(x + 8., y + 8.)
+                .max_w(360.)
+                .px(10.)
+                .py(6.)
+                .radius(6.)
+                .fill(t.panel)
+                .box_shadow(shadow::drag())
+                .opacity(0.95)
+                .inert()
+                .child(
+                    text(drag_label(&b.content))
+                        .font(ty::ui(15.))
+                        .color(t.fg)
+                        .truncate(),
+                ),
+        );
     }
 }
 
-/// Holds a kit popup menu (its own popover chrome draws the frame) where the
-/// editor keeps focus: a click in the menu must not move it there.
-fn popup_holder(id: &'static str) -> Stateful<Div> {
-    div()
-        .id(id)
-        .occlude()
-        .capture_any_mouse_down(|_, window, _| window.prevent_default())
+/// The marks toolbar over a text selection: centred over the caret, 44pt above it.
+fn marks_toolbar(f: &Frame, tb: &crate::editor::Toolbar, caret: [f32; 4], win_w: f32) -> El {
+    use roostr_core::types::mark;
+    let t = f.t;
+    let oid = f.oid();
+    let tool = |key: &'static str, tip: &'static str, label: El, wide: bool| {
+        let b = Button::new(key).ghost().h(30.).text_size(14.).child(label);
+        let b = if wide { b.px(8.) } else { b.w(30.).p(0.) };
+        (b, tip)
+    };
+    let mk = |kind: u32| {
+        let (o, block) = (oid.clone(), tb.block.clone());
+        move |s: &mut State| {
+            with_editor(s, &o, |e, s| e.apply_mark(&block, kind, None, s));
+        }
+    };
+    let label = |s: &str, style: rune::TextStyle| text(s.to_string()).font(style).color(t.fg);
+    let mut bar = row()
+        .key(format!("ed-{oid}-marks-toolbar"))
+        .gap(2.)
+        .fill(t.panel)
+        .border(1., t.border)
+        .radius(8.)
+        .padding(4.)
+        .shadow(8., 48., Color::BLACK.alpha(0.35));
+    let items: Vec<(roostr_ui::Button, &'static str)> = vec![
+        {
+            let (b, tip) = tool(
+                "tb-bold",
+                "Bold (⌘B)",
+                label("B", ty::ui(14.).bold()),
+                false,
+            );
+            (b.on_press(mk(mark::BOLD)), tip)
+        },
+        {
+            let (b, tip) = tool(
+                "tb-italic",
+                "Italic (⌘I)",
+                label(
+                    "I",
+                    rune::TextStyle {
+                        italic: true,
+                        ..ty::ui(14.)
+                    },
+                ),
+                false,
+            );
+            (b.on_press(mk(mark::ITALIC)), tip)
+        },
+        {
+            let u = label("U", ty::ui(14.)).spans(vec![rune::Span {
+                underline: Some(t.fg),
+                ..rune::Span::new(0, 1)
+            }]);
+            let (b, tip) = tool("tb-underline", "Underline (⌘U)", u, false);
+            (b.on_press(mk(mark::UNDERLINE)), tip)
+        },
+        {
+            let s_el = label("S", ty::ui(14.)).strike(0, 1, None);
+            let (b, tip) = tool("tb-strike", "Strikethrough (⌘⇧S)", s_el, false);
+            (b.on_press(mk(mark::STRIKETHROUGH)), tip)
+        },
+        {
+            let (b, tip) = tool("tb-code", "Code (⌘E)", label("<>", ty::ui(14.)), false);
+            (b.on_press(mk(mark::INLINE_CODE)), tip)
+        },
+        {
+            let o = oid.clone();
+            let (b, tip) = tool("tb-link", "Link", label("🔗", ty::ui(14.)), false);
+            (
+                b.on_press(move |s: &mut State| {
+                    with_editor(s, &o, |e, s| e.add_link(s));
+                }),
+                tip,
+            )
+        },
+        {
+            let o = oid.clone();
+            let pos = (caret[0], caret[1] + caret[3]);
+            let (b, tip) = tool(
+                "tb-object",
+                "Turn into object",
+                label("↗ Object", ty::ui(12.)),
+                true,
+            );
+            (
+                b.on_press(move |s: &mut State| {
+                    with_editor(s, &o, |e, s| e.open_turn_into(pos, s));
+                }),
+                tip,
+            )
+        },
+    ];
+    for (b, tip) in items {
+        bar = bar.child(roostr_ui::tooltip(b.build(t), tip));
+    }
+    // translateX(-50%) at the selection, 44pt above it.
+    let w = 7. * 32. + 50.;
+    let x = (caret[0] - w / 2.).clamp(4., (win_w - w - 4.).max(4.));
+    bar.absolute(x, (caret[1] - 44.).max(4.))
 }
 
-/// A marks-toolbar control: a kit ghost button (30px square) under Roostr's
-/// tooltip — the kit Button takes only its own tooltip — whose mouse-down
-/// stays off the text so the selection survives the click.
-fn tool_button(
-    id: &'static str,
-    tip: &'static str,
-    label: AnyElement,
-    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
-) -> AnyElement {
-    tool_button_with(id, tip, Button::new(id).w(px(30.)).p_0(), label, on_click)
+/// Several shadows on one element.
+trait WithShadows {
+    fn with_shadows(self, shadows: impl IntoIterator<Item = rune::Shadow>) -> Self;
 }
 
-/// [`tool_button`] sized to its label.
-fn tool_button_wide(
-    id: &'static str,
-    tip: &'static str,
-    label: AnyElement,
-    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
-) -> AnyElement {
-    tool_button_with(id, tip, Button::new(id).px(px(8.)), label, on_click)
-}
-
-fn tool_button_with(
-    id: &'static str,
-    tip: &'static str,
-    button: Button,
-    label: AnyElement,
-    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
-) -> AnyElement {
-    div()
-        .id(SharedString::from(format!("{id}-tip")))
-        .flex_none()
-        .tooltip(roostr_core::ui::tooltip(tip))
-        .child(
-            button
-                .ghost()
-                .h(px(30.))
-                .text_size(px(14.))
-                .text_color(theme::fg())
-                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .on_click(on_click)
-                .child(label),
-        )
-        .into_any_element()
+impl WithShadows for El {
+    fn with_shadows(self, shadows: impl IntoIterator<Item = rune::Shadow>) -> Self {
+        shadows.into_iter().fold(self, El::box_shadow)
+    }
 }

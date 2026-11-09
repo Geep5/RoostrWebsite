@@ -1,29 +1,30 @@
-//! The dark document pages, `/guide` and `/privacy`: a 720px column of
-//! headings, paragraphs and lists, scrolled like a browser body (keyboard
-//! included), with in-page anchors for the guide's table of contents.
+//! The dark document pages, `/guide` and `/privacy`: a 720 pt column of headings, paragraphs
+//! and lists, scrolled like a browser body (keyboard included), with in-page anchors for the
+//! guide's table of contents.
 
-use gpui_kit::component::scroll::ScrollableElement as _;
-use gpui_kit::*;
-use roostr_core::theme::fonts;
+use roostr_core::State;
+use roostr_ui::ty::Weights as _;
+use roostr_ui::{ScrollArea, Theme, color::rgb, ty};
+use rune::{Color, Cursor, El, TextStyle, Tx, col, row, text};
 
-use crate::scroll_keys;
 use crate::text::{Rich, RichStyle, home};
+use crate::{DOC_SCROLL, scroll_root, track_scroll};
 
 /// `body` text of the site pages.
-pub(crate) fn page_fg() -> Hsla {
-    rgb(0xf5f5f7).into()
+pub(crate) fn page_fg() -> Color {
+    rgb(0xf5f5f7)
 }
 /// `p, li`.
-fn body_fg() -> Hsla {
-    rgb(0xd6d6db).into()
+fn body_fg() -> Color {
+    rgb(0xd6d6db)
 }
 /// `.home`, `.updated`, `.foot`.
-fn dim() -> Hsla {
-    rgb(0x9a9aa2).into()
+fn dim() -> Color {
+    rgb(0x9a9aa2)
 }
 /// `a`.
-fn link() -> Hsla {
-    rgb(0x8ab4ff).into()
+fn link() -> Color {
+    rgb(0x8ab4ff)
 }
 
 /// `b`, `a`, `code` colours.
@@ -31,7 +32,7 @@ fn rich() -> RichStyle {
     RichStyle {
         bold: Some(page_fg()),
         link: link(),
-        code_bg: rgb(0x2a2a2e).into(),
+        code_bg: rgb(0x2a2a2e),
     }
 }
 
@@ -70,228 +71,141 @@ pub(crate) struct DocStyle {
     pub li_margin: f32,
 }
 
-pub(crate) struct DocPage {
-    blocks: &'static [Block],
-    style: DocStyle,
-    scroll: ScrollHandle,
-    focus: FocusHandle,
-}
-
 /// `line-height: 1.6` everywhere on these pages.
 const LH: f32 = 1.6;
 
-impl DocPage {
-    pub(crate) fn new(
-        blocks: &'static [Block],
-        style: DocStyle,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Self {
-        let focus = cx.focus_handle();
-        window.focus(&focus, cx);
-        Self {
-            blocks,
-            style,
-            scroll: ScrollHandle::new(),
-            focus,
-        }
-    }
+/// The page's text at `size`: the UI font, `line-height: 1.6`.
+fn font(size: f32) -> TextStyle {
+    ty::ui(size).lh(size * LH)
+}
 
-    /// Follow `#anchor`: put that heading at the top, less its 16px
-    /// `scroll-margin-top`.
-    fn jump(&mut self, anchor: &str, cx: &mut Context<Self>) {
-        let Some(ix) = self
-            .blocks
-            .iter()
-            .position(|b| matches!(b, Block::H2(Some(id), _) if *id == anchor))
-        else {
-            return;
-        };
-        let Some(bounds) = self.scroll.bounds_for_item(ix) else {
-            return;
-        };
-        let offset = self.scroll.offset();
-        let top = bounds.top() - self.scroll.bounds().top() - offset.y;
-        let max = self.scroll.max_offset().y;
-        let y = (top - px(16.)).max(px(0.)).min(max);
-        self.scroll.set_offset(point(offset.x, -y));
-        cx.notify();
-    }
+/// The element key of the heading `#anchor` jumps to.
+pub(crate) fn anchor_key(anchor: &str) -> String {
+    format!("site-anchor-{anchor}")
+}
 
-    /// (margin-top, margin-bottom) of a block, before collapsing.
-    fn margins(&self, block: &Block) -> (f32, f32) {
-        match block {
-            Block::Home | Block::Toc(_) => (0., 0.),
-            Block::Title(_) => (24., 4.),
-            Block::Updated(_) => (0., self.style.updated_margin),
-            Block::H2(..) => self.style.h2_margin,
-            Block::H3(_) => (22., 4.),
-            // `<p>`/`<ul>`/`<ol>`: 1em; the first/last `li` margins collapse into them.
-            Block::P(_) | Block::Ul(_) | Block::Ol(_) => (16., 16.),
-            Block::Foot(_) => (48., 14.),
-        }
-    }
-
-    fn list(&self, ix: usize, items: &'static [&'static str], ordered: bool) -> Div {
-        div()
-            .flex()
-            .flex_col()
-            .gap(px(self.style.li_margin))
-            .children(items.iter().enumerate().map(|(n, item)| {
-                let marker = if ordered {
-                    format!("{}.", n + 1)
-                } else {
-                    "•".to_string()
-                };
-                div()
-                    .flex()
-                    .child(
-                        div()
-                            .flex_none()
-                            .w(px(40.))
-                            .pr(px(if ordered { 6. } else { 9. }))
-                            .flex()
-                            .justify_end()
-                            .child(marker),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .child(Rich::markup(item, rich()).into_element(("li", ix * 1000 + n))),
-                    )
-            }))
-    }
-
-    fn block(&self, ix: usize, block: &Block, cx: &mut Context<Self>) -> AnyElement {
-        match block {
-            Block::Home => div()
-                .h(px(16. * LH))
-                .flex()
-                .items_center()
-                .child(
-                    div()
-                        .id("home")
-                        .cursor_pointer()
-                        .text_size(px(14.))
-                        .text_color(dim())
-                        .child("← Roostr")
-                        .on_click(|_, _, cx| home().open(cx)),
-                )
-                .into_any_element(),
-            Block::Title(text) => div()
-                .text_size(px(34.))
-                .line_height(relative(LH))
-                .font_weight(FontWeight::BOLD)
-                .child(*text)
-                .into_any_element(),
-            Block::Updated(text) => div()
-                .text_size(px(self.style.updated_size))
-                .text_color(dim())
-                .child(*text)
-                .into_any_element(),
-            Block::Toc(entries) => div()
-                .flex()
-                .flex_wrap()
-                .gap_x(px(14.))
-                .gap_y(px(6.))
-                .pt(px(12.))
-                .pb(px(4.))
-                .border_t_1()
-                .border_b_1()
-                .border_color(rgb(0x333338))
-                .text_size(px(14.))
-                .text_color(link())
-                .children(entries.iter().map(|(anchor, label)| {
-                    let anchor: &'static str = anchor;
-                    div()
-                        .id(anchor)
-                        .cursor_pointer()
-                        .child(*label)
-                        .on_click(cx.listener(move |this, _, _, cx| this.jump(anchor, cx)))
-                }))
-                .into_any_element(),
-            Block::H2(_, text) => div()
-                .text_size(px(self.style.h2_size))
-                .font_weight(FontWeight::BOLD)
-                .child(*text)
-                .into_any_element(),
-            Block::H3(text) => div()
-                .text_size(px(16.))
-                .font_weight(FontWeight::BOLD)
-                .child(*text)
-                .into_any_element(),
-            Block::P(markup) => div()
-                .text_color(body_fg())
-                .child(Rich::markup(markup, rich()).into_element(("p", ix)))
-                .into_any_element(),
-            Block::Ul(items) => self
-                .list(ix, items, false)
-                .text_color(body_fg())
-                .into_any_element(),
-            Block::Ol(items) => self
-                .list(ix, items, true)
-                .text_color(body_fg())
-                .into_any_element(),
-            Block::Foot(markup) => div()
-                .text_size(px(14.))
-                .text_color(dim())
-                .child(Rich::markup(markup, rich()).into_element(("foot", ix)))
-                .into_any_element(),
-        }
+/// (margin-top, margin-bottom) of a block, before collapsing.
+fn margins(style: &DocStyle, block: &Block) -> (f32, f32) {
+    match block {
+        Block::Home | Block::Toc(_) => (0., 0.),
+        Block::Title(_) => (24., 4.),
+        Block::Updated(_) => (0., style.updated_margin),
+        Block::H2(..) => style.h2_margin,
+        Block::H3(_) => (22., 4.),
+        // `<p>`/`<ul>`/`<ol>`: 1em; the first/last `li` margins collapse into them.
+        Block::P(_) | Block::Ul(_) | Block::Ol(_) => (16., 16.),
+        Block::Foot(_) => (48., 14.),
     }
 }
 
-impl Focusable for DocPage {
-    fn focus_handle(&self, _: &App) -> FocusHandle {
-        self.focus.clone()
-    }
-}
-
-impl Render for DocPage {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let mut previous_bottom = 0.;
-        let mut children = Vec::with_capacity(self.blocks.len());
-        for (ix, block) in self.blocks.iter().enumerate() {
-            let (top, bottom) = self.margins(block);
-            // Adjacent vertical margins collapse to the larger one.
-            let gap = if ix == 0 {
-                top
+fn list(style: &DocStyle, items: &'static [&'static str], ordered: bool) -> El {
+    col()
+        .w_full()
+        .gap(style.li_margin)
+        .children(items.iter().enumerate().map(|(n, item)| {
+            let marker = if ordered {
+                format!("{}.", n + 1)
             } else {
-                top.max(previous_bottom)
+                "•".to_string()
             };
-            previous_bottom = bottom;
-            children.push(
-                div().flex().justify_center().w_full().mt(px(gap)).child(
-                    div()
-                        .w_full()
-                        .max_w(px(720.))
-                        .px(px(24.))
-                        .child(self.block(ix, block, cx)),
-                ),
-            );
-        }
-        let scroll = self.scroll.clone();
-        scroll_keys(div().id("site-doc"), &self.focus, cx, |this: &Self| {
-            &this.scroll
-        })
-        .relative()
-        .size_full()
-        .bg(roostr_core::theme::bg())
-        .text_color(page_fg())
-        .font_family(fonts::UI)
-        .text_size(px(16.))
-        .line_height(relative(LH))
-        .child(
-            div()
-                .id("site-doc-scroll")
-                .size_full()
-                .overflow_y_scroll()
-                .track_scroll(&scroll)
-                .pt(px(48.))
-                .pb(px(96. + previous_bottom))
-                .children(children),
-        )
-        .vertical_scrollbar(&scroll)
+            row()
+                .w_full()
+                .items_start()
+                .child(
+                    row()
+                        .w(40.)
+                        .pr(if ordered { 6. } else { 9. })
+                        .justify_end()
+                        .child(text(marker).font(font(16.)).color(body_fg())),
+                )
+                .child(
+                    col()
+                        .grow(1.0)
+                        .min_w(0.0)
+                        .child(Rich::markup(item, rich()).build(font(16.), body_fg())),
+                )
+        }))
+}
+
+/// A plain wrapping line of the page.
+fn line(s: &'static str, font: TextStyle, color: Color) -> El {
+    text(s).font(font).color(color).wrap()
+}
+
+fn block(style: &DocStyle, block: &Block) -> El {
+    match block {
+        Block::Home => row().h(16. * LH).items_center().child(
+            text("← Roostr")
+                .font(font(14.))
+                .color(dim())
+                .cursor(Cursor::Pointer)
+                .on_press_tx(|s: &mut State, tx: &mut Tx| home().open(s, tx)),
+        ),
+        Block::Title(s) => line(s, font(34.).bold(), page_fg()),
+        Block::Updated(s) => line(s, font(style.updated_size), dim()),
+        Block::Toc(entries) => row()
+            .w_full()
+            .flex_wrap()
+            .gaps(6., 14.)
+            .pt(12.)
+            .pb(4.)
+            .border_sides([1., 0., 1., 0.], rgb(0x333338))
+            .border_layout()
+            .children(entries.iter().map(|&(anchor, label)| {
+                text(label)
+                    .font(font(14.))
+                    .color(link())
+                    .cursor(Cursor::Pointer)
+                    .on_press_tx(move |_: &mut State, tx: &mut Tx| {
+                        // `scroll-margin-top: 16px`.
+                        tx.scroll_key_to(anchor_key(anchor), 16.);
+                    })
+            })),
+        Block::H2(_, s) => line(s, font(style.h2_size).bold(), page_fg()),
+        Block::H3(s) => line(s, font(16.).bold(), page_fg()),
+        Block::P(markup) => Rich::markup(markup, rich()).build(font(16.), body_fg()),
+        Block::Ul(items) => list(style, items, false),
+        Block::Ol(items) => list(style, items, true),
+        Block::Foot(markup) => Rich::markup(markup, rich()).build(font(14.), dim()),
     }
+}
+
+/// A document page: `blocks` in `style`, filling its parent.
+pub(crate) fn view(s: &State, blocks: &'static [Block], style: &DocStyle) -> El {
+    let mut previous_bottom = 0.;
+    let mut children = Vec::with_capacity(blocks.len());
+    for (ix, b) in blocks.iter().enumerate() {
+        let (top, bottom) = margins(style, b);
+        // Adjacent vertical margins collapse to the larger one.
+        let gap = if ix == 0 {
+            top
+        } else {
+            top.max(previous_bottom)
+        };
+        previous_bottom = bottom;
+        let mut wrapper = row()
+            .w_full()
+            .justify_center()
+            .mt(gap)
+            .child(col().w_full().max_w(720.).px(24.).child(block(style, b)));
+        if let Block::H2(Some(anchor), _) = b {
+            wrapper = wrapper.key(anchor_key(anchor));
+        }
+        children.push(wrapper);
+    }
+    let content = col()
+        .w_full()
+        .pt(48.)
+        .pb(96. + previous_bottom)
+        .children(children);
+    let viewport = track_scroll(s, ScrollArea::vertical(DOC_SCROLL, content).grow().w_full())
+        .build(Theme::dark());
+    scroll_root(
+        col()
+            .key("site-doc")
+            .w_full()
+            .h_full()
+            .fill(Theme::dark().bg)
+            .child(viewport),
+    )
 }

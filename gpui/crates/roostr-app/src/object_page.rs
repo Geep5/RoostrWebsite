@@ -1,31 +1,32 @@
 //! The object page (`routes/app/object/[id]/+page.svelte`) and the space
 //! home (`routes/app/+page.svelte`): icon, title, featured properties, notes,
 //! the body for the object's kind, and the right "Chat & properties" pane.
+//!
+//! A page's own state (its title draft, icon picker, cover) lives in the
+//! [`Pages`] slot keyed by object id from when the shell first shows it
+//! ([`shown`]) until no tab shows it ([`closed`]). Each body keeps its state
+//! in its own crate's slot; the page opens and drops it with the page.
 
 mod cover;
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
-use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::input::{Enter, InputEvent, Textarea, TextareaState};
-use gpui_kit::prelude::FluentBuilder as _;
-use gpui_kit::*;
-use roostr_core::cover::{CoverAsk, CoverAsks};
-use roostr_core::layout::is_mobile;
-use roostr_core::nav::{NavEvent, Navigator, Route};
+use roostr_core::nav::Route;
 use roostr_core::objects::{is_image_icon, object_icon};
-use roostr_core::store::Store;
 use roostr_core::types::{Object, Value, field_str, is_builtin_tool, is_locked_tool};
-use roostr_core::{ObjectSlot, PaneState, StoreEvent, api, theme, ui};
-use roostr_discussion::{ConversationDrawer, Discussion, DiscussionOptions};
-use roostr_editor::{Editor, FileView};
-use roostr_properties::{EmojiPicker, ObjectMeta, PropertyPanel, TypePanel};
-use roostr_sets::{DataView, DataViewKind};
-use roostr_settings::{InstallComputer, SpaceManage};
+use roostr_core::{ObjectSlot, State, StoreEvent, api, cover::CoverAsk};
+use roostr_discussion::DiscussionOptions;
+use roostr_sets::DataViewKind;
+use roostr_ui::overlay::anchored;
+use roostr_ui::{
+    Button, Glyph, Images, KitSize, Placement, Textarea, TextareaState, Theme, glyph, ty,
+};
+use rune::{Cx, Drag, El, Tx, col, el, row, text};
 
 /// What the page body shows (decided by the object's type).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Kind {
+pub(crate) enum Kind {
     Space,
     Chat,
     File,
@@ -36,7 +37,7 @@ enum Kind {
     Document { read_only: bool },
 }
 
-fn kind_of(object: &Object) -> Kind {
+pub(crate) fn kind_of(object: &Object) -> Kind {
     match object.type_key.as_str() {
         "channel" => Kind::Space,
         "chat" => Kind::Chat,
@@ -51,307 +52,10 @@ fn kind_of(object: &Object) -> Kind {
     }
 }
 
-enum Body {
-    Space(Entity<SpaceManage>),
-    Chat(Entity<Discussion>),
-    File(Entity<FileView>),
-    Type(Entity<TypePanel>, Entity<DataView>),
-    Relation(Entity<PropertyPanel>),
-    Data(Entity<DataView>),
-    Document(Entity<Editor>),
-}
-
-pub struct ObjectPage {
-    id: String,
-    title: Entity<TextareaState>,
-    /// The stored name the title last took: a refresh brings in a name only
-    /// when it changed, never re-imposing one over a draft.
-    title_synced: Option<String>,
-    /// From the title's own focus event to its blur, which saves the draft.
-    /// Window focus leaves a frame before that blur arrives, so it can't tell.
-    title_editing: bool,
-    show_emoji: bool,
-    meta: Option<Entity<ObjectMeta>>,
-    body: Option<(Kind, Body)>,
-    pane: Option<(bool, Entity<ConversationDrawer>)>,
-    opened: bool,
-    /// A title edit that brought in newlines, to rewrite with spaces.
-    pending_title_fix: Option<String>,
-    /// Whether the title was last set read-only (built-in tools).
-    title_read_only: bool,
-    /// The cover banner, its actions and generating.
-    cover: cover::CoverUi,
-    _subscriptions: Vec<Subscription>,
-}
-
-impl ObjectPage {
-    pub fn new(id: String, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let store = Store::global(cx);
-        store.update(cx, |store, cx| store.ensure_object(&id, cx));
-        let title = cx.new(|cx| {
-            TextareaState::new(window, cx)
-                .auto_grow(1, 100)
-                .placeholder("Untitled")
-        });
-        let subscriptions = vec![
-            cx.observe_in(&store, window, |this, _, window, cx| this.sync(window, cx)),
-            cx.subscribe_in(
-                &store,
-                window,
-                |this, store, event: &StoreEvent, window, cx| {
-                    // A load that failed (not synced yet) retries when the replica learns more.
-                    let failed = matches!(
-                        store.read(cx).object_slot(&this.id),
-                        Some(ObjectSlot::Failed(_))
-                    );
-                    let retry = match event {
-                        StoreEvent::Committed(id) => *id == this.id,
-                        StoreEvent::Refreshed | StoreEvent::Reconnected => true,
-                    };
-                    if failed && retry {
-                        let id = this.id.clone();
-                        store.update(cx, |store, cx| store.reload_object(&id, cx));
-                    }
-                    this.sync(window, cx);
-                },
-            ),
-            cx.subscribe(&title, |this, title, event: &InputEvent, cx| match event {
-                InputEvent::Change => {
-                    // Titles are single logical lines that wrap: pasted newlines collapse to spaces.
-                    let value = title.read(cx).value().to_string();
-                    if value.contains('\n') {
-                        let fixed = value.replace('\n', " ");
-                        this.pending_title_fix = Some(fixed);
-                        cx.notify();
-                    }
-                }
-                InputEvent::Focus => this.title_editing = true,
-                InputEvent::Blur => {
-                    this.title_editing = false;
-                    this.save_name(cx);
-                }
-                _ => {}
-            }),
-            cx.subscribe_in(
-                &Navigator::global(cx),
-                window,
-                |this, nav, event: &NavEvent, window, cx| {
-                    if *event == NavEvent::Navigated
-                        && *nav.read(cx).route() == Route::Object(this.id.clone())
-                    {
-                        this.close_sheet_on_phone(window, cx);
-                        this.publish_pane(cx);
-                    }
-                },
-            ),
-            cx.subscribe_in(
-                &CoverAsks::global(cx),
-                window,
-                |this, _, ask: &CoverAsk, _, cx| {
-                    if ask.object_id == this.id {
-                        this.on_cover_ask(cx);
-                    }
-                },
-            ),
-        ];
-        let mut this = Self {
-            id,
-            title,
-            title_synced: None,
-            title_editing: false,
-            show_emoji: false,
-            meta: None,
-            body: None,
-            pane: None,
-            opened: false,
-            title_read_only: false,
-            cover: cover::CoverUi::default(),
-            _subscriptions: subscriptions,
-            pending_title_fix: None,
-        };
-        if this.is_active(cx) {
-            this.close_sheet_on_phone(window, cx);
-        }
-        this.sync(window, cx);
-        this
-    }
-
-    /// On a phone the pane is a full-screen sheet over the object, so each
-    /// object opens on its own page; the header's chat button opens the sheet.
-    fn close_sheet_on_phone(&self, window: &Window, cx: &mut App) {
-        if is_mobile(window) {
-            PaneState::global(cx).update(cx, |pane, cx| pane.set_sheet(false, cx));
-        }
-    }
-
-    fn object(&self, cx: &App) -> Option<Arc<Object>> {
-        Store::global(cx).read(cx).object(&self.id)
-    }
-
-    fn is_active(&self, cx: &App) -> bool {
-        *Navigator::global(cx).read(cx).route() == Route::Object(self.id.clone())
-    }
-
-    /// Bring the title, body and pane in line with the cached object state.
-    fn sync(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(object) = self.object(cx) else {
-            return;
-        };
-        if !self.opened {
-            // Anytype's phone idiom: a chat object IS its discussion - open
-            // the full-screen chat page in this one's place.
-            if object.type_key == "chat" && is_mobile(window) && self.is_active(cx) {
-                let chat = Route::Chat(self.id.clone());
-                Navigator::global(cx).update(cx, |nav, cx| {
-                    if nav.can_go_back() {
-                        nav.back(cx);
-                    }
-                    nav.navigate(chat, cx);
-                });
-                return;
-            }
-            self.opened = true;
-            roostr_core::recent::mark_opened(&self.id, cx);
-        }
-        // Title draft: refreshes must not clobber typing, saved or not yet.
-        let name = object.name();
-        if !self.title_editing && self.title_synced.as_deref() != Some(name) {
-            self.title_synced = Some(name.to_string());
-            if self.title.read(cx).value().as_ref() != name {
-                self.title
-                    .update(cx, |t, cx| t.set_value(name.to_string(), window, cx));
-            }
-        }
-        let read_only = is_builtin_tool(&object.fields);
-        if self.title_read_only != read_only {
-            self.title_read_only = read_only;
-            self.title.update(cx, |t, cx| t.set_readonly(read_only, cx));
-        }
-        if self.meta.is_none() {
-            let id = self.id.clone();
-            self.meta = Some(cx.new(|cx| ObjectMeta::new(id, window, cx)));
-        }
-        let kind = kind_of(&object);
-        if self.body.as_ref().map(|(k, _)| *k) != Some(kind) {
-            let id = self.id.clone();
-            let body = match kind {
-                Kind::Space => Body::Space(cx.new(|cx| SpaceManage::new(id, window, cx))),
-                Kind::Chat => Body::Chat(cx.new(|cx| {
-                    Discussion::new(
-                        id,
-                        DiscussionOptions {
-                            full: true,
-                            page_mode: false,
-                            thread_id: "__discussion__".into(),
-                            embedded: false,
-                        },
-                        window,
-                        cx,
-                    )
-                })),
-                Kind::File => Body::File(cx.new(|cx| FileView::new(id, window, cx))),
-                Kind::Type => Body::Type(
-                    cx.new(|cx| TypePanel::new(id.clone(), window, cx)),
-                    cx.new(|cx| DataView::new(id, DataViewKind::Type, window, cx)),
-                ),
-                Kind::Relation => Body::Relation(cx.new(|cx| PropertyPanel::new(id, window, cx))),
-                Kind::Query => {
-                    Body::Data(cx.new(|cx| DataView::new(id, DataViewKind::Query, window, cx)))
-                }
-                Kind::Collection => {
-                    Body::Data(cx.new(|cx| DataView::new(id, DataViewKind::Collection, window, cx)))
-                }
-                Kind::Document { read_only } => {
-                    Body::Document(cx.new(|cx| Editor::new(id, read_only, window, cx)))
-                }
-            };
-            self.body = Some((kind, body));
-        }
-        // The right pane: properties everywhere a property row makes sense, plus the chat.
-        let (has_discussion, has_pane) = pane_flags(&object);
-        match (&self.pane, has_pane) {
-            (Some((chat, _)), true) if *chat == has_discussion => {}
-            (_, true) => {
-                let id = self.id.clone();
-                self.pane = Some((
-                    has_discussion,
-                    cx.new(|cx| ConversationDrawer::new(id, has_discussion, window, cx)),
-                ));
-            }
-            (_, false) => self.pane = None,
-        }
-        self.sync_cover(&object, cx);
-        if self.is_active(cx) {
-            self.publish_pane(cx);
-        }
-        cx.notify();
-    }
-
-    /// `discussionUI.available/count/convCount` + the pane view, for the shell.
-    fn publish_pane(&mut self, cx: &mut Context<Self>) {
-        let Some(object) = self.object(cx) else {
-            PaneState::global(cx).update(cx, |p, cx| p.publish(false, false, 0, 0, cx));
-            roostr_shell::set_pane(None, cx);
-            return;
-        };
-        let (has_discussion, has_pane) = pane_flags(&object);
-        let (count, conversations) = roostr_discussion::pane_counts(&object);
-        let conversations = if has_discussion { conversations } else { 0 };
-        PaneState::global(cx).update(cx, |p, cx| {
-            p.publish(has_pane, has_discussion, count, conversations, cx)
-        });
-        let drawer = self.pane.as_ref().map(|(_, drawer)| drawer.clone());
-        let views = drawer.map(|drawer| ConversationDrawer::views(&drawer, cx));
-        roostr_shell::set_pane(views, cx);
-    }
-
-    fn save_name(&mut self, cx: &mut Context<Self>) {
-        let Some(object) = self.object(cx) else {
-            return;
-        };
-        let draft = self.title.read(cx).value().replace('\n', " ");
-        if draft == object.name() {
-            return;
-        }
-        api::note::set_field(&object.id, "name", Value::string(draft), cx).detach_and_log_err(cx);
-    }
-
-    /// Emoji and image icons are mutually exclusive.
-    fn set_icon(&mut self, value: &str, cx: &mut Context<Self>) {
-        self.show_emoji = false;
-        let image = is_image_icon(value);
-        let (set, clear) = if image {
-            ("iconImage", "iconEmoji")
-        } else {
-            ("iconEmoji", "iconImage")
-        };
-        let id = self.id.clone();
-        let set_task = api::note::set_field(&id, set, Value::string(value), cx);
-        cx.spawn(async move |_, cx| {
-            if set_task.await.is_ok() {
-                let clear_task = cx.update(|cx| api::note::delete_field(&id, clear, cx));
-                let _ = clear_task.await;
-            }
-        })
-        .detach();
-        cx.notify();
-    }
-
-    fn toggle_done(&mut self, done: bool, cx: &mut Context<Self>) {
-        api::note::set_field(&self.id, "done", Value::bool(!done), cx).detach_and_log_err(cx);
-    }
-
-    fn focus_body(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some((_, Body::Document(editor))) = &self.body {
-            editor.update(cx, |editor, cx| editor.focus_start(window, cx));
-        }
-    }
-}
-
 /// (`hasDiscussion`, `hasPane`) from the object page's rules. Every page
 /// but a chat object (whose page IS its discussion) has the pane with both
 /// Chat and Properties - types, properties and templates included.
-fn pane_flags(object: &Object) -> (bool, bool) {
+pub(crate) fn pane_flags(object: &Object) -> (bool, bool) {
     let t = object.type_key.as_str();
     let has_mailbox = object.mailbox.as_ref().is_some_and(|m| !m.is_empty());
     let has_discussion = has_mailbox || t != "chat";
@@ -359,616 +63,693 @@ fn pane_flags(object: &Object) -> (bool, bool) {
     (has_discussion, has_pane)
 }
 
-/// `.tpl-note` as a quiet kit info [`Alert`](gpui_kit::component::alert::Alert):
-/// no fill or border, 12px muted, margin 0 0 8 0 (16 on a phone).
-fn note(
-    id: &'static str,
-    text: impl Into<SharedString>,
-    mobile: bool,
-) -> gpui_kit::component::alert::Alert {
-    use gpui_kit::component::{Sizable as _, Size};
-    gpui_kit::component::alert::Alert::info(id, text.into())
-        .with_size(Size::XSmall)
-        .w_auto()
-        .ml(px(if mobile { 16. } else { 0. }))
-        .mb(px(8.))
-        .p_0()
-        .bg(transparent_black())
-        .border_color(transparent_black())
-        .text_size(px(12.))
-        .text_color(theme::muted())
+/// Every object page the shell shows, by object id.
+#[derive(Default)]
+pub struct Pages(HashMap<String, Page>);
+
+/// One object page's own state.
+pub(crate) struct Page {
+    title: TextareaState,
+    /// The stored name the title last took: a refresh brings in a name only
+    /// when it changed, never re-imposing one over a draft.
+    title_synced: Option<String>,
+    /// Typed since the last save: saved once the title loses focus.
+    title_dirty: bool,
+    show_emoji: bool,
+    /// The body whose state was opened, by kind.
+    body: Option<Kind>,
+    opened: bool,
+    cover: cover::CoverUi,
+    /// The object state the page last synced with: a reload that emits no
+    /// store event (a mutation's refetch) is caught by [`follow`].
+    synced: Option<Arc<Object>>,
 }
 
-impl Render for ObjectPage {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if let Some(fixed) = self.pending_title_fix.take() {
-            self.title
-                .update(cx, |t, cx| t.set_value(fixed, window, cx));
-        }
-        let Some(object) = self.object(cx) else {
-            let error = match Store::global(cx).read(cx).object_slot(&self.id) {
-                Some(ObjectSlot::Failed(message)) if message.contains("Storage") => {
-                    Some(format!("Cannot open this object: {message}"))
-                }
-                _ => None,
-            };
-            return div()
-                .text_size(px(12.))
-                .text_color(theme::muted())
-                .child(error.unwrap_or_else(|| "Loading…".into()))
-                .into_any_element();
-        };
-        let store = Store::global(cx).read(cx);
-        let active = Navigator::global(cx).read(cx).space().to_string();
-        let target_type = (object.type_key == "template")
-            .then(|| {
-                store
-                    .types
-                    .iter()
-                    .find(|t| t.id == field_str(&object.fields, "target_type"))
-                    .cloned()
-            })
-            .flatten();
-        let effective = if object.type_key == "template" {
-            target_type
-                .as_ref()
-                .map(|t| t.key.clone())
-                .unwrap_or_default()
-        } else {
-            object.type_key.clone()
-        };
-        let task = store.layout_of(&effective) == "task";
-        let done = object.field("done").and_then(|v| v.bool_value) == Some(true);
-        let builtin_tool = is_builtin_tool(&object.fields);
-        let locked_tool = is_locked_tool(&object.fields);
-        let emoji = field_str(&object.fields, "iconEmoji").to_string();
-        let image = field_str(&object.fields, "iconImage").to_string();
-        let icon = object_icon(store, &emoji, &object.type_key, &active);
-        // Phones drop the 48px rail: one 16px gutter for icon, title, notes
-        // and body, a tighter rhythm, smaller icon and title (@media 720).
-        let mobile = is_mobile(window);
-        // On desktop every page runs flush with the header's back/forward
-        // arrows: icon, title, badges and content start under them. A
-        // document's block handles hang in the margin to the left instead
-        // of taking a 48px rail inside the page.
-        let flush = !mobile;
-        // Written only when it changes: a write while drawing redraws the
-        // badges every frame (and, on GPUI Fast, the page around them).
-        if let Some(meta) = &self.meta
-            && meta.read(cx).flush() != flush
-        {
-            meta.update(cx, |meta, cx| meta.set_flush(flush, cx));
-        }
-
-        // The cover spans the page's column, above the icon and title.
-        let banner = self.render_cover_banner(&object, mobile, cx);
-        let covered = banner.is_some();
-        // Desktop: the header's 16px side padding, so the page's content
-        // starts right under the back arrow.
-        let mut article = div().flex().flex_col().when(flush, |d| d.px(px(16.)));
-        // The icon and title: hovering them offers Add cover (desktop).
-        let mut head = div()
-            .id("page-head")
-            .relative()
-            .flex()
-            .flex_col()
-            .on_hover(self.cover_head_hover(cx))
-            .when(covered && task, |d| d.mt(px(12.)));
-        if !task {
-            let picker = self.show_emoji.then(|| {
-                let page = cx.entity().downgrade();
-                let close = cx.entity().downgrade();
-                deferred(
-                    anchored().snap_to_window_with_margin(px(8.)).child(
-                        div().mt(px(6.)).child(
-                            EmojiPicker::new("object-emoji")
-                                .with_image(true)
-                                .on_pick(move |value, _, cx| {
-                                    let value = value.to_string();
-                                    let _ = page.update(cx, |page, cx| page.set_icon(&value, cx));
-                                })
-                                .on_close(move |_, cx| {
-                                    let _ = close.update(cx, |page, cx| {
-                                        page.show_emoji = false;
-                                        cx.notify();
-                                    });
-                                }),
-                        ),
-                    ),
-                )
-                .with_priority(5)
-            });
-            // Built-in tools show their icon without any affordance; everything
-            // else gets a kit ghost button that toggles the emoji picker. Its
-            // box never shrinks: squeezed (a phone in landscape), the button's
-            // clip cut the emoji in half.
-            let content = div().flex_none().flex().items_center().justify_center().map(|d| {
-                if !image.is_empty() {
-                    let size = px(if mobile { 72. } else { 96. });
-                    d.size(size).child(
-                        img(SharedString::from(image.clone()))
-                            .size(size)
-                            .rounded(px(18.))
-                            .object_fit(ObjectFit::Cover),
-                    )
-                } else if emoji.is_empty() {
-                    d.size(px(if mobile { 56. } else { 80. }))
-                        .text_size(px(32.))
-                        .line_height(px(32.))
-                        .text_color(theme::muted())
-                        .opacity(0.5)
-                        .child(icon)
-                } else if mobile {
-                    d.size(px(56.))
-                        .text_size(px(42.))
-                        .line_height(px(42.))
-                        .child(ui::emoji_or_image_icon(&icon, px(47.25)))
-                } else {
-                    d.size(px(80.))
-                        .text_size(px(64.))
-                        .line_height(px(64.))
-                        .child(ui::emoji_or_image_icon(&icon, px(72.)))
-                }
-            });
-            let button = if builtin_tool {
-                div()
-                    .id("obj-emoji")
-                    .rounded(px(14.))
-                    .child(content)
-                    .into_any_element()
-            } else {
-                Button::new("obj-emoji")
-                    .ghost()
-                    .flex_none()
-                    .p_0()
-                    .h_auto()
-                    .rounded(px(14.))
-                    .child(content)
-                    .tooltip("Set icon")
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.show_emoji = !this.show_emoji;
-                        cx.notify();
-                    }))
-                    .into_any_element()
-            };
-            head = head.child(
-                div()
-                    .debug_selector(|| "object-icon".into())
-                    .relative()
-                    .map(|d| {
-                        // Under a cover the icon overlaps its bottom edge.
-                        if mobile {
-                            d.mt(px(if covered {
-                                -cover::ICON_OVERLAP_PHONE
-                            } else {
-                                8.
-                            }))
-                            .mb(px(2.))
-                            .ml(px(16.))
-                        } else {
-                            d.mt(px(if covered { -cover::ICON_OVERLAP } else { 16. }))
-                                .mb(px(4.))
-                                .ml(px(if flush { 0. } else { 44. }))
-                        }
-                    })
-                    .flex()
-                    .flex_col()
-                    .items_start()
-                    .child(button)
-                    .children(picker),
-            );
-        }
-
-        let title = div()
-            .id("title")
-            .debug_selector(|| "object-title".into())
-            .flex_1()
-            .min_w_0()
-            .map(|d| {
-                if mobile {
-                    d.pt(px(4.)).pb(px(6.)).text_size(px(32.))
-                } else {
-                    d.pt(px(8.)).pb(px(16.)).text_size(px(34.))
-                }
-            })
-            .font_weight(FontWeight(750.))
-            .line_height(relative(1.25))
-            .text_color(theme::fg())
-            .capture_action(cx.listener(|this, _: &Enter, window, cx| {
-                cx.stop_propagation();
-                window.blur(cx);
-                this.save_name(cx);
-                this.focus_body(window, cx);
-            }))
-            .child(
-                Textarea::new(&self.title)
-                    .appearance(false)
-                    .readonly(builtin_tool)
-                    .text_size(px(if mobile { 32. } else { 34. }))
-                    .font_weight(FontWeight(750.))
-                    .line_height(relative(1.25))
-                    .p_0(),
-            );
-        head = head.child(
-            div()
-                .flex()
-                .items_start()
-                .when(!task, |d| {
-                    d.pl(px(if mobile {
-                        16.
-                    } else if flush {
-                        0.
-                    } else {
-                        48.
-                    }))
-                })
-                .when(task, |d| {
-                    // Centred on the title's capitals (their middle is 0.87em
-                    // below the top of its line - below the line box's own
-                    // centre), not on the line box, which left it high.
-                    let (size, pad) = if mobile { (32., 4.) } else { (34., 8.) };
-                    d.child(
-                        ui::checkbox("done-check", done)
-                            .flex_none()
-                            .ml(px(15.))
-                            .mr(px(7.))
-                            .mt(px(pad + size * 0.87 - 8.))
-                            .tooltip(if done { "Done" } else { "Mark done" })
-                            .on_change(cx.listener(move |this, _: &bool, _, cx| {
-                                cx.stop_propagation();
-                                this.toggle_done(done, cx)
-                            })),
-                    )
-                })
-                .child(title),
-        );
-        let add_cover = self.render_add_cover(&object, mobile, cx);
-        article = article
-            .child(head.children(add_cover))
-            .child(self.render_cover_cards(&object, mobile, cx));
-        if let Some(meta) = &self.meta {
-            article = article.child(meta.clone());
-        }
-        if object.type_key == "template" {
-            let of = target_type
-                .map(|t| t.name)
-                .filter(|n| !n.is_empty())
-                .map(|n| format!(" of {n}"))
-                .unwrap_or_default();
-            article = article.child(note("tpl-note", format!(
-                "Template{of} — new objects copy these blocks, and its properties fill in any the new object doesn't already have."
-            ), mobile));
-        }
-        if locked_tool {
-            article = article.child(note("tool-note", "Built-in tool, written by an older Roostr that runs it from its own code — this page doesn't change what runs, so it is read-only here. A computer with a current Roostr turns it into the shipped code, which you can then edit.", mobile));
-        } else if builtin_tool {
-            article = article.child(note("tool-note", "Built-in tool, shipped with Roostr — the code below is what runs, so editing it changes this tool for every agent in the space. If an edit breaks it, each computer keeps running the last version that worked there and says so under Error.", mobile));
-            if object.field("tool_update_available").is_some() {
-                article = article.child(note(
-                    "tool-update-note",
-                    "Roostr now ships a different version of this tool. It was edited here, so your version was kept.",
-                    mobile,
-                ));
-            }
-        }
-        let dataview = |view: AnyView| div().when(!mobile && !flush, |d| d.ml(px(48.))).child(view);
-        if let Some((_, body)) = &self.body {
-            article = match body {
-                Body::Space(v) => article.child(v.clone()),
-                Body::Chat(v) => article.child(v.clone()),
-                Body::File(v) => article.child(v.clone()),
-                Body::Type(panel, data) => article
-                    .child(panel.clone())
-                    .child(dataview(data.clone().into())),
-                Body::Relation(v) => article.child(v.clone()),
-                Body::Data(v) => article.child(dataview(v.clone().into())),
-                Body::Document(v) => article.child(
-                    div()
-                        .when(flush, |d| d.ml(px(-roostr_editor::GUTTER_W)))
-                        .child(v.clone()),
-                ),
-            };
-        }
-        // The table's rubber band arms anywhere on the page (web selection provider).
-        let data_view = match &self.body {
-            Some((_, Body::Type(_, view))) | Some((_, Body::Data(view))) => Some(view.clone()),
-            _ => None,
-        };
-        if let Some(view) = data_view {
-            article = article.on_mouse_down(MouseButton::Left, move |e, window, cx| {
-                view.update(cx, |v, cx| v.page_mouse_down(e, window, cx));
-            });
-        }
-        match banner {
-            Some(banner) => div()
-                .flex()
-                .flex_col()
-                .child(banner)
-                .child(article)
-                .into_any_element(),
-            None => article.into_any_element(),
+impl Page {
+    fn new() -> Self {
+        Self {
+            title: TextareaState::new().auto_grow(1, 100).submit_on_enter(true),
+            title_synced: None,
+            title_dirty: false,
+            show_emoji: false,
+            body: None,
+            opened: false,
+            cover: cover::CoverUi::default(),
+            synced: None,
         }
     }
+}
+
+pub(crate) fn page<'a>(s: &'a State, id: &str) -> Option<&'a Page> {
+    s.get::<Pages>()?.0.get(id)
+}
+
+pub(crate) fn page_mut<'a>(s: &'a mut State, id: &str) -> Option<&'a mut Page> {
+    s.slot::<Pages>().0.get_mut(id)
+}
+
+/// The listeners object pages follow. Call once.
+pub fn register(s: &mut State) {
+    s.on_store(on_store);
+    s.on_cover_ask(on_cover_ask);
+    s.on_poll(follow);
+}
+
+fn ids(s: &mut State) -> Vec<String> {
+    s.slot::<Pages>().0.keys().cloned().collect()
+}
+
+fn on_store(s: &mut State, event: &StoreEvent) {
+    for id in ids(s) {
+        // A load that failed (not synced yet) retries when the replica learns more.
+        let failed = matches!(s.store.object_slot(&id), Some(ObjectSlot::Failed(_)));
+        let retry = match event {
+            StoreEvent::Committed(committed) => *committed == id,
+            StoreEvent::Refreshed | StoreEvent::Reconnected => true,
+        };
+        if failed && retry {
+            s.store.reload_object(&id);
+        }
+        sync(s, &id);
+    }
+}
+
+fn on_cover_ask(s: &mut State, ask: &CoverAsk) {
+    cover::on_ask(s, &ask.object_id);
+}
+
+/// Each poll: pages whose object changed without a store event (a
+/// mutation refetches its object quietly) sync, and a title typed into and
+/// left is saved (Rune has no blur event).
+fn follow(s: &mut State) -> bool {
+    let changed: Vec<String> = s
+        .get::<Pages>()
+        .map(|pages| {
+            pages
+                .0
+                .iter()
+                .filter(|(id, p)| match (s.store.object(id), &p.synced) {
+                    (Some(now), Some(then)) => !Arc::ptr_eq(&now, then),
+                    (Some(_), None) => true,
+                    (None, _) => false,
+                })
+                .map(|(id, _)| id.clone())
+                .collect()
+        })
+        .unwrap_or_default();
+    for id in &changed {
+        sync(s, id);
+    }
+    let left: Vec<String> = s
+        .slot::<Pages>()
+        .0
+        .iter()
+        .filter(|(_, p)| p.title_dirty && !p.title.is_focused())
+        .map(|(id, _)| id.clone())
+        .collect();
+    for id in &left {
+        save_name(s, id);
+    }
+    !changed.is_empty() || !left.is_empty()
+}
+
+/// The shell shows `id`'s page: its state exists from now on, the object
+/// loads, and the pane is published.
+pub(crate) fn shown(s: &mut State, id: &str) {
+    if page(s, id).is_none() {
+        s.slot::<Pages>().0.insert(id.to_string(), Page::new());
+        s.store.ensure_object(id);
+    }
+    close_sheet_on_phone(s);
+    sync(s, id);
+    publish_pane(s, id);
+}
+
+/// No tab shows `id`'s page any more: drop its state and its body's.
+pub(crate) fn closed(s: &mut State, id: &str) {
+    let Some(page) = s.slot::<Pages>().0.remove(id) else {
+        return;
+    };
+    if page.title_dirty {
+        save_draft(s, id, page.title.value());
+    }
+    if let Some(kind) = page.body {
+        close_body(s, id, kind);
+    }
+    roostr_properties::forget(s, id);
+    roostr_discussion::forget(s, id);
+}
+
+/// On a phone the pane is a full-screen sheet over the object, so each
+/// object opens on its own page; the header's chat button opens the sheet.
+fn close_sheet_on_phone(s: &mut State) {
+    if roostr_shell::is_mobile(s) {
+        s.pane.set_sheet(false);
+    }
+}
+
+fn is_active(s: &State, id: &str) -> bool {
+    matches!(s.nav.route(), Route::Object(open) if open == id)
+}
+
+fn open_body(s: &mut State, id: &str, kind: Kind) {
+    match kind {
+        Kind::Space => roostr_settings::open_space_manage(s, id),
+        // The discussion opens itself when first drawn.
+        Kind::Chat => {}
+        Kind::File => roostr_editor::open_file(s, id),
+        Kind::Type => {
+            roostr_properties::open_type_panel(s, id);
+            roostr_sets::open(s, id, DataViewKind::Type);
+        }
+        Kind::Relation => roostr_properties::open_property_panel(s, id),
+        Kind::Query => roostr_sets::open(s, id, DataViewKind::Query),
+        Kind::Collection => roostr_sets::open(s, id, DataViewKind::Collection),
+        Kind::Document { read_only } => roostr_editor::open(s, id, read_only),
+    }
+}
+
+fn close_body(s: &mut State, id: &str, kind: Kind) {
+    match kind {
+        Kind::Space | Kind::Chat | Kind::Relation => {}
+        Kind::File => roostr_editor::close_file(s, id),
+        Kind::Type | Kind::Query | Kind::Collection => roostr_sets::close(s, id),
+        Kind::Document { .. } => roostr_editor::close(s, id),
+    }
+}
+
+/// Bring the title, body and pane in line with the cached object state.
+fn sync(s: &mut State, id: &str) {
+    let Some(object) = s.store.object(id) else {
+        return;
+    };
+    let Some(p) = page_mut(s, id) else {
+        return;
+    };
+    p.synced = Some(object.clone());
+    if !p.opened {
+        // Anytype's phone idiom: a chat object IS its discussion - open
+        // the full-screen chat page in this one's place.
+        if object.type_key == "chat" && roostr_shell::is_mobile(s) && is_active(s, id) {
+            if s.nav.can_go_back() {
+                s.nav.back(&mut s.ui);
+            }
+            roostr_core::nav::navigate(Route::Chat(id.to_string()), s);
+            return;
+        }
+        page_mut(s, id).expect("checked above").opened = true;
+        roostr_core::recent::mark_opened(id, s);
+    }
+    let p = page_mut(s, id).expect("checked above");
+    // Title draft: refreshes must not clobber typing, saved or not yet.
+    let name = object.name();
+    if !p.title.is_focused() && !p.title_dirty && p.title_synced.as_deref() != Some(name) {
+        p.title_synced = Some(name.to_string());
+        if p.title.value() != name {
+            p.title.set_value(name);
+        }
+    }
+    let kind = kind_of(&object);
+    let previous = p.body.replace(kind);
+    if previous != Some(kind) {
+        if let Some(previous) = previous {
+            close_body(s, id, previous);
+        }
+        open_body(s, id, kind);
+    }
+    cover::sync(s, id, &object);
+    if is_active(s, id) {
+        publish_pane(s, id);
+    }
+}
+
+/// `discussionUI.available/count/convCount` for the shell's pane.
+fn publish_pane(s: &mut State, id: &str) {
+    let Some(object) = s.store.object(id) else {
+        s.pane.publish(false, false, 0, 0);
+        return;
+    };
+    let (has_discussion, has_pane) = pane_flags(&object);
+    let (count, conversations) = roostr_discussion::pane_counts(&object);
+    let conversations = if has_discussion { conversations } else { 0 };
+    s.pane
+        .publish(has_pane, has_discussion, count, conversations);
+}
+
+/// The pane body the shell asks for: one desktop column or the phone sheet.
+pub(crate) fn pane(
+    s: &State,
+    cx: &mut Cx<State>,
+    t: &'static Theme,
+    layer: &mut Vec<El>,
+    id: &str,
+    part: roostr_shell::PanePart,
+) -> El {
+    let window = window_size(s);
+    match part {
+        roostr_shell::PanePart::Column(tab) => {
+            roostr_discussion::pane_column(s, cx, t, layer, id, s.pane.chat, tab, window)
+        }
+        roostr_shell::PanePart::Sheet => {
+            roostr_discussion::pane_sheet(s, cx, t, layer, id, s.pane.chat, window)
+        }
+    }
+}
+
+/// The window's logical size, as the shell's root last laid out.
+pub(crate) fn window_size(s: &State) -> [f32; 2] {
+    [roostr_shell::window_width(s), roostr_shell::window_height(s)]
+}
+
+fn save_name(s: &mut State, id: &str) {
+    let Some(p) = page_mut(s, id) else {
+        return;
+    };
+    p.title_dirty = false;
+    let draft = p.title.value().to_string();
+    save_draft(s, id, &draft);
+}
+
+fn save_draft(s: &mut State, id: &str, draft: &str) {
+    let Some(object) = s.store.object(id) else {
+        return;
+    };
+    let draft = draft.replace('\n', " ");
+    if draft == object.name() {
+        return;
+    }
+    api::note::set_field(id, "name", Value::string(draft), s).detach_and_log_err(&s.rt);
+}
+
+/// Titles are single logical lines that wrap: pasted newlines collapse to spaces.
+fn title_changed(s: &mut State, id: &str) {
+    if let Some(p) = page_mut(s, id) {
+        p.title_dirty = true;
+        if p.title.value().contains('\n') {
+            let fixed = p.title.value().replace('\n', " ");
+            let caret = fixed.len();
+            p.title.set_value(fixed);
+            p.title.set_caret(caret);
+        }
+    }
+}
+
+/// Enter in the title: leave it, save, and start typing the body.
+fn title_entered(s: &mut State, id: &str, tx: &mut Tx) {
+    tx.blur();
+    save_name(s, id);
+    if matches!(
+        page(s, id).and_then(|p| p.body),
+        Some(Kind::Document { .. })
+    ) {
+        roostr_editor::focus_start(s, id);
+    }
+}
+
+/// Emoji and image icons are mutually exclusive.
+fn set_icon(s: &mut State, id: &str, value: &str) {
+    if let Some(p) = page_mut(s, id) {
+        p.show_emoji = false;
+    }
+    let (set, clear) = if is_image_icon(value) {
+        ("iconImage", "iconEmoji")
+    } else {
+        ("iconEmoji", "iconImage")
+    };
+    let set_task = api::note::set_field(id, set, Value::string(value), s);
+    let id = id.to_string();
+    s.rt.spawn(async move |cx| {
+        if set_task.await.is_ok() {
+            let clear_task = cx.update(|s| api::note::delete_field(&id, clear, s));
+            let _ = clear_task.await;
+        }
+    })
+    .detach();
+}
+
+fn toggle_done(s: &mut State, id: &str, done: bool) {
+    api::note::set_field(id, "done", Value::bool(!done), s).detach_and_log_err(&s.rt);
+}
+
+/// `.tpl-note` as a quiet kit info alert: no fill or border, 12px muted,
+/// margin 0 0 8 0 (16 on a phone).
+fn note(key: &str, line: String, mobile: bool, t: &Theme) -> El {
+    row()
+        .key(key)
+        .items_start()
+        .gap(6.)
+        .ml(if mobile { 16. } else { 0. })
+        .mb(8.)
+        .child(glyph(Glyph::Info, 12.).color(t.muted).mt(2.))
+        .child(text(line).font(ty::ui(12.)).color(t.muted).wrap().shrink())
+}
+
+/// The page for `Route::Object(id)`.
+pub(crate) fn view(
+    s: &State,
+    cx: &mut Cx<State>,
+    t: &'static Theme,
+    layer: &mut Vec<El>,
+    id: &str,
+) -> El {
+    let (Some(object), Some(p)) = (s.store.object(id), page(s, id)) else {
+        let error = match s.store.object_slot(id) {
+            Some(ObjectSlot::Failed(message)) if message.contains("Storage") => {
+                Some(format!("Cannot open this object: {message}"))
+            }
+            _ => None,
+        };
+        return text(error.unwrap_or_else(|| "Loading…".into()))
+            .font(ty::ui(12.))
+            .color(t.muted);
+    };
+    let store = &s.store;
+    let active = s.nav.space().to_string();
+    let target_type = (object.type_key == "template")
+        .then(|| {
+            store
+                .types
+                .iter()
+                .find(|ty| ty.id == field_str(&object.fields, "target_type"))
+                .cloned()
+        })
+        .flatten();
+    let effective = if object.type_key == "template" {
+        target_type
+            .as_ref()
+            .map(|ty| ty.key.clone())
+            .unwrap_or_default()
+    } else {
+        object.type_key.clone()
+    };
+    let task = store.layout_of(&effective) == "task";
+    let done = object.field("done").and_then(|v| v.bool_value) == Some(true);
+    let builtin_tool = is_builtin_tool(&object.fields);
+    let locked_tool = is_locked_tool(&object.fields);
+    let emoji = field_str(&object.fields, "iconEmoji").to_string();
+    let image = field_str(&object.fields, "iconImage").to_string();
+    let icon = object_icon(store, &emoji, &object.type_key, &active);
+    // Phones drop the 48px rail: one 16px gutter for icon, title, notes
+    // and body, a tighter rhythm, smaller icon and title (@media 720).
+    let mobile = roostr_shell::is_mobile(s);
+    // On desktop every page runs flush with the header's back/forward
+    // arrows: icon, title, badges and content start under them. A
+    // document's block handles hang in the margin to the left instead
+    // of taking a 48px rail inside the page.
+    let flush = !mobile;
+    let images = s.get::<Images>();
+
+    let mut c = cover::Ctx {
+        s,
+        cx,
+        t,
+        id,
+        object: &object,
+        mobile,
+    };
+    // The cover spans the page's column, above the icon and title.
+    let banner = cover::banner(&mut c);
+    let covered = banner.is_some();
+    let add_cover = cover::add_cover_button(&c);
+    let cards = cover::cards(&mut c, layer);
+
+    // Desktop: the header's 16px side padding, so the page's content
+    // starts right under the back arrow.
+    let mut article = col();
+    if flush {
+        article = article.px(16.);
+    }
+    // The icon and title: hovering them offers Add cover (desktop).
+    let hover = id.to_string();
+    let mut head =
+        col()
+            .key("page-head")
+            .on_hover_change(move |s: &mut State, inside: bool, _: &mut Tx| {
+                if let Some(p) = page_mut(s, &hover) {
+                    p.cover.head_hovered = inside;
+                }
+            });
+    if covered && task {
+        head = head.mt(12.);
+    }
+    if !task {
+        let content = {
+            let frame = row().center();
+            if !image.is_empty() {
+                let size = if mobile { 72. } else { 96. };
+                let mut frame = frame.size(size, size).radius(18.).clip_rounded(18.);
+                if let Some(image) = images.and_then(|i| i.image(&image, size)) {
+                    frame = frame.pixels_fit(image.pixels(), rune::SurfaceFit::Fill);
+                }
+                frame
+            } else if emoji.is_empty() {
+                let size = if mobile { 56. } else { 80. };
+                frame
+                    .size(size, size)
+                    .opacity(0.5)
+                    .child(text(icon.clone()).font(ty::ui(32.).lh(32.)).color(t.muted))
+            } else {
+                let (size, icon_size) = if mobile { (56., 47.25) } else { (80., 72.) };
+                let shown = match images {
+                    Some(images) => roostr_ui::emoji_or_image_icon(&icon, icon_size, images),
+                    None => text(icon.clone()).font(ty::ui(icon_size * 0.9).lh(icon_size)),
+                };
+                frame.size(size, size).child(shown)
+            }
+        };
+        // Built-in tools show their icon without any affordance; everything
+        // else gets a kit ghost button that toggles the emoji picker. Its
+        // box never shrinks: squeezed (a phone in landscape), the button's
+        // clip cut the emoji in half.
+        let button = if builtin_tool {
+            el().key("obj-emoji").radius(14.).child(content)
+        } else {
+            let toggle = id.to_string();
+            Button::new("obj-emoji")
+                .ghost()
+                .size(KitSize::Px(0.))
+                .p(0.)
+                .h_auto()
+                .radius(14.)
+                .child(content)
+                .tooltip("Set icon")
+                .on_press(move |s: &mut State| {
+                    if let Some(p) = page_mut(s, &toggle) {
+                        p.show_emoji = !p.show_emoji;
+                    }
+                })
+                .build(t)
+        };
+        if p.show_emoji {
+            let (pick, close) = (id.to_string(), id.to_string());
+            let picker = roostr_properties::EmojiPicker::new("object-emoji")
+                .with_image(true)
+                .on_pick(move |s: &mut State, value: &str| set_icon(s, &pick, value))
+                .on_close(move |s: &mut State| {
+                    if let Some(p) = page_mut(s, &close) {
+                        p.show_emoji = false;
+                    }
+                })
+                .build(s, cx, t, layer);
+            layer.push(anchored(picker, "object-icon", Placement::BottomStart, 6.));
+        }
+        // Under a cover the icon overlaps its bottom edge.
+        let mut holder = col().key("object-icon").items_start().child(button);
+        holder = if mobile {
+            holder
+                .mt(if covered {
+                    -cover::ICON_OVERLAP_PHONE
+                } else {
+                    8.
+                })
+                .mb(2.)
+                .ml(16.)
+        } else {
+            holder
+                .mt(if covered { -cover::ICON_OVERLAP } else { 16. })
+                .mb(4.)
+                .ml(if flush { 0. } else { 44. })
+        };
+        head = head.child(holder);
+    }
+
+    let size = if mobile { 32. } else { 34. };
+    let (edit, change, enter) = (id.to_string(), id.to_string(), id.to_string());
+    let title = el()
+        .key("title")
+        .grow(1.)
+        .min_w(0.)
+        .pt(if mobile { 4. } else { 8. })
+        .pb(if mobile { 6. } else { 16. })
+        .child(
+            Textarea::new("object-title", &p.title)
+                .appearance(false)
+                .readonly(builtin_tool)
+                .placeholder("Untitled")
+                .text_size(size)
+                .weight(750.)
+                .line_height(size * 1.25)
+                .text_color(t.fg)
+                .on_edit(move |s: &mut State| {
+                    &mut page_mut(s, &edit).expect("a shown page's title").title
+                })
+                .on_change(move |s: &mut State, _: &mut Tx| title_changed(s, &change))
+                .on_submit(move |s: &mut State, tx: &mut Tx| title_entered(s, &enter, tx))
+                .build(t),
+        );
+    let mut title_row = row().items_start();
+    if task {
+        // Centred on the title's capitals (their middle is 0.87em below
+        // the top of its line - below the line box's own centre), not on
+        // the line box, which left it high.
+        let pad = if mobile { 4. } else { 8. };
+        let toggle = id.to_string();
+        title_row = title_row.child(
+            el().ml(15.).mr(7.).mt(pad + size * 0.87 - 8.).child(
+                roostr_ui::checkbox("done-check", done)
+                    .tooltip(if done { "Done" } else { "Mark done" })
+                    .on_change(move |s: &mut State, _: bool| toggle_done(s, &toggle, done))
+                    .build(t),
+            ),
+        );
+    } else {
+        title_row = title_row.pl(if mobile {
+            16.
+        } else if flush {
+            0.
+        } else {
+            48.
+        });
+    }
+    head = head.child(title_row.child(title));
+    if let Some(add_cover) = add_cover {
+        head = head.child(add_cover);
+    }
+    article = article
+        .child(head)
+        .child(cards)
+        .child(roostr_properties::object_meta(s, cx, t, layer, id, flush));
+    if object.type_key == "template" {
+        let of = target_type
+            .map(|ty| ty.name)
+            .filter(|n| !n.is_empty())
+            .map(|n| format!(" of {n}"))
+            .unwrap_or_default();
+        article = article.child(note(
+            "tpl-note",
+            format!(
+                "Template{of} — new objects copy these blocks, and its properties fill in any the new object doesn't already have."
+            ),
+            mobile,
+            t,
+        ));
+    }
+    if locked_tool {
+        article = article.child(note("tool-note", "Built-in tool, written by an older Roostr that runs it from its own code — this page doesn't change what runs, so it is read-only here. A computer with a current Roostr turns it into the shipped code, which you can then edit.".into(), mobile, t));
+    } else if builtin_tool {
+        article = article.child(note("tool-note", "Built-in tool, shipped with Roostr — the code below is what runs, so editing it changes this tool for every agent in the space. If an edit breaks it, each computer keeps running the last version that worked there and says so under Error.".into(), mobile, t));
+        if object.field("tool_update_available").is_some() {
+            article = article.child(note(
+                "tool-update-note",
+                "Roostr now ships a different version of this tool. It was edited here, so your version was kept.".into(),
+                mobile,
+                t,
+            ));
+        }
+    }
+    let kind = kind_of(&object);
+    let body = match kind {
+        Kind::Space => roostr_settings::space_manage(s, cx, t, layer, id),
+        Kind::Chat => roostr_discussion::discussion(
+            s,
+            cx,
+            t,
+            layer,
+            id,
+            &DiscussionOptions {
+                full: true,
+                ..DiscussionOptions::default()
+            },
+            window_size(s),
+        ),
+        Kind::File => roostr_editor::file_view(s, cx, t, layer, id),
+        Kind::Type => col()
+            .child(roostr_properties::type_panel(s, cx, t, layer, id))
+            .child(roostr_sets::view(s, cx, t, layer, id, DataViewKind::Type)),
+        Kind::Relation => roostr_properties::property_panel(s, cx, t, layer, id),
+        Kind::Query => roostr_sets::view(s, cx, t, layer, id, DataViewKind::Query),
+        Kind::Collection => roostr_sets::view(s, cx, t, layer, id, DataViewKind::Collection),
+        Kind::Document { .. } => {
+            let editor = el().child(roostr_editor::view(s, cx, t, layer, id));
+            if flush {
+                editor.ml(-roostr_editor::GUTTER_W)
+            } else {
+                editor
+            }
+        }
+    };
+    article = article.child(body);
+    let mut page = match banner {
+        Some(banner) => col().child(banner).child(article),
+        None => article,
+    };
+    // The table's rubber band arms anywhere on the page (web selection provider).
+    if matches!(kind, Kind::Type | Kind::Query | Kind::Collection) {
+        let drag = id.to_string();
+        page = page.on_drag(move |s: &mut State, d: &mut Drag, tx: &mut Tx| {
+            roostr_sets::page_drag(s, &drag, d, tx)
+        });
+    }
+    page.key("object-page")
 }
 
 /// `/app`: the space home — the Install-a-computer card, then the space's
 /// own settings (what its object page shows), never an empty note.
-pub struct HomePage {
-    install: Entity<InstallComputer>,
-    /// The current space's settings, rebuilt when the space changes.
-    manage: Option<(String, Entity<SpaceManage>)>,
-}
-
-impl HomePage {
-    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        cx.observe(&Store::global(cx), |_, _, cx| cx.notify())
-            .detach();
-        cx.observe(&Navigator::global(cx), |_, _, cx| cx.notify())
-            .detach();
-        Self {
-            install: cx.new(|cx| InstallComputer::new(window, cx)),
-            manage: None,
-        }
+pub(crate) fn home(s: &State, cx: &mut Cx<State>, t: &'static Theme, layer: &mut Vec<El>) -> El {
+    let space = s.nav.space();
+    let known = !space.is_empty() && s.store.space(space).is_some();
+    let mut home = col().child(roostr_settings::install_computer(s, cx, t));
+    if known {
+        home = home.child(roostr_settings::space_manage(s, cx, t, layer, space));
     }
+    home
 }
 
-impl Render for HomePage {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let space = Navigator::global(cx).read(cx).space().to_string();
-        let known = !space.is_empty() && Store::global(cx).read(cx).space(&space).is_some();
-        if !known {
-            self.manage = None;
-        } else if self.manage.as_ref().is_none_or(|(id, _)| *id != space) {
-            let id = space.clone();
-            self.manage = Some((space, cx.new(|cx| SpaceManage::new(id, window, cx))));
-        }
-        div()
-            .flex()
-            .flex_col()
-            .child(self.install.clone())
-            .when_some(self.manage.as_ref(), |d, (_, manage)| d.child(manage.clone()))
-    }
+/// Escape nobody else took on an object page: the data view's menus and
+/// selection first, then the pane.
+pub(crate) fn on_escape(s: &mut State) -> bool {
+    let Route::Object(id) = s.nav.route().clone() else {
+        return false;
+    };
+    roostr_sets::dismiss(s, &id) || roostr_discussion::on_escape(s, &id, roostr_shell::is_mobile(s))
 }
 
-#[cfg(all(test, not(target_family = "wasm")))]
+#[cfg(test)]
 mod tests {
-    // Explicit imports: the kit's glob would shadow `#[test]` with GPUI's.
-    use std::collections::HashMap;
-    use std::path::Path;
-    use std::sync::Arc;
+    use super::*;
 
-    use gpui::{Modifiers, TestAppContext, VisualTestContext};
-    use gpui_kit::component::input::TextareaState;
-    use gpui_kit::{
-        AppContext as _, Context, Entity, FocusHandle, Focusable as _, InteractiveElement as _,
-        IntoElement, ParentElement as _, Render, Styled as _, Window, div, px, size,
-    };
-    use parking_lot::Mutex;
-    use roostr_core::io::{BoxFuture, BoxStream};
-    use roostr_core::store::Store;
-    use roostr_core::types::{
-        Object, ObjectSummary, QueryResult, RelationDef, Settings, Space, Value,
-    };
-    use roostr_core::{Backend, BackendEvent, JsonMap};
-    use serde_json::Value as Json;
-
-    use super::ObjectPage;
-
-    const PAGE: &str = "page-1";
-    const QUERY: &str = "query-1";
-
-    /// A vault of an untitled page and an untitled query that keeps every
-    /// mutation it is sent.
-    #[derive(Default)]
-    struct Vault {
-        /// Saved names by object id.
-        names: Mutex<HashMap<String, String>>,
-        mutations: Mutex<Vec<(String, JsonMap)>>,
-    }
-
-    fn ready<T: Send + 'static>(value: T) -> BoxFuture<T> {
-        Box::pin(std::future::ready(value))
-    }
-
-    impl Backend for Vault {
-        fn describe(&self) -> String {
-            "a page and a query".into()
-        }
-        fn settings(&self) -> BoxFuture<anyhow::Result<Settings>> {
-            ready(Ok(Settings {
-                has_key: true,
-                ..Settings::default()
-            }))
-        }
-        fn objects(&self) -> BoxFuture<anyhow::Result<Vec<ObjectSummary>>> {
-            ready(Ok(Vec::new()))
-        }
-        fn object(&self, id: &str) -> BoxFuture<anyhow::Result<Object>> {
-            let type_key = match id {
-                PAGE => "page",
-                QUERY => "query",
-                _ => return ready(Err(anyhow::anyhow!("unknown object {id}"))),
-            };
-            let name = self.names.lock().get(id).cloned().unwrap_or_default();
-            ready(Ok(Object {
-                id: id.into(),
-                type_key: type_key.into(),
-                fields: [("name".to_string(), Value::string(name))].into(),
-                ..Object::default()
-            }))
-        }
-        fn channels(&self) -> BoxFuture<anyhow::Result<Vec<Space>>> {
-            ready(Ok(Vec::new()))
-        }
-        fn relations(&self) -> BoxFuture<anyhow::Result<Vec<RelationDef>>> {
-            ready(Ok(Vec::new()))
-        }
-        fn query(&self, _: &Json) -> BoxFuture<anyhow::Result<QueryResult>> {
-            ready(Ok(QueryResult::default()))
-        }
-        fn mutate(&self, action: &str, params: JsonMap) -> BoxFuture<anyhow::Result<JsonMap>> {
-            if action == "set_field" && params["key"] == "name" {
-                let id = params["object_id"].as_str().unwrap_or("");
-                let name = params["value"]["stringValue"].as_str().unwrap_or("");
-                self.names.lock().insert(id.to_string(), name.to_string());
-            }
-            self.mutations.lock().push((action.to_string(), params));
-            ready(Ok(JsonMap::new()))
-        }
-        fn serving(&self, _: &[String]) -> BoxFuture<anyhow::Result<JsonMap>> {
-            ready(Ok(JsonMap::new()))
-        }
-        fn sync_digest(&self) -> BoxFuture<anyhow::Result<JsonMap>> {
-            ready(Ok(JsonMap::new()))
-        }
-        fn events(&self) -> BoxStream<anyhow::Result<BackendEvent>> {
-            Box::pin(futures::stream::pending())
+    fn object(type_key: &str) -> Object {
+        Object {
+            type_key: type_key.into(),
+            ..Object::default()
         }
     }
 
-    /// The page with somewhere else to click (its body, another field).
-    struct Harness {
-        page: Entity<ObjectPage>,
-        elsewhere: FocusHandle,
-    }
-
-    impl Render for Harness {
-        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-            div().size_full().child(self.page.clone()).child(
-                div()
-                    .id("elsewhere")
-                    .track_focus(&self.elsewhere)
-                    .h(px(40.)),
-            )
-        }
-    }
-
-    fn text(title: &Entity<TextareaState>, cx: &mut VisualTestContext) -> String {
-        cx.update(|_, cx| title.read(cx).value().to_string())
-    }
-
-    fn title_of(harness: &Entity<Harness>, cx: &mut VisualTestContext) -> Entity<TextareaState> {
-        cx.update(|_, cx| harness.read(cx).page.read(cx).title.clone())
-    }
-
-    fn focus_elsewhere(harness: &Entity<Harness>, cx: &mut VisualTestContext) {
-        cx.update(|window, cx| {
-            let elsewhere = harness.read(cx).elsewhere.clone();
-            window.focus(&elsewhere, cx);
-        });
-    }
-
-    /// Whether `object`'s name was ever saved as `name`.
-    fn saved(backend: &Vault, object: &str, name: &str) -> bool {
-        backend.mutations.lock().iter().any(|(action, params)| {
-            action == "set_field"
-                && params["object_id"] == object
-                && params["key"] == "name"
-                && params["value"]["stringValue"] == name
-        })
-    }
-
-    /// Start the app on `backend`, its device-local UI state in `dir`, and
-    /// open `id`'s page in an active window.
-    fn open<'a>(
-        id: &str,
-        backend: &Arc<Vault>,
-        dir: &Path,
-        cx: &'a mut TestAppContext,
-    ) -> (Entity<Harness>, &'a mut VisualTestContext) {
-        // The environment is the process's: tests set it and start their
-        // app (which reads it) one at a time.
-        static START: Mutex<()> = Mutex::new(());
-        {
-            let _one_at_a_time = START.lock();
-            // SAFETY: the only place these tests touch the environment, and
-            // no other thread of theirs reads it while the lock is held.
-            unsafe { std::env::set_var("ROOSTR_UI_STATE", dir.join("ui-state.json")) };
-            cx.update(|cx| {
-                gpui_kit::init(cx);
-                roostr_core::init(backend.clone(), None, cx);
-                crate::init(cx);
-            });
-        }
-        let id = id.to_string();
-        let (harness, cx) = cx.add_window_view(|window, cx| Harness {
-            page: cx.new(|cx| ObjectPage::new(id, window, cx)),
-            elsewhere: cx.focus_handle(),
-        });
-        // Focus events need the window active, as a window being typed in is.
-        cx.update(|window, _| window.activate_window());
-        cx.run_until_parked();
-        (harness, cx)
-    }
-
-    /// A title typed into a new page and left at once is saved. Focus leaves
-    /// the title a frame before the title hears its blur (which saves); a
-    /// store refresh landing in between (a fresh vault's first sync brings
-    /// many) must not put the stored, still empty, name back over the draft.
-    #[gpui::test]
-    fn title_left_mid_refresh_is_saved(cx: &mut TestAppContext) {
-        let ui_state = tempfile::tempdir().unwrap();
-        let backend = Arc::new(Vault::default());
-        let (harness, cx) = open(PAGE, &backend, ui_state.path(), cx);
-        let title = title_of(&harness, cx);
-
-        cx.update(|window, cx| title.update(cx, |title, cx| title.focus(window, cx)));
-        cx.run_until_parked();
-        cx.simulate_input("E2E Page");
-        assert_eq!(text(&title, cx), "E2E Page");
-
-        cx.update(|window, cx| {
-            let elsewhere = harness.read(cx).elsewhere.clone();
-            window.focus(&elsewhere, cx);
-            Store::global(cx).update(cx, |_, cx| cx.notify());
-        });
-        assert_eq!(text(&title, cx), "E2E Page", "the refresh took the draft");
-        cx.run_until_parked();
-
-        assert!(
-            saved(&backend, PAGE, "E2E Page"),
-            "the title was never saved: {:?}",
-            backend.mutations.lock()
+    #[test]
+    fn kinds_follow_the_type() {
+        assert_eq!(kind_of(&object("channel")), Kind::Space);
+        assert_eq!(kind_of(&object("set")), Kind::Query);
+        assert_eq!(kind_of(&object("query")), Kind::Query);
+        assert_eq!(
+            kind_of(&object("page")),
+            Kind::Document { read_only: false }
         );
-        assert_eq!(text(&title, cx), "E2E Page");
     }
 
-    /// A tap on a new query's title edits it, on a phone and on the desktop.
-    /// A press anywhere on a query's page arms its table's rubber band, which
-    /// focuses the view; a press the title took is the title's (the web's
-    /// selection provider leaves inputs alone) and keeps the focus there.
-    #[gpui::test]
-    fn query_title_takes_a_tap(cx: &mut TestAppContext) {
-        let ui_state = tempfile::tempdir().unwrap();
-        let backend = Arc::new(Vault::default());
-        let (harness, cx) = open(QUERY, &backend, ui_state.path(), cx);
-        let title = title_of(&harness, cx);
-        let title_focused = |cx: &mut VisualTestContext| {
-            cx.update(|window, cx| title.read(cx).focus_handle(cx).is_focused(window))
-        };
-
-        // iPhone 13 Pro Max portrait: the mobile layout.
-        cx.simulate_resize(size(px(428.), px(926.)));
-        cx.run_until_parked();
-        let at = cx.debug_bounds("object-title").expect("the title").center();
-        cx.simulate_click(at, Modifiers::none());
-        cx.run_until_parked();
-        assert!(title_focused(cx), "the tap left the title unfocused");
-        cx.simulate_input("Reading list");
-        assert_eq!(text(&title, cx), "Reading list");
-        focus_elsewhere(&harness, cx);
-        cx.run_until_parked();
-        assert!(
-            saved(&backend, QUERY, "Reading list"),
-            "the title was never saved: {:?}",
-            backend.mutations.lock()
-        );
-
-        cx.simulate_resize(size(px(1280.), px(800.)));
-        cx.run_until_parked();
-        let at = cx.debug_bounds("object-title").expect("the title").center();
-        cx.simulate_click(at, Modifiers::none());
-        cx.run_until_parked();
-        assert!(title_focused(cx), "the click left the title unfocused");
+    #[test]
+    fn only_a_chat_without_mailbox_has_no_pane() {
+        assert_eq!(pane_flags(&object("page")), (true, true));
+        assert_eq!(pane_flags(&object("chat")), (false, false));
+        assert_eq!(pane_flags(&object("type")), (true, true));
     }
 }

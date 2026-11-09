@@ -3,47 +3,46 @@
 //! column resize / reorder / hide, row multi-select (cmd / shift / marquee),
 //! paging, the Served by and Repeat virtual columns, the "+ New Object" entry
 //! row, and the row context menu.
+//!
+//! The page scrolls the table: only the rows in and near the window are built
+//! (spacers stand in for the rest), from row heights measured as they lay out.
+//! Drawing never writes state; handlers and layout callbacks keep the geometry
+//! the rubber band, the cell editor and paging need.
 
-use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::input::{Escape as InputEscape, Input, InputEvent, InputState};
-use gpui_kit::component::scroll::{Scrollbar, ScrollbarMode};
-use gpui_kit::component::{Icon, IconName, Sizable as _};
-use gpui_kit::prelude::FluentBuilder as _;
-use gpui_kit::*;
 use roostr_core::dates::show_date;
-use roostr_core::objects::{object_icon, type_icon};
-use roostr_core::options::badge_colors;
+use roostr_core::objects::{object_icon, relation_emoji, type_icon};
 use roostr_core::protected::blockers_for;
-use roostr_core::relations::current_space_id;
+use roostr_core::relations::{current_space_id, object_space_id};
 use roostr_core::repeat::describe_repeat;
 use roostr_core::serving::{MachineRow, fetch_machines, machine_name, resolve_many, serving_copy};
-use roostr_core::ui::{self, tooltip};
-use roostr_core::{
-    QueryRow, RelationDef, Store, Value, api, field_str, is_locked_tool, repeat_of, theme,
-};
+use roostr_core::{QueryRow, RelationDef, State, Value, api, field_str, is_locked_tool, repeat_of};
 use roostr_properties::{
-    CredentialCell, FlowEvent, FlowItem, PropertyFlow, PropertyValue, credential_cell_badge,
-    credential_status_badge, credential_status_text, reconnect_target,
+    CredentialCell, FlowEvent, FlowItem, PropertyFlow, PropertyFlowState, PropertyValue,
+    credential_cell_badge, credential_status_badge, credential_status_text, reconnect_target,
+};
+use roostr_rt::Task;
+use roostr_ui::color::{rgb, rgba};
+use roostr_ui::overlay::{self, Placement};
+use roostr_ui::tags::badge_colors;
+use roostr_ui::ty::Weights as _;
+use roostr_ui::{
+    Button, Glyph, Input, InputState, ScrollArea, ScrollbarMode, Theme, checkbox, checkbox_display,
+    danger_button, glyph, ty,
+};
+use rune::{
+    Color, Cursor, Cx, Drag, El, Key, KeyEvent, Phase, PointerButton, PointerPress, Shadow, Tx,
+    col, el, row, text,
 };
 use serde_json::{Value as Json, json};
 
-use crate::common::{
-    self, BoundsCell, bounds_cell, cached_object, engine_body, tag_pill, track_bounds,
-};
+use crate::common::{self, engine_body, tag_pill};
 use crate::config::{self, Col, DEFAULT_WIDTH, MIN_WIDTH, NAME_MIN_WIDTH};
-use crate::context_menu::{MenuEvent, RowContextMenu};
 use crate::gallery::js_number_string;
-use crate::views::{ViewInput, ViewMsg};
-
-/// What the table asks of the data view.
-pub(crate) enum TableEvent {
-    /// The entry row committed a name: create a record (`oncreate`).
-    Create(String),
-}
+use crate::views::ViewInput;
+use crate::{DataView, dv, dv_mut};
 
 /// Built-in columns that aren't stored fields.
 const SPECIALS: &[(&str, &str)] = &[
@@ -70,8 +69,15 @@ const ROW_H_GUESS: f32 = 33.;
 /// Rows drawn beyond the window, as a share of its height on each side: a
 /// wheel step or a fling between frames lands on rows already drawn.
 const OVERSCAN: f32 = 1.;
+/// The view re-runs as the table's top crosses a band this tall (and draws a
+/// band more on each side), not on every frame of a scroll.
+const BAND: f32 = 256.;
+/// The window's height before rune-kit's root has laid out.
+const WINDOW_H_GUESS: f32 = 900.;
 /// Room under the last row for the horizontal scrollbar of a too-wide table.
 const TABLE_SCROLLBAR_ROOM: f32 = 10.;
+/// The header row (35 with its rule).
+const HEADER_H: f32 = 35.;
 /// What every row draws whatever the columns - and its space (`channel`):
 /// a cell's editor offers and creates linked objects in the row's space.
 const ROW_FIELDS: &[&str] = &[
@@ -91,8 +97,12 @@ const SERVING_KEY: &str = "served_by";
 const PLUS_W: f32 = 32.;
 /// How far ← / → scroll a hovered table: about one column.
 const ARROW_STEP: f32 = 160.;
-/// How far a pinned Name cell reaches past its left edge, over the table's.
-const PIN_BLEED: f32 = 2.;
+/// A selected row's fill and the rubber band's.
+const SELECTED: u32 = 0x377aff40;
+const BAND_FILL: u32 = 0x377aff1f;
+const BAND_BORDER: u32 = 0x377aff8c;
+/// The error / warning text colour.
+const WARN: u32 = 0xf55522;
 
 #[derive(Clone, Debug)]
 struct ServingInfo {
@@ -127,45 +137,33 @@ fn serving_rank(info: Option<&ServingInfo>) -> i32 {
     }
 }
 
-/// Payload of a header drag (column reorder).
-#[derive(Clone)]
-struct ColumnDrag {
-    idx: usize,
-    label: SharedString,
-}
-
-impl Render for ColumnDrag {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .px(px(10.))
-            .py(px(6.))
-            .rounded(px(6.))
-            .bg(theme::panel())
-            .border_1()
-            .border_color(theme::border())
-            .text_size(px(13.))
-            .text_color(theme::muted())
-            .opacity(0.9)
-            .child(self.label.clone())
-    }
-}
-
 /// A live resize gesture: `None` column = the Name column.
 struct Resize {
     col: Option<usize>,
-    start_x: Pixels,
     start_w: f32,
     snapshot: Vec<Col>,
 }
 
-struct Marquee {
-    x0: Point<Pixels>,
-    x1: Point<Pixels>,
+/// A header drag (column reorder): where it came from, the gap it would drop
+/// into, and the pointer for its ghost.
+struct ColDrag {
+    from: usize,
+    label: String,
+    gap: Option<usize>,
+    /// The drop line's x in the table's own points.
+    gap_x: Option<f32>,
+    /// The pointer (window) and where in the cell it grabbed.
+    at: [f32; 2],
+    grab: [f32; 2],
 }
 
-pub(crate) struct SetTable {
-    object_id: String,
-    collection: Option<String>,
+/// The rubber band, in window points.
+struct Marquee {
+    x0: [f32; 2],
+    x1: [f32; 2],
+}
+
+pub(crate) struct Table {
     input: ViewInput,
     rows: Vec<QueryRow>,
     total: usize,
@@ -177,89 +175,37 @@ pub(crate) struct SetTable {
     marquee: Option<Marquee>,
     drag_moved: bool,
     cell_edit: Option<(String, String)>,
-    editable_down: bool,
     sel_blocked: HashMap<String, String>,
-    ctx_menu: Option<Entity<RowContextMenu>>,
     override_sort: Option<(String, bool)>,
     local_cols: Option<Vec<Col>>,
     name_local: Option<f32>,
-    adding: Option<Entity<PropertyFlow>>,
-    drag_col: Option<usize>,
-    gap_idx: Option<usize>,
-    gap_x: Option<Pixels>,
+    adding: Option<PropertyFlowState>,
+    col_drag: Option<ColDrag>,
     resize: Option<Resize>,
     serving_by_id: HashMap<String, ServingInfo>,
     machines_now: Vec<MachineRow>,
     pending_new: bool,
-    new_input: Entity<InputState>,
+    new_input: InputState,
+    /// The entry field has had focus since it opened (its blur commits).
+    new_focused: bool,
     committing: bool,
-    /// Every row's bounds last frame: measured for the rows drawn, placed
-    /// by [`Self::row_h`] for those outside the drawn window.
-    row_bounds: Rc<RefCell<Vec<Bounds<Pixels>>>>,
-    /// A body row's height as last drawn (rows are one line: near uniform).
-    row_h: Rc<std::cell::Cell<f32>>,
-    table_bounds: BoundsCell,
-    scroll_bounds: BoundsCell,
-    pop_bounds: BoundsCell,
-    plus_bounds: BoundsCell,
-    name_th_bounds: BoundsCell,
-    header_bounds: Rc<RefCell<Vec<Bounds<Pixels>>>>,
-    scroll: ScrollHandle,
-    _subs: Vec<Subscription>,
+    /// Each drawn row's height as it laid out, and their mean for the rest.
+    heights: HashMap<String, f32>,
+    row_h: f32,
+    /// The rows block's top and the table's left edge, in window points, and
+    /// the horizontal viewport's rect (the visible width of the table).
+    rows_top: f32,
+    table_left: f32,
+    clip: [f32; 4],
+    /// The table's laid-out width (the content the viewport scrolls).
+    table_w: f32,
+    /// The pointer is over the table (← / → scroll it).
+    hovered: bool,
 }
 
-impl EventEmitter<TableEvent> for SetTable {}
-impl EventEmitter<ViewMsg> for SetTable {}
-
-impl SetTable {
-    pub(crate) fn new(
-        object_id: String,
-        collection: Option<String>,
-        input: ViewInput,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Self {
-        let new_input = cx.new(|cx| InputState::new(window, cx).placeholder("Enter name"));
-        let subs = vec![
-            cx.subscribe_in(
-                &new_input,
-                window,
-                |this, input, event: &InputEvent, window, cx| match event {
-                    InputEvent::PressEnter { .. } => this.commit_new(false, window, cx),
-                    InputEvent::Blur => {
-                        let empty = input.read(cx).value().trim().is_empty();
-                        if this.pending_new {
-                            this.commit_new(empty, window, cx);
-                        }
-                    }
-                    _ => {}
-                },
-            ),
-            // ← → scroll the table under the pointer sideways - never while
-            // typing: a text field ("Input") or the page editor holds focus
-            // even when it ignores the press (→ at the end of the text).
-            cx.observe_keystrokes(|this, event, window, cx| {
-                let typing = event
-                    .context_stack
-                    .iter()
-                    .any(|c| c.contains("Input") || c.contains("RoostrEditor"));
-                if typing || event.action.is_some() || event.keystroke.modifiers.modified() {
-                    return;
-                }
-                let step = match event.keystroke.key.as_str() {
-                    "left" => ARROW_STEP,
-                    "right" => -ARROW_STEP,
-                    _ => return,
-                };
-                if !this.scroll_bounds.get().contains(&window.mouse_position()) {
-                    return;
-                }
-                this.scroll_x_by(px(step), cx);
-            }),
-        ];
-        let mut this = Self {
-            object_id,
-            collection,
+impl Table {
+    pub(crate) fn new(input: ViewInput) -> Self {
+        Self {
             input,
             rows: Vec::new(),
             total: 0,
@@ -271,80 +217,26 @@ impl SetTable {
             marquee: None,
             drag_moved: false,
             cell_edit: None,
-            editable_down: false,
             sel_blocked: HashMap::new(),
-            ctx_menu: None,
             override_sort: None,
             local_cols: None,
             name_local: None,
             adding: None,
-            drag_col: None,
-            gap_idx: None,
-            gap_x: None,
+            col_drag: None,
             resize: None,
             serving_by_id: HashMap::new(),
             machines_now: Vec::new(),
             pending_new: false,
-            new_input,
+            new_input: InputState::new(),
+            new_focused: false,
             committing: false,
-            row_bounds: Rc::new(RefCell::new(Vec::new())),
-            row_h: Rc::new(std::cell::Cell::new(ROW_H_GUESS)),
-            table_bounds: bounds_cell(),
-            scroll_bounds: bounds_cell(),
-            pop_bounds: bounds_cell(),
-            plus_bounds: bounds_cell(),
-            name_th_bounds: bounds_cell(),
-            header_bounds: Rc::new(RefCell::new(Vec::new())),
-            scroll: ScrollHandle::new(),
-            _subs: subs,
-        };
-        this.load(false, cx);
-        this
-    }
-
-    /// Scroll the table sideways by `dx` (positive = toward its start), within its width.
-    fn scroll_x_by(&mut self, dx: Pixels, cx: &mut Context<Self>) {
-        let offset = self.scroll.offset();
-        let max = self.scroll.max_offset().x;
-        let x = (offset.x + dx).min(px(0.)).max(-max);
-        if x != offset.x {
-            self.scroll.set_offset(point(x, offset.y));
-            cx.notify();
-        }
-    }
-
-    /// A wheel turn over the horizontal scrollbar strip of a too-wide table
-    /// scrolls it sideways (either wheel axis); false when elsewhere.
-    /// The wheel is over the horizontal scrollbar of a table wider than its pane.
-    fn on_scrollbar(&self, e: &ScrollEvent) -> bool {
-        let bounds = self.scroll.bounds();
-        self.scroll.max_offset().x > px(0.)
-            && bounds.contains(&e.position)
-            && e.position.y >= bounds.bottom() - px(TABLE_SCROLLBAR_ROOM)
-    }
-
-    /// A column resize or marquee is running: window-wide moves are its.
-    fn tracking(&self) -> bool {
-        self.resize.is_some() || self.marquee.is_some()
-    }
-
-    fn wheel_on_scrollbar(&mut self, e: &ScrollEvent, cx: &mut Context<Self>) -> bool {
-        if !self.on_scrollbar(e) {
-            return false;
-        }
-        let delta = e.delta.pixel_delta(px(20.));
-        let dx = if delta.y.abs() > delta.x.abs() { delta.y } else { delta.x };
-        self.scroll_x_by(dx, cx);
-        true
-    }
-
-    pub(crate) fn set_input(&mut self, input: ViewInput, cx: &mut Context<Self>) {
-        // The table reloads on its body and sorts (the page's own refresh reloads it too).
-        if input.body != self.input.body || input.sorts != self.input.sorts {
-            self.input = input;
-            self.load(false, cx);
-        } else {
-            self.input = input;
+            heights: HashMap::new(),
+            row_h: ROW_H_GUESS,
+            rows_top: 0.,
+            table_left: 0.,
+            clip: [0.; 4],
+            table_w: 0.,
+            hovered: false,
         }
     }
 
@@ -352,20 +244,14 @@ impl SetTable {
         self.rows.iter().map(|r| r.id.as_str())
     }
 
-    fn stored_cols(&self, cx: &App) -> Vec<Col> {
-        cached_object(&self.object_id, cx)
-            .map(|o| config::stored_columns(&o.fields))
-            .unwrap_or_default()
-    }
-
-    fn stored_name_width(&self, cx: &App) -> Option<f32> {
-        cached_object(&self.object_id, cx).and_then(|o| config::stored_name_width(&o.fields))
-    }
-
-    fn cols(&self, cx: &App) -> Vec<Col> {
-        self.local_cols
-            .clone()
-            .unwrap_or_else(|| self.stored_cols(cx))
+    /// Escape: close the cell editor, clear the selection.
+    pub(crate) fn dismiss(&mut self) -> bool {
+        let any = self.cell_edit.is_some() || !self.selected.is_empty() || self.adding.is_some();
+        self.cell_edit = None;
+        self.adding = None;
+        self.selected.clear();
+        self.sel_blocked.clear();
+        any
     }
 
     fn sort_key_dir(&self) -> (String, bool) {
@@ -378,865 +264,1014 @@ impl SetTable {
         }
     }
 
-    // ── Loading ──────────────────────────────────────────────────
+    /// Row `i`'s height: measured, else the mean of those measured.
+    fn height_of(&self, r: &QueryRow) -> f32 {
+        self.heights.get(&r.id).copied().unwrap_or(self.row_h)
+    }
 
-    /// The engine sorts and filters; the table fetches a page at a time. Only
-    /// what the engine can't compute (Served by, a sort by next repeat) needs
-    /// every row. `keep_count`: a refresh keeps the rows already scrolled in.
-    pub(crate) fn load(&mut self, keep_count: bool, cx: &mut Context<Self>) {
-        let Some(body) = self.input.body.clone() else {
-            return;
-        };
-        self.generation += 1;
-        let generation = self.generation;
-        let rules = common::body_serving_rules(&body);
-        let (key, desc) = self.sort_key_dir();
-        let dir = if desc { "desc" } else { "asc" };
-        let serving_sort = key == "serving";
-        let repeat_sort = key == "repeat";
-        let sorts: Vec<Json> = if serving_sort || repeat_sort {
-            vec![json!({"key": "updatedAt", "type": "desc", "emptyPlacement": "end"})]
-        } else if self.override_sort.is_some() {
-            vec![json!({"key": key, "type": dir, "emptyPlacement": "end"})]
-        } else if !self.input.sorts.is_empty() {
-            self.input
-                .sorts
-                .iter()
-                .map(|s| json!({"key": s.key, "type": s.type_str(), "emptyPlacement": "end"}))
-                .collect()
-        } else {
-            vec![json!({"key": "updatedAt", "type": "desc", "emptyPlacement": "end"})]
-        };
-        let columns: Vec<String> = self.cols(cx).into_iter().map(|c| c.key).collect();
-        let needs_every_row = serving_sort
-            || repeat_sort
-            || !rules.is_empty()
-            || columns.iter().any(|c| c == "serving");
-        if !needs_every_row {
-            let mut fields: Vec<String> = ROW_FIELDS.iter().map(|s| (*s).to_string()).collect();
-            for c in &columns {
-                if !fields.contains(c) {
-                    fields.push(c.clone());
-                }
-            }
-            let query = engine_body(&body, json!({"sorts": sorts, "fields": fields}));
-            let limit = if keep_count {
-                PAGE.max(self.rows.len())
-            } else {
-                PAGE
-            };
-            let task = api::query(
-                engine_body(&query, json!({"offset": 0, "limit": limit})),
-                cx,
-            );
-            cx.spawn(async move |this, cx| {
-                let Ok(res) = task.await else { return };
-                let _ = this.update(cx, |this, cx| {
-                    if this.generation != generation {
-                        return;
-                    }
-                    this.page_query = Some(query);
-                    this.rows = res.records;
-                    this.total = res.total as usize;
-                    this.after_rows(cx);
-                    cx.notify();
-                });
-            })
-            .detach();
-            return;
+    /// The rows' tops from the rows block's top (one longer: the last is the
+    /// bottom of the last row).
+    /// The horizontal viewport's offset and its furthest, from where the
+    /// table and the viewport last laid out (the arrows and the scrollbar
+    /// wheel step from it).
+    fn hscroll(&self) -> (f32, f32) {
+        let max = (self.table_w - self.clip[2]).max(0.);
+        ((self.clip[0] - self.table_left).clamp(0., max), max)
+    }
+
+    fn tops(&self) -> Vec<f32> {
+        let mut out = Vec::with_capacity(self.rows.len() + 1);
+        let mut y = 0.;
+        out.push(0.);
+        for r in &self.rows {
+            y += self.height_of(r);
+            out.push(y);
         }
-        self.page_query = None;
-        let task = api::query(engine_body(&body, json!({"sorts": sorts})), cx);
-        let with_serving =
-            columns.iter().any(|c| c == "serving") || !rules.is_empty() || serving_sort;
-        cx.spawn(async move |this, cx| {
-            let Ok(res) = task.await else { return };
-            let mut all = res.records;
-            if repeat_sort {
-                // One-off objects last either way.
-                all.sort_by(|a, b| {
-                    let x = repeat_of(&a.fields).map(|r| r.next);
-                    let y = repeat_of(&b.fields).map(|r| r.next);
-                    match (x, y) {
-                        (Some(x), Some(y)) => {
-                            if desc {
-                                y.cmp(&x)
-                            } else {
-                                x.cmp(&y)
-                            }
-                        }
-                        (None, None) => std::cmp::Ordering::Equal,
-                        (None, Some(_)) => std::cmp::Ordering::Greater,
-                        (Some(_), None) => std::cmp::Ordering::Less,
-                    }
-                });
-            }
-            let mut serving: Option<(HashMap<String, ServingInfo>, Vec<MachineRow>)> = None;
-            if with_serving {
-                let machines_task = cx.update(|cx| fetch_machines(cx));
-                let Ok((machine_rows, machines)) = machines_task.await else {
-                    return;
-                };
-                let ids: Vec<String> = all.iter().map(|r| r.id.clone()).collect();
-                let resolve = cx.update(|cx| resolve_many(&ids, cx));
-                let resolved = resolve.await.unwrap_or_default();
-                let icons: Vec<String> = cx.update(|cx| {
-                    let store = Store::global(cx).read(cx);
-                    let space = current_space_id(cx);
-                    resolved
-                        .iter()
-                        .map(|s| {
-                            if s.machine_id.is_empty() {
-                                return String::new();
-                            }
-                            let emoji = machine_rows
-                                .iter()
-                                .find(|m| field_str(&m.fields, "machine_id") == s.machine_id)
-                                .map(|m| field_str(&m.fields, "iconEmoji").to_string())
-                                .unwrap_or_default();
-                            object_icon(store, &emoji, "machine", &space)
-                        })
-                        .collect()
-                });
-                let mut map = HashMap::new();
-                for (i, r) in all.iter().enumerate() {
-                    let s = resolved.get(i).cloned().unwrap_or_default();
-                    let copy = serving_copy(&s, &machines);
-                    let label = if s.machine_id.is_empty() {
-                        "No machine".to_string()
-                    } else {
-                        machine_name(&machines, &s.machine_id)
-                    };
-                    map.insert(
-                        r.id.clone(),
-                        ServingInfo {
-                            text: copy.text,
-                            label,
-                            warning: copy.warning,
-                            reason: s.reason.clone(),
-                            machine_id: s.machine_id.clone(),
-                            icon: icons.get(i).cloned().unwrap_or_default(),
-                        },
-                    );
-                }
-                if !rules.is_empty() {
-                    all.retain(|r| {
-                        rules
-                            .iter()
-                            .all(|(c, v)| serving_match(c, v, map.get(&r.id)))
-                    });
-                }
-                if serving_sort {
-                    let d = if desc { -1 } else { 1 };
-                    all.sort_by(|a, b| {
-                        let ra = serving_rank(map.get(&a.id));
-                        let rb = serving_rank(map.get(&b.id));
-                        (d * (ra - rb))
-                            .cmp(&0)
-                            .then(b.updated_at.cmp(&a.updated_at))
-                    });
-                }
-                serving = Some((map, machines));
-            }
-            let _ = this.update(cx, |this, cx| {
-                if this.generation != generation {
-                    return;
-                }
-                if let Some((map, machines)) = serving {
-                    this.serving_by_id = map;
-                    this.machines_now = machines;
-                }
-                this.total = all.len();
-                this.rows = all;
-                this.after_rows(cx);
-                cx.notify();
-            });
-        })
-        .detach();
-    }
-
-    /// The next page of a paged view, in the same order.
-    fn load_more(&mut self, cx: &mut Context<Self>) {
-        let Some(query) = self.page_query.clone() else {
-            return;
-        };
-        if self.loading_more || self.rows.len() >= self.total {
-            return;
-        }
-        self.loading_more = true;
-        let generation = self.generation;
-        let task = api::query(
-            engine_body(&query, json!({"offset": self.rows.len(), "limit": PAGE})),
-            cx,
-        );
-        cx.spawn(async move |this, cx| {
-            let res = task.await;
-            let _ = this.update(cx, |this, cx| {
-                this.loading_more = false;
-                if this.generation != generation {
-                    return;
-                }
-                if let Ok(res) = res {
-                    for r in res.records {
-                        if !this.rows.iter().any(|x| x.id == r.id) {
-                            this.rows.push(r);
-                        }
-                    }
-                    this.total = res.total as usize;
-                    cx.notify();
-                }
-            });
-        })
-        .detach();
-    }
-
-    fn after_rows(&mut self, _cx: &mut Context<Self>) {
-        let ids: Vec<&str> = self.rows.iter().map(|r| r.id.as_str()).collect();
-        self.selected.retain(|s| ids.contains(&s.as_str()));
-    }
-
-    /// After a change: the same view, the same rows scrolled into view.
-    pub(crate) fn reload(&mut self, cx: &mut Context<Self>) {
-        self.load(true, cx);
-    }
-
-    // ── Selection ────────────────────────────────────────────────
-
-    fn set_selection(&mut self, ids: Vec<String>, cx: &mut Context<Self>) {
-        if ids == self.selected {
-            return;
-        }
-        self.selected = ids;
-        let task = blockers_for(&self.selected, cx);
-        cx.spawn(async move |this, cx| {
-            if let Ok(map) = task.await {
-                let _ = this.update(cx, |this, cx| {
-                    this.sel_blocked = map;
-                    cx.notify();
-                });
-            }
-        })
-        .detach();
-        cx.notify();
-    }
-
-    fn toggle_row(&mut self, id: &str, cx: &mut Context<Self>) {
-        self.anchor = id.to_string();
-        let next = if self.selected.iter().any(|x| x == id) {
-            self.selected.iter().filter(|x| *x != id).cloned().collect()
-        } else {
-            let mut n = self.selected.clone();
-            n.push(id.to_string());
-            n
-        };
-        self.set_selection(next, cx);
-    }
-
-    fn range_rows(&mut self, id: &str, cx: &mut Context<Self>) {
-        let anchor = if self.anchor.is_empty() {
-            self.selected.first().cloned().unwrap_or_default()
-        } else {
-            self.anchor.clone()
-        };
-        let a = self.rows.iter().position(|r| r.id == anchor);
-        let b = self.rows.iter().position(|r| r.id == id);
-        let (Some(a), Some(b)) = (a, b) else {
-            self.toggle_row(id, cx);
-            return;
-        };
-        let next = self.rows[a.min(b)..=a.max(b)]
-            .iter()
-            .map(|r| r.id.clone())
-            .collect();
-        self.set_selection(next, cx);
-    }
-
-    fn on_row_click(&mut self, e: &ClickEvent, id: &str, cx: &mut Context<Self>) {
-        let m = e.modifiers();
-        if m.platform || m.control {
-            self.toggle_row(id, cx);
-            return;
-        }
-        if m.shift {
-            self.range_rows(id, cx);
-            return;
-        }
-        // The click that ends a drag must not clear what the drag just selected.
-        if self.drag_moved {
-            self.drag_moved = false;
-            return;
-        }
-        if !self.selected.is_empty() {
-            self.set_selection(Vec::new(), cx);
-            return;
-        }
-        common::open_object(id, cx);
-    }
-
-    /// Escape: close the cell editor, clear the selection, close the menu.
-    pub(crate) fn dismiss(&mut self, cx: &mut Context<Self>) -> bool {
-        let any = self.cell_edit.is_some() || !self.selected.is_empty() || self.ctx_menu.is_some();
-        self.cell_edit = None;
-        self.ctx_menu = None;
-        self.set_selection(Vec::new(), cx);
-        cx.notify();
-        any
-    }
-
-    /// Arm the rubber band (the data view forwards presses from its whole area).
-    pub(crate) fn start_marquee(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
-        self.marquee = Some(Marquee {
-            x0: position,
-            x1: position,
-        });
-        self.drag_moved = false;
-        cx.notify();
-    }
-
-    fn marquee_move(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
-        let Some(m) = &mut self.marquee else { return };
-        m.x1 = position;
-        let (x0, x1) = (m.x0, m.x1);
-        if (x1.x - x0.x).abs() + (x1.y - x0.y).abs() < px(4.) {
-            return;
-        }
-        self.drag_moved = true;
-        let rect = Bounds::from_corners(
-            point(x0.x.min(x1.x), x0.y.min(x1.y)),
-            point(x0.x.max(x1.x), x0.y.max(x1.y)),
-        );
-        let bounds = self.row_bounds.borrow();
-        let hit: Vec<String> = self
-            .rows
-            .iter()
-            .zip(bounds.iter())
-            .filter(|(_, b)| {
-                b.bottom() >= rect.top()
-                    && b.top() <= rect.bottom()
-                    && b.right() >= rect.left()
-                    && b.left() <= rect.right()
-            })
-            .map(|(r, _)| r.id.clone())
-            .collect();
-        drop(bounds);
-        self.set_selection(hit, cx);
-        cx.notify();
-    }
-
-    fn end_marquee(&mut self, cx: &mut Context<Self>) {
-        // A plain click on the whitespace around the rows clears, like a plain row click.
-        if let Some(m) = self.marquee.take()
-            && !self.drag_moved
-            && !self.selected.is_empty()
-            && !self.row_bounds.borrow().iter().any(|b| b.contains(&m.x0))
-        {
-            self.set_selection(Vec::new(), cx);
-        }
-        cx.notify();
-    }
-
-    // ── Cells ────────────────────────────────────────────────────
-
-    fn is_editable(relations: &[RelationDef], key: &str) -> bool {
-        // Repeat is a rule edited in the object's Repeat row, not a cell value.
-        key != "repeat" && common::find_rel(relations, key).is_some_and(|r| !r.read_only)
-    }
-
-    fn format_of(relations: &[RelationDef], key: &str) -> String {
-        common::find_rel(relations, key)
-            .map(|r| r.format.clone())
-            .unwrap_or_default()
-    }
-
-    /// A click on cell `key` of `record`: a checkbox toggles, any other opens its editor.
-    fn on_cell_click(&mut self, record: &str, key: &str, checkbox: bool, cx: &mut Context<Self>) {
-        // The mouseup ending a row-drag must not open an editor.
-        if self.drag_moved {
-            self.drag_moved = false;
-            return;
-        }
-        if checkbox {
-            // Checkbox cells toggle on click, no menu.
-            let cur = self
-                .rows
-                .iter()
-                .find(|r| r.id == record)
-                .and_then(|r| r.fields.get(key))
-                .and_then(|v| v.bool_value)
-                == Some(true);
-            let task = api::note::set_field(record, key, Value::bool(!cur), cx);
-            self.after(task, cx);
-            return;
-        }
-        let same = self
-            .cell_edit
-            .as_ref()
-            .is_some_and(|(r, k)| r == record && k == key);
-        self.cell_edit = if same {
-            None
-        } else {
-            Some((record.to_string(), key.to_string()))
-        };
-        cx.notify();
-    }
-
-    /// Await a mutation, then reload.
-    fn after(&mut self, task: Task<anyhow::Result<roostr_core::JsonMap>>, cx: &mut Context<Self>) {
-        cx.spawn(async move |this, cx| {
-            if let Err(error) = task.await {
-                log::error!("{error:#}");
-            }
-            let _ = this.update(cx, |this, cx| this.reload(cx));
-        })
-        .detach();
-    }
-
-    fn cell_save(&mut self, v: Value, relations: &[RelationDef], cx: &mut Context<Self>) {
-        let Some((record, key)) = self.cell_edit.clone() else {
-            return;
-        };
-        let f = Self::format_of(relations, if key == "serving" { SERVING_KEY } else { &key });
-        // Single-value editors close on save; tag/object stay open for more picks.
-        if f != "tag" && f != "object" {
-            self.cell_edit = None;
-        }
-        let task = if key == "serving" {
-            // The picker links a Computer object; served_by holds its machine_id.
-            let target = v
-                .link_value
-                .as_ref()
-                .map(|l| l.target_id.clone())
-                .or_else(|| {
-                    v.items()
-                        .first()
-                        .and_then(|i| i.link_value.as_ref().map(|l| l.target_id.clone()))
-                })
-                .unwrap_or_default();
-            let machine_id = self
-                .machines_now
-                .iter()
-                .find(|m| m.id == target)
-                .map(|m| m.machine_id.clone())
-                .unwrap_or_default();
-            if machine_id.is_empty() {
-                api::note::delete_field(&record, SERVING_KEY, cx)
-            } else {
-                api::note::set_field(&record, SERVING_KEY, Value::string(machine_id), cx)
-            }
-        } else {
-            api::note::set_field(&record, &key, v, cx)
-        };
-        self.after(task, cx);
-        cx.notify();
-    }
-
-    fn cell_text(&self, r: &QueryRow, key: &str, relations: &[RelationDef], cx: &App) -> String {
-        match key {
-            "serving" => {
-                return self
-                    .serving_by_id
-                    .get(&r.id)
-                    .map(|s| s.label.clone())
-                    .unwrap_or_default();
-            }
-            "repeat" => {
-                return repeat_of(&r.fields)
-                    .map(|rule| describe_repeat(&rule))
-                    .unwrap_or_default();
-            }
-            "type" => return common::type_name(&r.type_key, cx),
-            "createdAt" => {
-                return if r.created_at != 0 {
-                    show_date(r.created_at)
-                } else {
-                    String::new()
-                };
-            }
-            "updatedAt" => {
-                return if r.updated_at != 0 {
-                    show_date(r.updated_at)
-                } else {
-                    String::new()
-                };
-            }
-            _ => {}
-        }
-        let Some(v) = r.fields.get(key) else {
-            return String::new();
-        };
-        let format = Self::format_of(relations, key);
-        // Object values come as a list, a bare link, or a bare id: all read as names.
-        if format == "object" || v.link_value.is_some() {
-            return common::link_names(v, cx);
-        }
-        if let Some(s) = &v.string_value {
-            return s.clone();
-        }
-        if let Some(b) = v.bool_value {
-            return if b { "✓".into() } else { String::new() };
-        }
-        if let Some(n) = v.int_value {
-            return if format == "date" {
-                show_date(n)
-            } else {
-                n.to_string()
-            };
-        }
-        if let Some(f) = v.float_value {
-            return js_number_string(f);
-        }
-        if v.values_value.is_some() {
-            return v
-                .items()
-                .iter()
-                .map(|i| i.string_value.clone().unwrap_or_default())
-                .collect::<Vec<_>>()
-                .join(", ");
-        }
-        if let Some(l) = &v.list_value {
-            return l.values.join(", ");
-        }
-        String::new()
-    }
-
-    fn col_name(key: &str, relations: &[RelationDef]) -> String {
-        SPECIALS
-            .iter()
-            .find(|(k, _)| *k == key)
-            .map(|(_, n)| (*n).to_string())
-            .or_else(|| common::find_rel(relations, key).map(|r| r.name.clone()))
-            .unwrap_or_else(|| key.to_string())
-    }
-
-    fn toggle_sort(&mut self, key: &str, cx: &mut Context<Self>) {
-        let (cur, desc) = self.sort_key_dir();
-        self.override_sort = Some(if cur == key {
-            (key.to_string(), !desc)
-        } else {
-            (key.to_string(), false)
-        });
-        self.load(false, cx);
-        cx.notify();
-    }
-
-    // ── Columns ──────────────────────────────────────────────────
-
-    fn persist_view(
-        &mut self,
-        next: Vec<Col>,
-        name_w: Option<f32>,
-        cx: &mut Context<Self>,
-    ) -> Task<()> {
-        let task = api::note::set_field(
-            &self.object_id,
-            "viewRelations",
-            config::columns_value(&next, name_w),
-            cx,
-        );
-        cx.spawn(async move |this, cx| {
-            let _ = task.await;
-            let _ = this.update(cx, |this, cx| {
-                // Wait for the refetched view object before dropping the local state.
-                this.local_cols = None;
-                this.name_local = None;
-                this.reload(cx);
-            });
-        })
-    }
-
-    fn save_columns(&mut self, next: Vec<Col>, cx: &mut Context<Self>) {
-        self.local_cols = Some(next.clone());
-        let name_w = self.stored_name_width(cx);
-        self.persist_view(next, name_w, cx).detach();
-        cx.notify();
-    }
-
-    fn drop_column(&mut self, cx: &mut Context<Self>) {
-        let from = self.drag_col.take();
-        let gap = self.gap_idx.take();
-        self.gap_x = None;
-        cx.notify();
-        let (Some(from), Some(gap)) = (from, gap) else {
-            return;
-        };
-        let mut next = self.cols(cx);
-        if from >= next.len() {
-            return;
-        }
-        let moved = next.remove(from);
-        next.insert(if gap > from { gap - 1 } else { gap }, moved);
-        self.save_columns(next, cx);
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn column_drag_over(
-        &mut self,
-        i: usize,
-        from: usize,
-        header: Bounds<Pixels>,
-        x: Pixels,
-        force_after: bool,
-        n: usize,
-        cx: &mut Context<Self>,
-    ) {
-        let after = force_after || x > header.left() + header.size.width / 2.;
-        let gap = if force_after {
-            n
-        } else if after {
-            i + 1
-        } else {
-            i
-        };
-        self.drag_col = Some(from);
-        if gap == from || gap == from + 1 {
-            self.gap_idx = None;
-            self.gap_x = None;
-        } else {
-            self.gap_idx = Some(gap);
-            let edge = if force_after {
-                header.left()
-            } else if after {
-                header.right()
-            } else {
-                header.left()
-            };
-            self.gap_x = Some(edge - self.table_bounds.get().left());
-        }
-        cx.notify();
-    }
-
-    fn mouse_move(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
-        if let Some(resize) = &self.resize {
-            let w = (resize.start_w + f32::from(position.x - resize.start_x)).max(MIN_WIDTH);
-            match resize.col {
-                Some(idx) => {
-                    let mut snap = resize.snapshot.clone();
-                    if let Some(c) = snap.get_mut(idx) {
-                        c.width = w;
-                    }
-                    self.local_cols = Some(snap);
-                }
-                None => self.name_local = Some(w.round()),
-            }
-            cx.notify();
-            return;
-        }
-        if self.marquee.is_some() {
-            self.marquee_move(position, cx);
-        }
-    }
-
-    fn mouse_up(&mut self, cx: &mut Context<Self>) {
-        if let Some(resize) = self.resize.take() {
-            match resize.col {
-                Some(_) => {
-                    let cols = self.local_cols.clone().unwrap_or(resize.snapshot);
-                    self.save_columns(cols, cx);
-                }
-                None => {
-                    let cols = self.cols(cx);
-                    let name_w = self.name_local;
-                    self.persist_view(cols, name_w, cx).detach();
-                }
-            }
-            return;
-        }
-        if self.marquee.is_some() {
-            self.end_marquee(cx);
-        }
-    }
-
-    // ── Entry row ────────────────────────────────────────────────
-
-    pub(crate) fn begin_new(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.pending_new = true;
-        self.new_input.update(cx, |s, cx| {
-            s.set_value("", window, cx);
-            s.focus(window, cx);
-        });
-        cx.notify();
-    }
-
-    fn commit_new(&mut self, cancel: bool, window: &mut Window, cx: &mut Context<Self>) {
-        if self.committing {
-            return;
-        }
-        let name = self.new_input.read(cx).value().trim().to_string();
-        self.pending_new = false;
-        self.new_input
-            .update(cx, |s, cx| s.set_value("", window, cx));
-        cx.notify();
-        if cancel {
-            return;
-        }
-        cx.emit(TableEvent::Create(name));
-    }
-
-    /// The data view finished creating the entry row's record.
-    pub(crate) fn created(&mut self, cx: &mut Context<Self>) {
-        self.committing = false;
-        self.load(false, cx);
-    }
-
-    pub(crate) fn set_committing(&mut self, committing: bool) {
-        self.committing = committing;
-    }
-
-    // ── Context menu ─────────────────────────────────────────────
-
-    fn open_menu(
-        &mut self,
-        id: String,
-        position: Point<Pixels>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let targets = if self.selected.contains(&id) {
-            self.selected.clone()
-        } else {
-            vec![id]
-        };
-        let Some(object) = cached_object(&self.object_id, cx) else {
-            return;
-        };
-        let space = field_str(&object.fields, "channel").to_string();
-        let columns: Vec<String> = self.cols(cx).into_iter().map(|c| c.key).collect();
-        let fields: HashMap<String, roostr_core::Fields> = self
-            .rows
-            .iter()
-            .filter(|r| targets.contains(&r.id))
-            .map(|r| (r.id.clone(), r.fields.clone()))
-            .collect();
-        let collection = self.collection.clone();
-        let menu = cx.new(|cx| {
-            RowContextMenu::new(
-                position, targets, space, collection, columns, fields, window, cx,
-            )
-        });
-        cx.subscribe(&menu, |this, _, event: &MenuEvent, cx| {
-            match event {
-                MenuEvent::Close => {
-                    this.ctx_menu = None;
-                    this.set_selection(Vec::new(), cx);
-                }
-                MenuEvent::Changed => {
-                    this.reload(cx);
-                    cx.emit(ViewMsg::Changed);
-                }
-            }
-            cx.notify();
-        })
-        .detach();
-        self.ctx_menu = Some(menu);
-        cx.notify();
-    }
-
-    fn delete_selected(&mut self, cx: &mut Context<Self>) {
-        let ids: Vec<String> = self
-            .selected
-            .iter()
-            .filter(|id| !self.sel_blocked.contains_key(*id))
-            .cloned()
-            .collect();
-        self.set_selection(Vec::new(), cx);
-        cx.spawn(async move |this, cx| {
-            for id in ids {
-                let _ = cx.update(|cx| api::note::delete(&id, cx)).await;
-            }
-            let _ = this.update(cx, |this, cx| this.reload(cx));
-        })
-        .detach();
-    }
-
-    /// The property flow's list: the view's columns (on), then the specials not shown (off).
-    fn flow_items(&self, cols: &[Col], cx: &App) -> Vec<FlowItem> {
-        let Some(object) = cached_object(&self.object_id, cx) else {
-            return Vec::new();
-        };
-        let relations = common::scoped_relations(&object, cx);
-        let mut items: Vec<FlowItem> = cols
-            .iter()
-            .map(|c| {
-                let sp = SPECIALS.iter().find(|(k, _)| *k == c.key);
-                let rel = common::find_rel(&relations, &c.key);
-                FlowItem {
-                    key: c.key.clone(),
-                    name: sp
-                        .map(|(_, n)| (*n).to_string())
-                        .or_else(|| rel.map(|r| r.name.clone()))
-                        .unwrap_or_else(|| c.key.clone()),
-                    format: rel
-                        .map(|r| r.format.clone())
-                        .unwrap_or_else(|| "shorttext".into()),
-                    on: true,
-                    emoji: special_emoji(&c.key)
-                        .map(str::to_string)
-                        .or_else(|| rel.and_then(|r| r.icon_emoji.clone())),
-                }
-            })
-            .collect();
-        for (k, n) in SPECIALS {
-            if !cols.iter().any(|c| c.key == *k) {
-                items.push(FlowItem {
-                    key: (*k).into(),
-                    name: (*n).into(),
-                    format: "shorttext".into(),
-                    on: false,
-                    emoji: special_emoji(k).map(str::to_string),
-                });
-            }
-        }
-        items
-    }
-
-    fn open_adding(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.adding.take().is_some() {
-            cx.notify();
-            return;
-        }
-        let Some(object) = cached_object(&self.object_id, cx) else {
-            return;
-        };
-        let items = self.flow_items(&self.cols(cx), cx);
-        let space =
-            roostr_core::relations::object_space_id(Store::global(cx).read(cx), &object.fields);
-        let flow =
-            cx.new(|cx| PropertyFlow::new(items, vec![SERVING_KEY.to_string()], space, window, cx));
-        cx.subscribe(&flow, |this, flow, event: &FlowEvent, cx| {
-            match event {
-                FlowEvent::Toggle(key, on) => {
-                    let mut cols = this.cols(cx);
-                    if *on {
-                        cols.push(Col {
-                            key: key.clone(),
-                            width: DEFAULT_WIDTH,
-                        });
-                    } else {
-                        cols.retain(|c| c.key != *key);
-                    }
-                    let items = this.flow_items(&cols, cx);
-                    flow.update(cx, |f, cx| f.set_items(items, cx));
-                    this.save_columns(cols, cx);
-                }
-                FlowEvent::Add(rel) => {
-                    let mut cols = this.cols(cx);
-                    cols.push(Col {
-                        key: rel.key.clone(),
-                        width: DEFAULT_WIDTH,
-                    });
-                    this.save_columns(cols, cx);
-                }
-                FlowEvent::Close => this.adding = None,
-            }
-            cx.notify();
-        })
-        .detach();
-        self.adding = Some(flow);
-        cx.notify();
+        out
     }
 }
 
-// ── Rendering ───────────────────────────────────────────────────
+fn table<'a>(s: &'a State, id: &str) -> Option<&'a Table> {
+    dv(s, id).and_then(DataView::table)
+}
+
+fn table_mut<'a>(s: &'a mut State, id: &str) -> Option<&'a mut Table> {
+    dv_mut(s, id).and_then(DataView::table_mut)
+}
+
+fn stored_cols(s: &State, id: &str) -> Vec<Col> {
+    s.store
+        .object(id)
+        .map(|o| config::stored_columns(&o.fields))
+        .unwrap_or_default()
+}
+
+fn stored_name_width(s: &State, id: &str) -> Option<f32> {
+    s.store
+        .object(id)
+        .and_then(|o| config::stored_name_width(&o.fields))
+}
+
+fn cols_of(s: &State, id: &str, t: &Table) -> Vec<Col> {
+    t.local_cols.clone().unwrap_or_else(|| stored_cols(s, id))
+}
+
+fn cols(s: &State, id: &str) -> Vec<Col> {
+    table(s, id).map_or_else(Vec::new, |t| cols_of(s, id, t))
+}
+
+pub(crate) fn set_input(s: &mut State, id: &str, input: ViewInput) {
+    let Some(t) = table_mut(s, id) else { return };
+    // The table reloads on its body and sorts (the page's own refresh reloads it too).
+    let reload = input.body != t.input.body || input.sorts != t.input.sorts;
+    t.input = input;
+    if reload {
+        load(s, id, false);
+    }
+}
+
+// ── Loading ──────────────────────────────────────────────────────
+
+/// The engine sorts and filters; the table fetches a page at a time. Only
+/// what the engine can't compute (Served by, a sort by next repeat) needs
+/// every row. `keep_count`: a refresh keeps the rows already scrolled in.
+pub(crate) fn load(s: &mut State, id: &str, keep_count: bool) {
+    let columns: Vec<String> = cols(s, id).into_iter().map(|c| c.key).collect();
+    let Some(t) = table_mut(s, id) else { return };
+    let Some(body) = t.input.body.clone() else {
+        return;
+    };
+    t.generation += 1;
+    let generation = t.generation;
+    let rules = common::body_serving_rules(&body);
+    let (key, desc) = t.sort_key_dir();
+    let dir = if desc { "desc" } else { "asc" };
+    let serving_sort = key == "serving";
+    let repeat_sort = key == "repeat";
+    let sorts: Vec<Json> = if serving_sort || repeat_sort {
+        vec![json!({"key": "updatedAt", "type": "desc", "emptyPlacement": "end"})]
+    } else if t.override_sort.is_some() {
+        vec![json!({"key": key, "type": dir, "emptyPlacement": "end"})]
+    } else if !t.input.sorts.is_empty() {
+        t.input
+            .sorts
+            .iter()
+            .map(|s| json!({"key": s.key, "type": s.type_str(), "emptyPlacement": "end"}))
+            .collect()
+    } else {
+        vec![json!({"key": "updatedAt", "type": "desc", "emptyPlacement": "end"})]
+    };
+    let needs_every_row =
+        serving_sort || repeat_sort || !rules.is_empty() || columns.iter().any(|c| c == "serving");
+    let view = id.to_string();
+    if !needs_every_row {
+        let mut fields: Vec<String> = ROW_FIELDS.iter().map(|s| (*s).to_string()).collect();
+        for c in &columns {
+            if !fields.contains(c) {
+                fields.push(c.clone());
+            }
+        }
+        let query = engine_body(&body, json!({"sorts": sorts, "fields": fields}));
+        let limit = if keep_count {
+            PAGE.max(t.rows.len())
+        } else {
+            PAGE
+        };
+        let task = api::query(engine_body(&query, json!({"offset": 0, "limit": limit})), s);
+        s.rt.spawn(async move |cx| {
+            let res = match task.await {
+                Ok(res) => res,
+                Err(error) => {
+                    log::error!("table rows: {error:#}");
+                    return;
+                }
+            };
+            cx.update(|s| {
+                let Some(t) = table_mut(s, &view) else { return };
+                if t.generation != generation {
+                    return;
+                }
+                t.page_query = Some(query);
+                t.rows = res.records;
+                t.total = res.total as usize;
+                after_rows(t);
+            });
+        })
+        .detach();
+        return;
+    }
+    t.page_query = None;
+    let task = api::query(engine_body(&body, json!({"sorts": sorts})), s);
+    let with_serving = columns.iter().any(|c| c == "serving") || !rules.is_empty() || serving_sort;
+    s.rt.spawn(async move |cx| {
+        let mut all = match task.await {
+            Ok(res) => res.records,
+            Err(error) => {
+                log::error!("table rows: {error:#}");
+                return;
+            }
+        };
+        if repeat_sort {
+            // One-off objects last either way.
+            all.sort_by(|a, b| {
+                let x = repeat_of(&a.fields).map(|r| r.next);
+                let y = repeat_of(&b.fields).map(|r| r.next);
+                match (x, y) {
+                    (Some(x), Some(y)) => {
+                        if desc {
+                            y.cmp(&x)
+                        } else {
+                            x.cmp(&y)
+                        }
+                    }
+                    (None, None) => std::cmp::Ordering::Equal,
+                    (None, Some(_)) => std::cmp::Ordering::Greater,
+                    (Some(_), None) => std::cmp::Ordering::Less,
+                }
+            });
+        }
+        let mut serving: Option<(HashMap<String, ServingInfo>, Vec<MachineRow>)> = None;
+        if with_serving {
+            let machines_task = cx.read(fetch_machines);
+            let (machine_rows, machines) = match machines_task.await {
+                Ok(m) => m,
+                Err(error) => {
+                    log::error!("machines: {error:#}");
+                    return;
+                }
+            };
+            let ids: Vec<String> = all.iter().map(|r| r.id.clone()).collect();
+            let resolve = cx.read(|s| resolve_many(&ids, s));
+            let resolved = resolve.await.unwrap_or_default();
+            let icons: Vec<String> = cx.read(|s| {
+                let space = current_space_id(s);
+                resolved
+                    .iter()
+                    .map(|r| {
+                        if r.machine_id.is_empty() {
+                            return String::new();
+                        }
+                        let emoji = machine_rows
+                            .iter()
+                            .find(|m| field_str(&m.fields, "machine_id") == r.machine_id)
+                            .map(|m| field_str(&m.fields, "iconEmoji").to_string())
+                            .unwrap_or_default();
+                        object_icon(&s.store, &emoji, "machine", &space)
+                    })
+                    .collect()
+            });
+            let mut map = HashMap::new();
+            for (i, r) in all.iter().enumerate() {
+                let sv = resolved.get(i).cloned().unwrap_or_default();
+                let copy = serving_copy(&sv, &machines);
+                let label = if sv.machine_id.is_empty() {
+                    "No machine".to_string()
+                } else {
+                    machine_name(&machines, &sv.machine_id)
+                };
+                map.insert(
+                    r.id.clone(),
+                    ServingInfo {
+                        text: copy.text,
+                        label,
+                        warning: copy.warning,
+                        reason: sv.reason.clone(),
+                        machine_id: sv.machine_id.clone(),
+                        icon: icons.get(i).cloned().unwrap_or_default(),
+                    },
+                );
+            }
+            if !rules.is_empty() {
+                all.retain(|r| {
+                    rules
+                        .iter()
+                        .all(|(c, v)| serving_match(c, v, map.get(&r.id)))
+                });
+            }
+            if serving_sort {
+                let d = if desc { -1 } else { 1 };
+                all.sort_by(|a, b| {
+                    let ra = serving_rank(map.get(&a.id));
+                    let rb = serving_rank(map.get(&b.id));
+                    (d * (ra - rb))
+                        .cmp(&0)
+                        .then(b.updated_at.cmp(&a.updated_at))
+                });
+            }
+            serving = Some((map, machines));
+        }
+        cx.update(|s| {
+            let Some(t) = table_mut(s, &view) else { return };
+            if t.generation != generation {
+                return;
+            }
+            if let Some((map, machines)) = serving {
+                t.serving_by_id = map;
+                t.machines_now = machines;
+            }
+            t.total = all.len();
+            t.rows = all;
+            after_rows(t);
+        });
+    })
+    .detach();
+}
+
+/// The next page of a paged view, in the same order.
+fn load_more(s: &mut State, id: &str) {
+    let Some(t) = table_mut(s, id) else { return };
+    let Some(query) = t.page_query.clone() else {
+        return;
+    };
+    if t.loading_more || t.rows.len() >= t.total {
+        return;
+    }
+    t.loading_more = true;
+    let generation = t.generation;
+    let offset = t.rows.len();
+    let task = api::query(
+        engine_body(&query, json!({"offset": offset, "limit": PAGE})),
+        s,
+    );
+    let view = id.to_string();
+    s.rt.spawn(async move |cx| {
+        let res = task.await;
+        cx.update(|s| {
+            let Some(t) = table_mut(s, &view) else { return };
+            t.loading_more = false;
+            if t.generation != generation {
+                return;
+            }
+            match res {
+                Ok(res) => {
+                    for r in res.records {
+                        if !t.rows.iter().any(|x| x.id == r.id) {
+                            t.rows.push(r);
+                        }
+                    }
+                    t.total = res.total as usize;
+                }
+                Err(error) => log::error!("table page: {error:#}"),
+            }
+        });
+    })
+    .detach();
+}
+
+fn after_rows(t: &mut Table) {
+    let ids: Vec<&str> = t.rows.iter().map(|r| r.id.as_str()).collect();
+    t.selected.retain(|s| ids.contains(&s.as_str()));
+    t.heights.retain(|k, _| ids.contains(&k.as_str()));
+}
+
+/// After a change: the same view, the same rows scrolled into view.
+pub(crate) fn reload(s: &mut State, id: &str) {
+    load(s, id, true);
+}
+
+/// Await a mutation, then reload.
+fn after(s: &mut State, id: &str, task: Task<anyhow::Result<roostr_core::JsonMap>>) {
+    let view = id.to_string();
+    s.rt.spawn(async move |cx| {
+        if let Err(error) = task.await {
+            log::error!("{error:#}");
+        }
+        cx.update(|s| reload(s, &view));
+    })
+    .detach();
+}
+
+/// Per frame: the entry row's blur commits it (GPUI's `InputEvent::Blur`).
+pub(crate) fn poll(s: &mut State, id: &str) -> bool {
+    let Some(t) = table_mut(s, id) else {
+        return false;
+    };
+    if !t.pending_new {
+        return false;
+    }
+    if t.new_input.is_focused() {
+        t.new_focused = true;
+        return false;
+    }
+    if !t.new_focused {
+        return false;
+    }
+    let empty = t.new_input.value().trim().is_empty();
+    commit_new(s, id, empty);
+    true
+}
+
+// ── Selection ────────────────────────────────────────────────────
+
+fn set_selection(s: &mut State, id: &str, ids: Vec<String>) {
+    let Some(t) = table_mut(s, id) else { return };
+    if ids == t.selected {
+        return;
+    }
+    t.selected = ids.clone();
+    let task = blockers_for(&ids, s);
+    let view = id.to_string();
+    s.rt.spawn(async move |cx| {
+        if let Ok(map) = task.await {
+            cx.update(|s| {
+                if let Some(t) = table_mut(s, &view)
+                    && t.selected == ids
+                {
+                    t.sel_blocked = map;
+                }
+            });
+        }
+    })
+    .detach();
+}
+
+/// The row menu closed: its selection goes with it.
+pub(crate) fn clear_selection(s: &mut State, id: &str) {
+    set_selection(s, id, Vec::new());
+}
+
+fn toggle_row(s: &mut State, id: &str, row: &str) {
+    let Some(t) = table_mut(s, id) else { return };
+    t.anchor = row.to_string();
+    let next = if t.selected.iter().any(|x| x == row) {
+        t.selected.iter().filter(|x| *x != row).cloned().collect()
+    } else {
+        let mut n = t.selected.clone();
+        n.push(row.to_string());
+        n
+    };
+    set_selection(s, id, next);
+}
+
+fn range_rows(s: &mut State, id: &str, row: &str) {
+    let Some(t) = table(s, id) else { return };
+    let anchor = if t.anchor.is_empty() {
+        t.selected.first().cloned().unwrap_or_default()
+    } else {
+        t.anchor.clone()
+    };
+    let a = t.rows.iter().position(|r| r.id == anchor);
+    let b = t.rows.iter().position(|r| r.id == row);
+    let (Some(a), Some(b)) = (a, b) else {
+        toggle_row(s, id, row);
+        return;
+    };
+    let next = t.rows[a.min(b)..=a.max(b)]
+        .iter()
+        .map(|r| r.id.clone())
+        .collect();
+    set_selection(s, id, next);
+}
+
+/// A row press: cmd/ctrl toggles it, shift extends to it, a plain press
+/// clears a selection or opens the row; the middle button opens it in a tab.
+fn on_row_press(s: &mut State, id: &str, row: &str, tx: &mut Tx) {
+    if tx.button() == PointerButton::Middle {
+        common::open_object_tab(row, s);
+        return;
+    }
+    let m = tx.mods();
+    if m.cmd || m.ctrl {
+        toggle_row(s, id, row);
+        return;
+    }
+    if m.shift {
+        range_rows(s, id, row);
+        return;
+    }
+    let Some(t) = table_mut(s, id) else { return };
+    // The press that ends a drag must not clear what the drag just selected.
+    if t.drag_moved {
+        t.drag_moved = false;
+        return;
+    }
+    if !t.selected.is_empty() {
+        set_selection(s, id, Vec::new());
+        return;
+    }
+    common::open_object(row, s);
+}
+
+/// The rubber band: a press-and-drag anywhere in the data view below its
+/// chrome (and from the page around it, [`crate::page_drag`]) selects the
+/// rows it crosses. Presses with cmd/ctrl/shift, other buttons and presses on
+/// the header don't arm it. A plain press on the whitespace around the rows
+/// clears the selection.
+pub(crate) fn marquee(s: &mut State, id: &str, d: &Drag, tx: &mut Tx) {
+    if tx.button() != PointerButton::Primary {
+        return;
+    }
+    let [x, y] = d.window_point();
+    let Some(t) = table_mut(s, id) else { return };
+    match d.phase {
+        Phase::Down => {
+            let m = tx.mods();
+            // Above the rows: the controls, the header.
+            if m.cmd || m.ctrl || m.shift || y < t.rows_top {
+                return;
+            }
+            t.marquee = Some(Marquee {
+                x0: [x, y],
+                x1: [x, y],
+            });
+            t.drag_moved = false;
+        }
+        Phase::Move => {
+            let Some(m) = &mut t.marquee else { return };
+            m.x1 = [x, y];
+            let (x0, x1) = (m.x0, m.x1);
+            if (x1[0] - x0[0]).abs() + (x1[1] - x0[1]).abs() < 4. {
+                return;
+            }
+            t.drag_moved = true;
+            let (top, bottom) = (x0[1].min(x1[1]), x0[1].max(x1[1]));
+            let (left, right) = (x0[0].min(x1[0]), x0[0].max(x1[0]));
+            let tops = t.tops();
+            let row_left = t.clip[0];
+            let row_right = t.clip[0] + t.clip[2];
+            let hit: Vec<String> = t
+                .rows
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| {
+                    let (rt, rb) = (t.rows_top + tops[*i], t.rows_top + tops[i + 1]);
+                    rb >= top && rt <= bottom && row_right >= left && row_left <= right
+                })
+                .map(|(_, r)| r.id.clone())
+                .collect();
+            set_selection(s, id, hit);
+        }
+        Phase::Up => {
+            let Some(m) = t.marquee.take() else { return };
+            // A plain click on the whitespace around the rows clears, like a plain row click.
+            let tops = t.tops();
+            let on_row = m.x0[1] >= t.rows_top
+                && m.x0[1] <= t.rows_top + tops[t.rows.len()]
+                && m.x0[0] >= t.clip[0]
+                && m.x0[0] <= t.clip[0] + t.clip[2];
+            if !t.drag_moved && !t.selected.is_empty() && !on_row {
+                set_selection(s, id, Vec::new());
+            }
+        }
+    }
+}
+
+/// [`crate::page_drag`]: a press on the page around the data view.
+pub(crate) fn page_drag(s: &mut State, id: &str, d: &Drag, tx: &mut Tx) {
+    marquee(s, id, d, tx);
+}
+
+// ── Cells ────────────────────────────────────────────────────────
+
+fn is_editable(relations: &[RelationDef], key: &str) -> bool {
+    // Repeat is a rule edited in the object's Repeat row, not a cell value.
+    key != "repeat" && common::find_rel(relations, key).is_some_and(|r| !r.read_only)
+}
+
+fn format_of<'a>(relations: &'a [RelationDef], key: &str) -> &'a str {
+    common::find_rel(relations, key).map_or("", |r| r.format.as_str())
+}
+
+/// A press on cell `key` of `record`: a checkbox toggles, any other opens
+/// (or moves, or closes) its editor.
+fn on_cell_press(s: &mut State, id: &str, record: &str, key: &str, checkbox: bool) {
+    let Some(t) = table_mut(s, id) else { return };
+    // The release ending a row-drag must not open an editor.
+    if t.drag_moved {
+        t.drag_moved = false;
+        return;
+    }
+    if checkbox {
+        // Checkbox cells toggle on press, no menu.
+        let cur = t
+            .rows
+            .iter()
+            .find(|r| r.id == record)
+            .and_then(|r| r.fields.get(key))
+            .and_then(|v| v.bool_value)
+            == Some(true);
+        let task = api::note::set_field(record, key, Value::bool(!cur), s);
+        after(s, id, task);
+        return;
+    }
+    let same = t
+        .cell_edit
+        .as_ref()
+        .is_some_and(|(r, k)| r == record && k == key);
+    let open = !same;
+    if t.cell_edit.is_some() {
+        roostr_properties::commit_pending(s);
+    }
+    if let Some(t) = table_mut(s, id) {
+        t.cell_edit = open.then(|| (record.to_string(), key.to_string()));
+    }
+}
+
+fn close_editor(s: &mut State, id: &str) {
+    roostr_properties::commit_pending(s);
+    if let Some(t) = table_mut(s, id) {
+        t.cell_edit = None;
+    }
+}
+
+fn cell_save(s: &mut State, id: &str, v: Value) {
+    let Some(object) = s.store.object(id) else {
+        return;
+    };
+    let relations = common::scoped_relations(s, &object);
+    let Some(t) = table_mut(s, id) else { return };
+    let Some((record, key)) = t.cell_edit.clone() else {
+        return;
+    };
+    let f = format_of(
+        &relations,
+        if key == "serving" { SERVING_KEY } else { &key },
+    );
+    // Single-value editors close on save; tag/object stay open for more picks.
+    if f != "tag" && f != "object" {
+        t.cell_edit = None;
+    }
+    let task = if key == "serving" {
+        // The picker links a Computer object; served_by holds its machine_id.
+        let target = v
+            .link_value
+            .as_ref()
+            .map(|l| l.target_id.clone())
+            .or_else(|| {
+                v.items()
+                    .first()
+                    .and_then(|i| i.link_value.as_ref().map(|l| l.target_id.clone()))
+            })
+            .unwrap_or_default();
+        let machine_id = t
+            .machines_now
+            .iter()
+            .find(|m| m.id == target)
+            .map(|m| m.machine_id.clone())
+            .unwrap_or_default();
+        if machine_id.is_empty() {
+            api::note::delete_field(&record, SERVING_KEY, s)
+        } else {
+            api::note::set_field(&record, SERVING_KEY, Value::string(machine_id), s)
+        }
+    } else {
+        api::note::set_field(&record, &key, v, s)
+    };
+    after(s, id, task);
+}
+
+fn cell_text(s: &State, t: &Table, r: &QueryRow, key: &str, relations: &[RelationDef]) -> String {
+    match key {
+        "serving" => {
+            return t
+                .serving_by_id
+                .get(&r.id)
+                .map(|s| s.label.clone())
+                .unwrap_or_default();
+        }
+        "repeat" => {
+            return repeat_of(&r.fields)
+                .map(|rule| describe_repeat(&rule))
+                .unwrap_or_default();
+        }
+        "type" => return common::type_name(s, &r.type_key),
+        "createdAt" => {
+            return if r.created_at != 0 {
+                show_date(r.created_at)
+            } else {
+                String::new()
+            };
+        }
+        "updatedAt" => {
+            return if r.updated_at != 0 {
+                show_date(r.updated_at)
+            } else {
+                String::new()
+            };
+        }
+        _ => {}
+    }
+    let Some(v) = r.fields.get(key) else {
+        return String::new();
+    };
+    let format = format_of(relations, key);
+    // Object values come as a list, a bare link, or a bare id: all read as names.
+    if format == "object" || v.link_value.is_some() {
+        return common::link_names(s, v);
+    }
+    if let Some(s) = &v.string_value {
+        return s.clone();
+    }
+    if let Some(b) = v.bool_value {
+        return if b { "✓".into() } else { String::new() };
+    }
+    if let Some(n) = v.int_value {
+        return if format == "date" {
+            show_date(n)
+        } else {
+            n.to_string()
+        };
+    }
+    if let Some(f) = v.float_value {
+        return js_number_string(f);
+    }
+    if v.values_value.is_some() {
+        return v
+            .items()
+            .iter()
+            .map(|i| i.string_value.clone().unwrap_or_default())
+            .collect::<Vec<_>>()
+            .join(", ");
+    }
+    if let Some(l) = &v.list_value {
+        return l.values.join(", ");
+    }
+    String::new()
+}
+
+fn col_name(key: &str, relations: &[RelationDef]) -> String {
+    SPECIALS
+        .iter()
+        .find(|(k, _)| *k == key)
+        .map(|(_, n)| (*n).to_string())
+        .or_else(|| common::find_rel(relations, key).map(|r| r.name.clone()))
+        .unwrap_or_else(|| key.to_string())
+}
+
+fn toggle_sort(s: &mut State, id: &str, key: &str) {
+    let Some(t) = table_mut(s, id) else { return };
+    let (cur, desc) = t.sort_key_dir();
+    t.override_sort = Some(if cur == key {
+        (key.to_string(), !desc)
+    } else {
+        (key.to_string(), false)
+    });
+    load(s, id, false);
+}
+
+// ── Columns ──────────────────────────────────────────────────────
+
+fn persist_view(s: &mut State, id: &str, next: Vec<Col>, name_w: Option<f32>) {
+    let task = api::note::set_field(id, "viewRelations", config::columns_value(&next, name_w), s);
+    let view = id.to_string();
+    s.rt.spawn(async move |cx| {
+        if let Err(error) = task.await {
+            log::error!("save columns: {error:#}");
+        }
+        cx.update(|s| {
+            // Wait for the refetched view object before dropping the local state.
+            if let Some(t) = table_mut(s, &view) {
+                t.local_cols = None;
+                t.name_local = None;
+            }
+            reload(s, &view);
+        });
+    })
+    .detach();
+}
+
+fn save_columns(s: &mut State, id: &str, next: Vec<Col>) {
+    let name_w = stored_name_width(s, id);
+    if let Some(t) = table_mut(s, id) {
+        t.local_cols = Some(next.clone());
+    }
+    persist_view(s, id, next, name_w);
+}
+
+fn drop_column(s: &mut State, id: &str) {
+    let Some(t) = table_mut(s, id) else { return };
+    let Some(drag) = t.col_drag.take() else {
+        return;
+    };
+    let Some(gap) = drag.gap else { return };
+    let mut next = cols(s, id);
+    if drag.from >= next.len() {
+        return;
+    }
+    let moved = next.remove(drag.from);
+    next.insert(if gap > drag.from { gap - 1 } else { gap }, moved);
+    save_columns(s, id, next);
+}
+
+/// A header drag: the gap under the pointer among the columns (laid out
+/// from `starts`, each column's left edge in the table's points, and its
+/// width), never beside the column itself.
+fn column_drag_move(s: &mut State, id: &str, x: f32, starts: &[(f32, f32)]) {
+    let Some(t) = table_mut(s, id) else { return };
+    let Some(drag) = &mut t.col_drag else { return };
+    let local = x - t.table_left;
+    let n = starts.len();
+    let mut gap = None;
+    for (i, (left, w)) in starts.iter().enumerate() {
+        if local >= *left && local < left + w {
+            let after = local > left + w / 2.;
+            gap = Some(if after { i + 1 } else { i });
+            break;
+        }
+    }
+    // Over the "+" column: after the last.
+    if gap.is_none()
+        && let Some((left, w)) = starts.last()
+        && local >= left + w
+    {
+        gap = Some(n);
+    }
+    let Some(gap) = gap else { return };
+    if gap == drag.from || gap == drag.from + 1 {
+        drag.gap = None;
+        drag.gap_x = None;
+    } else {
+        drag.gap = Some(gap);
+        drag.gap_x = Some(if gap == n {
+            starts.last().map_or(0., |(l, w)| l + w)
+        } else {
+            starts[gap].0
+        });
+    }
+}
+
+// ── Entry row ────────────────────────────────────────────────────
+
+/// The accent New of a table view: the in-table entry row, focused.
+pub(crate) fn begin_new(s: &mut State, id: &str) {
+    let Some(t) = table_mut(s, id) else { return };
+    t.pending_new = true;
+    t.new_focused = false;
+    t.new_input.clear();
+    t.new_input.focus();
+}
+
+fn commit_new(s: &mut State, id: &str, cancel: bool) {
+    let Some(t) = table_mut(s, id) else { return };
+    if t.committing {
+        return;
+    }
+    let name = t.new_input.value().trim().to_string();
+    t.pending_new = false;
+    t.new_focused = false;
+    t.new_input.clear();
+    if cancel {
+        return;
+    }
+    // The entry row's record: created as the view creates records (`oncreate`).
+    t.committing = true;
+    let task = crate::controls::create_record(s, id, name, None);
+    let view = id.to_string();
+    s.rt.spawn(async move |cx| {
+        task.await;
+        cx.update(|s| {
+            if let Some(t) = table_mut(s, &view) {
+                t.committing = false;
+            }
+            load(s, &view, false);
+        });
+    })
+    .detach();
+}
+
+// ── Context menu ─────────────────────────────────────────────────
+
+fn open_menu(s: &mut State, id: &str, row: &str, at: PointerPress) {
+    let columns: Vec<String> = cols(s, id).into_iter().map(|c| c.key).collect();
+    let Some(t) = table(s, id) else { return };
+    let targets = if t.selected.iter().any(|x| x == row) {
+        t.selected.clone()
+    } else {
+        vec![row.to_string()]
+    };
+    let fields: HashMap<String, roostr_core::Fields> = t
+        .rows
+        .iter()
+        .filter(|r| targets.contains(&r.id))
+        .map(|r| (r.id.clone(), r.fields.clone()))
+        .collect();
+    crate::context_menu::open(s, id, targets, (at.x, at.y), fields, columns);
+}
+
+fn delete_selected(s: &mut State, id: &str) {
+    let Some(t) = table(s, id) else { return };
+    let ids: Vec<String> = t
+        .selected
+        .iter()
+        .filter(|x| !t.sel_blocked.contains_key(*x))
+        .cloned()
+        .collect();
+    set_selection(s, id, Vec::new());
+    let view = id.to_string();
+    s.rt.spawn(async move |cx| {
+        for record in ids {
+            let task = cx.update(|s| api::note::delete(&record, s));
+            if let Err(error) = task.await {
+                log::error!("delete {record}: {error:#}");
+            }
+        }
+        cx.update(|s| reload(s, &view));
+    })
+    .detach();
+}
+
+/// The property flow's list: the view's columns (on), then the specials not shown (off).
+fn flow_items(s: &State, id: &str, cols: &[Col]) -> Vec<FlowItem> {
+    let Some(object) = s.store.object(id) else {
+        return Vec::new();
+    };
+    let relations = common::scoped_relations(s, &object);
+    let mut items: Vec<FlowItem> = cols
+        .iter()
+        .map(|c| {
+            let sp = SPECIALS.iter().find(|(k, _)| *k == c.key);
+            let rel = common::find_rel(&relations, &c.key);
+            FlowItem {
+                key: c.key.clone(),
+                name: sp
+                    .map(|(_, n)| (*n).to_string())
+                    .or_else(|| rel.map(|r| r.name.clone()))
+                    .unwrap_or_else(|| c.key.clone()),
+                format: rel
+                    .map(|r| r.format.clone())
+                    .unwrap_or_else(|| "shorttext".into()),
+                on: true,
+                emoji: special_emoji(&c.key)
+                    .map(str::to_string)
+                    .or_else(|| rel.and_then(|r| r.icon_emoji.clone())),
+            }
+        })
+        .collect();
+    for (k, n) in SPECIALS {
+        if !cols.iter().any(|c| c.key == *k) {
+            items.push(FlowItem {
+                key: (*k).into(),
+                name: (*n).into(),
+                format: "shorttext".into(),
+                on: false,
+                emoji: special_emoji(k).map(str::to_string),
+            });
+        }
+    }
+    items
+}
+
+fn toggle_adding(s: &mut State, id: &str) {
+    let Some(t) = table_mut(s, id) else { return };
+    if t.adding.take().is_some() {
+        return;
+    }
+    let Some(object) = s.store.object(id) else {
+        return;
+    };
+    let items = flow_items(s, id, &cols(s, id));
+    let space = object_space_id(&s.store, &object.fields);
+    if let Some(t) = table_mut(s, id) {
+        t.adding = Some(PropertyFlowState::new(
+            items,
+            vec![SERVING_KEY.to_string()],
+            space,
+        ));
+    }
+}
+
+fn on_flow(s: &mut State, id: &str, event: FlowEvent) {
+    match event {
+        FlowEvent::Toggle(key, on) => {
+            let mut next = cols(s, id);
+            if on {
+                next.push(Col {
+                    key,
+                    width: DEFAULT_WIDTH,
+                });
+            } else {
+                next.retain(|c| c.key != key);
+            }
+            let items = flow_items(s, id, &next);
+            if let Some(flow) = table_mut(s, id).and_then(|t| t.adding.as_mut()) {
+                flow.set_items(items);
+            }
+            save_columns(s, id, next);
+        }
+        FlowEvent::Add(rel) => {
+            let mut next = cols(s, id);
+            next.push(Col {
+                key: rel.key.clone(),
+                width: DEFAULT_WIDTH,
+            });
+            save_columns(s, id, next);
+        }
+        FlowEvent::Close => {
+            if let Some(t) = table_mut(s, id) {
+                t.adding = None;
+            }
+        }
+    }
+}
+
+// ── Keys ─────────────────────────────────────────────────────────
+
+/// ← / → with no modifiers: the table under the pointer scrolls sideways.
+fn arrow_step(ev: &KeyEvent) -> Option<f32> {
+    let m = ev.mods;
+    if m.cmd || m.ctrl || m.alt || m.shift || m.logo {
+        return None;
+    }
+    match ev.key {
+        Key::Left => Some(-ARROW_STEP),
+        Key::Right => Some(ARROW_STEP),
+        _ => None,
+    }
+}
+
+fn scroll_by(t: &Table, id: &str, dx: f32, tx: &mut Tx) -> bool {
+    let (at, max) = t.hscroll();
+    if max <= 0. {
+        return false;
+    }
+    let x = (at + dx).clamp(0., max);
+    if x == at {
+        return false;
+    }
+    tx.scroll_to_x(format!("{id}/table-scroll"), x);
+    true
+}
+
+/// The window's keys nothing focused took: the hovered table scrolls with ←
+/// / →; Escape closes every open cell editor.
+pub(crate) fn on_window_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
+    // A text field keeps its arrows even when it ignores one (→ at the end of the text).
+    if tx.focused().is_some() && ev.key != Key::Escape {
+        return false;
+    }
+    let Some(sets) = s.get::<crate::Sets>() else {
+        return false;
+    };
+    if ev.key == Key::Escape {
+        let ids: Vec<String> = sets
+            .views
+            .values()
+            .filter(|v| v.table().is_some_and(|t| t.cell_edit.is_some()))
+            .map(|v| v.id.clone())
+            .collect();
+        for id in &ids {
+            close_editor(s, id);
+        }
+        return !ids.is_empty();
+    }
+    let Some(dx) = arrow_step(ev) else {
+        return false;
+    };
+    sets.views
+        .values()
+        .find_map(|v| v.table().filter(|t| t.hovered).map(|t| (v.id.clone(), t)))
+        .is_some_and(|(id, t)| scroll_by(t, &id, dx, tx))
+}
+
+/// Keys while the data view has focus (a press in it focused it).
+pub(crate) fn on_view_key(s: &mut State, id: &str, ev: &KeyEvent, tx: &mut Tx) -> bool {
+    let Some(dx) = arrow_step(ev) else {
+        return false;
+    };
+    table(s, id).is_some_and(|t| t.hovered && scroll_by(t, id, dx, tx))
+}
+
+// ── Rendering ────────────────────────────────────────────────────
 
 /// Column widths for this frame: the Name column takes the slack (never less
 /// than its minimum), or its own width; fixed-layout tables spread any excess
@@ -1260,1187 +1295,1263 @@ fn layout_widths(avail: f32, name_w: Option<f32>, cols: &[Col]) -> (f32, Vec<f32
     }
 }
 
-/// A column title (`.th-label`), the kit ghost button that sorts by it:
-/// muted 13/500, the optional property emoji, the text ellipsized.
-fn sort_head(id: SharedString, icon: Option<String>, text: String) -> Button {
-    Button::new(id)
-        .ghost()
-        .tab_stop(false)
-        .max_w_full()
-        .h_auto()
-        .px(px(10.))
-        .py(px(6.))
-        .rounded(px(0.))
-        .text_color(theme::muted())
-        .cursor_pointer()
-        .child(
-            // Text styles on the child: the kit's inner box sets its own size.
-            div()
-                .flex()
-                .flex_1()
-                .min_w_0()
-                .items_center()
-                .text_size(px(13.))
-                .font_weight(FontWeight::MEDIUM)
-                .when_some(icon, |d, icon| {
-                    d.child(div().flex_none().mr(px(5.)).text_size(px(12.)).child(icon))
-                })
-                .child(
-                    div()
-                        .min_w_0()
-                        .overflow_hidden()
-                        .text_ellipsis()
-                        .child(text),
-                ),
-        )
+/// What every view run reads once: the theme, the view's id, its relations.
+struct Ctx<'a> {
+    th: &'a Theme,
+    id: &'a str,
+    relations: &'a [RelationDef],
+    space: &'a str,
 }
 
-impl SetTable {
-    #[allow(clippy::too_many_arguments)]
-    fn header_cell(
-        &self,
-        i: usize,
-        c: &Col,
-        width: f32,
-        relations: &[RelationDef],
-        sort: &(String, bool),
-        n: usize,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let label = Self::col_name(&c.key, relations);
-        let icon = common::find_rel(relations, &c.key).and_then(|r| {
-            let store = Store::global(cx).read(cx);
-            let space = r.space.clone().unwrap_or_default();
-            roostr_core::objects::relation_emoji(store, r, None, &space)
-        });
-        let arrow = if sort.0 == c.key {
-            if sort.1 { "↓" } else { "↑" }
-        } else {
-            ""
-        };
-        let group: SharedString = format!("th-{}", c.key).into();
-        let key = c.key.clone();
-        let key2 = c.key.clone();
-        let dragging = self.drag_col == Some(i);
-        let headers = self.header_bounds.clone();
-        let headers2 = self.header_bounds.clone();
-        div()
-            .id(SharedString::from(format!("th-{}", c.key)))
-            .group(group.clone())
-            .relative()
-            .flex_none()
-            .w(px(width))
-            .h_full()
-            .flex()
-            .items_center()
-            .overflow_hidden()
-            .when(dragging, |d| d.bg(theme::accent().opacity(0.14)))
-            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .on_drag(
-                ColumnDrag {
-                    idx: i,
-                    label: label.clone().into(),
-                },
-                |d, _, _, cx| cx.new(|_| d.clone()),
-            )
-            .on_drag_move(
-                cx.listener(move |this, e: &DragMoveEvent<ColumnDrag>, _, cx| {
-                    let Some(b) = headers.borrow().get(i + 1).copied() else {
-                        return;
-                    };
-                    if b.contains(&e.event.position) {
-                        let from = e.drag(cx).idx;
-                        this.column_drag_over(i, from, b, e.event.position.x, false, n, cx);
+/// The kit ghost button's hover fill: the accent at half strength (dark), solid (light).
+fn ghost_hover(th: &Theme) -> Color {
+    if th.dark {
+        th.kit.accent.alpha(th.kit.accent.a * 0.5)
+    } else {
+        th.kit.accent
+    }
+}
+
+/// A column title (`.th-label`), drawn as the kit ghost button that sorts by
+/// it: muted 13/500, the optional property emoji, the text ellipsized. The
+/// whole title is also the column's drag source (reorder).
+fn sort_head(c: &Ctx, s: &State, key: String, icon: Option<String>, label: String) -> El {
+    let th = c.th;
+    let ghost_hover = ghost_hover(th);
+    let mut content = row().grow(1.0).min_w(0.0).center_y();
+    if let Some(icon) = icon {
+        content = content.child(el().mr(5.0).child(common::icon(s, &icon, ty::ui(12.0))));
+    }
+    content = content.child(
+        text(label)
+            .font(ty::ui(13.0).medium())
+            .color(th.muted)
+            .group_color(th.kit.accent_foreground)
+            .truncate()
+            .shrink(),
+    );
+    row()
+        .key(key)
+        .role("button")
+        .min_w(0.0)
+        .px(10.0)
+        .py(6.0)
+        .center_y()
+        .cursor(Cursor::Pointer)
+        .hover_group()
+        .hover(ghost_hover)
+        .child(content)
+}
+
+/// The resize grip on a header cell's right edge: the accent at 25% while
+/// the header cell is hovered, 60% under the pointer.
+fn resize_grip(c: &Ctx, key: String, col: Option<usize>, start_w: f32) -> El {
+    let id = c.id.to_string();
+    el().key(key)
+        .pin(None, Some(0.), Some(0.), Some(0.))
+        .w(11.0)
+        .cursor(Cursor::ResizeColumn)
+        .hover(c.th.accent.alpha(0.6))
+        .help("Drag to resize")
+        .child(
+            el().w_full()
+                .h_full()
+                .fill(c.th.accent.alpha(0.25))
+                .group_opacity(0.0, 1.0),
+        )
+        .on_drag(move |s: &mut State, d: &mut Drag, _: &mut Tx| {
+            resize_drag(s, &id, col, start_w, d)
+        })
+}
+
+fn resize_drag(s: &mut State, id: &str, col: Option<usize>, start_w: f32, d: &Drag) {
+    match d.phase {
+        Phase::Down => {
+            let snapshot = cols(s, id);
+            let name_w = stored_name_width(s, id);
+            let Some(t) = table_mut(s, id) else { return };
+            let start_w = match col {
+                Some(_) => start_w,
+                None => t.name_local.or(name_w).unwrap_or(start_w),
+            };
+            t.resize = Some(Resize {
+                col,
+                start_w,
+                snapshot,
+            });
+        }
+        Phase::Move => {
+            let Some(t) = table_mut(s, id) else { return };
+            let Some(resize) = &t.resize else { return };
+            let w = (resize.start_w + d.dx).max(MIN_WIDTH);
+            match resize.col {
+                Some(idx) => {
+                    let mut snap = resize.snapshot.clone();
+                    if let Some(c) = snap.get_mut(idx) {
+                        c.width = w;
                     }
-                }),
-            )
-            .on_drop(cx.listener(|this, _: &ColumnDrag, _, cx| this.drop_column(cx)))
-            .child(
-                // The title is the sort toggle; the whole cell stays the drag source.
-                sort_head(
-                    SharedString::from(format!("head-{}", c.key)),
-                    icon,
-                    format!("{label} {arrow}"),
-                )
-                .when(dragging, |d| d.opacity(0.55))
-                .on_click(cx.listener(move |this, _, _, cx| this.toggle_sort(&key, cx))),
-            )
-            .child(
-                div()
-                    .absolute()
-                    .right(px(8.))
-                    .top_0()
-                    .bottom_0()
-                    .flex()
-                    .items_center()
-                    .child(
-                        Button::new(SharedString::from(format!("hide-{}", c.key)))
-                            .ghost()
-                            .xsmall()
-                            .icon(IconName::Close)
-                            .tab_stop(false)
-                            .bg(theme::bg())
-                            .text_color(theme::muted())
-                            .cursor_pointer()
-                            .opacity(0.)
-                            .group_hover(group.clone(), |s| s.opacity(1.))
-                            .tooltip("Hide column")
-                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                let next = this
-                                    .cols(cx)
-                                    .into_iter()
-                                    .filter(|x| x.key != key2)
-                                    .collect();
-                                this.save_columns(next, cx);
-                            })),
-                    ),
-            )
-            .child(self.resize_grip(
-                SharedString::from(format!("grip-{}", c.key)),
-                group,
-                Some(i),
-                c.width,
-                cx,
-            ))
-            .child(
-                canvas(
-                    move |b, _, _| {
-                        let mut h = headers2.borrow_mut();
-                        if h.len() <= i + 1 {
-                            h.resize(i + 2, Bounds::default());
-                        }
-                        h[i + 1] = b;
-                    },
-                    |_, _, _, _| {},
-                )
-                .absolute()
-                .top_0()
-                .left_0()
-                .size_full(),
-            )
-            .into_any_element()
-    }
-
-    fn resize_grip(
-        &self,
-        id: SharedString,
-        group: SharedString,
-        col: Option<usize>,
-        start_w: f32,
-        cx: &mut Context<Self>,
-    ) -> Stateful<Div> {
-        let name_bounds = self.name_th_bounds.clone();
-        div()
-            .id(id)
-            .absolute()
-            .top_0()
-            .right_0()
-            .w(px(11.))
-            .h_full()
-            .cursor_col_resize()
-            .group_hover(group, |s| s.bg(theme::accent().opacity(0.25)))
-            .hover(|s| s.bg(theme::accent().opacity(0.6)))
-            .tooltip(tooltip("Drag to resize"))
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, e: &MouseDownEvent, _, cx| {
-                    cx.stop_propagation();
-                    let start_w = match col {
-                        Some(_) => start_w,
-                        None => this
-                            .name_local
-                            .or(this.stored_name_width(cx))
-                            .unwrap_or(f32::from(name_bounds.get().size.width)),
-                    };
-                    this.resize = Some(Resize {
-                        col,
-                        start_x: e.position.x,
-                        start_w,
-                        snapshot: this.cols(cx),
-                    });
-                }),
-            )
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn body_cell(
-        &self,
-        r: &QueryRow,
-        c: &str,
-        width: f32,
-        relations: &[RelationDef],
-        dragging: bool,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let base = || {
-            div()
-                .flex_none()
-                .w(px(width))
-                .flex()
-                .items_center()
-                .gap(px(4.))
-                .px(px(10.))
-                .py(px(7.))
-                .overflow_hidden()
-                .whitespace_nowrap()
-                .when(dragging, |d| d.bg(theme::accent().opacity(0.14)))
-        };
-        let target = reconnect_target(r, c);
-        if r.type_key == "credential" && c == "status" {
-            // The harness writes a credential's status: shown in words, never hand-edited here.
-            let st = field_str(&r.fields, "status").to_string();
-            if let Some(target) = target {
-                let (text, glyph, color) = credential_cell_badge(r, cx);
-                let colors = badge_colors(color);
-                let name = field_str(&r.fields, "name");
-                let label = format!(
-                    "Reconnect {}: {text}",
-                    if name.is_empty() { "credential" } else { name }
-                );
-                return base()
-                    .child(
-                        CredentialCell::new(
-                            SharedString::from(format!("cred-{}", r.id)),
-                            r.clone(),
-                            target,
-                            label.into(),
-                        )
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap(px(5.))
-                                .text_color(colors.fg)
-                                .child(Icon::new(glyph).size(px(14.)).text_color(colors.icon))
-                                .child(text),
-                        ),
-                    )
-                    .into_any_element();
+                    t.local_cols = Some(snap);
+                }
+                None => t.name_local = Some(w.round()),
             }
-            let (glyph, color) = credential_status_badge(&st);
-            let colors = badge_colors(color);
-            return base()
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(5.))
-                        .text_color(colors.fg)
-                        .child(Icon::new(glyph).size(px(14.)).text_color(colors.icon))
-                        .child(credential_status_text(&st)),
-                )
-                .into_any_element();
         }
-        if let Some(target) = target
-            && c == "error"
-        {
-            let text = self.cell_text(r, c, relations, cx);
-            return base()
-                .child(
-                    CredentialCell::new(
-                        SharedString::from(format!("err-{}", r.id)),
-                        r.clone(),
-                        target,
-                        format!("Reconnect: {text}").into(),
-                    )
-                    .child(
-                        div()
-                            .text_color(rgb(0xf55522))
-                            .overflow_hidden()
-                            .text_ellipsis()
-                            .child(text),
-                    ),
-                )
-                .into_any_element();
+        Phase::Up => {
+            let Some(t) = table_mut(s, id) else { return };
+            let Some(resize) = t.resize.take() else {
+                return;
+            };
+            if d.cancelled() {
+                t.local_cols = None;
+                t.name_local = None;
+                return;
+            }
+            match resize.col {
+                Some(_) => {
+                    let next = t.local_cols.clone().unwrap_or(resize.snapshot);
+                    save_columns(s, id, next);
+                }
+                None => {
+                    let name_w = t.name_local;
+                    let next = cols(s, id);
+                    persist_view(s, id, next, name_w);
+                }
+            }
         }
-        let locked = is_locked_tool(&r.fields);
-        if Self::is_editable(relations, c) && !locked {
-            let fmt = Self::format_of(relations, c);
-            let rel = common::find_rel(relations, c);
-            let record = r.id.clone();
-            let key = c.to_string();
-            let checkbox = fmt == "checkbox";
-            let mut cell = base()
-                .id(SharedString::from(format!("cell-{}-{}", r.id, c)))
-                .debug_selector({
-                    let selector = format!("cell-{}-{}", r.id, c);
-                    move || selector.clone()
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn header_cell(
+    c: &Ctx,
+    s: &State,
+    i: usize,
+    col: &Col,
+    width: f32,
+    sort: &(String, bool),
+    dragging: bool,
+    starts: Rc<Vec<(f32, f32)>>,
+) -> El {
+    let th = c.th;
+    let label = col_name(&col.key, c.relations);
+    let icon = common::find_rel(c.relations, &col.key).and_then(|r| {
+        let space = r.space.clone().unwrap_or_default();
+        relation_emoji(&s.store, r, None, &space)
+    });
+    let arrow = if sort.0 == col.key {
+        if sort.1 { "↓" } else { "↑" }
+    } else {
+        ""
+    };
+    let (id, key) = (c.id.to_string(), col.key.clone());
+    let sort_key = col.key.clone();
+    let drag_label = label.clone();
+    let mut head = sort_head(
+        c,
+        s,
+        format!("head-{}", col.key),
+        icon,
+        format!("{label} {arrow}"),
+    )
+    .on_press(move |s: &mut State| toggle_sort(s, &id, &sort_key));
+    if dragging {
+        head = head.opacity(0.55);
+    }
+    // The title is the sort toggle and the drag source (reorder).
+    let id = c.id.to_string();
+    head = head.on_drag(move |s: &mut State, d: &mut Drag, _: &mut Tx| {
+        let [x, y] = d.window_point();
+        match d.phase {
+            Phase::Down => {
+                if let Some(t) = table_mut(s, &id) {
+                    t.col_drag = Some(ColDrag {
+                        from: i,
+                        label: drag_label.clone(),
+                        gap: None,
+                        gap_x: None,
+                        at: [x, y],
+                        grab: [d.x, d.y],
+                    });
+                }
+            }
+            Phase::Move => {
+                if let Some(drag) = table_mut(s, &id).and_then(|t| t.col_drag.as_mut()) {
+                    drag.at = [x, y];
+                }
+                if d.dx.abs() + d.dy.abs() >= 4. {
+                    column_drag_move(s, &id, x, &starts);
+                }
+            }
+            Phase::Up => {
+                if d.cancelled() || d.dx.abs() + d.dy.abs() < 4. {
+                    if let Some(t) = table_mut(s, &id) {
+                        t.col_drag = None;
+                    }
+                    return;
+                }
+                drop_column(s, &id);
+            }
+        }
+    });
+    let hide_id = c.id.to_string();
+    let hide = el()
+        .pin(None, Some(0.), Some(8.), Some(0.))
+        .center_y()
+        .group_opacity(0.0, 1.0)
+        .child(
+            Button::new(format!("hide-{}", col.key))
+                .ghost()
+                .xsmall()
+                .icon(Glyph::Close)
+                .bg(th.bg)
+                .text_color(th.muted)
+                .pointer()
+                .tooltip("Hide column")
+                .on_press(move |s: &mut State| {
+                    let next = cols(s, &hide_id)
+                        .into_iter()
+                        .filter(|x| x.key != key)
+                        .collect();
+                    save_columns(s, &hide_id, next);
                 })
-                .cursor_pointer()
-                .hover(|s| s.bg(theme::hl_light()))
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(|this, _, _, _| this.editable_down = true),
-                )
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    cx.stop_propagation();
-                    this.on_cell_click(&record, &key, checkbox, cx)
-                }));
-            match fmt.as_str() {
-                "tag" | "status" => {
-                    // Inline-block pills on the text baseline grow the CSS line box to ~23px.
-                    let items = common::string_items(r.fields.get(c));
-                    if !items.is_empty() {
-                        cell = cell.min_h(px(37.));
-                    }
-                    for t in items {
-                        let color = rel
-                            .and_then(|rel| rel.options.iter().find(|o| o.text == t))
-                            .map(|o| o.color.clone())
-                            .unwrap_or_default();
-                        cell = cell.child(tag_pill(t, &color, false, theme::fg()));
-                    }
+                .build(th),
+        );
+    let mut cell = row()
+        .key(format!("th-{}", col.key))
+        .hover_group()
+        .w(width)
+        .h_full()
+        .center_y()
+        .clip_rounded(0.0)
+        .child(head)
+        .child(hide)
+        .child(resize_grip(
+            c,
+            format!("grip-{}", col.key),
+            Some(i),
+            col.width,
+        ));
+    if dragging {
+        cell = cell.fill(th.accent.alpha(0.14));
+    }
+    cell
+}
+
+#[allow(clippy::too_many_arguments)]
+fn body_cell(
+    c: &Ctx,
+    s: &State,
+    cx: &mut Cx<State>,
+    layer: &mut Vec<El>,
+    t: &Table,
+    r: &QueryRow,
+    key: &str,
+    width: f32,
+    dragging: bool,
+) -> El {
+    let th = c.th;
+    let base = || {
+        let e = row()
+            .w(width)
+            .center_y()
+            .gap(4.0)
+            .px(10.0)
+            .py(7.0)
+            .clip_rounded(0.0);
+        if dragging {
+            e.fill(th.accent.alpha(0.14))
+        } else {
+            e
+        }
+    };
+    let cell_key = format!("cell-{}-{}", r.id, key);
+    let target = reconnect_target(r, key);
+    if r.type_key == "credential" && key == "status" {
+        // The harness writes a credential's status: shown in words, never hand-edited here.
+        let st = field_str(&r.fields, "status").to_string();
+        if let Some(target) = target {
+            let (label, g, color) = credential_cell_badge(r, s);
+            let colors = badge_colors(th, color);
+            let name = field_str(&r.fields, "name");
+            let tip = format!(
+                "Reconnect {}: {label}",
+                if name.is_empty() { "credential" } else { name }
+            );
+            return base().key(cell_key).child(
+                CredentialCell::new(format!("cred-{}", r.id), r.clone(), target, tip)
+                    .child(
+                        row()
+                            .center_y()
+                            .gap(5.0)
+                            .child(glyph(g, 14.0).color(colors.icon))
+                            .child(text(label).font(ty::ui(13.0)).color(colors.fg)),
+                    )
+                    .build(s, cx, th, layer),
+            );
+        }
+        let (g, color) = credential_status_badge(&st);
+        let colors = badge_colors(th, color);
+        return base().key(cell_key).child(
+            row()
+                .center_y()
+                .gap(5.0)
+                .child(glyph(g, 14.0).color(colors.icon))
+                .child(
+                    text(credential_status_text(&st))
+                        .font(ty::ui(13.0))
+                        .color(colors.fg),
+                ),
+        );
+    }
+    if let Some(target) = target
+        && key == "error"
+    {
+        let line = cell_text(s, t, r, key, c.relations);
+        return base().key(cell_key).child(
+            CredentialCell::new(
+                format!("err-{}", r.id),
+                r.clone(),
+                target,
+                format!("Reconnect: {line}"),
+            )
+            .child(text(line).font(ty::ui(13.0)).color(rgb(WARN)).truncate())
+            .build(s, cx, th, layer),
+        );
+    }
+    let locked = is_locked_tool(&r.fields);
+    if is_editable(c.relations, key) && !locked {
+        let fmt = format_of(c.relations, key);
+        let rel = common::find_rel(c.relations, key);
+        let checkbox = fmt == "checkbox";
+        let (id, record, k) = (c.id.to_string(), r.id.clone(), key.to_string());
+        let mut cell = base()
+            .key(cell_key)
+            .cursor(Cursor::Pointer)
+            .hover(th.hl_light)
+            .on_press(move |s: &mut State| on_cell_press(s, &id, &record, &k, checkbox));
+        cell = with_marquee(cell, c.id);
+        match fmt {
+            "tag" | "status" => {
+                // Inline-block pills on the text baseline grow the CSS line box to ~23px.
+                let items = common::string_items(r.fields.get(key));
+                if !items.is_empty() {
+                    cell = cell.min_h(37.0);
                 }
-                "object" => {
-                    let ids = r.fields.get(c).map(common::link_ids).unwrap_or_default();
-                    if !ids.is_empty() {
-                        cell = cell.min_h(px(37.));
-                    }
-                    let store = Store::global(cx).read(cx);
-                    let space = current_space_id(cx);
-                    for id in &ids {
-                        let selector = format!("pill-{}-{c}-{id}", r.id);
-                        let target = id.clone();
-                        // A pill opens its object; the cell around it opens the editor.
-                        cell = cell.child(
-                            div()
-                                .id(SharedString::from(selector.clone()))
-                                .flex_none()
-                                .cursor_pointer()
-                                .debug_selector(move || selector.clone())
-                                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                                .on_click(move |_, _, cx| {
-                                    cx.stop_propagation();
-                                    common::open_object(&target, cx);
-                                })
-                                .child(common::object_pill(store, id, &space)),
-                        );
-                    }
+                for item in items {
+                    let color = rel
+                        .and_then(|rel| rel.options.iter().find(|o| o.text == item))
+                        .map_or("", |o| o.color.as_str());
+                    cell = cell.child(tag_pill(th, &item, color, false, th.fg));
                 }
-                "checkbox" => {
-                    // Display only: the press reaches the cell, which toggles it.
-                    let on = r.fields.get(c).and_then(|v| v.bool_value) == Some(true);
-                    cell = cell.min_h(px(37.)).child(ui::checkbox_display(
-                        SharedString::from(format!("cbx-{}-{c}", r.id)),
-                        on,
-                    ));
+            }
+            "object" => {
+                let ids = r.fields.get(key).map(common::link_ids).unwrap_or_default();
+                if !ids.is_empty() {
+                    cell = cell.min_h(37.0);
                 }
-                _ => {
-                    let text = self.cell_text(r, c, relations, cx);
-                    let warn = c == "error" && !text.is_empty();
+                for target in &ids {
+                    let open = target.clone();
+                    // A pill opens its object; the cell around it opens the editor.
                     cell = cell.child(
-                        div()
-                            .min_w_0()
-                            .overflow_hidden()
-                            .text_ellipsis()
-                            .when(warn, |d| d.text_color(rgb(0xf55522)))
-                            .child(text),
+                        el().key(format!("pill-{}-{key}-{target}", r.id))
+                            .cursor(Cursor::Pointer)
+                            .on_press(move |s: &mut State| common::open_object(&open, s))
+                            .child(common::object_pill(s, th, target, c.space)),
                     );
                 }
             }
-            return cell.into_any_element();
-        }
-        // Specials and read-only columns.
-        let muted = matches!(c, "type" | "createdAt" | "updatedAt");
-        let serving = self.serving_by_id.get(&r.id).cloned();
-        let warn = c == "serving" && serving.as_ref().is_some_and(|s| s.warning);
-        let space = current_space_id(cx);
-        let lead = if c == "type" {
-            Some(type_icon(Store::global(cx).read(cx), &r.type_key, &space))
-                .filter(|s| !s.is_empty())
-        } else if c == "serving" {
-            serving
-                .as_ref()
-                .map(|s| s.icon.clone())
-                .filter(|s| !s.is_empty())
-        } else {
-            None
-        };
-        let text = self.cell_text(r, c, relations, cx);
-        let mut cell = base()
-            .id(SharedString::from(format!("cell-{}-{}", r.id, c)))
-            .when(muted, |d| d.text_color(theme::muted()))
-            .when(warn, |d| d.text_color(rgb(0xf55522)))
-            .when_some(lead, |d, icon| {
-                d.child(div().flex_none().mr(px(2.)).child(icon))
-            })
-            .child(
-                div()
-                    .min_w_0()
-                    .overflow_hidden()
-                    .text_ellipsis()
-                    .child(text),
-            );
-        if c == "serving" {
-            if let Some(s) = &serving {
-                cell = cell.tooltip(tooltip(s.text.clone()));
-            }
-            if !locked {
-                let record = r.id.clone();
+            "checkbox" => {
+                // Display only: the press reaches the cell, which toggles it.
+                let on = r.fields.get(key).and_then(|v| v.bool_value) == Some(true);
                 cell = cell
-                    .cursor_pointer()
-                    .hover(|s| s.bg(theme::hl_light()))
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, _, _, _| this.editable_down = true),
-                    )
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        cx.stop_propagation();
-                        this.on_cell_click(&record, "serving", false, cx)
-                    }));
+                    .min_h(37.0)
+                    .child(checkbox_display(format!("cbx-{}-{key}", r.id), on).build(th));
+            }
+            _ => {
+                let line = cell_text(s, t, r, key, c.relations);
+                let warn = key == "error" && !line.is_empty();
+                cell = cell.child(
+                    text(line)
+                        .font(ty::ui(13.0))
+                        .color(if warn { rgb(WARN) } else { th.fg })
+                        .truncate()
+                        .shrink(),
+                );
             }
         }
-        cell.into_any_element()
+        return cell;
     }
+    // Specials and read-only columns.
+    let muted = matches!(key, "type" | "createdAt" | "updatedAt");
+    let serving = t.serving_by_id.get(&r.id);
+    let warn = key == "serving" && serving.is_some_and(|s| s.warning);
+    let ink = if warn {
+        rgb(WARN)
+    } else if muted {
+        th.muted
+    } else {
+        th.fg
+    };
+    let lead = if key == "type" {
+        Some(type_icon(&s.store, &r.type_key, c.space)).filter(|s| !s.is_empty())
+    } else if key == "serving" {
+        serving.map(|s| s.icon.clone()).filter(|s| !s.is_empty())
+    } else {
+        None
+    };
+    let line = cell_text(s, t, r, key, c.relations);
+    let mut cell = base().key(cell_key);
+    if let Some(icon) = lead {
+        cell = cell.child(el().mr(2.0).child(common::icon(s, &icon, ty::ui(13.0))));
+    }
+    cell = cell.child(text(line).font(ty::ui(13.0)).color(ink).truncate().shrink());
+    if key == "serving" {
+        if let Some(sv) = serving {
+            cell = cell.help(sv.text.clone());
+        }
+        if !locked {
+            let (id, record) = (c.id.to_string(), r.id.clone());
+            cell = cell
+                .cursor(Cursor::Pointer)
+                .hover(th.hl_light)
+                .on_press(move |s: &mut State| on_cell_press(s, &id, &record, "serving", false));
+            cell = with_marquee(cell, c.id);
+        }
+    }
+    cell
+}
 
-    /// The cell editor popover (PropertyValue at the cell).
-    fn cell_pop(
-        &self,
-        relations: &[RelationDef],
-        window: &Window,
-        cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
-        let (record, key) = self.cell_edit.clone()?;
-        let edit_key = if key == "serving" {
-            SERVING_KEY
-        } else {
-            key.as_str()
-        };
-        let rel = common::find_rel(relations, edit_key)?.clone();
-        let row = self.rows.iter().find(|r| r.id == record)?;
-        let wide = rel.format == "longtext" || rel.key == "error";
-        let seeds = cached_object(&self.object_id, cx)
-            .map(|o| roostr_core::view_seeds::seeds_from_view(&o.fields, relations))
-            .unwrap_or_default();
-        let entity = cx.entity().downgrade();
-        let rels = relations.to_vec();
-        let pop_bounds = self.pop_bounds.clone();
-        Some(
-            div()
-                .relative()
-                .bg(theme::panel())
-                .border_1()
-                .border_color(theme::border())
-                .rounded(px(10.))
-                .p(px(8.))
-                .shadow(roostr_core::ui::menu_shadow())
-                // `.cell-pop.wide`: 440px, `max-width: calc(100vw - 24px)` (content box).
-                .when(wide, |d| {
-                    d.w(px(458.).min(window.viewport_size().width - px(24.) + px(18.)))
-                })
-                .occlude()
-                .child(track_bounds(&self.pop_bounds))
-                .child(
-                    PropertyValue::new(
-                        SharedString::from(format!("pop-{record}-{key}")),
-                        rel.clone(),
-                        row.fields.get(&rel.key).cloned(),
+/// The rubber band also arms from the rows' own pressables.
+fn with_marquee(e: El, id: &str) -> El {
+    let id = id.to_string();
+    e.on_drag(move |s: &mut State, d: &mut Drag, tx: &mut Tx| marquee(s, &id, d, tx))
+}
+
+/// The cell editor (roostr-properties `PropertyValue` at the cell): anchored
+/// under the cell's left edge (+4), pulled left so it stays inside the
+/// table's visible width (the page column clips anything past it). A press
+/// outside it closes it, or moves it to the editable cell pressed.
+#[allow(clippy::too_many_arguments)]
+fn cell_pop(
+    c: &Ctx,
+    s: &State,
+    cx: &mut Cx<State>,
+    layer: &mut Vec<El>,
+    t: &Table,
+    name_width: f32,
+    widths: &[f32],
+    cols: &[Col],
+) -> Option<El> {
+    let th = c.th;
+    let (record, key) = t.cell_edit.clone()?;
+    let edit_key = if key == "serving" {
+        SERVING_KEY
+    } else {
+        key.as_str()
+    };
+    let rel = common::find_rel(c.relations, edit_key)?.clone();
+    let row = t.rows.iter().find(|r| r.id == record)?;
+    let ci = cols.iter().position(|col| col.key == key)?;
+    let wide = rel.format == "longtext" || rel.key == "error";
+    let seeds = s
+        .store
+        .object(c.id)
+        .map(|o| roostr_core::view_seeds::seeds_from_view(&o.fields, c.relations))
+        .unwrap_or_default();
+    let pop_key = format!("{}/cell-pop", c.id);
+    // Where the cell starts in the table, and the table's visible part
+    // (in the table's points: it scrolls sideways under the clip).
+    let cell_left = name_width + widths[..ci].iter().sum::<f32>();
+    let (at, _) = t.hscroll();
+    let pop_w = cx.layout_with(&pop_key, |r| r[2]).unwrap_or(0.).max(260.);
+    let mut left = cell_left;
+    if t.clip[2] > 0. {
+        left = left.min(at + t.clip[2] - pop_w).max(at);
+    }
+    let win_w = cx.layout_with("kit-root", |r| r[2]).unwrap_or(f32::MAX);
+    let id = c.id.to_string();
+    let editor = PropertyValue::new(
+        format!("pop-{record}-{key}"),
+        rel,
+        row.fields.get(edit_key).cloned(),
+    )
+    .space(field_str(&row.fields, "channel").to_string())
+    .seeds(seeds)
+    .auto_open(true)
+    .inline_menus(true)
+    .on_save(move |s: &mut State, v: Value| cell_save(s, &id, v))
+    .build(s, cx, th, layer);
+    let mut pop = col()
+        .key(pop_key)
+        .fill(th.panel)
+        .border(1.0, th.border)
+        .radius(10.0)
+        .padding(8.0)
+        .box_shadow(roostr_ui::shadow::menu())
+        .child(editor);
+    if wide {
+        // `.cell-pop.wide`: 440px, `max-width: calc(100vw - 24px)` (content box).
+        pop = pop.w(458.0_f32.min(win_w - 24. + 18.));
+    }
+    let escape = c.id.to_string();
+    let pop = pop.on_key(move |s: &mut State, ev: &KeyEvent, _: &mut Tx| {
+        if ev.key == Key::Escape {
+            close_editor(s, &escape);
+            return true;
+        }
+        false
+    });
+    let anchor = format!("{}/pop-anchor", c.id);
+    // Enters per cell: another cell's editor mounts afresh.
+    let pop = overlay::anchored(
+        pop.key(format!("{}/cell-pop-{record}-{key}", c.id)),
+        &anchor,
+        Placement::BottomStart,
+        4.,
+    );
+    // The press-away layer under it: an editable cell takes the editor, any
+    // other press closes it.
+    let id = c.id.to_string();
+    layer.push(
+        el().key(format!("{}/cell-scrim", c.id))
+            .pin(Some(0.), Some(0.), Some(0.), Some(0.))
+            .on_drag(move |s: &mut State, d: &mut Drag, _: &mut Tx| {
+                if d.phase == Phase::Down {
+                    let [x, y] = d.window_point();
+                    press_outside_editor(s, &id, x, y);
+                }
+            }),
+    );
+    layer.push(pop);
+    // The anchor rides in the edited row, `left` in from the table's start.
+    let ri = t.rows.iter().position(|r| r.id == record)?;
+    let tops = t.tops();
+    Some(
+        el().key(anchor)
+            .absolute(left, tops[ri + 1] - 1.)
+            .size(0., 1.),
+    )
+}
+
+/// A press outside the open cell editor: on an editable cell, the editor
+/// moves there (a checkbox toggles); anywhere else it closes.
+fn press_outside_editor(s: &mut State, id: &str, x: f32, y: f32) {
+    let Some(object) = s.store.object(id) else {
+        return;
+    };
+    let relations = common::scoped_relations(s, &object);
+    let all = cols(s, id);
+    let name_w = s
+        .get::<crate::Sets>()
+        .and_then(|_| table(s, id))
+        .and_then(|t| t.name_local)
+        .or(config::stored_name_width(&object.fields));
+    let Some(t) = table(s, id) else { return };
+    let (name_width, widths, _) = layout_widths(t.clip[2], name_w, &all);
+    let hit = (|| {
+        if x < t.clip[0] || x > t.clip[0] + t.clip[2] {
+            return None;
+        }
+        let tops = t.tops();
+        let ri = (0..t.rows.len())
+            .find(|&i| y >= t.rows_top + tops[i] && y < t.rows_top + tops[i + 1])?;
+        let local = x - t.table_left;
+        // The pinned Name column covers the cells scrolled under it.
+        if x < t.clip[0] + name_width {
+            return None;
+        }
+        let mut left = name_width;
+        for (ci, w) in widths.iter().enumerate() {
+            if local >= left && local < left + w {
+                let key = &all[ci].key;
+                let row = &t.rows[ri];
+                let editable = if key == "serving" {
+                    !is_locked_tool(&row.fields)
+                } else {
+                    is_editable(&relations, key)
+                        && !is_locked_tool(&row.fields)
+                        && reconnect_target(row, key).is_none()
+                        && !(row.type_key == "credential" && key == "status")
+                };
+                return editable.then(|| {
+                    (
+                        row.id.clone(),
+                        key.clone(),
+                        format_of(&relations, key) == "checkbox",
                     )
-                    .space(field_str(&row.fields, "channel").to_string())
-                    .seeds(seeds)
-                    .auto_open(true)
-                    .inline_menus(true)
-                    .on_save(move |v, _, cx| {
-                        let v = v.clone();
-                        let rels = rels.clone();
-                        let _ = entity.update(cx, |this, cx| this.cell_save(v, &rels, cx));
-                    }),
-                )
-                .on_mouse_down_out(cx.listener(move |this, e: &MouseDownEvent, _, cx| {
-                    if pop_bounds.get().contains(&e.position) {
-                        return;
-                    }
-                    // A click on an editable cell moves/toggles the editor itself.
-                    this.editable_down = false;
-                    cx.defer_in_window_or(move |this: &mut Self, cx: &mut Context<Self>| {
-                        if !this.editable_down {
-                            this.cell_edit = None;
-                            cx.notify();
-                        }
-                        this.editable_down = false;
-                    });
-                }))
-                .into_any_element(),
-        )
+                });
+            }
+            left += w;
+        }
+        None
+    })();
+    match hit {
+        Some((record, key, checkbox)) => on_cell_press(s, id, &record, &key, checkbox),
+        None => close_editor(s, id),
     }
 }
 
-trait DeferExt<T> {
-    fn defer_in_window_or(&mut self, f: impl FnOnce(&mut T, &mut Context<T>) + 'static);
-}
+/// The table of data view `v`: header, the rows near the window, the entry
+/// row and "＋ New Object", the "+" column button, the selection bar, and
+/// (into `layer`) the cell editor, the column flow, the drag ghost and the
+/// rubber band.
+pub(crate) fn view(
+    s: &State,
+    cx: &mut Cx<State>,
+    th: &Theme,
+    layer: &mut Vec<El>,
+    v: &DataView,
+) -> El {
+    let Some(t) = v.table() else { return el() };
+    let Some(object) = s.store.object(&v.id) else {
+        return el();
+    };
+    let id = v.id.as_str();
+    let relations = common::scoped_relations(s, &object);
+    let space = current_space_id(s);
+    let c = Ctx {
+        th,
+        id,
+        relations: &relations,
+        space: &space,
+    };
+    let all_cols = cols_of(s, id, t);
+    let n = all_cols.len();
+    let name_w = t.name_local.or(config::stored_name_width(&object.fields));
+    let scroll_key = format!("{id}/table-scroll");
+    let avail = cx.layout_with(&scroll_key, |r| r[2]).unwrap_or(0.);
+    let (name_width, widths, plus_w) = layout_widths(avail, name_w, &all_cols);
+    let table_w = name_width + widths.iter().sum::<f32>() + plus_w;
+    let sort = t.sort_key_dir();
+    // Each column's left edge and width in the table's points (reorder targets).
+    let starts: Rc<Vec<(f32, f32)>> = Rc::new({
+        let mut x = name_width;
+        widths
+            .iter()
+            .map(|w| {
+                let at = (x, *w);
+                x += w;
+                at
+            })
+            .collect()
+    });
 
-impl<T: 'static> DeferExt<T> for Context<'_, T> {
-    /// Run `f` on this entity once the current event has finished dispatching.
-    fn defer_in_window_or(&mut self, f: impl FnOnce(&mut T, &mut Context<T>) + 'static) {
-        let entity = self.entity().downgrade();
-        self.defer(move |cx| {
-            let _ = entity.update(cx, f);
-        });
-    }
-}
-
-impl Render for SetTable {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let Some(object) = cached_object(&self.object_id, cx) else {
-            return div();
-        };
-        let relations = common::scoped_relations(&object, cx);
-        let cols = self.cols(cx);
-        let n = cols.len();
-        let name_w = self
-            .name_local
-            .or(config::stored_name_width(&object.fields));
-        let avail = f32::from(self.scroll_bounds.get().size.width);
-        let (name_width, widths, plus_w) = layout_widths(avail, name_w, &cols);
-        let table_w = name_width + widths.iter().sum::<f32>() + plus_w;
-        let sort = self.sort_key_dir();
-
-        // Header.
-        let name_group: SharedString = "th-name".into();
-        let name_arrow = if sort.0 == "name" {
-            if sort.1 { "↓" } else { "↑" }
-        } else {
-            ""
-        };
-        let name_bounds = self.name_th_bounds.clone();
-        // The Name column stays put while the table scrolls sideways: its
-        // cells move right by as much as the table moved left, over the
-        // cells scrolled under them. Rows and the header lay out right to
-        // left with Name added last, so it is drawn (and hit) on top; once
-        // something is under it, it takes the pointer for itself.
-        let pin = (-f32::from(self.scroll.offset().x))
-            .min(f32::from(self.scroll.max_offset().x))
-            .max(0.);
-        let pinned = pin > 0.;
-        let pin_shadow = || vec![common::shadow(hsla(0., 0., 0., 0.6), 8., 0., 8., -8.)];
-        // Pinned, the cell reaches PIN_BLEED past its left edge (its content
-        // stays put): fractional column widths, laid out right to left, can
-        // leave its edge a pixel short of the table's, a seam the cells
-        // scrolled under it showed through.
-        let pin_bleed = |d: Stateful<Div>| {
-            d.occlude()
-                .shadow(pin_shadow())
-                .ml(px(-PIN_BLEED))
-                .pl(px(PIN_BLEED))
-                .w(px(name_width + PIN_BLEED))
-        };
-        let name_th = div()
-            .id("th-name")
-            .group(name_group.clone())
-            .relative()
-            .left(px(pin))
-            .flex_none()
-            .w(px(name_width))
-            .h_full()
-            .flex()
-            .items_center()
-            .overflow_hidden()
-            .bg(theme::bg())
-            .when(pinned, pin_bleed)
-            .child(track_bounds(&name_bounds))
-            .child(
-                sort_head("head-name".into(), None, format!("Name {name_arrow}"))
-                    .on_click(cx.listener(|this, _, _, cx| this.toggle_sort("name", cx))),
+    // Header.
+    let name_arrow = if sort.0 == "name" {
+        if sort.1 { "↓" } else { "↑" }
+    } else {
+        ""
+    };
+    let pin_shadow = Shadow {
+        x: 8.,
+        blur: 16.,
+        spread: -8.,
+        color: Color::BLACK.alpha(0.6),
+        ..Shadow::default()
+    };
+    let sort_id = id.to_string();
+    // The Name column stays put while the table scrolls sideways, opaque over
+    // the cells scrolled under it, its shadow showing once it is pinned.
+    let name_th = row()
+        .key("th-name")
+        .hover_group()
+        .w(name_width)
+        .h_full()
+        .center_y()
+        .clip_rounded(0.0)
+        .fill(th.bg)
+        .sticky_left(0.)
+        .stuck_shadow(pin_shadow)
+        .child(
+            sort_head(
+                &c,
+                s,
+                "head-name".into(),
+                None,
+                format!("Name {name_arrow}"),
             )
-            .child(self.resize_grip("grip-name".into(), name_group, None, 0., cx));
-        let mut header = div()
-            .flex()
-            .flex_row_reverse()
-            .h(px(35.))
-            .border_b_1()
-            .border_color(theme::border())
-            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation());
-        // The "+" column's drop target (its button is pinned on top, see below), first: the header runs right to left.
-        let plus_bounds = self.plus_bounds.clone();
-        header = header.child(
-            div()
-                .id("th-plus-drop")
-                .flex_none()
-                .w(px(plus_w))
-                .h_full()
-                .on_drag_move(
-                    cx.listener(move |this, e: &DragMoveEvent<ColumnDrag>, _, cx| {
-                        if e.bounds.contains(&e.event.position) {
-                            let from = e.drag(cx).idx;
-                            let b = e.bounds;
-                            let _ = &plus_bounds;
-                            this.column_drag_over(
-                                n.saturating_sub(1),
-                                from,
-                                b,
-                                e.event.position.x,
-                                true,
-                                n,
-                                cx,
-                            );
-                        }
-                    }),
-                )
-                .on_drop(cx.listener(|this, _: &ColumnDrag, _, cx| this.drop_column(cx))),
-        );
-        for (i, c) in cols.iter().enumerate().rev() {
-            header = header.child(self.header_cell(i, c, widths[i], &relations, &sort, n, cx));
-        }
-        header = header.child(name_th);
+            .on_press(move |s: &mut State| toggle_sort(s, &sort_id, "name")),
+        )
+        .child(resize_grip(&c, "grip-name".into(), None, name_width));
+    let mut header = row()
+        .key(format!("{id}/table-head"))
+        .h(HEADER_H)
+        .border_sides([0., 0., 1., 0.], th.border)
+        .border_layout()
+        .child(name_th);
+    let dragging = t
+        .col_drag
+        .as_ref()
+        .filter(|d| d.gap.is_some() || d.gap_x.is_some());
+    for (i, col) in all_cols.iter().enumerate() {
+        let on = t.col_drag.as_ref().is_some_and(|d| d.from == i);
+        header = header.child(header_cell(
+            &c,
+            s,
+            i,
+            col,
+            widths[i],
+            &sort,
+            on,
+            starts.clone(),
+        ));
+    }
+    // The "+" column's place (its button is pinned on top, see below).
+    header = header.child(el().w(plus_w).h_full());
 
-        // Body rows: only those in (or near) the window are built - the
-        // page scrolls the table, and each frame of it built every loaded
-        // row (hundreds, each a row of cells). Spacers stand in for the rest.
-        let n_rows = self.rows.len();
-        let row_h = self.row_h.get().max(1.);
-        let (first, last) = {
-            let view_h = f32::from(window.viewport_size().height);
-            let over = view_h * OVERSCAN;
-            // Last frame's place of the first row (the header is 35px).
-            let top = f32::from(self.table_bounds.get().top()) + 35.;
-            let first = (((-over - top) / row_h).floor().max(0.) as usize).min(n_rows);
-            let last = ((((view_h + over - top) / row_h).ceil().max(0.)) as usize).clamp(first, n_rows);
-            (first, last)
-        };
-        let mut rows_el = div().flex().flex_col();
-        let row_bounds = self.row_bounds.clone();
-        let row_h_cell = self.row_h.clone();
-        rows_el = rows_el.on_children_prepainted(move |bounds, _, _| {
-            // Children: the top spacer, the drawn rows, the bottom spacer, then the rest.
-            let drawn = bounds.get(1..1 + (last - first)).unwrap_or(&[]);
-            if !drawn.is_empty() {
-                let h = drawn.iter().map(|b| f32::from(b.size.height)).sum::<f32>() / drawn.len() as f32;
-                row_h_cell.set(h);
+    // Body rows: only those in (or near) the window are built - the page
+    // scrolls the table, and building every loaded row (hundreds, each a row
+    // of cells) on every change lagged. Spacers stand in for the rest.
+    let rows_key = format!("{id}/rows");
+    let n_rows = t.rows.len();
+    let tops = t.tops();
+    let win_h = cx
+        .layout_with("kit-root", |r| r[3])
+        .unwrap_or(WINDOW_H_GUESS);
+    let band = cx
+        .window_layout_with(&rows_key, |r| (r[1] / BAND).floor() as i32)
+        .unwrap_or(0);
+    let (first, last) = {
+        let top = band as f32 * BAND;
+        let over = win_h * OVERSCAN + BAND;
+        let first = tops[1..]
+            .iter()
+            .position(|b| top + b >= -over)
+            .unwrap_or(n_rows);
+        let last = tops[..n_rows]
+            .iter()
+            .rposition(|y| top + y <= win_h + over)
+            .map_or(first, |i| i + 1)
+            .max(first);
+        (first, last)
+    };
+    let mut rows_el = col().key(rows_key.clone()).on_layout_tx({
+        let id = id.to_string();
+        move |s: &mut State, r: [f32; 4], tx: &mut Tx| {
+            if let Some(t) = table_mut(s, &id) {
+                t.rows_top = r[1];
             }
-            let (Some(top), Some(bottom)) = (bounds.first(), bounds.get(1 + (last - first))) else {
-                return;
-            };
-            let at = |origin: Bounds<Pixels>, k: usize| Bounds {
-                origin: point(origin.left(), origin.top() + px(row_h * k as f32)),
-                size: size(origin.size.width, px(row_h)),
-            };
-            let mut all = Vec::with_capacity(n_rows);
-            all.extend((0..first).map(|i| at(*top, i)));
-            all.extend(drawn.iter().copied());
-            all.extend((last..n_rows).map(|i| at(*bottom, i - last)));
-            *row_bounds.borrow_mut() = all;
-        });
-        rows_el = rows_el.child(div().flex_none().h(px(row_h * first as f32)));
-        let space = current_space_id(cx);
-        for r in &self.rows[first..last] {
-            let selected = self.selected.contains(&r.id);
-            let id = r.id.clone();
-            let id_aux = r.id.clone();
-            let id_ctx = r.id.clone();
-            let id_name = r.id.clone();
-            let id_name_aux = r.id.clone();
-            let name_selector = format!("name-{}", r.id);
-            let id_name_ctx = r.id.clone();
-            let row_group = SharedString::from(format!("row-{}", r.id));
-            let task = Store::global(cx).read(cx).layout_of(&r.type_key) == "task";
-            let done = r.fields.get("done").and_then(|v| v.bool_value) == Some(true);
-            let lead: AnyElement = if task {
-                let rid = r.id.clone();
-                div()
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .mr(px(6.))
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .child(
-                        ui::checkbox(SharedString::from(format!("done-{}", r.id)), done)
-                            .tab_stop(false)
-                            .on_change(cx.listener(move |this, done: &bool, _, cx| {
-                                cx.stop_propagation();
-                                let task =
-                                    api::note::set_field(&rid, "done", Value::bool(*done), cx);
-                                this.after(task, cx);
-                            })),
-                    )
-                    .into_any_element()
-            } else {
-                let icon = object_icon(
-                    Store::global(cx).read(cx),
-                    field_str(&r.fields, "iconEmoji"),
-                    &r.type_key,
-                    &space,
-                );
-                div().flex_none().mr(px(4.)).child(icon).into_any_element()
-            };
-            // Right to left (see the header): the "+" spacer, the columns from the last, then Name on top.
-            let mut row = div()
-                .id(SharedString::from(format!("row-{}", r.id)))
-                .group(row_group.clone())
-                .flex()
-                .flex_row_reverse()
-                .border_b_1()
-                .border_color(theme::border())
-                .text_size(px(13.))
-                .cursor_pointer()
-                .when(selected, |d| d.bg(rgba(0x377aff40)))
-                .when(!selected, |d| d.hover(|s| s.bg(theme::hover())))
-                .on_click(
-                    cx.listener(move |this, e: &ClickEvent, _, cx| this.on_row_click(e, &id, cx)),
-                )
-                .on_mouse_down(MouseButton::Middle, move |_, _, cx| {
-                    common::open_object_tab(&id_aux, cx)
-                })
-                .on_mouse_down(
-                    MouseButton::Right,
-                    cx.listener(move |this, e: &MouseDownEvent, window, cx| {
-                        cx.stop_propagation();
-                        this.open_menu(id_ctx.clone(), e.position, window, cx)
-                    }),
-                )
-                .child(div().flex_none().w(px(plus_w)));
-            for (i, c) in cols.iter().enumerate().rev() {
-                row = row.child(self.body_cell(
-                    r,
-                    &c.key,
-                    widths[i],
-                    &relations,
-                    self.drag_col == Some(i),
-                    cx,
-                ));
-            }
-            // Opaque, so the cells scrolled under it don't show through; the
-            // row's selection and hover are painted again on top of that.
-            let name_cell = div()
-                .id(SharedString::from(format!("name-{}", r.id)))
-                .debug_selector(move || name_selector.clone())
-                .relative()
-                .left(px(pin))
-                .flex_none()
-                .w(px(name_width))
-                .bg(theme::bg())
-                .when(pinned, pin_bleed)
-                .on_click(cx.listener(move |this, e: &ClickEvent, _, cx| {
-                    cx.stop_propagation();
-                    this.on_row_click(e, &id_name, cx)
-                }))
-                .on_mouse_down(MouseButton::Middle, move |_, _, cx| {
-                    cx.stop_propagation();
-                    common::open_object_tab(&id_name_aux, cx)
-                })
-                .on_mouse_down(
-                    MouseButton::Right,
-                    cx.listener(move |this, e: &MouseDownEvent, window, cx| {
-                        cx.stop_propagation();
-                        this.open_menu(id_name_ctx.clone(), e.position, window, cx)
-                    }),
-                )
-                .child(
-                    div()
-                        .size_full()
-                        .flex()
-                        .items_center()
-                        .px(px(10.))
-                        .py(px(7.))
-                        .overflow_hidden()
-                        .whitespace_nowrap()
-                        .font_weight(FontWeight(550.))
-                        .when(selected, |d| d.bg(rgba(0x377aff40)))
-                        .when(!selected, |d| {
-                            d.hover(|s| s.bg(theme::hover()))
-                                .group_hover(row_group, |s| s.bg(theme::hover()))
-                        })
-                        .child(lead)
-                        .child(
-                            div()
-                                .min_w_0()
-                                .overflow_hidden()
-                                .text_ellipsis()
-                                .child(common::row_name(r)),
-                        ),
-                );
-            row = row.child(name_cell);
-            rows_el = rows_el.child(row);
+            tx.live_only();
         }
-        rows_el = rows_el.child(div().flex_none().h(px(row_h * (n_rows - last) as f32)));
-        if self.page_query.is_some() && self.rows.len() < self.total {
-            // The next page loads as this comes within a screen of view.
-            let entity = cx.entity().downgrade();
-            rows_el = rows_el.child(
-                div()
-                    .relative()
-                    .px(px(10.))
-                    .py(px(7.))
-                    .border_b_1()
-                    .border_color(theme::border())
-                    .text_size(px(13.))
-                    .child(format!(
-                        "Loading more… {} of {}",
-                        self.rows.len(),
-                        self.total
-                    ))
-                    .child(
-                        canvas(
-                            move |bounds, window, cx| {
-                                if bounds.top() < window.viewport_size().height + px(800.) {
-                                    let entity = entity.clone();
-                                    cx.defer(move |cx| {
-                                        let _ = entity.update(cx, |this, cx| this.load_more(cx));
-                                    });
-                                }
-                            },
-                            |_, _, _, _| {},
-                        )
-                        .absolute()
-                        .size_full(),
-                    ),
-            );
-        }
-        // The entry row and "+ New Object".
-        if self.pending_new {
-            rows_el = rows_el.child(
-                div()
-                    .py(px(4.))
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(6.))
-                            .max_w(px(444.))
-                            .border_2()
-                            .border_color(theme::accent())
-                            .rounded(px(8.))
-                            .px(px(10.))
-                            .py(px(8.))
-                            // The Input binds Escape itself: catch its action first.
-                            .capture_action(cx.listener(|this, _: &InputEscape, window, cx| {
-                                cx.stop_propagation();
-                                this.commit_new(true, window, cx);
-                            }))
-                            .child(
-                                Input::new(&self.new_input)
-                                    .appearance(false)
-                                    .text_size(px(13.)),
-                            ),
-                    ),
-            );
-        }
+    });
+    rows_el = rows_el.child(el().h(tops[first]));
+    for r in &t.rows[first..last] {
+        rows_el = rows_el.child(body_row(
+            &c, s, cx, layer, t, r, &all_cols, &widths, name_width, plus_w, pin_shadow,
+        ));
+    }
+    rows_el = rows_el.child(el().h(tops[n_rows] - tops[last]));
+    if t.page_query.is_some() && t.rows.len() < t.total {
+        // The next page loads as this comes within a screen of view.
         rows_el = rows_el.child(
-            div()
-                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            row()
+                .key(format!("{id}/loading-more"))
+                .px(10.0)
+                .py(7.0)
+                .border_sides([0., 0., 1., 0.], th.border)
+                .border_layout()
                 .child(
-                    Button::new("new-object")
-                        .ghost()
-                        .w_full()
-                        .h_auto()
-                        .px(px(8.))
-                        .py(px(10.))
-                        .text_color(theme::muted())
-                        .cursor_pointer()
-                        .child(div().flex_1().text_size(px(14.)).child("＋ New Object"))
-                        .on_click(cx.listener(|this, _, window, cx| this.begin_new(window, cx))),
+                    text(format!("Loading more… {} of {}", t.rows.len(), t.total))
+                        .font(ty::ui(13.0))
+                        .color(th.fg),
                 ),
         );
-
-        let table = div()
-            .relative()
-            .w(px(table_w))
-            .child(track_bounds(&self.table_bounds))
-            .child(header)
-            .child(rows_el)
-            .when_some(self.gap_x, |d, x| {
-                d.child(
-                    div()
-                        .absolute()
-                        .top_0()
-                        .bottom_0()
-                        .left(x - px(1.5))
-                        .w(px(3.))
-                        .rounded(px(2.))
-                        .bg(theme::accent())
-                        .shadow(vec![common::shadow(
-                            theme::accent().opacity(0.22),
-                            0.,
-                            0.,
-                            0.,
-                            3.,
-                        )]),
-                )
-            });
-
-        // The "+" header button, pinned to the right edge (sticky).
-        let plus_open = self.adding.is_some();
-        let plus = div()
-            .absolute()
-            .top_0()
-            .right_0()
-            .w(px(40.))
-            .h(px(35.))
-            .flex()
-            .items_center()
-            .justify_center()
-            .bg(theme::bg())
-            .border_b_1()
-            .border_color(theme::border())
-            .shadow(vec![common::shadow(
-                hsla(0., 0., 0., 0.6),
-                -8.,
-                0.,
-                8.,
-                -8.,
-            )])
-            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .child(
-                div()
-                    .relative()
-                    .child(track_bounds(&self.plus_bounds))
-                    .child(
-                        Button::new("add-column")
-                            .outline()
-                            .icon(IconName::Plus)
-                            .size(px(26.))
-                            .rounded(px(7.))
-                            .border_color(theme::border())
-                            .text_color(theme::fg())
-                            .cursor_pointer()
-                            .tooltip("Add column")
-                            .on_click(
-                                cx.listener(|this, _, window, cx| this.open_adding(window, cx)),
-                            ),
-                    )
-                    // Opens leftward, over the table: the + sits at the
-                    // table's right edge, and the page column clips anything
-                    // that spills past it (into the chat pane) - snapping to
-                    // the window can't see that edge.
-                    .when_some(self.adding.clone().filter(|_| plus_open), |d, flow| {
-                        d.child(common::floating(common::Place::BelowRight, 4., flow))
-                    }),
-            );
-
-        let entity = cx.entity().downgrade();
-        // Registered every frame (cheap no-ops when idle) so a press and the
-        // moves that follow it are tracked even before the next frame paints.
-        let active_gesture = true;
-        // The table overflows its pane sideways: its columns, as laid out
-        // for this pane width, are wider than the pane.
-        let too_wide = avail > 0. && table_w > avail + 0.5;
-        let mut root = div()
-            .relative()
-            .flex()
-            .flex_col()
-            .text_color(theme::fg())
-            .child(
-                div()
-                    .relative()
-                    .child(track_bounds(&self.scroll_bounds))
-                    .child(
-                        // Wider than the pane: a scrollbar along the bottom,
-                        // always shown, with room under the last row for it.
-                        div()
-                            .relative()
-                            .child(
-                                div()
-                                    .id("set-table-scroll")
-                                    .overflow_x_scroll()
-                                    .track_scroll(&self.scroll)
-                                    .when(too_wide, |d| d.pb(px(TABLE_SCROLLBAR_ROOM)))
-                                    .child(table),
-                            )
-                            .when(too_wide, |d| {
-                                d.child(
-                                    div()
-                                        .absolute()
-                                        .inset_0()
-                                        .debug_selector(|| "set-table-scrollbar".into())
-                                        .child(
-                                            Scrollbar::horizontal(&self.scroll)
-                                                .id("set-table-scrollbar")
-                                                .mode(ScrollbarMode::Always),
-                                        ),
-                                )
-                            }),
-                    )
-                    .child(plus),
-            )
-            // Global pointer tracking while a resize or marquee runs.
-            .when(active_gesture, |d| {
-                d.child(
-                    canvas(
-                        |_, _, _| {},
-                        move |_, _, window, _| {
-                            let e1 = entity.clone();
-                            // Window-wide listeners: they read first and update the
-                            // table only for its own gesture - an update on every
-                            // move or wheel redraws the table (and what reads it).
-                            window.on_mouse_event(move |e: &MouseMoveEvent, phase, _, cx| {
-                                if phase == DispatchPhase::Bubble
-                                    && e1.upgrade().is_some_and(|t| t.read(cx).tracking())
-                                {
-                                    let _ =
-                                        e1.update(cx, |this, cx| this.mouse_move(e.position, cx));
-                                }
-                            });
-                            let e2 = entity.clone();
-                            window.on_mouse_event(move |_: &MouseUpEvent, phase, _, cx| {
-                                if phase == DispatchPhase::Bubble
-                                    && e2.upgrade().is_some_and(|t| t.read(cx).tracking())
-                                {
-                                    let _ = e2.update(cx, |this, cx| this.mouse_up(cx));
-                                }
-                            });
-                            // The wheel over the horizontal scrollbar scrolls
-                            // the table sideways, not the page.
-                            let e3 = entity.clone();
-                            window.on_mouse_event(move |e: &ScrollEvent, phase, _, cx| {
-                                if phase != DispatchPhase::Capture
-                                    || !e3.upgrade().is_some_and(|t| t.read(cx).on_scrollbar(e))
-                                {
-                                    return;
-                                }
-                                let took = e3
-                                    .update(cx, |this, cx| this.wheel_on_scrollbar(e, cx))
-                                    .unwrap_or(false);
-                                if took {
-                                    cx.stop_propagation();
-                                }
-                            });
-                        },
-                    )
-                    .absolute()
-                    .size_0(),
-                )
-            });
-
-        if let Some(pop) = self.cell_pop(&relations, window, cx) {
-            // Anchored at the cell's bottom-left (+4px), pulled left so it
-            // stays inside the table's visible width: the page column clips
-            // anything past it (into the chat pane), which snapping to the
-            // window can't see - a cell at the column's edge got an editor
-            // nobody could see or click.
-            let clip = self.scroll_bounds.get();
-            let pop_w = self.pop_bounds.get().size.width.max(px(260.));
-            let cell = self.cell_edit.as_ref().and_then(|(rid, key)| {
-                let ri = self.rows.iter().position(|r| r.id == *rid)?;
-                let rb = *self.row_bounds.borrow().get(ri)?;
-                let ci = cols.iter().position(|c| c.key == *key)?;
-                let mut left = rb.left() + px(name_width + widths[..ci].iter().sum::<f32>());
-                if clip.size.width > px(0.) {
-                    left = left.min(clip.right() - pop_w).max(clip.left());
-                }
-                Some(point(left, rb.bottom() + px(4.)))
-            });
-            if let (Some(pos), Some((rid, key))) = (cell, self.cell_edit.as_ref()) {
-                // Enters per cell: another cell's editor mounts afresh.
-                let pop = common::appear(
-                    SharedString::from(format!("cell-pop-{rid}-{key}")),
-                    div().child(pop),
-                    window,
-                    cx,
-                );
-                // In-tree: the editor's inputs need their keyboard actions.
-                root = root.child(
-                    anchored()
-                        .position(pos)
-                        .snap_to_window_with_margin(px(12.))
-                        .child(pop),
-                );
-            }
+        let near = band as f32 * BAND + tops[n_rows] < win_h + 800.;
+        if near && !t.loading_more {
+            let id = id.to_string();
+            s.rt.spawn(async move |cx| cx.update(|s| load_more(s, &id)))
+                .detach();
         }
-
-        if !self.selected.is_empty() {
-            let deletable = self
-                .selected
-                .iter()
-                .filter(|id| !self.sel_blocked.contains_key(*id))
-                .count();
-            let mut bar = div()
-                .id("sel-bar")
-                .flex()
-                .items_center()
-                .gap(px(12.))
-                .mt(px(8.))
-                .mx_auto()
-                .bg(theme::panel())
-                .border_1()
-                .border_color(theme::border())
-                .rounded(px(10.))
-                .px(px(12.))
-                .py(px(6.))
-                .text_size(px(13.))
-                .shadow(vec![common::shadow(hsla(0., 0., 0., 0.4), 0., 4., 16., 0.)])
-                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .child(format!("{} selected", self.selected.len()));
-            if deletable > 0 {
-                let label = if self.sel_blocked.is_empty() {
-                    "Delete".to_string()
-                } else {
-                    format!(
-                        "Delete {deletable} ({} protected kept)",
-                        self.sel_blocked.len()
-                    )
-                };
-                bar = bar.child(
-                    ui::danger_button("sel-del", label)
-                        .py(px(2.))
-                        .px(px(8.))
-                        .on_click(cx.listener(|this, _, _, cx| this.delete_selected(cx))),
-                );
-            } else {
-                let why = self
-                    .sel_blocked
-                    .values()
-                    .next()
-                    .cloned()
-                    .unwrap_or_default();
-                bar = bar.child(
-                    div()
-                        .id("sel-locked")
-                        .text_size(px(12.))
-                        .text_color(theme::muted())
-                        .tooltip(tooltip(
-                            "Types and properties Roostr or your queries rely on can't be deleted",
-                        ))
-                        .child(format!("Can't delete: {why}")),
-                );
-            }
-            bar = bar.child(
-                Button::new("sel-clear")
-                    .ghost()
-                    .xsmall()
-                    .icon(IconName::Close)
-                    .accessibility_label("Clear selection")
-                    .text_color(theme::muted())
-                    .cursor_pointer()
-                    .on_click(cx.listener(|this, _, _, cx| this.set_selection(Vec::new(), cx))),
-            );
-            root = root.child(div().flex().child(bar));
-        }
-        if self.rows.is_empty() {
-            root = root.child(
-                common::empty_state("No objects match.", 13.)
-                    .px(px(10.))
-                    .py(px(16.)),
-            );
-        }
-        if let Some(m) = &self.marquee
-            && self.drag_moved
-        {
-            let origin = point(m.x0.x.min(m.x1.x), m.x0.y.min(m.x1.y));
-            let size = size((m.x1.x - m.x0.x).abs(), (m.x1.y - m.x0.y).abs());
-            root = root.child(
-                deferred(
-                    anchored().position(origin).child(
-                        div()
-                            .w(size.width)
-                            .h(size.height)
-                            .bg(rgba(0x377aff1f))
-                            .border_1()
-                            .border_color(rgba(0x377aff8c))
-                            .rounded(px(2.)),
-                    ),
-                )
-                .with_priority(1),
-            );
-        }
-        let _ = window;
-        root
     }
+    // The entry row and "＋ New Object".
+    if t.pending_new {
+        let (submit, key_id, lens) = (id.to_string(), id.to_string(), id.to_string());
+        rows_el = rows_el.child(
+            el().py(4.0).child(
+                row()
+                    .key(format!("{id}/new-entry"))
+                    .center_y()
+                    .gap(6.0)
+                    .max_w(444.0)
+                    .border(2.0, th.accent)
+                    .border_layout()
+                    .radius(8.0)
+                    .px(10.0)
+                    .py(8.0)
+                    .child(
+                        Input::new(format!("{id}/new-input"), &t.new_input)
+                            .placeholder("Enter name")
+                            .appearance(false)
+                            .text_size(13.0)
+                            .on_edit(move |s: &mut State| {
+                                &mut table_mut(s, &lens)
+                                    .expect("the entry row's table is open")
+                                    .new_input
+                            })
+                            .on_submit(move |s: &mut State, _: &mut Tx| {
+                                commit_new(s, &submit, false)
+                            })
+                            .on_key(move |s: &mut State, ev: &KeyEvent, _: &mut Tx| {
+                                if ev.key == Key::Escape {
+                                    commit_new(s, &key_id, true);
+                                    return true;
+                                }
+                                false
+                            })
+                            .build(th),
+                    ),
+            ),
+        );
+    }
+    let new_id = id.to_string();
+    rows_el = rows_el.child(
+        // The kit ghost button, full width, its label at the start.
+        row()
+            .key(format!("{id}/new-object"))
+            .role("button")
+            .w_full()
+            .px(8.0)
+            .py(10.0)
+            .radius(roostr_ui::radius::KIT)
+            .center_y()
+            .cursor(Cursor::Pointer)
+            .focusable(true)
+            .hover_group()
+            .hover(ghost_hover(th))
+            .child(
+                text("＋ New Object")
+                    .font(ty::ui(14.0))
+                    .color(th.muted)
+                    .group_color(th.kit.accent_foreground),
+            )
+            .on_press(move |s: &mut State| begin_new(s, &new_id)),
+    );
+
+    let mut table_el = col()
+        .key(format!("{id}/table"))
+        .w(table_w)
+        .on_layout_tx({
+            let id = id.to_string();
+            move |s: &mut State, r: [f32; 4], tx: &mut Tx| {
+                if let Some(t) = table_mut(s, &id) {
+                    t.table_left = r[0];
+                    t.table_w = r[2];
+                }
+                tx.live_only();
+            }
+        })
+        .child(header)
+        .child(rows_el);
+    if let Some(x) = dragging.and_then(|d| d.gap_x) {
+        table_el = table_el.child(
+            el().pin(Some(x - 1.5), Some(0.), None, Some(0.))
+                .w(3.0)
+                .radius(2.0)
+                .fill(th.accent)
+                .box_shadow(Shadow {
+                    spread: 3.,
+                    color: th.accent.alpha(0.22),
+                    ..Shadow::default()
+                }),
+        );
+    }
+    if let Some(anchor) = cell_pop(&c, s, cx, layer, t, name_width, &widths, &all_cols) {
+        table_el = table_el.child(el().pin(Some(0.), Some(HEADER_H), None, None).child(anchor));
+    }
+    // The table overflows its pane sideways: its columns, as laid out for
+    // this pane width, are wider than the pane.
+    let too_wide = avail > 0. && table_w > avail + 0.5;
+    if too_wide {
+        table_el = table_el.pb(TABLE_SCROLLBAR_ROOM);
+    }
+    // The wheel over the horizontal scrollbar strip scrolls the table
+    // sideways (either wheel axis), not the page.
+    let wheel_id = id.to_string();
+    table_el = table_el.on_wheel(move |s: &mut State, e: rune::WheelEvent, tx: &mut Tx| {
+        let Some(t) = table(s, &wheel_id) else {
+            return false;
+        };
+        let (at, max) = t.hscroll();
+        if max <= 0. || e.y < t.clip[3] - TABLE_SCROLLBAR_ROOM {
+            return false;
+        }
+        let d = if e.dy.abs() > e.dx.abs() { e.dy } else { e.dx };
+        let x = (at - d).clamp(0., max);
+        tx.scroll_to_x(format!("{wheel_id}/table-scroll"), x);
+        true
+    });
+
+    let mode = if too_wide {
+        ScrollbarMode::Always
+    } else {
+        ScrollbarMode::system()
+    };
+    let scroller = ScrollArea::horizontal(scroll_key, table_el)
+        .mode(mode)
+        .w_full()
+        .build(th);
+
+    // The "+" header button, pinned to the right edge.
+    let plus_id = id.to_string();
+    let add_key = format!("{id}/add-column");
+    let plus_button = Button::new(add_key.clone())
+        .outline()
+        .icon(Glyph::Plus)
+        .square(26.0)
+        .radius(7.0)
+        .border_color(th.border)
+        .text_color(th.fg)
+        .pointer()
+        .tooltip("Add column")
+        .on_press(move |s: &mut State| toggle_adding(s, &plus_id))
+        .build(th);
+    let plus = row()
+        .key(format!("{id}/plus"))
+        .pin(None, Some(0.), Some(0.), None)
+        .w(40.0)
+        .h(HEADER_H)
+        .center()
+        .fill(th.bg)
+        .border_sides([0., 0., 1., 0.], th.border)
+        .box_shadow(Shadow {
+            x: -8.,
+            blur: 16.,
+            spread: -8.,
+            color: Color::BLACK.alpha(0.6),
+            ..Shadow::default()
+        })
+        .child(plus_button);
+    if let Some(flow) = &t.adding {
+        // Opens leftward, over the table: the + sits at the table's right edge.
+        let (lens, ev) = (id.to_string(), id.to_string());
+        let surface = PropertyFlow::new(format!("{id}/flow"), flow)
+            .on_state(move |s: &mut State| {
+                table_mut(s, &lens)
+                    .and_then(|t| t.adding.as_mut())
+                    .expect("the column flow is open")
+            })
+            .on_event(move |s: &mut State, e: FlowEvent| on_flow(s, &ev, e))
+            .build(s, cx, th, layer);
+        layer.push(overlay::anchored(
+            surface,
+            &add_key,
+            Placement::BottomEnd,
+            4.,
+        ));
+    }
+
+    let hover_id = id.to_string();
+    let mut root = col().key(format!("{id}/table-root")).w_full().child(
+        el().key(format!("{id}/table-wrap"))
+            .w_full()
+            // The viewport's rect: the table's visible part.
+            .on_layout_tx({
+                let id = id.to_string();
+                move |s: &mut State, r: [f32; 4], tx: &mut Tx| {
+                    if let Some(t) = table_mut(s, &id) {
+                        t.clip = r;
+                    }
+                    tx.live_only();
+                }
+            })
+            .on_hover_change(move |s: &mut State, inside: bool, tx: &mut Tx| {
+                if let Some(t) = table_mut(s, &hover_id) {
+                    t.hovered = inside;
+                }
+                tx.live_only();
+            })
+            .child(scroller)
+            .child(plus),
+    );
+    if too_wide {
+        root = root.child(
+            el().key(format!("{id}/set-table-scrollbar"))
+                .h(0.)
+                .w_full()
+                .a11y_hidden(),
+        );
+    }
+
+    if !t.selected.is_empty() {
+        root = root.child(row().w_full().justify_center().child(selection_bar(&c, t)));
+    }
+    if t.rows.is_empty() {
+        root = root.child(el().px(10.0).py(16.0).child(common::empty_state(
+            th,
+            "No objects match.",
+            13.0,
+        )));
+    }
+    if let Some(m) = t.marquee.as_ref().filter(|_| t.drag_moved) {
+        let (x, y) = (m.x0[0].min(m.x1[0]), m.x0[1].min(m.x1[1]));
+        let (w, h) = ((m.x1[0] - m.x0[0]).abs(), (m.x1[1] - m.x0[1]).abs());
+        layer.push(
+            el().key(format!("{id}/marquee"))
+                .absolute(x, y)
+                .size(w, h)
+                .fill(rgba(BAND_FILL))
+                .border(1.0, rgba(BAND_BORDER))
+                .radius(2.0)
+                .inert(),
+        );
+    }
+    if let Some(drag) = dragging {
+        layer.push(
+            row()
+                .key(format!("{id}/col-ghost"))
+                .absolute(drag.at[0] - drag.grab[0], drag.at[1] - drag.grab[1])
+                .px(10.0)
+                .py(6.0)
+                .radius(6.0)
+                .fill(th.panel)
+                .border(1.0, th.border)
+                .opacity(0.9)
+                .inert()
+                .child(text(drag.label.clone()).font(ty::ui(13.0)).color(th.muted)),
+        );
+    }
+    let _ = n;
+    root
 }
 
-impl SetTable {
-    /// The open row menu; the data view paints it above everything.
-    pub(crate) fn ctx_menu(&self) -> Option<Entity<RowContextMenu>> {
-        self.ctx_menu.clone()
+#[allow(clippy::too_many_arguments)]
+fn body_row(
+    c: &Ctx,
+    s: &State,
+    cx: &mut Cx<State>,
+    layer: &mut Vec<El>,
+    t: &Table,
+    r: &QueryRow,
+    cols: &[Col],
+    widths: &[f32],
+    name_width: f32,
+    plus_w: f32,
+    pin_shadow: Shadow,
+) -> El {
+    let th = c.th;
+    let id = c.id;
+    let selected = t.selected.iter().any(|x| *x == r.id);
+    let task = s.store.layout_of(&r.type_key) == "task";
+    let done = r.fields.get("done").and_then(|v| v.bool_value) == Some(true);
+    let lead = if task {
+        let (view, rid) = (id.to_string(), r.id.clone());
+        el().mr(6.0).child(
+            checkbox(format!("done-{}", r.id), done)
+                .tab_stop(false)
+                .on_change(move |s: &mut State, done: bool| {
+                    let task = api::note::set_field(&rid, "done", Value::bool(done), s);
+                    after(s, &view, task);
+                })
+                .build(th),
+        )
+    } else {
+        let glyph = object_icon(
+            &s.store,
+            field_str(&r.fields, "iconEmoji"),
+            &r.type_key,
+            c.space,
+        );
+        el().mr(4.0)
+            .child(common::icon(s, &glyph, ty::ui(13.0).weight(550.)))
+    };
+    // Opaque, so the cells scrolled under it don't show through; the row's
+    // selection and hover are painted again on top of that.
+    let wash = if selected {
+        el().pin(Some(0.), Some(0.), Some(0.), Some(0.))
+            .fill(rgba(SELECTED))
+    } else {
+        el().pin(Some(0.), Some(0.), Some(0.), Some(0.))
+            .fill(th.hover)
+            .group_opacity(0.0, 1.0)
+    };
+    let (press_id, press_row) = (id.to_string(), r.id.clone());
+    let (menu_id, menu_row) = (id.to_string(), r.id.clone());
+    let name_cell = row()
+        .key(format!("name-{}", r.id))
+        .w(name_width)
+        .self_stretch()
+        .fill(th.bg)
+        .sticky_left(0.)
+        .stuck_shadow(pin_shadow)
+        .cursor(Cursor::Pointer)
+        .pointer_buttons([PointerButton::Middle])
+        .on_press_tx(move |s: &mut State, tx: &mut Tx| on_row_press(s, &press_id, &press_row, tx))
+        .on_secondary_press(move |s: &mut State, p: PointerPress, _: &mut Tx| {
+            open_menu(s, &menu_id, &menu_row, p)
+        })
+        .child(wash)
+        .child(
+            row()
+                .grow(1.0)
+                .min_w(0.0)
+                .center_y()
+                .px(10.0)
+                .py(7.0)
+                .clip_rounded(0.0)
+                .child(lead)
+                .child(
+                    text(common::row_name(r))
+                        .font(ty::ui(13.0).weight(550.))
+                        .color(th.fg)
+                        .truncate()
+                        .shrink(),
+                ),
+        );
+    let name_cell = with_marquee(name_cell, id);
+    let mut line = row()
+        .key(format!("row-{}", r.id))
+        .hover_group()
+        .border_sides([0., 0., 1., 0.], th.border)
+        .border_layout()
+        .cursor(Cursor::Pointer)
+        .child(name_cell);
+    line = if selected {
+        line.fill(rgba(SELECTED))
+    } else {
+        line.hover(th.hover)
+    };
+    for (i, col) in cols.iter().enumerate() {
+        let on = t
+            .col_drag
+            .as_ref()
+            .is_some_and(|d| d.from == i && d.gap.is_some());
+        line = line.child(body_cell(c, s, cx, layer, t, r, &col.key, widths[i], on));
+    }
+    line = line.child(el().w(plus_w));
+    let (press_id, press_row) = (id.to_string(), r.id.clone());
+    let (menu_id, menu_row) = (id.to_string(), r.id.clone());
+    let (h_id, h_row) = (id.to_string(), r.id.clone());
+    let line = line
+        .pointer_buttons([PointerButton::Middle])
+        .on_press_tx(move |s: &mut State, tx: &mut Tx| on_row_press(s, &press_id, &press_row, tx))
+        .on_secondary_press(move |s: &mut State, p: PointerPress, _: &mut Tx| {
+            open_menu(s, &menu_id, &menu_row, p)
+        })
+        .on_layout_tx(move |s: &mut State, rect: [f32; 4], tx: &mut Tx| {
+            measured(s, &h_id, &h_row, rect[3], tx)
+        });
+    with_marquee(line, id)
+}
+
+/// A drawn row laid out at `h`: kept for the window, the band and the
+/// editor; the view re-runs only when a height changed.
+fn measured(s: &mut State, id: &str, row: &str, h: f32, tx: &mut Tx) {
+    let Some(t) = table_mut(s, id) else { return };
+    let old = t.heights.insert(row.to_string(), h);
+    if old.is_some_and(|o| (o - h).abs() < 0.5) {
+        tx.live_only();
+        return;
+    }
+    let n = t.heights.len().max(1) as f32;
+    t.row_h = t.heights.values().sum::<f32>() / n;
+}
+
+fn selection_bar(c: &Ctx, t: &Table) -> El {
+    let th = c.th;
+    let id = c.id;
+    let deletable = t
+        .selected
+        .iter()
+        .filter(|x| !t.sel_blocked.contains_key(*x))
+        .count();
+    let mut bar = row()
+        .key(format!("{id}/sel-bar"))
+        .center_y()
+        .gap(12.0)
+        .mt(8.0)
+        .fill(th.panel)
+        .border(1.0, th.border)
+        .radius(10.0)
+        .px(12.0)
+        .py(6.0)
+        .box_shadow(roostr_ui::shadow::gpui(4.0, 16.0, 0.0, 0.4))
+        .child(
+            text(format!("{} selected", t.selected.len()))
+                .font(ty::ui(13.0))
+                .color(th.fg),
+        );
+    if deletable > 0 {
+        let label = if t.sel_blocked.is_empty() {
+            "Delete".to_string()
+        } else {
+            format!(
+                "Delete {deletable} ({} protected kept)",
+                t.sel_blocked.len()
+            )
+        };
+        let del = id.to_string();
+        bar = bar.child(
+            danger_button(format!("{id}/sel-del"), label)
+                .py(2.0)
+                .px(8.0)
+                .on_press(move |s: &mut State| delete_selected(s, &del))
+                .build(th),
+        );
+    } else {
+        let why = t.sel_blocked.values().next().cloned().unwrap_or_default();
+        bar = bar.child(
+            text(format!("Can't delete: {why}"))
+                .key(format!("{id}/sel-locked"))
+                .font(ty::ui(12.0))
+                .color(th.muted)
+                .help("Types and properties Roostr or your queries rely on can't be deleted"),
+        );
+    }
+    let clear = id.to_string();
+    bar.child(
+        Button::new(format!("{id}/sel-clear"))
+            .ghost()
+            .xsmall()
+            .icon(Glyph::Close)
+            .accessibility_label("Clear selection")
+            .text_color(th.muted)
+            .pointer()
+            .on_press(move |s: &mut State| set_selection(s, &clear, Vec::new()))
+            .build(th),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn name_takes_the_slack_or_scales_with_the_rest() {
+        let cols = vec![
+            Col {
+                key: "a".into(),
+                width: 150.,
+            },
+            Col {
+                key: "b".into(),
+                width: 100.,
+            },
+        ];
+        let (name, widths, plus) = layout_widths(1000., None, &cols);
+        assert_eq!((name, plus), (1000. - 250. - PLUS_W, PLUS_W));
+        assert_eq!(widths, vec![150., 100.]);
+        // Too narrow: Name keeps its minimum and the table scrolls.
+        assert_eq!(layout_widths(300., None, &cols).0, NAME_MIN_WIDTH);
+        // A stored Name width: wider panes spread the excess in proportion.
+        let (name, widths, _) = layout_widths(2. * (200. + 250. + PLUS_W), Some(200.), &cols);
+        assert_eq!(name, 400.);
+        assert_eq!(widths, vec![300., 200.]);
+    }
+
+    #[test]
+    fn serving_filters_match_the_rolled_up_states() {
+        let warn = ServingInfo {
+            text: String::new(),
+            label: String::new(),
+            warning: true,
+            reason: "pinned-uncapable".into(),
+            machine_id: "m".into(),
+            icon: String::new(),
+        };
+        assert!(serving_match("equal", "attention", Some(&warn)));
+        assert!(!serving_match("equal", "ok", Some(&warn)));
+        assert!(serving_match("notEqual", "ok", Some(&warn)));
+        assert!(serving_match("equal", "pinned-uncapable", Some(&warn)));
+        assert_eq!(serving_rank(Some(&warn)), 0);
+        assert_eq!(serving_rank(None), 1);
     }
 }

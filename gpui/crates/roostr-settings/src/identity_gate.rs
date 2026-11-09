@@ -6,310 +6,322 @@
 //! device (browser `localStorage` `roostr-key`, the Svelte app's own entry).
 //! Either way the vault reopens under it.
 
-use std::sync::{Arc, LazyLock};
+use std::sync::LazyLock;
 
-use gpui_kit::component::alert::Alert;
-use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::checkbox::Checkbox;
-use gpui_kit::component::input::{InputEvent, InputState};
-use gpui_kit::*;
 use roostr_core::mode::{self, Mode};
-use roostr_core::{Store, api, io, theme};
+use roostr_core::{State, api, io};
+use roostr_ui::color::rgba;
+use roostr_ui::ty::Weights as _;
+use roostr_ui::{Alert, Button, Checkbox, InputState, Theme, ty};
+use rune::{Align, El, Pixels, Tx, col, el, text};
 
 use crate::keys::generate_nsec;
-use crate::widgets::{Btn, FieldStyle, field};
+use crate::widgets::{Btn, Field, FieldStyle};
 
-static LOGO: LazyLock<Arc<Image>> = LazyLock::new(|| {
-    Arc::new(Image::from_bytes(
-        ImageFormat::Png,
-        include_bytes!("../../../../static/logo.png").to_vec(),
-    ))
+/// The app logo, decoded once.
+static LOGO: LazyLock<Pixels> = LazyLock::new(|| {
+    let pixels = Pixels::new();
+    let image = image::load_from_memory_with_format(
+        include_bytes!("../../../../static/logo.png"),
+        image::ImageFormat::Png,
+    )
+    .expect("static/logo.png is a valid PNG")
+    .into_rgba8();
+    pixels.set(image.width(), image.height(), image.into_raw());
+    pixels
 });
 
-/// Shown by the shell instead of the workspace when the daemon has no identity.
+/// The gate's state (the shell shows the gate instead of the workspace when
+/// the daemon has no identity).
 pub struct IdentityGate {
-    draft: Entity<InputState>,
-    error: SharedString,
+    draft: InputState,
+    error: String,
     busy: bool,
     /// The new account's key while it is being saved; `None` on the sign-in form.
-    created: Option<SharedString>,
+    created: Option<String>,
     saved: bool,
     copied: bool,
-    _subscriptions: Vec<Subscription>,
 }
 
-impl IdentityGate {
-    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let draft = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("nsec1… or 64-char hex")
-                .masked(true)
-        });
-        let subscriptions = vec![cx.subscribe_in(
-            &draft,
-            window,
-            |this, state, event: &InputEvent, window, cx| match event {
-                InputEvent::PressEnter { .. } => {
-                    let key = state.read(cx).value().trim().to_string();
-                    if !key.is_empty() {
-                        this.open(key, window, cx);
-                    }
-                }
-                InputEvent::Change => cx.notify(),
-                _ => {}
-            },
-        )];
+impl Default for IdentityGate {
+    fn default() -> Self {
         Self {
-            draft,
-            error: SharedString::default(),
+            draft: InputState::new().masked(true),
+            error: String::new(),
             busy: false,
             created: None,
             saved: false,
             copied: false,
-            _subscriptions: subscriptions,
         }
     }
+}
 
-    /// Make `key` this machine's identity, then reopen the vault under it.
-    fn open(&mut self, key: String, window: &mut Window, cx: &mut Context<Self>) {
-        if self.busy {
-            return;
-        }
-        self.error = SharedString::default();
-        self.busy = true;
-        cx.notify();
-        let task = api::settings::import_key(&key, cx);
-        cx.spawn_in(window, async move |this, cx| {
-            let result = task.await;
-            let _ = this.update_in(cx, |this, window, cx| {
-                this.busy = false;
-                match result {
-                    Ok(_) => {
-                        this.created = None;
-                        // The gate stays mounted: a later logout must not find the key still typed in.
-                        this.draft.update(cx, |s, cx| s.set_value("", window, cx));
-                        // The web reloads the page here: restart the store on the new identity.
-                        Store::global(cx).update(cx, |store, cx| store.reconnect(cx));
-                    }
-                    Err(error) => this.error = error.to_string().into(),
+/// Make `key` this machine's identity, then reopen the vault under it.
+fn open(s: &mut State, key: String) {
+    let gate = s.slot::<IdentityGate>();
+    if gate.busy {
+        return;
+    }
+    gate.error.clear();
+    gate.busy = true;
+    let task = api::settings::import_key(&key, s);
+    s.rt.spawn(async move |cx| {
+        let result = task.await;
+        cx.update(|s| {
+            let gate = s.slot::<IdentityGate>();
+            gate.busy = false;
+            match result {
+                Ok(_) => {
+                    gate.created = None;
+                    // The gate stays in state: a later logout must not find the key still typed in.
+                    gate.draft.clear();
+                    // The web reloads the page here: restart the store on the new identity.
+                    s.store.reconnect();
                 }
-                cx.notify();
-            });
-        })
-        .detach();
-    }
+                Err(error) => gate.error = error.to_string(),
+            }
+        });
+    })
+    .detach();
+}
 
-    fn create(&mut self, cx: &mut Context<Self>) {
-        self.error = SharedString::default();
-        self.saved = false;
-        self.copied = false;
-        match generate_nsec() {
-            Ok(key) => self.created = Some(key.into()),
-            Err(error) => self.error = error.to_string().into(),
-        }
-        cx.notify();
-    }
+/// The typed key, trimmed.
+fn typed(gate: &IdentityGate) -> String {
+    gate.draft.value().trim().to_string()
+}
 
-    fn primary(id: &'static str, label: &'static str) -> Btn {
-        Btn::action(id, label).full_width().style(|b| {
-            b.set_colors(Some(theme::accent()), None, theme::white());
-            b.set_padding(11., 11.);
-            b.set_text(14., FontWeight::SEMIBOLD);
-            b.set_radius(10.);
-            b.set_hover(None, None, None);
-        })
-    }
-
-    fn ghost(id: &'static str, label: &'static str) -> Btn {
-        Btn::action(id, label).full_width().style(|b| {
-            b.set_colors(
-                Some(rgba(0xffffff0f).into()),
-                Some(rgba(0xffffff24).into()),
-                theme::fg(),
-            );
-            b.set_padding(11., 11.);
-            b.set_text(14., FontWeight::SEMIBOLD);
-            b.set_radius(10.);
-            b.set_hover(None, None, None);
-        })
-    }
-
-    /// A quiet text link under the card (kit text button, muted until hover).
-    /// The label carries its own size: the kit's inner box sets one of its own.
-    fn link(id: &'static str, label: &'static str) -> Button {
-        Button::new(id)
-            .text()
-            .h_auto()
-            .p(px(4.))
-            .text_color(theme::muted())
-            .accessibility_label(label)
-            .child(div().text_size(px(14.)).child(label))
+fn open_typed(s: &mut State) {
+    let key = typed(s.slot::<IdentityGate>());
+    if !key.is_empty() {
+        open(s, key);
     }
 }
 
-fn sub(text: &'static str) -> Div {
-    div()
-        .mb(px(8.))
-        .text_size(px(14.))
-        .line_height(px(22.))
-        .text_color(theme::muted())
-        .text_center()
-        .child(text)
+fn create(s: &mut State) {
+    let gate = s.slot::<IdentityGate>();
+    gate.error.clear();
+    gate.saved = false;
+    gate.copied = false;
+    match generate_nsec() {
+        Ok(key) => gate.created = Some(key),
+        Err(error) => gate.error = error.to_string(),
+    }
 }
 
-impl Render for IdentityGate {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let replica = mode::current(cx) == Mode::Replica;
-        let input_style = FieldStyle {
-            bg: rgba(0xffffff0d).into(),
-            radius: 10.,
-            px: 14.,
-            py: 11.,
-            size: 14.,
-            focus: theme::accent(),
-            ring: None,
-            centered: true,
-        };
-        let mut card = div()
-            .flex()
-            .flex_col()
-            .items_center()
-            .gap(px(10.))
-            .w(px(420.))
-            .px(px(32.))
-            .py(px(36.))
-            .child(img(LOGO.clone()).size(px(72.)).rounded(px(18.)))
+fn primary(t: &Theme, key: &'static str, label: &'static str) -> Btn<State> {
+    Btn::action(t, key, label)
+        .full_width()
+        .colors(Some(t.accent), None, t.white)
+        .padding(11.0, 11.0)
+        .text_style(14.0, ty::SEMIBOLD)
+        .radius(10.0)
+        .hover(None, None, None)
+}
+
+fn ghost(t: &Theme, key: &'static str, label: &'static str) -> Btn<State> {
+    Btn::action(t, key, label)
+        .full_width()
+        .colors(Some(rgba(0xffffff0f)), Some(rgba(0xffffff24)), t.fg)
+        .padding(11.0, 11.0)
+        .text_style(14.0, ty::SEMIBOLD)
+        .radius(10.0)
+        .hover(None, None, None)
+}
+
+/// A quiet text link under the card (kit text button, muted until hover).
+fn link(t: &Theme, key: &'static str, label: &'static str) -> Button {
+    Button::new(key)
+        .text()
+        .h_auto()
+        .p(4.0)
+        .text_color(t.muted)
+        .accessibility_label(label)
+        .child(text(label).font(ty::ui(14.0)).color(t.muted))
+}
+
+fn sub(t: &Theme, s: &'static str) -> El {
+    text(s)
+        .font(ty::ui(14.0).lh(22.0))
+        .color(t.muted)
+        .wrap()
+        .align(Align::Center)
+        .w_full()
+        .mb(8.0)
+}
+
+/// The gate, filling its parent.
+pub fn identity_gate(s: &State, _cx: &mut rune::Cx<State>, t: &Theme, _layer: &mut Vec<El>) -> El {
+    let fallback = IdentityGate::default();
+    let gate = s.get::<IdentityGate>().unwrap_or(&fallback);
+    let replica = mode::current(s) == Mode::Replica;
+    let input_style = FieldStyle {
+        bg: rgba(0xffffff0d),
+        radius: 10.0,
+        px: 14.0,
+        py: 11.0,
+        size: 14.0,
+        focus: t.accent,
+        ring: None,
+        centered: true,
+    };
+    let mut card = col()
+        .center()
+        .gap(10.0)
+        .w(420.0)
+        .px(32.0)
+        .py(36.0)
+        .child(
+            el().key("gate-logo")
+                .size(72.0, 72.0)
+                .radius(18.0)
+                .pixels(&LOGO),
+        )
+        .child(
+            text("Roostr")
+                .font(ty::ui(26.0).lh(32.0).weight(ty::BOLD))
+                .color(t.fg)
+                .mt(4.0),
+        );
+
+    if let Some(created) = &gate.created {
+        card = card
+            .child(sub(
+                t,
+                "This key is your new account. Save it somewhere safe, like a password manager - it's the only way back into your vault on another device, and nobody can reset it.",
+            ))
             .child(
-                div()
-                    .mt(px(4.))
-                    .text_size(px(26.))
-                    .line_height(px(32.))
-                    .font_weight(FontWeight::BOLD)
-                    .child("Roostr"),
-            );
-
-        if let Some(created) = self.created.clone() {
-            let key = created.clone();
-            card = card
-                .child(sub(
-                    "This key is your new account. Save it somewhere safe, like a password manager - it's the only way back into your vault on another device, and nobody can reset it.",
-                ))
-                .child(
-                    div()
-                        .w_full()
-                        .px(px(14.))
-                        .py(px(12.))
-                        .rounded(px(10.))
-                        .bg(rgba(0xffffff0d))
-                        .border_1()
-                        .border_color(rgba(0xffffff1f))
-                        .text_size(px(13.))
-                        .line_height(px(20.))
-                        .font_family(theme::fonts::MONO)
-                        .text_center()
-                        .child(created),
+                el().w_full()
+                    .px(14.0)
+                    .py(12.0)
+                    .radius(10.0)
+                    .fill(rgba(0xffffff0d))
+                    .border(1.0, rgba(0xffffff1f))
+                    .child(
+                        text(created.clone())
+                            .font(ty::mono(13.0).lh(20.0))
+                            .color(t.fg)
+                            .wrap()
+                            .align(Align::Center)
+                            .w_full(),
+                    ),
+            )
+            .child(
+                ghost(
+                    t,
+                    "copy-key",
+                    if gate.copied { "Copied" } else { "Copy key" },
                 )
-                .child(Self::ghost("copy-key", if self.copied { "Copied" } else { "Copy key" }).on_click(cx.listener(
-                    move |this, _, _, cx| {
-                        cx.write_to_clipboard(ClipboardItem::new_string(key.to_string()));
-                        this.copied = true;
-                        cx.notify();
-                    },
-                )))
-                .child(
-                    Checkbox::new("saved-key")
-                        .checked(self.saved)
-                        .label("I saved my key")
-                        .text_size(px(14.))
-                        .on_click(cx.listener(|this, checked: &bool, _, cx| {
-                            this.saved = *checked;
-                            cx.notify();
-                        })),
-                )
-                .child(Self::primary("open-created", "Open my vault").disabled(self.busy || !self.saved).on_click(cx.listener(
-                    |this, _, window, cx| {
-                        if let Some(key) = this.created.clone() {
-                            this.open(key.to_string(), window, cx);
+                .on_press_tx(|s: &mut State, tx: &mut Tx| {
+                    let gate = s.slot::<IdentityGate>();
+                    if let Some(key) = &gate.created {
+                        tx.copy(key.clone());
+                        gate.copied = true;
+                    }
+                })
+                .build(t),
+            )
+            .child(
+                Checkbox::new("saved-key")
+                    .checked(gate.saved)
+                    .label("I saved my key")
+                    .on_change(|s: &mut State, checked| s.slot::<IdentityGate>().saved = checked)
+                    .build(t),
+            )
+            .child(
+                primary(t, "open-created", "Open my vault")
+                    .disabled(gate.busy || !gate.saved)
+                    .on_press(|s: &mut State| {
+                        if let Some(key) = s.slot::<IdentityGate>().created.clone() {
+                            open(s, key);
                         }
-                    },
-                )))
-                .child(Self::link("back", "Back").on_click(cx.listener(|this, _, _, cx| {
-                    this.created = None;
-                    cx.notify();
-                })));
-        } else {
-            let empty = self.draft.read(cx).value().trim().is_empty();
-            card = card
-                .child(sub(
-                    "Sign in with your Nostr private key. Your notes sync end-to-end encrypted over relays — the key never leaves this device, and only it can decrypt your objects.",
-                ))
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap(px(10.))
-                        .w_full()
-                        .child(field(&self.draft, input_style, window, cx))
-                        .child(Self::primary("open-key", "Open my vault").disabled(self.busy || empty).on_click(cx.listener(
-                            |this, _, window, cx| {
-                                let key = this.draft.read(cx).value().trim().to_string();
-                                if !key.is_empty() {
-                                    this.open(key, window, cx);
-                                }
-                            },
-                        ))),
-                )
-                .child(div().text_size(px(12.)).text_color(theme::muted()).child("or"))
-                .child(Self::ghost("create", "Create a new account").on_click(cx.listener(|this, _, _, cx| this.create(cx))))
-                .child(
-                    div()
-                        .mt(px(6.))
-                        .text_size(px(12.))
-                        .line_height(px(18.))
-                        .text_color(theme::muted())
-                        .text_center()
-                        .child(if replica {
-                            "Have desktop Roostr? Settings → Reveal private key, and paste it above."
-                        } else {
-                            "This becomes this machine's daemon identity — like signing in on the web app. \
-                             Or set it up in the daemon's terminal and retry."
-                        }),
-                );
-            card = if replica {
-                // The other way in: the daemon on this computer (pairing, in a
-                // browser). The iOS app is replica-only: it has none.
-                if cfg!(target_os = "ios") {
-                    card
-                } else {
-                    card.child(
-                        Self::link(
-                            "use-daemon",
-                            if io::WEB {
-                                "Pair with Roostr on this computer instead"
-                            } else {
-                                "Use the Roostr daemon on this computer instead"
-                            },
-                        )
-                        .on_click(|_, _, cx| mode::switch(Mode::Daemon, cx)),
+                    })
+                    .build(t),
+            )
+            .child(
+                link(t, "back", "Back")
+                    .on_press(|s: &mut State| s.slot::<IdentityGate>().created = None)
+                    .build(t),
+            );
+    } else {
+        let empty = typed(gate).is_empty();
+        card = card
+            .child(sub(
+                t,
+                "Sign in with your Nostr private key. Your notes sync end-to-end encrypted over relays — the key never leaves this device, and only it can decrypt your objects.",
+            ))
+            .child(
+                col()
+                    .gap(10.0)
+                    .w_full()
+                    .child(
+                        Field::new("gate-key", &gate.draft, input_style)
+                            .placeholder("nsec1… or 64-char hex")
+                            .on_edit(|s: &mut State| &mut s.slot::<IdentityGate>().draft)
+                            .on_submit(|s: &mut State, _: &mut Tx| open_typed(s))
+                            .build(t),
                     )
-                }
-            } else {
-                card.child(Self::link("retry", "Retry").on_click(|_, _, cx| {
-                    Store::global(cx).update(cx, |store, cx| store.reconnect(cx))
-                }))
-            };
+                    .child(
+                        primary(t, "open-key", "Open my vault")
+                            .disabled(gate.busy || empty)
+                            .on_press(open_typed)
+                            .build(t),
+                    ),
+            )
+            .child(text("or").font(ty::ui(12.0)).color(t.muted))
+            .child(ghost(t, "create", "Create a new account").on_press(create).build(t))
+            .child(
+                text(if replica {
+                    "Have desktop Roostr? Settings → Reveal private key, and paste it above."
+                } else {
+                    "This becomes this machine's daemon identity — like signing in on the web app. \
+                     Or set it up in the daemon's terminal and retry."
+                })
+                .font(ty::ui(12.0).lh(18.0))
+                .color(t.muted)
+                .wrap()
+                .align(Align::Center)
+                .w_full()
+                .mt(6.0),
+            );
+        if replica {
+            // The other way in: the daemon on this computer (pairing, in a
+            // browser). The iOS app is replica-only: it has none.
+            if !cfg!(target_os = "ios") {
+                card = card.child(
+                    link(
+                        t,
+                        "use-daemon",
+                        if io::WEB {
+                            "Pair with Roostr on this computer instead"
+                        } else {
+                            "Use the Roostr daemon on this computer instead"
+                        },
+                    )
+                    .on_press_tx(|_: &mut State, tx: &mut Tx| {
+                        // True when the relaunched app is running: this one quits.
+                        if mode::switch(Mode::Daemon) {
+                            tx.quit();
+                        }
+                    })
+                    .build(t),
+                );
+            }
+        } else {
+            card = card.child(
+                link(t, "retry", "Retry")
+                    .on_press(|s: &mut State| s.store.reconnect())
+                    .build(t),
+            );
         }
-        if !self.error.is_empty() {
-            card = card.child(Alert::error("gate-error", self.error.clone()).text_size(px(13.)));
-        }
-
-        div()
-            .size_full()
-            .flex()
-            .items_center()
-            .justify_center()
-            .bg(theme::bg())
-            .text_color(theme::fg())
-            .child(card)
     }
+    if !gate.error.is_empty() {
+        card = card.child(Alert::error("gate-error", gate.error.clone()).build(t));
+    }
+
+    el().key("identity-gate")
+        .w_full()
+        .h_full()
+        .center()
+        .fill(t.bg)
+        .child(card)
 }

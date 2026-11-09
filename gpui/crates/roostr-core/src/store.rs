@@ -124,6 +124,9 @@ pub struct Store {
     stream: Option<Task<()>>,
     /// Emitted, not yet handed to the listeners ([`State::poll`]).
     pub(crate) events: Vec<StoreEvent>,
+    /// Which [`State::open`] made this store: loads it started that land
+    /// after the state opened another vault are dropped.
+    pub(crate) generation: u64,
 }
 
 impl Store {
@@ -153,6 +156,7 @@ impl Store {
             refresh_timer: None,
             stream: None,
             events: Vec::new(),
+            generation: 0,
         }
     }
 
@@ -164,11 +168,15 @@ impl Store {
     /// the collections, then the commit stream.
     pub(crate) fn start(&mut self) {
         let settings = self.rt.background(self.backend.settings());
+        let generation = self.generation;
         self.rt
             .spawn(async move |cx| {
                 let settings = settings.await;
                 cx.update(|s| {
                     let store = &mut s.store;
+                    if store.generation != generation {
+                        return;
+                    }
                     match settings {
                         Ok(settings) if !settings.has_key => {
                             store.connection = Connection::Failed(
@@ -304,6 +312,7 @@ impl Store {
         let defs = self.rt.background(fetch_defs(b.clone()));
         let agents = self.rt.background(fetch_agents(b.clone()));
         let prefs = self.rt.background(read_prefs(b));
+        let generation = self.generation;
         self.rt
             .spawn(async move |cx| {
                 let result: Result<_> = async {
@@ -317,7 +326,11 @@ impl Store {
                     ))
                 }
                 .await;
-                cx.update(|s| s.store.refreshed(result));
+                cx.update(|s| {
+                    if s.store.generation == generation {
+                        s.store.refreshed(result)
+                    }
+                });
             })
             .detach();
     }
@@ -412,10 +425,15 @@ impl Store {
         }
         let fetch = self.rt.background(self.backend.object(id));
         let id = id.to_string();
+        let generation = self.generation;
         self.rt
             .spawn(async move |cx| {
                 let result = fetch.await;
-                cx.update(|s| s.store.reloaded(id, result));
+                cx.update(|s| {
+                    if s.store.generation == generation {
+                        s.store.reloaded(id, result)
+                    }
+                });
             })
             .detach();
     }

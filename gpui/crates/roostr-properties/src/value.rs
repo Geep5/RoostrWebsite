@@ -3,40 +3,46 @@
 //! url/email/phone (typed input + open link), object (link picker with type
 //! limits, "+ New agent" / "+ New prompt"), and the `chat_color` hex. Emits
 //! complete values through `on_save`; the caller owns persistence.
+//!
+//! Each instance keeps its editing state in the slot [`ValueEditors`] under
+//! the builder's key. Typed text commits on Enter, when its box loses focus
+//! (the poll listener [`register`] installs) and on [`commit_pending`].
 
-use std::cell::Cell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::color_picker::{ColorPicker, ColorPickerEvent, ColorPickerState};
-use gpui_kit::component::input::{Escape, InputEvent, InputState, MoveDown, MoveUp, TextareaState};
-use gpui_kit::component::list::ListItem;
-use gpui_kit::component::tag::Tag;
-use gpui_kit::component::{Disableable as _, Icon, IconName, Sizable as _, h_flex};
-use gpui_kit::prelude::FluentBuilder as _;
-use gpui_kit::*;
 use roostr_core::color::normalize_hex;
 use roostr_core::objects::object_icon;
 use roostr_core::types::is_system_type;
-use roostr_core::ui::{TagPill, checkbox, checkbox_display};
-use roostr_core::{Fields, Glyph, RelationDef, Store, Value, api, lite_ui, theme};
+use roostr_core::{Fields, RelationDef, Route, State, Value, api, lite_ui};
+use roostr_ui::{
+    Button, ButtonRounded, ColorPicker, ColorPickerState, Glyph, Input, InputState, ListItem,
+    ScrollArea, Tag, TagPill, Textarea, TextareaState, Theme, checkbox, checkbox_display, glyph,
+    radius, ty,
+};
+use rune::{Cx, El, Key, KeyEvent, Tx, col, el, row, text};
 
-use crate::calendar::{CalendarEvent, CalendarPicker};
-use crate::option_picker::{OptionEvent, OptionPicker};
+use crate::calendar::{CalendarEvent, CalendarPickerState, calendar_picker};
+use crate::option_picker::{OptionHooks, OptionPickerState, option_picker, rename};
 use crate::widgets::{
-    FieldSkin, below, empty_note, field, note, pop_shadow, prefix, text_area, tip,
+    FieldSkin, below, empty_note, field, icon_text_el, later, lens, note, pop_shadow, prefix,
+    text_area, tip,
 };
 
-pub(crate) type SaveFn = Rc<dyn Fn(&Value, &mut Window, &mut App)>;
+/// Receives the complete new value.
+pub(crate) type SaveFn = Rc<dyn Fn(&mut State, Value)>;
+
+/// The hex field's invalid-value border.
+const HEX_ERROR_RED: u32 = 0xe5484d;
+/// The chat colour swatch with no colour set.
+const NO_CHAT_COLOR: u32 = 0x3a3a3e;
 
 /// One property value: display + inline editor (web PropertyValue.svelte).
-#[derive(IntoElement)]
 pub struct PropertyValue {
-    id: ElementId,
+    key: String,
     relation: RelationDef,
     value: Option<Value>,
-    space: SharedString,
+    space: String,
     seeds: Fields,
     auto_open: bool,
     read_only: bool,
@@ -45,13 +51,14 @@ pub struct PropertyValue {
 }
 
 impl PropertyValue {
-    /// The editor for `relation`'s `value` (None = not set), keyed by `id`.
-    pub fn new(id: impl Into<ElementId>, relation: RelationDef, value: Option<Value>) -> Self {
+    /// The editor for `relation`'s `value` (None = not set), keyed by `key`
+    /// (its state's key in [`ValueEditors`] and its root element's key).
+    pub fn new(key: impl Into<String>, relation: RelationDef, value: Option<Value>) -> Self {
         Self {
-            id: id.into(),
+            key: key.into(),
             relation,
             value,
-            space: SharedString::default(),
+            space: String::new(),
             seeds: Fields::new(),
             auto_open: false,
             read_only: false,
@@ -62,7 +69,7 @@ impl PropertyValue {
 
     /// Owning space of the object being edited: agent pickers offer only its agents,
     /// type-limited pickers only its objects.
-    pub fn space(mut self, space_id: impl Into<SharedString>) -> Self {
+    pub fn space(mut self, space_id: impl Into<String>) -> Self {
         self.space = space_id.into();
         self
     }
@@ -96,29 +103,215 @@ impl PropertyValue {
     }
 
     /// Called with the complete new value.
-    pub fn on_save(mut self, f: impl Fn(&Value, &mut Window, &mut App) + 'static) -> Self {
+    pub fn on_save(mut self, f: impl Fn(&mut State, Value) + 'static) -> Self {
         self.on_save = Some(Rc::new(f));
         self
     }
+
+    /// The editor, keyed `key`; its menus go into `layer` unless
+    /// [`Self::inline_menus`].
+    pub fn build(self, s: &State, _cx: &mut Cx<State>, t: &Theme, layer: &mut Vec<El>) -> El {
+        let auto_open = self.auto_open;
+        let p = Rc::new(Props {
+            key: self.key,
+            rel: self.relation,
+            value: self.value,
+            space: self.space,
+            seeds: self.seeds,
+            read_only: self.read_only,
+            inline_menus: self.inline_menus,
+            on_save: self.on_save,
+        });
+        let ed = s.get::<ValueEditors>().and_then(|m| m.0.get(&p.key));
+        if needs_sync(&p, ed) {
+            let p = p.clone();
+            later(s, move |s| sync(s, &p, auto_open));
+        }
+        let fallback;
+        let ed = match ed {
+            Some(ed) => ed,
+            None => {
+                fallback = ValueEditor::default();
+                &fallback
+            }
+        };
+        col()
+            .key(p.key.clone())
+            .w_full()
+            .min_w(0.0)
+            .child(body(s, t, layer, &p, ed))
+    }
 }
 
-actions!(property_value, [CommitValue]);
+/// What one frame's builder said, shared by its handlers.
+struct Props {
+    key: String,
+    rel: RelationDef,
+    value: Option<Value>,
+    space: String,
+    seeds: Fields,
+    read_only: bool,
+    inline_menus: bool,
+    on_save: Option<SaveFn>,
+}
 
-impl RenderOnce for PropertyValue {
-    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let state = window.use_keyed_state(self.id.clone(), cx, |window, cx| {
-            ValueEditor::new(window, cx)
-        });
-        state.update(cx, |s, cx| s.set_props(self, window, cx));
-        let commit = state.clone();
-        div()
-            .w_full()
-            .min_w_0()
-            .on_action(move |_: &CommitValue, window, cx| {
-                commit.update(cx, |s, cx| s.commit_text(window, cx))
-            })
-            .child(state)
+impl Props {
+    fn format(&self) -> &str {
+        self.rel.format.as_str()
     }
+
+    fn save(&self, s: &mut State, v: Value) {
+        if let Some(f) = &self.on_save {
+            f(s, v);
+        }
+    }
+}
+
+/// Every [`PropertyValue`]'s editing state, by builder key.
+#[derive(Default)]
+pub struct ValueEditors(HashMap<String, ValueEditor>);
+
+struct ValueEditor {
+    /// The first sync ran (auto open, served_by machines).
+    mounted: bool,
+    /// The relation the state was made for (another one resets it).
+    rel_id: String,
+    rel_key: String,
+    /// Single-line text box (text, number, url/email/phone, hex).
+    text: InputState,
+    /// Multi-line box (longtext, error), sized for `area_rows` (0 = not made yet).
+    area: TextareaState,
+    area_rows: usize,
+    /// The stored text last put in the boxes (an external change replaces an unfocused box).
+    synced: Option<String>,
+    /// Typed and not committed yet: how to commit it.
+    pending: Option<Rc<Props>>,
+    hex_error: String,
+    /// The `chat_color` swatch: the colour picker Settings uses.
+    swatch: ColorPickerState,
+    /// The open calendar (`None` = closed).
+    calendar: Option<CalendarPickerState>,
+    options: OptionPickerState,
+    object_open: bool,
+    object_query: InputState,
+    /// The highlighted candidate (-1 = none yet).
+    object_active: i32,
+    /// "+ New agent" naming box (Some while naming).
+    agent_name: Option<InputState>,
+    creating_agent: bool,
+    /// `served_by` may hold a machine_id: machine_id → Computer object id.
+    machine_objects: HashMap<String, String>,
+    machines_asked: bool,
+    /// Width of the objects row (the link menu spans it).
+    objects_width: f32,
+}
+
+impl Default for ValueEditor {
+    fn default() -> Self {
+        Self {
+            mounted: false,
+            rel_id: String::new(),
+            rel_key: String::new(),
+            text: InputState::new(),
+            area: TextareaState::new(),
+            area_rows: 0,
+            synced: None,
+            pending: None,
+            hex_error: String::new(),
+            swatch: ColorPickerState::new(),
+            calendar: None,
+            options: OptionPickerState::default(),
+            object_open: false,
+            object_query: InputState::new(),
+            object_active: -1,
+            agent_name: None,
+            creating_agent: false,
+            machine_objects: HashMap::new(),
+            machines_asked: false,
+            objects_width: 240.0,
+        }
+    }
+}
+
+impl ValueEditor {
+    fn shown_id(&self, id: &str) -> String {
+        self.machine_objects
+            .get(id)
+            .cloned()
+            .unwrap_or_else(|| id.to_string())
+    }
+}
+
+/// The editor keyed `key` (made on first use).
+fn editor<'a>(s: &'a mut State, key: &str) -> &'a mut ValueEditor {
+    s.slot::<ValueEditors>()
+        .0
+        .entry(key.to_string())
+        .or_default()
+}
+
+/// The editor keyed `key` if it still exists.
+fn existing<'a>(s: &'a mut State, key: &str) -> Option<&'a mut ValueEditor> {
+    s.slot::<ValueEditors>().0.get_mut(key)
+}
+
+/// Installs the commit-on-blur poll listener.
+pub(crate) fn register(s: &mut State) {
+    s.on_poll(poll);
+}
+
+/// Drops the state of the editor keyed `key`.
+pub fn forget(s: &mut State, key: &str) {
+    s.slot::<ValueEditors>().0.remove(key);
+}
+
+/// Commits every value editor with typed, uncommitted text (GPUI's
+/// `CommitValue` action): call before a host action that would lose it.
+pub fn commit_pending(s: &mut State) {
+    let pending: Vec<(String, Rc<Props>)> = s
+        .slot::<ValueEditors>()
+        .0
+        .iter()
+        .filter_map(|(k, ed)| ed.pending.clone().map(|p| (k.clone(), p)))
+        .collect();
+    for (key, p) in pending {
+        commit_text(s, &key, &p);
+    }
+}
+
+/// Text typed into a box that has lost focus commits (GPUI's `InputEvent::Blur`);
+/// an option name box that lost focus renames.
+fn poll(s: &mut State) -> bool {
+    let Some(eds) = s.get::<ValueEditors>() else {
+        return false;
+    };
+    let blurred: Vec<(String, Rc<Props>)> = eds
+        .0
+        .iter()
+        .filter_map(|(k, ed)| {
+            let p = ed.pending.as_ref()?;
+            let focused = if is_longtext(&p.rel) {
+                ed.area.is_focused()
+            } else {
+                ed.text.is_focused()
+            };
+            (!focused).then(|| (k.clone(), p.clone()))
+        })
+        .collect();
+    let renames: Vec<_> = s
+        .slot::<ValueEditors>()
+        .0
+        .values_mut()
+        .filter_map(|ed| ed.options.blurred_rename())
+        .collect();
+    let changed = !blurred.is_empty() || !renames.is_empty();
+    for (key, p) in blurred {
+        commit_text(s, &key, &p);
+    }
+    for r in renames {
+        rename(s, r);
+    }
+    changed
 }
 
 /// What a value's text box shows.
@@ -190,6 +383,243 @@ pub(crate) fn date_label(ms: i64) -> String {
     roostr_core::dates::show_date_with(ms, roostr_core::dates::DateStyle::MonthDayYear)
 }
 
+/// `Number(raw)` for a typed number ("" is not a value here: onchange of an emptied box is ignored).
+fn parse_js_number(raw: &str) -> Option<f64> {
+    let t = raw.trim();
+    if t.is_empty() {
+        return Some(0.);
+    }
+    t.parse::<f64>().ok().filter(|n| n.is_finite())
+}
+
+fn is_longtext(rel: &RelationDef) -> bool {
+    rel.key != "chat_color" && (rel.format == "longtext" || rel.key == "error")
+}
+
+/// The textarea's minimum rows.
+fn area_rows(rel: &RelationDef) -> usize {
+    if rel.key == "error" { 5 } else { 3 }
+}
+
+/// The text the box shows for the stored value.
+fn stored_text(p: &Props) -> String {
+    match p.format() {
+        "number" => number_of(p.value.as_ref())
+            .map(number_text)
+            .unwrap_or_default(),
+        _ => text_of(p.value.as_ref()),
+    }
+}
+
+/// The `chat_color` swatch's colour for the stored value.
+fn chat_color(p: &Props) -> rune::Color {
+    normalize_hex(&text_of(p.value.as_ref()))
+        .as_deref()
+        .and_then(roostr_ui::color::hex)
+        .unwrap_or(roostr_ui::color::rgb(NO_CHAT_COLOR))
+}
+
+fn box_focused(p: &Props, ed: &ValueEditor) -> bool {
+    if is_longtext(&p.rel) {
+        ed.area.is_focused()
+    } else {
+        ed.text.is_focused()
+    }
+}
+
+/// Whether the state lags what the builder says (see [`sync`]).
+fn needs_sync(p: &Props, ed: Option<&ValueEditor>) -> bool {
+    let Some(ed) = ed else { return true };
+    if !ed.mounted || ed.rel_id != p.rel.id || ed.rel_key != p.rel.key {
+        return true;
+    }
+    if p.rel.key == "served_by" && !ed.machines_asked {
+        return true;
+    }
+    if is_longtext(&p.rel) && ed.area_rows != area_rows(&p.rel) {
+        return true;
+    }
+    if p.rel.key == "chat_color" && ed.swatch.value() != Some(chat_color(p)) {
+        return true;
+    }
+    ed.synced.as_deref() != Some(stored_text(p).as_str()) && !box_focused(p, ed)
+}
+
+/// Brings the editor's state up to the builder's props (GPUI's `set_props`):
+/// first mount (auto-open), a new relation, the served_by machines, and
+/// the boxes kept on the stored value unless one is being edited.
+fn sync(s: &mut State, p: &Props, auto_open: bool) {
+    let longtext = is_longtext(&p.rel);
+    let stored = stored_text(p);
+    let open_now = {
+        let ed = editor(s, &p.key);
+        let first = !ed.mounted;
+        ed.mounted = true;
+        if ed.rel_id != p.rel.id || ed.rel_key != p.rel.key {
+            ed.rel_id = p.rel.id.clone();
+            ed.rel_key = p.rel.key.clone();
+            ed.synced = None;
+            ed.options = OptionPickerState::default();
+        }
+        if longtext && ed.area_rows != area_rows(&p.rel) {
+            ed.area_rows = area_rows(&p.rel);
+            ed.area = TextareaState::new().auto_grow(ed.area_rows, 24);
+            ed.synced = None;
+        }
+        if ed.synced.as_deref() != Some(stored.as_str()) {
+            if longtext {
+                if !ed.area.is_focused() {
+                    ed.area.set_value(stored.clone());
+                    ed.synced = Some(stored);
+                }
+            } else if !ed.text.is_focused() {
+                ed.text.set_value(stored.clone());
+                ed.synced = Some(stored);
+            }
+        }
+        if p.rel.key == "chat_color" {
+            let color = chat_color(p);
+            if ed.swatch.value() != Some(color) {
+                ed.swatch.set_value(color);
+            }
+        }
+        let open_now = first
+            && auto_open
+            && p.format() == "object"
+            && object_ids(p.value.as_ref()).is_empty()
+            && !p.read_only;
+        if open_now {
+            ed.object_open = true;
+            ed.object_query.focus();
+        }
+        open_now
+    };
+    if open_now && !p.space.is_empty() {
+        lite_ui::ensure_space(&p.space, s);
+    }
+    let ed = editor(s, &p.key);
+    if p.rel.key == "served_by" && !ed.machines_asked {
+        ed.machines_asked = true;
+        load_machines(s, &p.key);
+    }
+}
+
+/// `onchange`: the box lost focus or took Enter with a changed value.
+fn commit_text(s: &mut State, key: &str, p: &Props) {
+    let Some(ed) = existing(s, key) else { return };
+    ed.pending = None;
+    let raw = if is_longtext(&p.rel) {
+        ed.area.value().to_string()
+    } else {
+        ed.text.value().to_string()
+    };
+    if ed.synced.as_deref() == Some(raw.as_str()) {
+        return;
+    }
+    ed.synced = Some(raw.clone());
+    if p.rel.key == "chat_color" {
+        save_hex(s, key, p, &raw);
+        return;
+    }
+    match p.format() {
+        "number" => {
+            let Some(n) = parse_js_number(&raw) else {
+                return;
+            };
+            let v = if n.fract() == 0. && n.abs() < 9.007_199_254_740_992e15 {
+                Value::int(n as i64)
+            } else {
+                Value::float(n)
+            };
+            p.save(s, v);
+        }
+        "url" | "email" | "phone" => p.save(s, Value::string(raw.trim())),
+        _ => p.save(s, Value::string(raw)),
+    }
+}
+
+fn save_hex(s: &mut State, key: &str, p: &Props, raw: &str) {
+    let hex = if raw.trim().is_empty() {
+        Some(String::new())
+    } else {
+        normalize_hex(raw)
+    };
+    let Some(ed) = existing(s, key) else { return };
+    match hex {
+        None => ed.hex_error = "Use a hex color like #EDCF7F".into(),
+        Some(hex) => {
+            ed.hex_error.clear();
+            p.save(s, Value::string(hex));
+        }
+    }
+}
+
+fn option_selection(p: &Props) -> (Vec<String>, bool) {
+    let items = items_of(p.value.as_ref());
+    if p.format() == "status" {
+        let text = text_of(p.value.as_ref());
+        let sel = if !items.is_empty() {
+            items
+        } else if !text.is_empty() {
+            vec![text]
+        } else {
+            vec![]
+        };
+        (sel, false)
+    } else {
+        (items, true)
+    }
+}
+
+/// An option picked: status selects one (or clears it), tag toggles.
+fn pick_option(s: &mut State, p: &Props, t: &str) {
+    let (selected, _) = option_selection(p);
+    let next: Vec<String> = if p.format() == "status" {
+        if selected.iter().any(|x| x == t) {
+            vec![]
+        } else {
+            vec![t.to_string()]
+        }
+    } else if selected.iter().any(|x| x == t) {
+        selected.into_iter().filter(|x| x != t).collect()
+    } else {
+        selected.into_iter().chain([t.to_string()]).collect()
+    };
+    p.save(s, list_value(&next));
+}
+
+fn toggle_calendar(s: &mut State, p: &Props) {
+    let value = number_of(p.value.as_ref()).unwrap_or(0.) as i64;
+    let ed = editor(s, &p.key);
+    ed.calendar = match ed.calendar {
+        Some(_) => None,
+        None => Some(CalendarPickerState::new(value)),
+    };
+}
+
+// ── Object links ──────────────────────────────────────────────
+
+fn load_machines(s: &mut State, key: &str) {
+    let task = roostr_core::serving::fetch_machines(s);
+    let key = key.to_string();
+    s.rt.spawn(async move |cx| {
+        let Ok((_, machines)) = task.await else {
+            return;
+        };
+        let map: HashMap<String, String> = machines
+            .into_iter()
+            .filter(|m| !m.machine_id.is_empty())
+            .map(|m| (m.machine_id, m.id))
+            .collect();
+        cx.update(move |s| {
+            if let Some(ed) = existing(s, &key) {
+                ed.machine_objects = map;
+            }
+        });
+    })
+    .detach();
+}
+
 /// A picker candidate.
 #[derive(Clone)]
 struct Candidate {
@@ -200,1308 +630,977 @@ struct Candidate {
     done: Option<bool>,
 }
 
-struct ValueEditor {
-    rel: RelationDef,
-    value: Option<Value>,
-    space: String,
-    seeds: Fields,
-    read_only: bool,
-    /// Menus open in the editor's flow ([`PropertyValue::inline_menus`]).
-    inline_menus: bool,
-    on_save: Option<SaveFn>,
-    mounted: bool,
-    /// Single-line text box (text, number, url/email/phone, hex).
-    text: Entity<InputState>,
-    /// Multi-line box (longtext, error), made on first use.
-    area: Option<Entity<TextareaState>>,
-    /// The stored text last put in the boxes (an external change replaces an unfocused box).
-    synced: Option<String>,
-    hex_error: String,
-    /// The `chat_color` swatch: the kit colour picker Settings uses, made on first use.
-    swatch: Option<Entity<ColorPickerState>>,
-    date_open: bool,
-    placeholder: &'static str,
-    calendar: Option<Entity<CalendarPicker>>,
-    options: Option<Entity<OptionPicker>>,
-    object_open: bool,
-    object_query: Entity<InputState>,
-    /// The highlighted candidate (-1 = none yet).
-    object_active: i32,
-    /// "+ New agent" naming box (Some while naming).
-    agent_name: Option<Entity<InputState>>,
-    creating_agent: bool,
-    /// `served_by` may hold a machine_id: machine_id → Computer object id.
-    machine_objects: HashMap<String, String>,
-    machines_asked: bool,
-    /// Width of the objects row (the link menu spans it).
-    objects_width: Rc<Cell<Pixels>>,
-    _subs: Vec<Subscription>,
+/// Type keys the relation is limited to (Anytype relationFormatObjectTypes).
+fn allowed_type_keys(s: &State, rel: &RelationDef) -> Vec<String> {
+    rel.object_types
+        .iter()
+        .flatten()
+        .filter_map(|id| {
+            s.store
+                .types
+                .iter()
+                .find(|t| &t.id == id)
+                .map(|t| t.key.clone())
+        })
+        .filter(|k| !k.is_empty())
+        .collect()
 }
 
-impl ValueEditor {
-    fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let text = cx.new(|cx| InputState::new(window, cx));
-        let object_query = cx.new(|cx| InputState::new(window, cx).placeholder("Search objects…"));
-        let subs = vec![
-            cx.subscribe_in(&text, window, |this, _, ev: &InputEvent, window, cx| {
-                if matches!(ev, InputEvent::Blur | InputEvent::PressEnter { .. }) {
-                    this.commit_text(window, cx);
+fn candidates(s: &State, p: &Props, ed: &ValueEditor) -> Vec<Candidate> {
+    let store = &s.store;
+    let ids = object_ids(p.value.as_ref());
+    let q = ed.object_query.value().trim().to_lowercase();
+    let allowed = allowed_type_keys(s, &p.rel);
+    let wants_agents = allowed.iter().any(|k| k == "agent");
+    let space = p.space.as_str();
+    let mut pool: Vec<Candidate> = if wants_agents {
+        store
+            .agents
+            .iter()
+            .filter(|a| {
+                !ids.contains(&a.id)
+                    && (space.is_empty() || a.channel.is_empty() || a.channel == space)
+            })
+            .map(|a| Candidate {
+                id: a.id.clone(),
+                name: a.name.clone(),
+                type_key: "agent".into(),
+                icon: a.icon.clone(),
+                done: None,
+            })
+            .collect()
+    } else {
+        store
+            .summaries
+            .iter()
+            .filter(|o| {
+                !ids.iter().any(|id| ed.shown_id(id) == o.id)
+                    && (!is_system_type(&o.type_key) || allowed.contains(&o.type_key))
+            })
+            .filter(|o| allowed.is_empty() || allowed.contains(&o.type_key))
+            // An object links within its own space: the picker offers that space's own.
+            .filter(|o| space.is_empty() || o.channel_id.is_empty() || o.channel_id == space)
+            .map(|o| Candidate {
+                id: o.id.clone(),
+                name: o.name.clone(),
+                type_key: o.type_key.clone(),
+                icon: o.icon.clone(),
+                done: o.done,
+            })
+            .collect()
+    };
+    pool.retain(|c| q.is_empty() || c.name.to_lowercase().contains(&q));
+    if !wants_agents && allowed.is_empty() {
+        pool.truncate(8);
+    }
+    pool
+}
+
+/// "+ New agent" / "+ New prompt" offered for agent- / prompt-limited relations.
+fn new_kind(s: &State, rel: &RelationDef) -> &'static str {
+    let allowed = allowed_type_keys(s, rel);
+    if allowed.iter().any(|k| k == "agent") {
+        "agent"
+    } else if allowed.iter().any(|k| k == "system_prompt") {
+        "prompt"
+    } else {
+        ""
+    }
+}
+
+/// The type a typed name becomes (relations other than agent / prompt):
+/// the first type the relation is limited to, else a page.
+fn create_type(s: &State, rel: &RelationDef) -> String {
+    allowed_type_keys(s, rel)
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| "page".into())
+}
+
+/// `(name, type label)` when the picker should offer to create an object
+/// named after the query: a non-empty query that names no candidate, on a
+/// relation without its own "New agent / prompt" flow.
+fn offer_create(s: &State, p: &Props, ed: &ValueEditor) -> Option<(String, String)> {
+    if p.read_only || !new_kind(s, &p.rel).is_empty() {
+        return None;
+    }
+    let name = ed.object_query.value().trim().to_string();
+    if name.is_empty() {
+        return None;
+    }
+    let lower = name.to_lowercase();
+    if candidates(s, p, ed)
+        .iter()
+        .any(|c| c.name.trim().to_lowercase() == lower)
+    {
+        return None;
+    }
+    let key = create_type(s, &p.rel);
+    let types = &s.store.types;
+    let label = types
+        .iter()
+        .find(|t| t.key == key && (p.space.is_empty() || t.space == p.space))
+        .or_else(|| types.iter().find(|t| t.key == key))
+        .map(|t| t.name.clone())
+        .filter(|n| !n.is_empty())
+        .unwrap_or(key);
+    Some((name, label))
+}
+
+/// The space new objects go to: the editor's, else the first.
+fn target_channel(s: &State, p: &Props) -> String {
+    if p.space.is_empty() {
+        s.store
+            .channels
+            .first()
+            .map(|c| c.id.clone())
+            .unwrap_or_default()
+    } else {
+        p.space.clone()
+    }
+}
+
+/// Make an object named after the query in this space and link it.
+fn create_from_query(s: &mut State, p: &Rc<Props>) {
+    let Some(ed) = s.get::<ValueEditors>().and_then(|m| m.0.get(&p.key)) else {
+        return;
+    };
+    let Some((name, _)) = offer_create(s, p, ed) else {
+        return;
+    };
+    if ed.creating_agent {
+        return;
+    }
+    let channel = target_channel(s, p);
+    let fields = if channel.is_empty() {
+        Fields::new()
+    } else {
+        Fields::from([("channel".to_string(), Value::string(channel))])
+    };
+    let type_key = create_type(s, &p.rel);
+    editor(s, &p.key).creating_agent = true;
+    let task = roostr_core::create::from_type(&name, &type_key, fields, s);
+    let p = p.clone();
+    s.rt.spawn(async move |cx| {
+        let result = task.await;
+        cx.update(move |s| {
+            let Some(ed) = existing(s, &p.key) else {
+                return;
+            };
+            ed.creating_agent = false;
+            match result {
+                Ok(id) => {
+                    ed.object_open = false;
+                    toggle_object(s, &p, &id);
                 }
-            }),
-            cx.subscribe_in(
-                &object_query,
-                window,
-                |this, _, ev: &InputEvent, window, cx| match ev {
-                    InputEvent::Change => {
-                        this.object_active = -1;
-                        cx.notify();
+                Err(error) => log::error!("create: {error:#}"),
+            }
+        });
+    })
+    .detach();
+}
+
+fn toggle_object_menu(s: &mut State, p: &Props) {
+    let ed = editor(s, &p.key);
+    ed.object_open = !ed.object_open;
+    ed.agent_name = None;
+    if ed.object_open {
+        ed.object_query.focus();
+        // A Lite copy holds only what was opened: the picker downloads
+        // the space so it can offer every candidate in it.
+        if !p.space.is_empty() {
+            lite_ui::ensure_space(&p.space, s);
+        }
+    }
+}
+
+fn close_object_menu(s: &mut State, key: &str) {
+    if let Some(ed) = existing(s, key) {
+        ed.object_open = false;
+        ed.agent_name = None;
+    }
+}
+
+fn pick_candidate(s: &mut State, p: &Props, id: &str) {
+    editor(s, &p.key).object_open = false;
+    toggle_object(s, p, id);
+}
+
+fn toggle_object(s: &mut State, p: &Props, id: &str) {
+    let ids = object_ids(p.value.as_ref());
+    // A single-value relation (System prompt, Served by) swaps its link; a list adds.
+    let next: Vec<String> = if ids.iter().any(|x| x == id) {
+        ids.into_iter().filter(|x| x != id).collect()
+    } else if p.rel.max_count == 1 {
+        vec![id.to_string()]
+    } else {
+        ids.into_iter().chain([id.to_string()]).collect()
+    };
+    editor(s, &p.key).object_query.clear();
+    let v = Value::values(
+        next.into_iter()
+            .map(|t| Value::link(t, p.rel.key.clone()))
+            .collect(),
+    );
+    p.save(s, v);
+}
+
+fn move_active(s: &mut State, p: &Props, down: bool) {
+    let Some(ed) = s.get::<ValueEditors>().and_then(|m| m.0.get(&p.key)) else {
+        return;
+    };
+    let n = candidates(s, p, ed).len() as i32;
+    if n == 0 {
+        return;
+    }
+    let ed = editor(s, &p.key);
+    ed.object_active = if down {
+        (ed.object_active + 1) % n
+    } else if ed.object_active <= 0 {
+        n - 1
+    } else {
+        ed.object_active - 1
+    };
+}
+
+/// Enter in the query: the highlighted (else first) candidate, else create from the query.
+fn enter_query(s: &mut State, p: &Rc<Props>) {
+    let Some(ed) = s.get::<ValueEditors>().and_then(|m| m.0.get(&p.key)) else {
+        return;
+    };
+    let found = candidates(s, p, ed);
+    if let Some(c) = found.get(ed.object_active.max(0) as usize) {
+        let id = c.id.clone();
+        pick_candidate(s, p, &id);
+    } else if offer_create(s, p, ed).is_some() {
+        create_from_query(s, p);
+    }
+}
+
+/// The menu's keys (GPUI captured MoveUp / MoveDown / Escape on the whole menu).
+fn menu_key(s: &mut State, p: &Props, ev: &KeyEvent) -> bool {
+    match ev.key {
+        Key::Down => move_active(s, p, true),
+        Key::Up => move_active(s, p, false),
+        Key::Escape => {
+            let ed = editor(s, &p.key);
+            if ed.agent_name.is_some() {
+                ed.agent_name = None;
+            } else {
+                close_object_menu(s, &p.key);
+            }
+        }
+        _ => return false,
+    }
+    true
+}
+
+fn start_naming(s: &mut State, p: &Props) {
+    let ed = editor(s, &p.key);
+    let seed = ed.object_query.value().trim().to_string();
+    let mut input = InputState::with_value(seed);
+    input.focus();
+    input.select_all();
+    ed.agent_name = Some(input);
+}
+
+/// Make the agent / prompt here and link it.
+fn add_new(s: &mut State, p: &Rc<Props>) {
+    let Some(ed) = existing(s, &p.key) else {
+        return;
+    };
+    let Some(input) = &ed.agent_name else { return };
+    let name = input.value().trim().to_string();
+    if ed.creating_agent || name.is_empty() {
+        return;
+    }
+    ed.creating_agent = true;
+    let channel = target_channel(s, p);
+    let task = if new_kind(s, &p.rel) == "agent" {
+        roostr_core::create::new_agent(&channel, &name, p.seeds.clone(), s)
+    } else {
+        let fields = (!channel.is_empty())
+            .then(|| Fields::from([("channel".to_string(), Value::string(channel.clone()))]));
+        api::note::create(
+            &name,
+            Some("system_prompt"),
+            Some(fields.unwrap_or_default()),
+            s,
+        )
+    };
+    let p = p.clone();
+    s.rt.spawn(async move |cx| {
+        let result = task.await;
+        cx.update(move |s| {
+            let Some(ed) = existing(s, &p.key) else {
+                return;
+            };
+            ed.creating_agent = false;
+            match result {
+                Ok(id) => {
+                    ed.object_open = false;
+                    ed.agent_name = None;
+                    toggle_object(s, &p, &id);
+                }
+                Err(error) => log::error!("create: {error:#}"),
+            }
+        });
+    })
+    .detach();
+}
+
+// ── Drawing ───────────────────────────────────────────────────
+
+fn body(s: &State, t: &Theme, layer: &mut Vec<El>, p: &Rc<Props>, ed: &ValueEditor) -> El {
+    let format = p.format();
+    if format == "repeat" {
+        // Owned by Repeat on the object page; this only guards a stray mount.
+        return el();
+    }
+    if format == "checkbox" {
+        let checked = p.value.as_ref().and_then(|v| v.bool_value) == Some(true);
+        if p.read_only {
+            return checkbox_display("chk", checked).build(t);
+        }
+        let p = p.clone();
+        return checkbox("chk", checked)
+            .on_change(move |s: &mut State, next: bool| p.save(s, Value::bool(next)))
+            .build(t);
+    }
+    if p.read_only {
+        return read_only(s, t, p, ed);
+    }
+    match format {
+        "date" => date(t, layer, p, ed),
+        "status" | "tag" => {
+            let (selected, multi) = option_selection(p);
+            let key = p.key.clone();
+            let alive_key = p.key.clone();
+            let pick = p.clone();
+            let hooks = OptionHooks {
+                lens: lens(move |s: &mut State| &mut editor(s, &key).options),
+                alive: Rc::new(move |s: &State| {
+                    s.get::<ValueEditors>()
+                        .is_some_and(|m| m.0.contains_key(&alive_key))
+                }),
+                on_pick: Rc::new(move |s: &mut State, text: String| pick_option(s, &pick, &text)),
+            };
+            col().w_full().child(option_picker(
+                s,
+                t,
+                &p.rel,
+                &selected,
+                multi,
+                &ed.options,
+                hooks,
+            ))
+        }
+        "url" | "email" | "phone" => {
+            let value = text_of(p.value.as_ref());
+            let href = match format {
+                "email" => format!("mailto:{value}"),
+                "phone" => format!("tel:{value}"),
+                _ if value.starts_with("http://") || value.starts_with("https://") => value.clone(),
+                _ => format!("https://{value}"),
+            };
+            let mut line = row()
+                .items_center()
+                .gap(6.0)
+                .w_full()
+                .child(text_field(t, p, ed).grow(1.0));
+            if !value.is_empty() {
+                line = line.child(
+                    Button::new("open")
+                        .ghost()
+                        .xsmall()
+                        .icon(Glyph::ArrowUpRight)
+                        .icon_size(14.0)
+                        .text_color(t.accent)
+                        .tooltip("Open")
+                        .accessibility_label("Open")
+                        .on_press_tx(move |_: &mut State, tx: &mut Tx| {
+                            if let Err(error) = tx.open_url(&href) {
+                                log::error!("open {href}: {error:?}");
+                            }
+                        })
+                        .build(t),
+                );
+            }
+            line
+        }
+        "object" => objects(s, t, layer, p, ed),
+        _ if p.rel.key == "chat_color" => chat_color_field(t, layer, p, ed),
+        _ if is_longtext(&p.rel) => {
+            let (key, mark) = (p.key.clone(), p.clone());
+            let area = Textarea::new("area", &ed.area)
+                .placeholder("Empty")
+                .on_edit(move |s: &mut State| &mut editor(s, &key).area)
+                .on_change(move |s: &mut State, _: &mut Tx| {
+                    editor(s, &mark.key).pending = Some(mark.clone())
+                });
+            text_area(t, area, ed.area.is_focused(), t.bg, radius::SM, (5.0, 8.0))
+        }
+        _ => text_field(t, p, ed).w_full(),
+    }
+}
+
+/// The single-line box: commits on Enter (and on blur, through the poll).
+fn text_field(t: &Theme, p: &Rc<Props>, ed: &ValueEditor) -> El {
+    let placeholder = match p.format() {
+        _ if p.rel.key == "chat_color" => "#RRGGBB",
+        "email" => "name@example.com",
+        "phone" => "+1 555 0100",
+        "url" => "example.com",
+        _ => "Empty",
+    };
+    let (key, mark, submit) = (p.key.clone(), p.clone(), p.clone());
+    let input = Input::new("text", &ed.text)
+        .placeholder(placeholder)
+        .on_edit(move |s: &mut State| &mut editor(s, &key).text)
+        .on_change(move |s: &mut State, _: &mut Tx| {
+            editor(s, &mark.key).pending = Some(mark.clone())
+        })
+        .on_submit(move |s: &mut State, _: &mut Tx| commit_text(s, &submit.key.clone(), &submit));
+    field(t, input, ed.text.is_focused(), FieldSkin::Value)
+}
+
+fn date(t: &Theme, layer: &mut Vec<El>, p: &Rc<Props>, ed: &ValueEditor) -> El {
+    let num = number_of(p.value.as_ref()).unwrap_or(0.) as i64;
+    let label = if num != 0 {
+        date_label(num)
+    } else {
+        "Pick a date".into()
+    };
+    let ink = if num == 0 { t.muted } else { t.fg };
+    let toggle = p.clone();
+    let button = Button::new("date-btn")
+        .outline()
+        .bg(t.bg)
+        .border_color(t.border)
+        .radius(radius::SM)
+        .h_auto()
+        .px(10.0)
+        .py(5.0)
+        .text_color(ink)
+        .child(text(label).font(ty::ui(13.0)).color(ink))
+        .on_press(move |s: &mut State| toggle_calendar(s, &toggle))
+        .build(t);
+    let anchor = format!("{}-date", p.key);
+    let wrap = row().key(anchor.clone()).child(button);
+    let Some(cal) = &ed.calendar else { return wrap };
+    let key = p.key.clone();
+    let on = p.clone();
+    let surface = calendar_picker(
+        t,
+        "date-calendar",
+        cal,
+        lens(move |s: &mut State| {
+            editor(s, &key)
+                .calendar
+                .get_or_insert_with(|| CalendarPickerState::new(0))
+        }),
+        Rc::new(move |s: &mut State, ev: CalendarEvent| {
+            editor(s, &on.key).calendar = None;
+            if let CalendarEvent::Pick(ms) = ev {
+                on.save(s, Value::int(ms.unwrap_or(0)));
+            }
+        }),
+    );
+    if p.inline_menus {
+        return col().items_start().gap(6.0).child(wrap).child(surface);
+    }
+    below(layer, &anchor, 6.0, surface);
+    wrap
+}
+
+fn chat_color_field(t: &Theme, layer: &mut Vec<El>, p: &Rc<Props>, ed: &ValueEditor) -> El {
+    let bad = !ed.hex_error.is_empty();
+    let (key, on) = (p.key.clone(), p.clone());
+    // The same picker as Settings → Chat color, kept in step with the value.
+    let picker = ColorPicker::new(
+        format!("{}-swatch", p.key),
+        &ed.swatch,
+        move |s: &mut State| &mut editor(s, &key).swatch,
+    )
+    .accessibility_label("Chat color picker")
+    .on_change(move |s: &mut State, color: Option<rune::Color>| {
+        let Some(color) = color else { return };
+        let hex = roostr_ui::color::to_hex(color);
+        let ed = editor(s, &on.key);
+        ed.text.set_value(hex.clone());
+        ed.synced = Some(hex.clone());
+        save_hex(s, &on.key, &on, &hex);
+    })
+    .build(t, layer);
+    let mut hex = text_field(t, p, ed);
+    if bad {
+        hex = hex.border(1.0, roostr_ui::color::rgb(HEX_ERROR_RED));
+    }
+    let mut hex = row().key("hex").grow(1.0).child(hex.grow(1.0));
+    if bad {
+        hex = tip(hex, ed.hex_error.clone());
+    }
+    row()
+        .items_center()
+        .gap(6.0)
+        .w_full()
+        .child(
+            row()
+                .w(34.0)
+                .h(26.0)
+                .padding(2.0)
+                .center()
+                .radius(radius::XS)
+                .fill(t.panel)
+                .border(1.0, t.border)
+                .child(picker),
+        )
+        .child(hex)
+}
+
+/// What leads a linked object's name: an agent's emoji, a task's checkbox,
+/// else the object's icon.
+fn object_lead(s: &State, t: &Theme, p: &Props, id: &str, shown: &str, key: String) -> El {
+    let store = &s.store;
+    let summary = store.summary(shown);
+    let agent = store.agent(id);
+    if agent.is_some() || summary.is_some_and(|o| o.type_key == "agent") {
+        let icon = agent
+            .map(|a| a.icon.clone())
+            .filter(|i| !i.is_empty())
+            .or_else(|| summary.map(|o| o.icon.clone()).filter(|i| !i.is_empty()))
+            .unwrap_or_else(|| "🤖".into());
+        return icon_text_el(s, &icon, 12.0, ty::ui(12.0));
+    }
+    if let Some(o) = summary.filter(|o| store.layout_of(&o.type_key) == "task") {
+        return checkbox_display(key, o.done == Some(true))
+            .xsmall()
+            .build(t);
+    }
+    let (icon, tk) = summary
+        .map(|o| (o.icon.as_str(), o.type_key.as_str()))
+        .unwrap_or(("", "note"));
+    icon_text_el(
+        s,
+        &object_icon(store, icon, tk, &p.space),
+        12.0,
+        ty::ui(12.0),
+    )
+}
+
+fn objects(s: &State, t: &Theme, layer: &mut Vec<El>, p: &Rc<Props>, ed: &ValueEditor) -> El {
+    let store = &s.store;
+    let ids = object_ids(p.value.as_ref());
+    let paint = roostr_ui::tags::object_pill_paint(t, t.fg);
+    let anchor = format!("{}-objects", p.key);
+    let width_key = p.key.clone();
+    let mut chips = row()
+        .key(anchor.clone())
+        .flex_wrap()
+        .gap(4.0)
+        .items_center()
+        .on_layout(move |s: &mut State, r: [f32; 4]| {
+            if let Some(ed) = existing(s, &width_key)
+                && (ed.objects_width - r[2]).abs() > 0.5
+            {
+                ed.objects_width = r[2];
+            }
+        });
+    for id in &ids {
+        let shown = ed.shown_id(id);
+        let name = store
+            .summary(&shown)
+            .map(|o| o.name.clone())
+            .filter(|n| !n.is_empty())
+            .or_else(|| {
+                store
+                    .agent(&shown)
+                    .map(|a| a.name.clone())
+                    .filter(|n| !n.is_empty())
+            })
+            .unwrap_or_else(|| prefix(id, 8));
+        let lead = object_lead(s, t, p, id, &shown, format!("chip-done-{id}"));
+        let target = shown.clone();
+        let mut chip = Tag::custom(paint.bg, paint.fg, paint.border)
+            .rounded_full()
+            .gap(2.0)
+            .pl(8.0)
+            .pr(4.0)
+            .py(1.0)
+            .text_size(12.0)
+            .child(
+                Button::new(format!("chip-{id}"))
+                    .ghost()
+                    .xsmall()
+                    .h_auto()
+                    .px(2.0)
+                    .child(
+                        row()
+                            .gap(4.0)
+                            .center_y()
+                            .child(lead)
+                            .child(text(name).font(ty::ui(12.0)).color(t.fg)),
+                    )
+                    .on_press(move |s: &mut State| {
+                        roostr_core::nav::navigate(Route::Object(target.clone()), s)
+                    })
+                    .build(t),
+            );
+        if !p.read_only {
+            let (remove, on) = (id.clone(), p.clone());
+            chip = chip.child(
+                Button::new(format!("rm-{id}"))
+                    .ghost()
+                    .xsmall()
+                    .child(glyph(Glyph::Close, 11.0).color(t.muted))
+                    .text_color(t.muted)
+                    .tooltip("Remove")
+                    .accessibility_label("Remove")
+                    .on_press(move |s: &mut State| toggle_object(s, &on, &remove))
+                    .build(t),
+            );
+        }
+        chips = chips.child(chip.build(t));
+    }
+    let toggle = p.clone();
+    chips = chips.child(
+        Button::new("link-object")
+            .outline()
+            .xsmall()
+            .rounded(ButtonRounded::Px(999.0))
+            .border_color(t.border)
+            .px(8.0)
+            .child(text("+ link object").font(ty::ui(11.0)).color(t.fg))
+            .on_press(move |s: &mut State| toggle_object_menu(s, &toggle))
+            .build(t),
+    );
+    if !ed.object_open {
+        return chips;
+    }
+    let menu = object_menu(s, t, p, ed);
+    if p.inline_menus {
+        return col().gap(6.0).child(chips).child(menu);
+    }
+    below(layer, &anchor, 6.0, menu);
+    chips
+}
+
+/// The link picker: query, candidates, the space notice, create-from-query,
+/// "+ New agent / prompt". Escape or a press outside closes it.
+fn object_menu(s: &State, t: &Theme, p: &Rc<Props>, ed: &ValueEditor) -> El {
+    let store = &s.store;
+    let found = candidates(s, p, ed);
+    let kind = new_kind(s, &p.rel);
+    let query = {
+        let (key, change, submit, keys) = (p.key.clone(), p.key.clone(), p.clone(), p.clone());
+        Input::new("object-query", &ed.object_query)
+            .placeholder("Search objects…")
+            .on_edit(move |s: &mut State| &mut editor(s, &key).object_query)
+            .on_change(move |s: &mut State, _: &mut Tx| editor(s, &change).object_active = -1)
+            .on_submit(move |s: &mut State, _: &mut Tx| enter_query(s, &submit))
+            .on_key(move |s: &mut State, ev: &KeyEvent, _: &mut Tx| menu_key(s, &keys, ev))
+    };
+    let mut menu = col().gap(2.0).padding(8.0).child(el().mb(4.0).child(field(
+        t,
+        query,
+        ed.object_query.is_focused(),
+        FieldSkin::Filter,
+    )));
+    for (i, c) in found.iter().enumerate() {
+        let active = i as i32 == ed.object_active;
+        let lead = if c.type_key == "agent" {
+            let icon = if !c.icon.is_empty() {
+                c.icon.clone()
+            } else {
+                store
+                    .agent(&c.id)
+                    .map(|a| a.icon.clone())
+                    .filter(|i| !i.is_empty())
+                    .unwrap_or_else(|| "🤖".into())
+            };
+            icon_text_el(s, &icon, 13.0, ty::ui(13.0))
+        } else if store.layout_of(&c.type_key) == "task" {
+            checkbox_display(format!("cand-done-{}", c.id), c.done == Some(true))
+                .xsmall()
+                .build(t)
+        } else {
+            icon_text_el(
+                s,
+                &object_icon(store, &c.icon, &c.type_key, &p.space),
+                13.0,
+                ty::ui(13.0),
+            )
+        };
+        let name = if c.name.is_empty() {
+            "Untitled".to_string()
+        } else {
+            c.name.clone()
+        };
+        let (hover, pick, id) = (p.key.clone(), p.clone(), c.id.clone());
+        menu = menu.child(
+            ListItem::new(format!("cand-{}", c.id))
+                .px(6.0)
+                .py(5.0)
+                .radius(radius::SM)
+                .text_size(13.0)
+                .pointer()
+                .selected(active)
+                .child(
+                    row()
+                        .grow(1.0)
+                        .min_w(0.0)
+                        .center_y()
+                        .gap(6.0)
+                        .child(
+                            row()
+                                .grow(1.0)
+                                .shrink()
+                                .min_w(0.0)
+                                .center_y()
+                                .gap(4.0)
+                                .child(lead)
+                                .child(text(name).font(ty::ui(13.0)).color(t.fg).truncate()),
+                        )
+                        .child(text(c.type_key.clone()).font(ty::ui(11.0)).color(t.muted)),
+                )
+                .on_hover(move |s: &mut State| {
+                    let ed = editor(s, &hover);
+                    if ed.object_active != i as i32 {
+                        ed.object_active = i as i32;
                     }
-                    InputEvent::PressEnter { .. } => {
-                        let candidates = this.candidates(cx);
-                        if let Some(c) = candidates.get(this.object_active.max(0) as usize) {
-                            let id = c.id.clone();
-                            this.pick_candidate(id, window, cx);
-                        } else if this.offer_create(cx).is_some() {
-                            this.create_from_query(window, cx);
-                        }
-                    }
-                    _ => {}
-                },
-            ),
-            cx.observe(&Store::global(cx), |_, _, cx| cx.notify()),
-        ];
-        Self {
-            rel: RelationDef::default(),
-            value: None,
+                })
+                .on_press(move |s: &mut State| pick_candidate(s, &pick, &id))
+                .build(t),
+        );
+    }
+    // Lite, while the space downloads (or before): the list may be partial.
+    if let Some(notice) = lite_ui::space_notice(&p.space, s) {
+        let mut line = row()
+            .key("picker-space")
+            .flex_wrap()
+            .items_center()
+            .gap(10.0)
+            .py(6.0)
+            .child(text(notice.text).font(ty::ui(12.0)).color(t.muted).wrap());
+        if let Some(action) = notice.action {
+            let label = action.label();
+            line = line.child(
+                roostr_ui::outline_button("picker-space-action", label)
+                    .on_press(move |s: &mut State| action.run(s))
+                    .build(t),
+            );
+        }
+        menu = menu.child(line);
+    }
+    if found.is_empty() {
+        menu = menu.child(
+            el().px(6.0)
+                .py(4.0)
+                .child(empty_note(t, "No matches", 11.0)),
+        );
+    }
+    if let Some((name, label)) = offer_create(s, p, ed) {
+        let creating = ed.creating_agent;
+        let create = p.clone();
+        let item = ListItem::new("create-from-query")
+            .px(6.0)
+            .py(5.0)
+            .radius(radius::SM)
+            .text_size(13.0)
+            .text_color(t.accent)
+            .disabled(creating)
+            .label(if creating {
+                "Creating…".to_string()
+            } else {
+                format!("＋ Create {label} “{name}”")
+            });
+        let item = if creating {
+            item
+        } else {
+            item.pointer()
+                .on_press(move |s: &mut State| create_from_query(s, &create))
+        };
+        menu = menu.child(
+            el().mt(2.0)
+                .border_sides([1.0, 0.0, 0.0, 0.0], t.border)
+                .opacity(if creating { 0.5 } else { 1.0 })
+                .child(item.build(t)),
+        );
+    }
+    if !kind.is_empty() {
+        menu = menu.child(match &ed.agent_name {
+            None => {
+                let start = p.clone();
+                el().mt(2.0)
+                    .border_sides([1.0, 0.0, 0.0, 0.0], t.border)
+                    .child(
+                        ListItem::new("new-kind")
+                            .px(6.0)
+                            .py(5.0)
+                            .radius(radius::SM)
+                            .text_size(13.0)
+                            .pointer()
+                            .label(format!("＋ New {kind}"))
+                            .on_press(move |s: &mut State| start_naming(s, &start))
+                            .build(t),
+                    )
+            }
+            Some(input) => {
+                let empty = input.value().trim().is_empty();
+                let creating = ed.creating_agent;
+                let (key, submit, keys, press) = (p.key.clone(), p.clone(), p.clone(), p.clone());
+                let name = Input::new("new-name", input)
+                    .placeholder(format!("Name the new {kind}"))
+                    .disabled(creating)
+                    .on_edit(move |s: &mut State| {
+                        editor(s, &key)
+                            .agent_name
+                            .get_or_insert_with(InputState::new)
+                    })
+                    .on_submit(move |s: &mut State, _: &mut Tx| add_new(s, &submit))
+                    .on_key(move |s: &mut State, ev: &KeyEvent, _: &mut Tx| menu_key(s, &keys, ev));
+                row()
+                    .mt(2.0)
+                    .border_sides([1.0, 0.0, 0.0, 0.0], t.border)
+                    .pt(6.0)
+                    .items_center()
+                    .gap(6.0)
+                    .child(field(t, name, input.is_focused(), FieldSkin::Filter).grow(1.0))
+                    .child(
+                        Button::new("create-new")
+                            .outline()
+                            .xsmall()
+                            .rounded(ButtonRounded::Px(999.0))
+                            .px(8.0)
+                            .disabled(creating || empty)
+                            .child(
+                                text(if creating { "Creating…" } else { "Create" })
+                                    .font(ty::ui(11.0))
+                                    .color(t.fg),
+                            )
+                            .on_press(move |s: &mut State| add_new(s, &press))
+                            .build(t),
+                    )
+            }
+        });
+    }
+    let close = p.key.clone();
+    col()
+        .key("obj-menu")
+        .w(ed.objects_width.max(240.0))
+        .fill(t.panel)
+        .border(1.0, t.border)
+        .radius(radius::MENU)
+        .box_shadow(pop_shadow())
+        .child(
+            ScrollArea::vertical("obj-menu-scroll", menu)
+                .max_h(318.0)
+                .build(t),
+        )
+        .modal(true, move |s: &mut State| close_object_menu(s, &close))
+}
+
+/// Read-only display of the value.
+fn read_only(s: &State, t: &Theme, p: &Props, ed: &ValueEditor) -> El {
+    let muted_empty = || note(t, "Empty", 13.0);
+    match p.format() {
+        "status" | "tag" => {
+            let (selected, _) = option_selection(p);
+            if selected.is_empty() {
+                return muted_empty();
+            }
+            let mut pills = row().flex_wrap().gap(4.0);
+            for v in &selected {
+                let color = p
+                    .rel
+                    .options
+                    .iter()
+                    .find(|o| &o.text == v)
+                    .map(|o| o.color.clone())
+                    .unwrap_or_default();
+                pills = pills.child(TagPill::new(v.clone(), color).build(t));
+            }
+            pills
+        }
+        "object" => {
+            let store = &s.store;
+            let paint = roostr_ui::tags::object_pill_paint(t, t.fg);
+            let mut pills = row().flex_wrap().gap(4.0);
+            for id in object_ids(p.value.as_ref()) {
+                let shown = ed.shown_id(&id);
+                let name = store
+                    .summary(&shown)
+                    .map(|o| o.name.clone())
+                    .filter(|n| !n.is_empty())
+                    .or_else(|| store.agent(&shown).map(|a| a.name.clone()))
+                    .unwrap_or_else(|| prefix(&id, 8));
+                pills = pills.child(
+                    Tag::custom(paint.bg, paint.fg, paint.border)
+                        .rounded_full()
+                        .px(8.0)
+                        .py(1.0)
+                        .text_size(12.0)
+                        .child(text(name).font(ty::ui(12.0)).color(t.fg))
+                        .build(t),
+                );
+            }
+            pills
+        }
+        "date" => {
+            let num = number_of(p.value.as_ref()).unwrap_or(0.) as i64;
+            if num == 0 {
+                return muted_empty();
+            }
+            text(date_label(num)).font(ty::ui(13.0)).color(t.fg)
+        }
+        _ => {
+            let value = stored_text(p);
+            if value.is_empty() {
+                return muted_empty();
+            }
+            text(value).font(ty::ui(13.0)).color(t.fg).wrap()
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn numbers_read_as_js_strings() {
+        assert_eq!(number_text(3.0), "3");
+        assert_eq!(number_text(-12.0), "-12");
+        assert_eq!(number_text(2.5), "2.5");
+        assert_eq!(parse_js_number(""), Some(0.0));
+        assert_eq!(parse_js_number(" 42 "), Some(42.0));
+        assert_eq!(parse_js_number("abc"), None);
+    }
+
+    #[test]
+    fn object_ids_read_links_strings_and_lists() {
+        assert!(object_ids(None).is_empty());
+        assert_eq!(object_ids(Some(&Value::link("a", "k"))), ["a"]);
+        assert_eq!(object_ids(Some(&Value::string("b"))), ["b"]);
+        let list = Value::values(vec![Value::link("x", "k"), Value::string("y")]);
+        assert_eq!(object_ids(Some(&list)), ["x", "y"]);
+    }
+
+    #[test]
+    fn status_selection_reads_a_plain_string_too() {
+        let p = Props {
+            key: "k".into(),
+            rel: RelationDef {
+                format: "status".into(),
+                ..RelationDef::default()
+            },
+            value: Some(Value::string("Doing")),
             space: String::new(),
             seeds: Fields::new(),
             read_only: false,
             inline_menus: false,
             on_save: None,
-            mounted: false,
-            text,
-            area: None,
-            synced: None,
-            hex_error: String::new(),
-            swatch: None,
-            date_open: false,
-            placeholder: "",
-            calendar: None,
-            options: None,
-            object_open: false,
-            object_query,
-            object_active: -1,
-            agent_name: None,
-            creating_agent: false,
-            machine_objects: HashMap::new(),
-            machines_asked: false,
-            objects_width: Rc::new(Cell::new(px(240.))),
-            _subs: subs,
-        }
-    }
-
-    fn format(&self) -> &str {
-        self.rel.format.as_str()
-    }
-
-    fn is_longtext(&self) -> bool {
-        self.rel.key != "chat_color" && (self.rel.format == "longtext" || self.rel.key == "error")
-    }
-
-    /// The text the box shows for the stored value.
-    fn stored_text(&self) -> String {
-        match self.format() {
-            "number" => number_of(self.value.as_ref())
-                .map(number_text)
-                .unwrap_or_default(),
-            _ => text_of(self.value.as_ref()),
-        }
-    }
-
-    fn set_props(&mut self, props: PropertyValue, window: &mut Window, cx: &mut Context<Self>) {
-        let rel_changed = self.rel.id != props.relation.id || self.rel.key != props.relation.key;
-        self.rel = props.relation;
-        self.value = props.value;
-        self.space = props.space.to_string();
-        self.seeds = props.seeds;
-        self.read_only = props.read_only;
-        self.inline_menus = props.inline_menus;
-        self.on_save = props.on_save;
-        if rel_changed {
-            self.synced = None;
-            self.options = None;
-        }
-        if !self.mounted {
-            self.mounted = true;
-            if props.auto_open
-                && self.format() == "object"
-                && object_ids(self.value.as_ref()).is_empty()
-                && !self.read_only
-            {
-                self.object_open = true;
-                if !self.space.is_empty() {
-                    lite_ui::ensure_space(&self.space, cx);
-                }
-                let q = self.object_query.clone();
-                window.defer(cx, move |window, cx| {
-                    q.update(cx, |s, cx| s.focus(window, cx))
-                });
-            }
-        }
-        if self.rel.key == "served_by" && !self.machines_asked {
-            self.machines_asked = true;
-            self.load_machines(cx);
-        }
-        // Keep the text boxes on the stored value unless one is being edited.
-        let stored = self.stored_text();
-        if self.synced.as_deref() != Some(stored.as_str()) {
-            if self.is_longtext() {
-                let rows = if self.rel.key == "error" { 5 } else { 3 };
-                let area = self.area.get_or_insert_with(|| {
-                    let area = cx.new(|cx| {
-                        TextareaState::new(window, cx)
-                            .auto_grow(rows, 24)
-                            .placeholder("Empty")
-                    });
-                    let sub =
-                        cx.subscribe_in(&area, window, |this, _, ev: &InputEvent, window, cx| {
-                            if matches!(ev, InputEvent::Blur) {
-                                this.commit_text(window, cx);
-                            }
-                        });
-                    self._subs.push(sub);
-                    area
-                });
-                if !area.focus_handle(cx).is_focused(window) {
-                    area.update(cx, |s, cx| s.set_value(stored.clone(), window, cx));
-                    self.synced = Some(stored);
-                }
-            } else if !self.text.focus_handle(cx).is_focused(window) {
-                self.text
-                    .update(cx, |s, cx| s.set_value(stored.clone(), window, cx));
-                self.synced = Some(stored);
-            }
-        }
-        let placeholder = match self.format() {
-            _ if self.rel.key == "chat_color" => "#RRGGBB",
-            "email" => "name@example.com",
-            "phone" => "+1 555 0100",
-            "url" => "example.com",
-            _ => "Empty",
         };
-        if self.placeholder != placeholder {
-            self.placeholder = placeholder;
-            self.text
-                .update(cx, |s, cx| s.set_placeholder(placeholder, window, cx));
-        }
-        if let Some(picker) = &self.options {
-            let (selected, multi) = self.option_selection();
-            let rel = self.rel.clone();
-            picker.update(cx, |p, cx| p.set_props(rel, selected, multi, cx));
-        }
-    }
-
-    fn save(&self, value: Value, window: &mut Window, cx: &mut App) {
-        if let Some(f) = &self.on_save {
-            f(&value, window, cx);
-        }
-    }
-
-    /// `onchange`: the box lost focus or took Enter with a changed value.
-    fn commit_text(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let raw = if self.is_longtext() {
-            self.area
-                .as_ref()
-                .map(|a| a.read(cx).value().to_string())
-                .unwrap_or_default()
-        } else {
-            self.text.read(cx).value().to_string()
-        };
-        if self.synced.as_deref() == Some(raw.as_str()) {
-            return;
-        }
-        self.synced = Some(raw.clone());
-        if self.rel.key == "chat_color" {
-            self.save_hex(&raw, window, cx);
-            return;
-        }
-        match self.format() {
-            "number" => {
-                let Some(n) = parse_js_number(&raw) else {
-                    return;
-                };
-                let v = if n.fract() == 0. && n.abs() < 9.007_199_254_740_992e15 {
-                    Value::int(n as i64)
-                } else {
-                    Value::float(n)
-                };
-                self.save(v, window, cx);
-            }
-            "url" | "email" | "phone" => self.save(Value::string(raw.trim()), window, cx),
-            _ => self.save(Value::string(raw), window, cx),
-        }
-    }
-
-    fn save_hex(&mut self, raw: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let hex = if raw.trim().is_empty() {
-            Some(String::new())
-        } else {
-            normalize_hex(raw)
-        };
-        match hex {
-            None => self.hex_error = "Use a hex color like #EDCF7F".into(),
-            Some(hex) => {
-                self.hex_error.clear();
-                self.save(Value::string(hex), window, cx);
-            }
-        }
-        cx.notify();
-    }
-
-    fn option_selection(&self) -> (Vec<String>, bool) {
-        let items = items_of(self.value.as_ref());
-        if self.format() == "status" {
-            let text = text_of(self.value.as_ref());
-            let sel = if !items.is_empty() {
-                items
-            } else if !text.is_empty() {
-                vec![text]
-            } else {
-                vec![]
-            };
-            (sel, false)
-        } else {
-            (items, true)
-        }
-    }
-
-    fn option_picker(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Entity<OptionPicker> {
-        if let Some(p) = &self.options {
-            return p.clone();
-        }
-        let (selected, multi) = self.option_selection();
-        let rel = self.rel.clone();
-        let picker = cx.new(|cx| OptionPicker::new(rel, selected, multi, window, cx));
-        let sub = cx.subscribe_in(&picker, window, |this, _, ev: &OptionEvent, window, cx| {
-            let OptionEvent::Pick(t) = ev;
-            let (selected, _) = this.option_selection();
-            let next: Vec<String> = if this.format() == "status" {
-                if selected.contains(t) {
-                    vec![]
-                } else {
-                    vec![t.clone()]
-                }
-            } else if selected.contains(t) {
-                selected.into_iter().filter(|x| x != t).collect()
-            } else {
-                selected.into_iter().chain([t.clone()]).collect()
-            };
-            this.save(list_value(&next), window, cx);
-        });
-        self._subs.push(sub);
-        self.options = Some(picker.clone());
-        picker
-    }
-
-    fn open_calendar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.date_open {
-            self.date_open = false;
-            self.calendar = None;
-            cx.notify();
-            return;
-        }
-        let value = number_of(self.value.as_ref()).unwrap_or(0.) as i64;
-        let cal = cx.new(|cx| CalendarPicker::new(value, window, cx));
-        let sub = cx.subscribe_in(&cal, window, |this, _, ev: &CalendarEvent, window, cx| {
-            this.date_open = false;
-            this.calendar = None;
-            if let CalendarEvent::Pick(ms) = ev {
-                this.save(Value::int(ms.unwrap_or(0)), window, cx);
-            }
-            cx.notify();
-        });
-        self._subs.push(sub);
-        self.calendar = Some(cal);
-        self.date_open = true;
-        cx.notify();
-    }
-
-    // ── Object links ──────────────────────────────────────────────
-
-    fn load_machines(&mut self, cx: &mut Context<Self>) {
-        let task = roostr_core::serving::fetch_machines(cx);
-        cx.spawn(async move |this, cx| {
-            let Ok((_, machines)) = task.await else {
-                return;
-            };
-            let map = machines
-                .into_iter()
-                .filter(|m| !m.machine_id.is_empty())
-                .map(|m| (m.machine_id, m.id))
-                .collect();
-            let _ = this.update(cx, |this, cx| {
-                this.machine_objects = map;
-                cx.notify();
-            });
-        })
-        .detach();
-    }
-
-    fn shown_id(&self, id: &str) -> String {
-        self.machine_objects
-            .get(id)
-            .cloned()
-            .unwrap_or_else(|| id.to_string())
-    }
-
-    /// Type keys the relation is limited to (Anytype relationFormatObjectTypes).
-    fn allowed_type_keys(&self, store: &Store) -> Vec<String> {
-        self.rel
-            .object_types
-            .iter()
-            .flatten()
-            .filter_map(|id| {
-                store
-                    .types
-                    .iter()
-                    .find(|t| &t.id == id)
-                    .map(|t| t.key.clone())
-            })
-            .filter(|k| !k.is_empty())
-            .collect()
-    }
-
-    fn candidates(&self, cx: &App) -> Vec<Candidate> {
-        let store = Store::global(cx).read(cx);
-        let ids = object_ids(self.value.as_ref());
-        let q = self.object_query.read(cx).value().trim().to_lowercase();
-        let allowed = self.allowed_type_keys(store);
-        let wants_agents = allowed.iter().any(|k| k == "agent");
-        let space = self.space.as_str();
-        let mut pool: Vec<Candidate> = if wants_agents {
-            store
-                .agents
-                .iter()
-                .filter(|a| {
-                    !ids.contains(&a.id)
-                        && (space.is_empty() || a.channel.is_empty() || a.channel == space)
-                })
-                .map(|a| Candidate {
-                    id: a.id.clone(),
-                    name: a.name.clone(),
-                    type_key: "agent".into(),
-                    icon: a.icon.clone(),
-                    done: None,
-                })
-                .collect()
-        } else {
-            store
-                .summaries
-                .iter()
-                .filter(|s| {
-                    !ids.iter().any(|id| self.shown_id(id) == s.id)
-                        && (!is_system_type(&s.type_key) || allowed.contains(&s.type_key))
-                })
-                .filter(|s| allowed.is_empty() || allowed.contains(&s.type_key))
-                // An object links within its own space: the picker offers that space's own.
-                .filter(|s| space.is_empty() || s.channel_id.is_empty() || s.channel_id == space)
-                .map(|s| Candidate {
-                    id: s.id.clone(),
-                    name: s.name.clone(),
-                    type_key: s.type_key.clone(),
-                    icon: s.icon.clone(),
-                    done: s.done,
-                })
-                .collect()
-        };
-        pool.retain(|c| q.is_empty() || c.name.to_lowercase().contains(&q));
-        if !wants_agents && allowed.is_empty() {
-            pool.truncate(8);
-        }
-        pool
-    }
-
-    /// "+ New agent" / "+ New prompt" offered for agent- / prompt-limited relations.
-    fn new_kind(&self, cx: &App) -> &'static str {
-        let allowed = self.allowed_type_keys(Store::global(cx).read(cx));
-        if allowed.iter().any(|k| k == "agent") {
-            "agent"
-        } else if allowed.iter().any(|k| k == "system_prompt") {
-            "prompt"
-        } else {
-            ""
-        }
-    }
-
-    /// The type a typed name becomes (relations other than agent / prompt):
-    /// the first type the relation is limited to, else a page.
-    fn create_type(&self, cx: &App) -> String {
-        self.allowed_type_keys(Store::global(cx).read(cx))
-            .into_iter()
-            .next()
-            .unwrap_or_else(|| "page".into())
-    }
-
-    /// `(name, type label)` when the picker should offer to create an object
-    /// named after the query: a non-empty query that names no candidate, on a
-    /// relation without its own "New agent / prompt" flow.
-    fn offer_create(&self, cx: &App) -> Option<(String, String)> {
-        if self.read_only || !self.new_kind(cx).is_empty() {
-            return None;
-        }
-        let name = self.object_query.read(cx).value().trim().to_string();
-        if name.is_empty() {
-            return None;
-        }
-        let lower = name.to_lowercase();
-        if self
-            .candidates(cx)
-            .iter()
-            .any(|c| c.name.trim().to_lowercase() == lower)
-        {
-            return None;
-        }
-        let key = self.create_type(cx);
-        let store = Store::global(cx).read(cx);
-        let label = store
-            .types
-            .iter()
-            .find(|t| t.key == key && (self.space.is_empty() || t.space == self.space))
-            .or_else(|| store.types.iter().find(|t| t.key == key))
-            .map(|t| t.name.clone())
-            .filter(|n| !n.is_empty())
-            .unwrap_or(key);
-        Some((name, label))
-    }
-
-    /// Make an object named after the query in this space and link it.
-    fn create_from_query(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some((name, _)) = self.offer_create(cx) else {
-            return;
-        };
-        if self.creating_agent {
-            return;
-        }
-        self.creating_agent = true;
-        let channel = if self.space.is_empty() {
-            Store::global(cx)
-                .read(cx)
-                .channels
-                .first()
-                .map(|s| s.id.clone())
-                .unwrap_or_default()
-        } else {
-            self.space.clone()
-        };
-        let fields = if channel.is_empty() {
-            Fields::new()
-        } else {
-            Fields::from([("channel".to_string(), Value::string(channel))])
-        };
-        let type_key = self.create_type(cx);
-        let task = roostr_core::create::from_type(&name, &type_key, fields, cx);
-        cx.spawn_in(window, async move |this, cx| {
-            let result = task.await;
-            let _ = this.update_in(cx, |this, window, cx| {
-                this.creating_agent = false;
-                match result {
-                    Ok(id) => {
-                        this.object_open = false;
-                        this.toggle_object(&id, window, cx);
-                    }
-                    Err(error) => log::error!("create: {error:#}"),
-                }
-                cx.notify();
-            });
-        })
-        .detach();
-        cx.notify();
-    }
-
-    fn toggle_object_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.object_open = !self.object_open;
-        self.agent_name = None;
-        if self.object_open {
-            self.object_query.update(cx, |s, cx| s.focus(window, cx));
-            // A Lite copy holds only what was opened: the picker downloads
-            // the space so it can offer every candidate in it.
-            if !self.space.is_empty() {
-                lite_ui::ensure_space(&self.space, cx);
-            }
-        }
-        cx.notify();
-    }
-
-    fn close_object_menu(&mut self, cx: &mut Context<Self>) {
-        self.object_open = false;
-        self.agent_name = None;
-        cx.notify();
-    }
-
-    fn pick_candidate(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
-        self.object_open = false;
-        self.toggle_object(&id, window, cx);
-    }
-
-    fn toggle_object(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let ids = object_ids(self.value.as_ref());
-        // A single-value relation (System prompt, Served by) swaps its link; a list adds.
-        let next: Vec<String> = if ids.iter().any(|x| x == id) {
-            ids.into_iter().filter(|x| x != id).collect()
-        } else if self.rel.max_count == 1 {
-            vec![id.to_string()]
-        } else {
-            ids.into_iter().chain([id.to_string()]).collect()
-        };
-        self.object_query
-            .update(cx, |s, cx| s.set_value("", window, cx));
-        let key = self.rel.key.clone();
-        let v = Value::values(
-            next.into_iter()
-                .map(|t| Value::link(t, key.clone()))
-                .collect(),
-        );
-        self.save(v, window, cx);
-        cx.notify();
-    }
-
-    fn move_active(&mut self, down: bool, cx: &mut Context<Self>) {
-        let n = self.candidates(cx).len() as i32;
-        if n == 0 {
-            return;
-        }
-        self.object_active = if down {
-            (self.object_active + 1) % n
-        } else if self.object_active <= 0 {
-            n - 1
-        } else {
-            self.object_active - 1
-        };
-        cx.notify();
-    }
-
-    fn start_naming(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let kind = self.new_kind(cx);
-        let seed = self.object_query.read(cx).value().trim().to_string();
-        let input = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder(format!("Name the new {kind}"))
-                .default_value(seed)
-        });
-        let sub = cx.subscribe_in(
-            &input,
-            window,
-            |this, _, ev: &InputEvent, window, cx| match ev {
-                InputEvent::PressEnter { .. } => this.add_new(window, cx),
-                InputEvent::Change => cx.notify(),
-                _ => {}
-            },
-        );
-        self._subs.push(sub);
-        input.update(cx, |s, cx| {
-            s.focus(window, cx);
-            s.select_all(window, cx);
-        });
-        self.agent_name = Some(input);
-        cx.notify();
-    }
-
-    /// Make the agent / prompt here and link it.
-    fn add_new(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(input) = &self.agent_name else {
-            return;
-        };
-        let name = input.read(cx).value().trim().to_string();
-        if self.creating_agent || name.is_empty() {
-            return;
-        }
-        self.creating_agent = true;
-        input.update(cx, |s, cx| s.set_disabled(true, cx));
-        let store = Store::global(cx).read(cx);
-        let channel = if self.space.is_empty() {
-            store
-                .channels
-                .first()
-                .map(|s| s.id.clone())
-                .unwrap_or_default()
-        } else {
-            self.space.clone()
-        };
-        let task = if self.new_kind(cx) == "agent" {
-            roostr_core::create::new_agent(&channel, &name, self.seeds.clone(), cx)
-        } else {
-            let fields = (!channel.is_empty())
-                .then(|| Fields::from([("channel".to_string(), Value::string(channel.clone()))]));
-            api::note::create(
-                &name,
-                Some("system_prompt"),
-                Some(fields.unwrap_or_default()),
-                cx,
-            )
-        };
-        cx.spawn_in(window, async move |this, cx| {
-            let result = task.await;
-            let _ = this.update_in(cx, |this, window, cx| {
-                this.creating_agent = false;
-                match result {
-                    Ok(id) => {
-                        this.object_open = false;
-                        this.agent_name = None;
-                        this.toggle_object(&id, window, cx);
-                    }
-                    Err(error) => {
-                        log::error!("create: {error:#}");
-                        if let Some(input) = &this.agent_name {
-                            input.update(cx, |s, cx| s.set_disabled(false, cx));
-                        }
-                    }
-                }
-                cx.notify();
-            });
-        })
-        .detach();
-        cx.notify();
-    }
-
-    fn render_object(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let store = Store::global(cx).read(cx);
-        let ids = object_ids(self.value.as_ref());
-        let read_only = self.read_only;
-        let object_paint = roostr_core::options::object_pill_paint(theme::fg());
-        let mut row = div()
-            .relative()
-            .flex()
-            .flex_wrap()
-            .gap(px(4.))
-            .items_center();
-        for id in &ids {
-            let shown = self.shown_id(id);
-            let summary = store.summary(&shown);
-            let agent = store.agent(id);
-            let name = summary
-                .map(|s| s.name.clone())
-                .filter(|n| !n.is_empty())
-                .or_else(|| {
-                    store
-                        .agent(&shown)
-                        .map(|a| a.name.clone())
-                        .filter(|n| !n.is_empty())
-                })
-                .unwrap_or_else(|| prefix(id, 8));
-            let lead: AnyElement =
-                if agent.is_some() || summary.is_some_and(|s| s.type_key == "agent") {
-                    let icon = agent
-                        .map(|a| a.icon.clone())
-                        .filter(|i| !i.is_empty())
-                        .or_else(|| summary.map(|s| s.icon.clone()).filter(|i| !i.is_empty()));
-                    div()
-                        .child(icon.unwrap_or_else(|| "🤖".into()))
-                        .into_any_element()
-                } else if let Some(s) = summary.filter(|s| store.layout_of(&s.type_key) == "task") {
-                    checkbox_display(
-                        SharedString::from(format!("chip-done-{id}")),
-                        s.done == Some(true),
-                    )
-                    .xsmall()
-                    .into_any_element()
-                } else {
-                    let (icon, tk) = summary
-                        .map(|s| (s.icon.as_str(), s.type_key.as_str()))
-                        .unwrap_or(("", "note"));
-                    div()
-                        .child(object_icon(store, icon, tk, &self.space))
-                        .into_any_element()
-                };
-            let target = shown.clone();
-            let remove = id.clone();
-            row = row.child(
-                // Filled like the table's object pills; option tags are outlines.
-                Tag::custom(object_paint.bg, object_paint.fg, object_paint.border)
-                    .rounded_full()
-                    .gap(px(2.))
-                    .pl(px(8.))
-                    .pr(px(4.))
-                    .py(px(1.))
-                    .text_size(px(12.))
-                    .text_color(theme::fg())
-                    .child(
-                        Button::new(SharedString::from(format!("chip-{id}")))
-                            .ghost()
-                            .xsmall()
-                            .h_auto()
-                            .px(px(2.))
-                            .on_click(move |_, _, cx| {
-                                roostr_core::nav::navigate(
-                                    roostr_core::Route::Object(target.clone()),
-                                    cx,
-                                )
-                            })
-                            .child(
-                                h_flex()
-                                    .gap(px(4.))
-                                    .text_size(px(12.))
-                                    .child(lead)
-                                    .child(name),
-                            ),
-                    )
-                    .when(!read_only, |d| {
-                        d.child(
-                            Button::new(SharedString::from(format!("rm-{id}")))
-                                .ghost()
-                                .xsmall()
-                                .child(Icon::new(IconName::Close).size(px(11.)))
-                                .text_color(theme::muted())
-                                .tooltip("Remove")
-                                .accessibility_label("Remove")
-                                .on_click(cx.listener(move |this, _, window, cx| {
-                                    this.toggle_object(&remove, window, cx)
-                                })),
-                        )
-                    }),
-            );
-        }
-        let width = self.objects_width.clone();
-        row = row.child(
-            canvas(
-                move |bounds, _, _| width.set(bounds.size.width),
-                |_, _, _, _| {},
-            )
-            .absolute()
-            .top_0()
-            .left_0()
-            .size_full(),
-        );
-        if read_only {
-            return row.into_any_element();
-        }
-        row = row.child(
-            Button::new("link-object")
-                .debug_selector(|| "link-object".into())
-                .outline()
-                .xsmall()
-                .rounded(px(999.))
-                .border_color(theme::border())
-                .px(px(8.))
-                .on_click(cx.listener(|this, _, window, cx| this.toggle_object_menu(window, cx)))
-                .child(div().text_size(px(11.)).child("+ link object")),
-        );
-        if self.object_open {
-            let menu = self.render_object_menu(window, cx);
-            if self.inline_menus {
-                return div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(6.))
-                    .child(row)
-                    .child(menu)
-                    .into_any_element();
-            }
-            row = row.child(below("object-menu", 6., menu));
-        }
-        row.into_any_element()
-    }
-
-    fn render_object_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let candidates = self.candidates(cx);
-        let kind = self.new_kind(cx);
-        let store = Store::global(cx).read(cx);
-        let mut menu = div()
-            .id("obj-menu")
-            .debug_selector(|| "obj-menu".into())
-            .w(self.objects_width.get().max(px(240.)))
-            .max_h(px(320.))
-            .overflow_y_scroll()
-            .flex()
-            .flex_col()
-            .gap(px(2.))
-            .bg(theme::panel())
-            .border_1()
-            .border_color(theme::border())
-            .rounded(theme::radius::menu())
-            .p(px(8.))
-            .shadow(pop_shadow())
-            .text_color(theme::fg())
-            .occlude()
-            .on_mouse_down_out(cx.listener(|this, _, _, cx| this.close_object_menu(cx)))
-            .capture_action(cx.listener(|this, _: &MoveDown, _, cx| {
-                cx.stop_propagation();
-                this.move_active(true, cx);
-            }))
-            .capture_action(cx.listener(|this, _: &MoveUp, _, cx| {
-                cx.stop_propagation();
-                this.move_active(false, cx);
-            }))
-            .capture_action(cx.listener(|this, _: &Escape, _, cx| {
-                cx.stop_propagation();
-                if this.agent_name.is_some() {
-                    this.agent_name = None;
-                    cx.notify();
-                } else {
-                    this.close_object_menu(cx);
-                }
-            }))
-            .child(div().mb(px(4.)).child(field(
-                &self.object_query,
-                FieldSkin::Filter,
-                window,
-                cx,
-            )));
-        for (i, c) in candidates.iter().enumerate() {
-            let active = i as i32 == self.object_active;
-            let lead: AnyElement = if c.type_key == "agent" {
-                let icon = if !c.icon.is_empty() {
-                    c.icon.clone()
-                } else {
-                    store
-                        .agent(&c.id)
-                        .map(|a| a.icon.clone())
-                        .filter(|i| !i.is_empty())
-                        .unwrap_or_else(|| "🤖".into())
-                };
-                div().child(icon).into_any_element()
-            } else if store.layout_of(&c.type_key) == "task" {
-                checkbox_display(
-                    SharedString::from(format!("cand-done-{}", c.id)),
-                    c.done == Some(true),
-                )
-                .xsmall()
-                .into_any_element()
-            } else {
-                div()
-                    .child(object_icon(store, &c.icon, &c.type_key, &self.space))
-                    .into_any_element()
-            };
-            let id = c.id.clone();
-            menu = menu.child(
-                ListItem::new(SharedString::from(format!("cand-{}", c.id)))
-                    .debug_selector({
-                        let selector = format!("cand-{}", c.id);
-                        move || selector
-                    })
-                    .px(px(6.))
-                    .py(px(5.))
-                    .rounded(theme::radius::sm())
-                    .text_size(px(13.))
-                    .cursor_pointer()
-                    .selected(active)
-                    .on_mouse_enter(cx.listener(move |this, _: &MouseMoveEvent, _, cx| {
-                        if this.object_active != i as i32 {
-                            this.object_active = i as i32;
-                            cx.notify();
-                        }
-                    }))
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.pick_candidate(id.clone(), window, cx)
-                    }))
-                    .child(
-                        h_flex()
-                            .gap(px(6.))
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .flex()
-                                    .items_center()
-                                    .gap(px(4.))
-                                    .overflow_hidden()
-                                    .whitespace_nowrap()
-                                    .child(lead)
-                                    .child(
-                                        div().min_w_0().overflow_hidden().text_ellipsis().child(
-                                            if c.name.is_empty() {
-                                                "Untitled".to_string()
-                                            } else {
-                                                c.name.clone()
-                                            },
-                                        ),
-                                    ),
-                            )
-                            .child(
-                                div()
-                                    .ml_auto()
-                                    .flex_none()
-                                    .text_size(px(11.))
-                                    .text_color(theme::muted())
-                                    .child(c.type_key.clone()),
-                            ),
-                    ),
-            );
-        }
-        // Lite, while the space downloads (or before): the list may be partial.
-        if let Some(notice) = lite_ui::space_notice("picker-space", &self.space, cx) {
-            menu = menu.child(notice);
-        }
-        if candidates.is_empty() {
-            menu = menu.child(
-                empty_note("No matches")
-                    .px(px(6.))
-                    .py(px(4.))
-                    .text_size(px(11.)),
-            );
-        }
-        if let Some((name, label)) = self.offer_create(cx) {
-            let creating = self.creating_agent;
-            menu = menu.child(
-                ListItem::new("create-from-query")
-                    .debug_selector(|| "create-from-query".into())
-                    .mt(px(2.))
-                    .border_t_1()
-                    .border_color(theme::border())
-                    .px(px(6.))
-                    .py(px(5.))
-                    .rounded(theme::radius::sm())
-                    .text_size(px(13.))
-                    .text_color(theme::accent())
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .text_ellipsis()
-                    .disabled(creating)
-                    .when(creating, |d| d.opacity(0.5))
-                    .when(!creating, |d| d.cursor_pointer())
-                    .on_click(cx.listener(|this, _, window, cx| this.create_from_query(window, cx)))
-                    .child(if creating {
-                        "Creating…".to_string()
-                    } else {
-                        format!("＋ Create {label} “{name}”")
-                    }),
-            );
-        }
-        if !kind.is_empty() {
-            match &self.agent_name {
-                None => {
-                    menu = menu.child(
-                        ListItem::new("new-kind")
-                            .mt(px(2.))
-                            .border_t_1()
-                            .border_color(theme::border())
-                            .px(px(6.))
-                            .py(px(5.))
-                            .rounded(theme::radius::sm())
-                            .text_size(px(13.))
-                            .cursor_pointer()
-                            .on_click(
-                                cx.listener(|this, _, window, cx| this.start_naming(window, cx)),
-                            )
-                            .child(format!("＋ New {kind}")),
-                    );
-                }
-                Some(input) => {
-                    let empty = input.read(cx).value().trim().is_empty();
-                    let creating = self.creating_agent;
-                    menu = menu.child(
-                        div()
-                            .mt(px(2.))
-                            .border_t_1()
-                            .border_color(theme::border())
-                            .pt(px(6.))
-                            .flex()
-                            .items_center()
-                            .gap(px(6.))
-                            .child(field(input, FieldSkin::Filter, window, cx).flex_1())
-                            .child(
-                                Button::new("create-new")
-                                    .outline()
-                                    .xsmall()
-                                    .flex_none()
-                                    .rounded(px(999.))
-                                    .px(px(8.))
-                                    .disabled(creating || empty)
-                                    .on_click(
-                                        cx.listener(|this, _, window, cx| this.add_new(window, cx)),
-                                    )
-                                    .child(div().text_size(px(11.)).child(if creating {
-                                        "Creating…"
-                                    } else {
-                                        "Create"
-                                    })),
-                            ),
-                    );
-                }
-            }
-        }
-        menu.into_any_element()
-    }
-}
-
-/// `Number(raw)` for a typed number ("" is not a value here: onchange of an emptied box is ignored).
-fn parse_js_number(raw: &str) -> Option<f64> {
-    let t = raw.trim();
-    if t.is_empty() {
-        return Some(0.);
-    }
-    t.parse::<f64>().ok().filter(|n| n.is_finite())
-}
-
-impl Render for ValueEditor {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let format = self.rel.format.clone();
-        let read_only = self.read_only;
-        if format == "repeat" {
-            // Owned by Repeat on the object page; this only guards a stray mount.
-            return div().into_any_element();
-        }
-        if format == "checkbox" {
-            let checked = self.value.as_ref().and_then(|v| v.bool_value) == Some(true);
-            if read_only {
-                return checkbox_display("chk", checked).into_any_element();
-            }
-            return checkbox("chk", checked)
-                .on_change(cx.listener(move |this, next: &bool, window, cx| {
-                    cx.stop_propagation();
-                    this.save(Value::bool(*next), window, cx)
-                }))
-                .into_any_element();
-        }
-        if read_only {
-            return self.render_read_only(cx);
-        }
-        match format.as_str() {
-            "date" => {
-                let num = number_of(self.value.as_ref()).unwrap_or(0.) as i64;
-                let label = if num != 0 {
-                    date_label(num)
-                } else {
-                    "Pick a date".into()
-                };
-                div()
-                    .relative()
-                    .flex()
-                    .child(
-                        Button::new("date-btn")
-                            .outline()
-                            .bg(theme::bg())
-                            .border_color(theme::border())
-                            .rounded(theme::radius::sm())
-                            .h_auto()
-                            .px(px(10.))
-                            .py(px(5.))
-                            .text_color(if num == 0 {
-                                theme::muted()
-                            } else {
-                                theme::fg()
-                            })
-                            .on_click(
-                                cx.listener(|this, _, window, cx| this.open_calendar(window, cx)),
-                            )
-                            .child(div().text_size(px(13.)).child(label)),
-                    )
-                    .when_some(
-                        self.calendar.clone().filter(|_| self.date_open),
-                        |d, cal| {
-                            let cal = div()
-                                .occlude()
-                                .on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                                    this.date_open = false;
-                                    this.calendar = None;
-                                    cx.notify();
-                                }))
-                                .child(cal);
-                            if self.inline_menus {
-                                d.flex_col().items_start().gap(px(6.)).child(cal)
-                            } else {
-                                d.child(below("date-calendar", 6., cal))
-                            }
-                        },
-                    )
-                    .into_any_element()
-            }
-            "status" | "tag" => {
-                let picker = self.option_picker(window, cx);
-                div().w_full().child(picker).into_any_element()
-            }
-            "url" | "email" | "phone" => {
-                let text = text_of(self.value.as_ref());
-                let href = match format.as_str() {
-                    "email" => format!("mailto:{text}"),
-                    "phone" => format!("tel:{text}"),
-                    _ if text.starts_with("http://") || text.starts_with("https://") => {
-                        text.clone()
-                    }
-                    _ => format!("https://{text}"),
-                };
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(6.))
-                    .w_full()
-                    .child(field(&self.text, FieldSkin::Value, window, cx).flex_1())
-                    .when(!text.is_empty(), |d| {
-                        d.child(
-                            Button::new("open")
-                                .ghost()
-                                .xsmall()
-                                .flex_none()
-                                .child(Icon::new(Glyph::ArrowUpRight).size(px(14.)))
-                                .text_color(theme::accent())
-                                .tooltip("Open")
-                                .accessibility_label("Open")
-                                .on_click(move |_, _, cx| cx.open_url(&href)),
-                        )
-                    })
-                    .into_any_element()
-            }
-            "object" => self.render_object(window, cx),
-            _ if self.rel.key == "chat_color" => {
-                let text = text_of(self.value.as_ref());
-                let stored = normalize_hex(&text);
-                let bad = !self.hex_error.is_empty();
-                let error = self.hex_error.clone();
-                // The same picker as Settings → Chat color, kept in step with the value.
-                let color = stored
-                    .as_deref()
-                    .and_then(roostr_core::color::hex)
-                    .unwrap_or(rgb(0x3a3a3e).into());
-                let swatch = match &self.swatch {
-                    Some(s) => s.clone(),
-                    None => {
-                        let s = cx.new(|cx| ColorPickerState::new(window, cx).default_value(color));
-                        let sub = cx.subscribe_in(
-                            &s,
-                            window,
-                            |this, _, event: &ColorPickerEvent, window, cx| {
-                                if let ColorPickerEvent::Change(Some(color)) = event {
-                                    let hex = roostr_core::color::to_hex(*color);
-                                    this.text
-                                        .update(cx, |t, cx| t.set_value(hex.clone(), window, cx));
-                                    this.synced = Some(hex.clone());
-                                    this.save_hex(&hex, window, cx);
-                                }
-                            },
-                        );
-                        self._subs.push(sub);
-                        self.swatch = Some(s.clone());
-                        s
-                    }
-                };
-                if swatch.read(cx).value() != Some(color) {
-                    swatch.update(cx, |s, cx| s.set_value(color, window, cx));
-                }
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(6.))
-                    .w_full()
-                    .child(
-                        div()
-                            .flex_none()
-                            .w(px(34.))
-                            .h(px(26.))
-                            .p(px(2.))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded(theme::radius::xs())
-                            .bg(theme::panel())
-                            .border_1()
-                            .border_color(theme::border())
-                            .child(
-                                ColorPicker::new(&swatch).accessibility_label("Chat color picker"),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .id("hex")
-                            .flex_1()
-                            .when(bad, |d| d.tooltip(tip(error)))
-                            .child(
-                                field(&self.text, FieldSkin::Value, window, cx)
-                                    .when(bad, |d| d.border_color(rgb(0xe5484d))),
-                            ),
-                    )
-                    .into_any_element()
-            }
-            _ if self.is_longtext() => match &self.area {
-                Some(area) => {
-                    text_area(area, window, cx, theme::bg(), theme::radius::sm(), (5., 8.))
-                        .into_any_element()
-                }
-                None => div().into_any_element(),
-            },
-            _ => field(&self.text, FieldSkin::Value, window, cx)
-                .w_full()
-                .into_any_element(),
-        }
-    }
-}
-
-impl ValueEditor {
-    /// Read-only display of the value.
-    fn render_read_only(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let format = self.rel.format.as_str();
-        let muted_empty = || note("Empty", 13.).into_any_element();
-        match format {
-            "status" | "tag" => {
-                let (selected, _) = self.option_selection();
-                if selected.is_empty() {
-                    return muted_empty();
-                }
-                let rel = self.rel.clone();
-                div()
-                    .flex()
-                    .flex_wrap()
-                    .gap(px(4.))
-                    .children(selected.iter().map(|t| {
-                        let color = rel
-                            .options
-                            .iter()
-                            .find(|o| &o.text == t)
-                            .map(|o| o.color.clone())
-                            .unwrap_or_default();
-                        TagPill::new(t.clone(), color)
-                    }))
-                    .into_any_element()
-            }
-            "object" => {
-                let mut window_less = self.render_object_static(cx);
-                window_less = window_less.text_size(px(12.));
-                window_less.into_any_element()
-            }
-            "date" => {
-                let num = number_of(self.value.as_ref()).unwrap_or(0.) as i64;
-                if num == 0 {
-                    return muted_empty();
-                }
-                div()
-                    .text_size(px(13.))
-                    .child(date_label(num))
-                    .into_any_element()
-            }
-            _ => {
-                let text = self.stored_text();
-                if text.is_empty() {
-                    return muted_empty();
-                }
-                div().text_size(px(13.)).child(text).into_any_element()
-            }
-        }
-    }
-
-    fn render_object_static(&self, cx: &App) -> Div {
-        let store = Store::global(cx).read(cx);
-        let ids = object_ids(self.value.as_ref());
-        let object_paint = roostr_core::options::object_pill_paint(theme::fg());
-        div()
-            .flex()
-            .flex_wrap()
-            .gap(px(4.))
-            .children(ids.iter().map(|id| {
-                let shown = self.shown_id(id);
-                let name = store
-                    .summary(&shown)
-                    .map(|s| s.name.clone())
-                    .filter(|n| !n.is_empty())
-                    .or_else(|| store.agent(&shown).map(|a| a.name.clone()))
-                    .unwrap_or_else(|| prefix(id, 8));
-                Tag::custom(object_paint.bg, object_paint.fg, object_paint.border)
-                    .rounded_full()
-                    .px(px(8.))
-                    .py(px(1.))
-                    .text_color(theme::fg())
-                    .child(name)
-            }))
+        assert_eq!(option_selection(&p), (vec!["Doing".to_string()], false));
     }
 }

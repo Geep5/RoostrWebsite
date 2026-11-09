@@ -13,11 +13,11 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use anyhow::{Result, anyhow};
-use gpui_kit::*;
-use roostr_core::harness::{Unreachable, harness};
-use roostr_core::io;
+use roostr_core::harness::Unreachable;
 use roostr_core::types::field_str;
-use roostr_core::{Fields, Glyph, QueryRow, Store, Value, api};
+use roostr_core::{Fields, QueryRow, State, Value, api};
+use roostr_rt::Task;
+use roostr_ui::Glyph;
 use serde_json::{Value as Json, json};
 
 pub(crate) const POLL: Duration = Duration::from_millis(3_000);
@@ -45,7 +45,7 @@ pub enum CredentialTarget {
     /// That credential (a credential row's Status or Error).
     Credential(String),
     /// The credentials another object's signed-out Error names.
-    Error(SharedString),
+    Error(String),
 }
 
 /// The credential's status in words.
@@ -198,13 +198,13 @@ pub(crate) struct ActionResult {
 }
 
 /// POST `/credentials/<action>`; a body with `error` and no `status` is a refusal.
-pub(crate) fn run_action(action: &str, id: &str, cx: &App) -> Task<Result<ActionResult>> {
-    let Some(h) = harness(cx) else {
+pub(crate) fn run_action(action: &str, id: &str, s: &State) -> Task<Result<ActionResult>> {
+    let Some(h) = s.harness.clone() else {
         return Task::ready(Err(anyhow!(Unreachable("no harness".into()))));
     };
     let path = format!("/credentials/{action}");
     let body = json!({ "id": id });
-    io::spawn(cx, async move {
+    s.rt.background(async move {
         let answer = h.post_json(&path, &body).await?;
         let status = answer
             .get("status")
@@ -224,19 +224,16 @@ pub(crate) fn run_action(action: &str, id: &str, cx: &App) -> Task<Result<Action
 }
 
 /// The credential's fields, fetched fresh.
-pub(crate) fn read_fields(id: &str, cx: &App) -> Task<Option<Fields>> {
-    let task = Store::global(cx).read(cx).fetch_object(id, cx);
-    cx.background_spawn(async move { task.await.ok().map(|o| o.fields) })
+pub(crate) fn read_fields(id: &str, s: &State) -> Task<Option<Fields>> {
+    let task = s.store.fetch_object(id);
+    s.rt.spawn(async move |_| task.await.ok().map(|o| o.fields))
 }
 
 /// Let the views re-read the credential (`onchanged`).
-pub(crate) fn changed(id: &str, cx: &mut App) {
-    let id = id.to_string();
-    Store::global(cx).update(cx, |store, cx| {
-        if store.object(&id).is_some() {
-            store.reload_object(&id, cx);
-        }
-    });
+pub(crate) fn changed(id: &str, s: &mut State) {
+    if s.store.object(id).is_some() {
+        s.store.reload_object(id);
+    }
 }
 
 // ── Signed-out errors on other objects ────────────────────────────────
@@ -350,14 +347,15 @@ pub fn reconnect_target(row: &QueryRow, key: &str) -> Option<CredentialTarget> {
         return None;
     }
     let error = field_str(&row.fields, "error");
-    (!signed_out_names(error).is_empty()).then(|| CredentialTarget::Error(error.to_string().into()))
+    (!signed_out_names(error).is_empty()).then(|| CredentialTarget::Error(error.to_string()))
 }
 
 /// A credential's Status cell: its status, or the progress of a Check / reconnect
 /// running in this window (`credentialCellBadge`). Returns (text, badge glyph, color name).
-pub fn credential_cell_badge(row: &QueryRow, cx: &App) -> (SharedString, Glyph, &'static str) {
+pub fn credential_cell_badge(row: &QueryRow, s: &State) -> (String, Glyph, &'static str) {
     let status = field_str(&row.fields, "status");
-    let progress = Progress::global(cx).read(cx);
+    let none = Progress::default();
+    let progress = s.get::<Progress>().unwrap_or(&none);
     let (clock, orange) = credential_status_badge("connecting");
     if progress.checking(&row.id, &row.fields) {
         return ("Checking…".into(), clock, orange);
@@ -371,12 +369,12 @@ pub fn credential_cell_badge(row: &QueryRow, cx: &App) -> (SharedString, Glyph, 
         }
         Some(p) if p.phase == ReconnectPhase::Failed && status != "active" => {
             let (x, red) = credential_status_badge("broken");
-            return (p.error.clone().into(), x, red);
+            return (p.error.clone(), x, red);
         }
         _ => {}
     }
     let (glyph, color) = credential_status_badge(status);
-    (credential_status_text(status).into(), glyph, color)
+    (credential_status_text(status), glyph, color)
 }
 
 // ── Progress, tab-wide ────────────────────────────────────────────────
@@ -411,18 +409,6 @@ pub(crate) struct CheckState {
     pub fields: Fields,
     pub requested_at: i64,
 }
-
-/// Reconnects and Checks started (or followed) in this window, per credential.
-pub(crate) struct Progress {
-    reconnect: HashMap<String, ReconnectState>,
-    reconnect_tasks: HashMap<String, Task<()>>,
-    checks: HashMap<String, CheckState>,
-    check_tasks: HashMap<String, Task<()>>,
-}
-
-struct GlobalProgress(Entity<Progress>);
-
-impl Global for GlobalProgress {}
 
 /// A credential's status after a sign-in, as a reconnect outcome.
 fn settled(fields: Fields, fallback_error: &str) -> ReconnectState {
@@ -460,25 +446,17 @@ fn harness_fields_moved(a: &Fields, b: &Fields) -> bool {
     HARNESS_FIELDS.iter().any(|k| a.get(*k) != b.get(*k))
 }
 
+/// Reconnects and Checks started (or followed) in this window, per credential:
+/// the slot `s.slot::<Progress>()`. Dropping a task cancels its poll.
+#[derive(Default)]
+pub(crate) struct Progress {
+    reconnect: HashMap<String, ReconnectState>,
+    reconnect_tasks: HashMap<String, Task<()>>,
+    checks: HashMap<String, CheckState>,
+    check_tasks: HashMap<String, Task<()>>,
+}
+
 impl Progress {
-    pub(crate) fn global(cx: &App) -> Entity<Self> {
-        cx.try_global::<GlobalProgress>()
-            .map(|g| g.0.clone())
-            .expect("roostr_properties::init not called")
-    }
-
-    pub(crate) fn init(cx: &mut App) {
-        if cx.try_global::<GlobalProgress>().is_none() {
-            let e = cx.new(|_| Self {
-                reconnect: HashMap::new(),
-                reconnect_tasks: HashMap::new(),
-                checks: HashMap::new(),
-                check_tasks: HashMap::new(),
-            });
-            cx.set_global(GlobalProgress(e));
-        }
-    }
-
     pub(crate) fn reconnect_state(&self, id: &str) -> Option<&ReconnectState> {
         self.reconnect.get(id)
     }
@@ -495,9 +473,15 @@ impl Progress {
             || (pending > 0 && Some(pending) != s.map(|s| s.requested_at))
     }
 
+    /// A Check another device asked for that this window has not followed yet.
+    pub(crate) fn should_follow(&self, id: &str, fields: &Fields) -> bool {
+        let pending = pending_check(fields, now_ms());
+        pending > 0 && self.checks.get(id).map(|s| s.requested_at) != Some(pending)
+    }
+
     /// Connect this credential (or, `already_connecting`, follow a sign-in started elsewhere).
-    pub(crate) fn reconnect(&mut self, id: &str, already_connecting: bool, cx: &mut Context<Self>) {
-        if self
+    pub(crate) fn reconnect(s: &mut State, id: &str, already_connecting: bool) {
+        if s.slot::<Progress>()
             .reconnect
             .get(id)
             .is_some_and(|s| matches!(s.phase, ReconnectPhase::Starting | ReconnectPhase::Waiting))
@@ -505,8 +489,9 @@ impl Progress {
             return;
         }
         let id_owned = id.to_string();
-        let run = (!already_connecting).then(|| run_action("connect", id, cx));
-        self.set_reconnect(
+        let run = (!already_connecting).then(|| run_action("connect", id, s));
+        set_reconnect(
+            s,
             id,
             ReconnectState {
                 phase: if already_connecting {
@@ -517,13 +502,12 @@ impl Progress {
                 error: String::new(),
                 fields: Fields::new(),
             },
-            cx,
         );
-        let task = cx.spawn(async move |this, cx| {
+        let task = s.rt.spawn(async move |cx| {
             let id = id_owned;
             if let Some(run) = run {
                 let result = run.await;
-                cx.update(|cx| changed(&id, cx));
+                cx.update(|s| changed(&id, s));
                 let state = match result {
                     Err(error) => ReconnectState {
                         phase: ReconnectPhase::Failed,
@@ -536,62 +520,51 @@ impl Progress {
                     ),
                 };
                 let waiting = state.phase == ReconnectPhase::Waiting;
-                let _ = this.update(cx, |this, cx| this.set_reconnect(&id, state, cx));
+                cx.update(|s| set_reconnect(s, &id, state));
                 if !waiting {
-                    let _ = this.update(cx, |this, _| this.reconnect_tasks.remove(&id));
+                    cx.update(|s| drop(s.slot::<Progress>().reconnect_tasks.remove(&id)));
                     return;
                 }
             }
             // Follow the `connecting` status the harness writes (pollWhileConnecting).
-            let deadline = now_ms() + CONNECT_TIMEOUT_MS;
+            let deadline = cx.now() + Duration::from_millis(CONNECT_TIMEOUT_MS as u64);
             let mut last = Fields::new();
             loop {
-                cx.background_executor().timer(POLL).await;
-                if now_ms() > deadline {
-                    let _ = this.update(cx, |this, cx| {
-                        let state = ReconnectState {
-                            phase: ReconnectPhase::Failed,
-                            error: CONNECT_TIMEOUT_TEXT.into(),
-                            fields: last.clone(),
-                        };
-                        this.set_reconnect(&id, state, cx);
-                    });
+                cx.timer(POLL).await;
+                if cx.now() > deadline {
+                    let state = ReconnectState {
+                        phase: ReconnectPhase::Failed,
+                        error: CONNECT_TIMEOUT_TEXT.into(),
+                        fields: last.clone(),
+                    };
+                    cx.update(|s| set_reconnect(s, &id, state));
                     break;
                 }
-                let read = cx.update(|cx| read_fields(&id, cx));
+                let read = cx.read(|s| read_fields(&id, s));
                 let Some(fresh) = read.await else { continue };
                 if harness_fields_moved(&fresh, &last) {
                     last = fresh.clone();
-                    let _ = this.update(cx, |this, cx| {
-                        this.set_reconnect(&id, settled(fresh.clone(), ""), cx)
+                    let state = settled(fresh.clone(), "");
+                    cx.update(|s| {
+                        set_reconnect(s, &id, state);
+                        changed(&id, s);
                     });
-                    cx.update(|cx| changed(&id, cx));
                 }
                 if field_str(&fresh, "status") != "connecting" {
                     break;
                 }
             }
-            let _ = this.update(cx, |this, _| this.reconnect_tasks.remove(&id));
+            cx.update(|s| drop(s.slot::<Progress>().reconnect_tasks.remove(&id)));
         });
-        self.reconnect_tasks.insert(id.to_string(), task);
-    }
-
-    fn set_reconnect(&mut self, id: &str, state: ReconnectState, cx: &mut Context<Self>) {
-        self.reconnect.insert(id.to_string(), state);
-        cx.notify();
+        s.slot::<Progress>()
+            .reconnect_tasks
+            .insert(id.to_string(), task);
     }
 
     /// Check this credential: `here` asks the serving harness straight; else
     /// write the request and follow; `pending` follows a request already written.
-    pub(crate) fn check(
-        &mut self,
-        id: &str,
-        fields: &Fields,
-        here: bool,
-        pending: i64,
-        cx: &mut Context<Self>,
-    ) {
-        if self
+    pub(crate) fn check(s: &mut State, id: &str, fields: &Fields, here: bool, pending: i64) {
+        if s.slot::<Progress>()
             .checks
             .get(id)
             .is_some_and(|s| s.phase == CheckPhase::Checking)
@@ -602,7 +575,8 @@ impl Progress {
         let requested_at = if pending > 0 { pending } else { now_ms() };
         let id_owned = id.to_string();
         let fields = fields.clone();
-        self.set_check(
+        set_check(
+            s,
             id,
             CheckState {
                 phase: CheckPhase::Checking,
@@ -610,20 +584,19 @@ impl Progress {
                 fields: fields.clone(),
                 requested_at,
             },
-            cx,
         );
-        let task = cx.spawn(async move |this, cx| {
+        let task = s.rt.spawn(async move |cx| {
             let id = id_owned;
-            let finish = |state: CheckState, cx: &mut AsyncApp| {
-                let _ = this.update(cx, |this, cx| {
-                    this.set_check(&id, state, cx);
-                    this.check_tasks.remove(&id);
+            let finish = |state: CheckState, cx: &roostr_core::Cx| {
+                cx.update(|s| {
+                    set_check(s, &id, state);
+                    s.slot::<Progress>().check_tasks.remove(&id);
+                    changed(&id, s);
                 });
-                cx.update(|cx| changed(&id, cx));
             };
             if pending == 0 {
                 if here {
-                    let run = cx.update(|cx| run_action("check", &id, cx));
+                    let run = cx.read(|s| run_action("check", &id, s));
                     match run.await {
                         Err(error) => {
                             finish(
@@ -633,11 +606,11 @@ impl Progress {
                                     fields,
                                     requested_at,
                                 },
-                                cx,
+                                &cx,
                             );
                         }
                         Ok(result) => {
-                            let read = cx.update(|cx| read_fields(&id, cx));
+                            let read = cx.read(|s| read_fields(&id, s));
                             let answer = read.await.unwrap_or_else(|| {
                                 let mut f = fields.clone();
                                 f.insert("status".into(), Value::string(result.status));
@@ -651,14 +624,14 @@ impl Progress {
                                     fields: answer,
                                     requested_at,
                                 },
-                                cx,
+                                &cx,
                             );
                         }
                     }
                     return;
                 }
-                let ask = cx.update(|cx| {
-                    api::note::set_field(&id, CHECK_REQUEST_KEY, Value::int(requested_at), cx)
+                let ask = cx.update(|s| {
+                    api::note::set_field(&id, CHECK_REQUEST_KEY, Value::int(requested_at), s)
                 });
                 if let Err(error) = ask.await {
                     finish(
@@ -668,31 +641,33 @@ impl Progress {
                             fields,
                             requested_at,
                         },
-                        cx,
+                        &cx,
                     );
                     return;
                 }
-                cx.update(|cx| changed(&id, cx));
+                cx.update(|s| changed(&id, s));
             }
+            // The request's age on the wall clock when following began, then the
+            // executor's clock from there.
+            let age = now_ms() - requested_at;
+            let start = cx.now();
             loop {
-                cx.background_executor().timer(CHECK_POLL).await;
-                if now_ms() - requested_at > CHECK_TIMEOUT_MS {
-                    let _ = this.update(cx, |this, cx| {
-                        this.set_check(
-                            &id,
-                            CheckState {
-                                phase: CheckPhase::Unanswered,
-                                error: String::new(),
-                                fields: fields.clone(),
-                                requested_at,
-                            },
-                            cx,
-                        );
-                        this.check_tasks.remove(&id);
+                cx.timer(CHECK_POLL).await;
+                let elapsed = cx.now().duration_since(start).as_millis() as i64;
+                if age + elapsed > CHECK_TIMEOUT_MS {
+                    let state = CheckState {
+                        phase: CheckPhase::Unanswered,
+                        error: String::new(),
+                        fields: fields.clone(),
+                        requested_at,
+                    };
+                    cx.update(|s| {
+                        set_check(s, &id, state);
+                        s.slot::<Progress>().check_tasks.remove(&id);
                     });
                     return;
                 }
-                let read = cx.update(|cx| read_fields(&id, cx));
+                let read = cx.read(|s| read_fields(&id, s));
                 if let Some(fresh) = read.await
                     && check_answered(&fresh, requested_at, before)
                 {
@@ -703,27 +678,32 @@ impl Progress {
                             fields: fresh,
                             requested_at,
                         },
-                        cx,
+                        &cx,
                     );
                     return;
                 }
             }
         });
-        self.check_tasks.insert(id.to_string(), task);
-    }
-
-    fn set_check(&mut self, id: &str, state: CheckState, cx: &mut Context<Self>) {
-        self.checks.insert(id.to_string(), state);
-        cx.notify();
+        s.slot::<Progress>()
+            .check_tasks
+            .insert(id.to_string(), task);
     }
 
     /// Follow a Check another device asked for, unless this window already followed that one.
-    pub(crate) fn follow_check(&mut self, id: &str, fields: &Fields, cx: &mut Context<Self>) {
+    pub(crate) fn follow_check(s: &mut State, id: &str, fields: &Fields) {
         let pending = pending_check(fields, now_ms());
-        if pending > 0 && self.checks.get(id).map(|s| s.requested_at) != Some(pending) {
-            self.check(id, fields, false, pending, cx);
+        if s.slot::<Progress>().should_follow(id, fields) {
+            Progress::check(s, id, fields, false, pending);
         }
     }
+}
+
+fn set_reconnect(s: &mut State, id: &str, state: ReconnectState) {
+    s.slot::<Progress>().reconnect.insert(id.to_string(), state);
+}
+
+fn set_check(s: &mut State, id: &str, state: CheckState) {
+    s.slot::<Progress>().checks.insert(id.to_string(), state);
 }
 
 /// What a Check says (`checkLine`): text and tone ("muted" | "ok" | "error").
@@ -794,9 +774,6 @@ pub(crate) fn check_says(
 
 #[cfg(test)]
 mod tests {
-    // `gpui_kit::*` brings GPUI's own `test` attribute; these are plain tests.
-    use std::prelude::v1::test;
-
     use super::*;
 
     fn s(v: &str) -> Value {
@@ -945,7 +922,7 @@ mod tests {
         let gmail = badge(&["Gmail"]);
         assert_eq!(
             reconnect_target(&task(&gmail), "error"),
-            Some(CredentialTarget::Error(gmail.clone().into()))
+            Some(CredentialTarget::Error(gmail.clone()))
         );
         assert_eq!(reconnect_target(&task("run failed"), "error"), None);
         assert_eq!(reconnect_target(&task(&gmail), "status"), None);

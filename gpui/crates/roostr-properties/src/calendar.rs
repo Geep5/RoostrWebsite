@@ -1,44 +1,22 @@
-//! Anytype's CalendarSelect, compact (`CalendarPicker.svelte`) on the kit
-//! calendar: month grid (Monday first) with adjacent-month fill, today ring,
-//! selected day, prev/next month, Today + Clear footer. Emits local-midnight
-//! unix ms, or `None` for clear.
+//! Anytype's CalendarSelect, compact (`CalendarPicker.svelte`): month grid
+//! (Monday first) with adjacent-month fill, today ring, selected day,
+//! prev/next month, Today + Clear footer. Emits local-midnight unix ms, or
+//! `None` for clear.
 //!
-//! The kit owns the calendar's state and structure (month paging, the month
-//! and year pickers behind the title, day activation); Roostr draws its cells
-//! through the calendar's item slot and wraps it in its own surface, footer
-//! and Escape handling. The kit's styled `time::Calendar` facade hardcodes its
-//! cell look (filled today, 32px chrome), so the base calendar it wraps is
-//! used directly here with Roostr's cells.
+//! roostr-ui's [`CalendarState`] owns the paging (month, the month and year
+//! pickers behind the title, day activation) and its [`DatePicker`] surface
+//! draws Roostr's cells, surface and footer; this module seeds it from a
+//! stored value, converts days to local-midnight ms and closes on Escape or
+//! a press outside.
+
+use std::rc::Rc;
 
 use chrono::{Local, NaiveDate, TimeZone as _, Weekday};
-use gpui_kit::base::{Calendar, CalendarItemKind};
-use gpui_kit::component::Sizable as _;
-use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
-use gpui_kit::component::calendar::{CalendarEvent as KitCalendarEvent, CalendarState, Date};
-use gpui_kit::prelude::FluentBuilder as _;
-use gpui_kit::*;
-use roostr_core::theme;
+use roostr_core::State;
+use roostr_ui::{CalendarState, Date, DatePicker, Theme};
+use rune::El;
 
-use crate::widgets::pop_shadow;
-
-const MONTHS: [&str; 12] = [
-    "January",
-    "February",
-    "March",
-    "April",
-    "May",
-    "June",
-    "July",
-    "August",
-    "September",
-    "October",
-    "November",
-    "December",
-];
-/// Indexed from Sunday, as the kit labels weekdays.
-const WEEKDAYS: [&str; 7] = ["Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"];
-/// One day column: the 252px surface less its padding and border, over 7.
-const CELL_W: f32 = 32.;
+use crate::widgets::Lens;
 
 pub(crate) enum CalendarEvent {
     /// Local midnight in ms, or `None` (Clear).
@@ -46,13 +24,22 @@ pub(crate) enum CalendarEvent {
     Close,
 }
 
-pub(crate) struct CalendarPicker {
-    state: Entity<CalendarState>,
-    focus: FocusHandle,
-    _sub: Subscription,
+/// One open calendar: made per open, seeded with the value it shows.
+pub(crate) struct CalendarPickerState {
+    calendar: CalendarState,
 }
 
-impl EventEmitter<CalendarEvent> for CalendarPicker {}
+impl CalendarPickerState {
+    /// `value_ms`: unix ms, 0 = unset. A set value also pages the grid to its
+    /// month; unset opens on today's.
+    pub(crate) fn new(value_ms: i64) -> Self {
+        let mut calendar = CalendarState::new();
+        if value_ms != 0 {
+            calendar.set_date(Date::Single(Some(local_date(value_ms))));
+        }
+        Self { calendar }
+    }
+}
 
 /// Local midnight of a calendar day as unix ms.
 pub(crate) fn local_midnight_ms(date: NaiveDate) -> i64 {
@@ -71,201 +58,50 @@ pub(crate) fn local_date(ms: i64) -> NaiveDate {
         .map_or_else(|| Local::now().date_naive(), |d| d.date_naive())
 }
 
-impl CalendarPicker {
-    /// `value`: unix ms, 0 = unset. Seeded once: the picker is made per open.
-    pub(crate) fn new(value: i64, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let state = cx.new(|cx| {
-            let mut state = CalendarState::new(window, cx);
-            if value != 0 {
-                // Also pages the grid to the value's month; unset opens on today's.
-                state.apply_date(Date::Single(Some(local_date(value))));
-            }
-            state
-        });
-        let sub = cx.subscribe(&state, |_, _, ev: &KitCalendarEvent, cx| {
-            let KitCalendarEvent::Selected(date) = ev;
-            if let Some(day) = date.start() {
-                cx.emit(CalendarEvent::Pick(Some(local_midnight_ms(day))));
-            }
-        });
-        let focus = cx.focus_handle();
-        let f = focus.clone();
-        window.defer(cx, move |window, cx| window.focus(&f, cx));
-        Self {
-            state,
-            focus,
-            _sub: sub,
-        }
+/// The picker surface (252 wide, panel, menu radius, pop shadow, Today /
+/// Clear footer), keyed `{key}-surface`; days are `{key}-calendar-YYYY-MM-DD`,
+/// the footer `{key}-today` / `{key}-clear`. It holds the keyboard while
+/// open: Escape or a press outside it emits [`CalendarEvent::Close`]. The
+/// caller places it (floating under its trigger, or in the flow).
+pub(crate) fn calendar_picker(
+    t: &Theme,
+    key: &str,
+    state: &CalendarPickerState,
+    lens: Lens<CalendarPickerState>,
+    on_event: Rc<dyn Fn(&mut State, CalendarEvent)>,
+) -> El {
+    let pick = on_event.clone();
+    DatePicker::new(key, &state.calendar, move |s: &mut State| {
+        &mut lens(s).calendar
+    })
+    .first_day_of_week(Weekday::Mon)
+    .on_pick(move |s: &mut State, day: Option<NaiveDate>| {
+        pick(s, CalendarEvent::Pick(day.map(local_midnight_ms)))
+    })
+    .surface(t)
+    .modal(true, move |s: &mut State| on_event(s, CalendarEvent::Close))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn midnight_round_trips_through_the_local_day() {
+        let day = NaiveDate::from_ymd_opt(2026, 10, 18).unwrap();
+        let ms = local_midnight_ms(day);
+        assert_eq!(local_date(ms), day);
+        assert_eq!(local_date(ms + 23 * 3_600_000), day);
     }
-}
 
-impl Focusable for CalendarPicker {
-    fn focus_handle(&self, _: &App) -> FocusHandle {
-        self.focus.clone()
-    }
-}
-
-/// A footer action ("Today" / "Clear"): kit [`Button`] (muted, hover fill),
-/// small, 12px label (in a child: the kit sizes its own label text) that
-/// turns fg while hovered.
-fn foot_button(id: &'static str, label: &'static str, cx: &App) -> Button {
-    Button::new(id)
-        .custom(
-            ButtonCustomVariant::new(cx)
-                .foreground(theme::muted())
-                .hover(theme::hover())
-                .active(theme::hover()),
-        )
-        .small()
-        .group(id)
-        .accessibility_label(label)
-        .h_auto()
-        .px(px(6.))
-        .py(px(2.))
-        .rounded(theme::radius::sm())
-        .child(
-            div()
-                .text_size(px(12.))
-                .group_hover(id, |s| s.text_color(theme::fg()))
-                .child(label),
-        )
-}
-
-/// What a calendar control reads as.
-fn label(kind: CalendarItemKind, value: i32) -> SharedString {
-    match kind {
-        CalendarItemKind::Previous => "‹".into(),
-        CalendarItemKind::Next => "›".into(),
-        CalendarItemKind::Weekday => WEEKDAYS[value.rem_euclid(7) as usize].into(),
-        CalendarItemKind::MonthToggle | CalendarItemKind::Month => MONTHS
-            .get((value - 1).max(0) as usize)
-            .copied()
-            .unwrap_or_default()
-            .into(),
-        _ => value.to_string().into(),
-    }
-}
-
-impl Render for CalendarPicker {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let calendar = Calendar::new("calendar-grid", &self.state)
-            .first_day_of_week(Weekday::Mon)
-            .label(label)
-            .item(|item, st, _, _| {
-                let kind = st.kind();
-                match kind {
-                    CalendarItemKind::Previous | CalendarItemKind::Next => item
-                        .px(px(8.))
-                        .py(px(2.))
-                        .rounded(theme::radius::sm())
-                        .text_size(px(16.))
-                        .text_color(theme::muted())
-                        .when(st.is_disabled(), |d| d.opacity(0.3))
-                        .when(!st.is_disabled(), |d| {
-                            d.cursor_pointer()
-                                .hover(|s| s.bg(theme::hover()).text_color(theme::fg()))
-                        })
-                        .into_any_element(),
-                    // "October 2026": the two halves meet in the middle; each
-                    // opens the kit's month / year picker.
-                    CalendarItemKind::MonthToggle | CalendarItemKind::YearToggle => item
-                        .flex_1()
-                        .when(kind == CalendarItemKind::MonthToggle, |d| {
-                            d.text_right().pr(px(2.))
-                        })
-                        .when(kind == CalendarItemKind::YearToggle, |d| {
-                            d.text_left().pl(px(2.))
-                        })
-                        .text_size(px(13.))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .when(st.is_active(), |d| d.text_color(theme::accent()))
-                        .cursor_pointer()
-                        .hover(|s| s.text_color(theme::accent()))
-                        .into_any_element(),
-                    CalendarItemKind::Weekday => item
-                        .w(px(CELL_W))
-                        .mx(px(0.5))
-                        .py(px(3.))
-                        .text_center()
-                        .text_size(px(10.))
-                        .text_color(theme::muted())
-                        .into_any_element(),
-                    CalendarItemKind::Day => {
-                        let (sel, other) = (st.is_active(), st.is_muted());
-                        item.w(px(CELL_W))
-                            .m(px(0.5))
-                            .py(px(5.))
-                            .text_center()
-                            .text_size(px(12.))
-                            .rounded(theme::radius::sm())
-                            .cursor_pointer()
-                            .when(other && !sel, |d| d.text_color(theme::muted()).opacity(0.5))
-                            .when(st.is_today(), |d| {
-                                d.border_1().border_color(theme::accent())
-                            })
-                            .when(sel, |d| {
-                                d.bg(theme::accent())
-                                    .text_color(rgb(0x14100a))
-                                    .font_weight(FontWeight::SEMIBOLD)
-                            })
-                            .when(!sel, |d| d.hover(|s| s.bg(theme::hover())))
-                            .into_any_element()
-                    }
-                    // The month and year pickers' cells.
-                    _ => item
-                        .py(px(5.))
-                        .my(px(1.))
-                        .text_center()
-                        .text_size(px(12.))
-                        .rounded(theme::radius::sm())
-                        .cursor_pointer()
-                        .when(st.is_active(), |d| {
-                            d.bg(theme::accent())
-                                .text_color(rgb(0x14100a))
-                                .font_weight(FontWeight::SEMIBOLD)
-                        })
-                        .when(!st.is_active(), |d| d.hover(|s| s.bg(theme::hover())))
-                        .into_any_element(),
-                }
-            })
-            .gap(px(8.));
-        let today = Local::now().date_naive();
-        div()
-            .id("calendar")
-            .track_focus(&self.focus)
-            .on_key_down(cx.listener(|_, ev: &KeyDownEvent, _, cx| {
-                if ev.keystroke.key == "escape" {
-                    cx.stop_propagation();
-                    cx.emit(CalendarEvent::Close);
-                }
-            }))
-            .w(px(252.))
-            .bg(theme::panel())
-            .border_1()
-            .border_color(theme::border())
-            .rounded(theme::radius::menu())
-            .p(px(10.))
-            .shadow(pop_shadow())
-            .text_color(theme::fg())
-            .child(calendar)
-            .child(
-                div()
-                    .flex()
-                    .justify_between()
-                    .mt(px(8.))
-                    .pt(px(8.))
-                    .border_t_1()
-                    .border_color(theme::border())
-                    .child(foot_button("today", "Today", cx).on_click(cx.listener(
-                        move |_, _, _, cx| {
-                            cx.emit(CalendarEvent::Pick(Some(local_midnight_ms(today))))
-                        },
-                    )))
-                    .child(
-                        foot_button("clear", "Clear", cx).on_click(
-                            cx.listener(|_, _, _, cx| cx.emit(CalendarEvent::Pick(None))),
-                        ),
-                    ),
-            )
+    #[test]
+    fn a_set_value_pages_to_its_month() {
+        let day = NaiveDate::from_ymd_opt(2024, 2, 29).unwrap();
+        let st = CalendarPickerState::new(local_midnight_ms(day));
+        assert_eq!(
+            (st.calendar.current_year(), st.calendar.current_month()),
+            (2024, 2)
+        );
+        assert_eq!(st.calendar.date(), Date::Single(Some(day)));
     }
 }

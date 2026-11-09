@@ -401,6 +401,7 @@ type Access<S> = Rc<dyn for<'a> Fn(&'a mut S) -> &'a mut CommandState>;
 type PathFn<S> = Rc<dyn Fn(&mut S, IndexPath, &mut Tx)>;
 type CancelFn<S> = Rc<dyn Fn(&mut S, &mut Tx)>;
 type QueryFn<S> = Rc<dyn Fn(&mut S, &str, &mut Tx)>;
+type KeyFn<S> = Rc<dyn Fn(&mut S, &KeyEvent, &mut Tx) -> bool>;
 
 /// The handlers a palette was given, held without naming the app state.
 #[derive(Clone, Default)]
@@ -409,6 +410,7 @@ struct Hooks {
     confirm: Option<Rc<dyn Any>>,
     cancel: Option<Rc<dyn Any>>,
     query: Option<Rc<dyn Any>>,
+    key: Option<Rc<dyn Any>>,
 }
 
 fn hook<T: Clone + 'static>(h: &Option<Rc<dyn Any>>) -> Option<T> {
@@ -481,6 +483,11 @@ fn command_key<S: 'static>(
     ev: &KeyEvent,
     tx: &mut Tx,
 ) -> bool {
+    if let Some(f) = hook::<KeyFn<S>>(&h.key)
+        && f(s, ev, tx)
+    {
+        return true;
+    }
     match ev.key {
         Key::Up | Key::Down => {
             if let Some(p) = nav.step(if ev.key == Key::Down { 1 } else { -1 })
@@ -712,6 +719,16 @@ impl Command {
     /// The query changed (trimmed).
     pub fn on_query<S: 'static>(mut self, f: impl Fn(&mut S, &str, &mut Tx) + 'static) -> Self {
         self.hooks.query = Some(Rc::new(Rc::new(f) as QueryFn<S>));
+        self
+    }
+    /// Sees every key the palette would (search field or list) before it does; returning
+    /// `true` takes the key (e.g. an Escape that dismisses at once instead of clearing the
+    /// query first, or an Enter with nothing highlighted).
+    pub fn on_key<S: 'static>(
+        mut self,
+        f: impl Fn(&mut S, &KeyEvent, &mut Tx) -> bool + 'static,
+    ) -> Self {
+        self.hooks.key = Some(Rc::new(Rc::new(f) as KeyFn<S>));
         self
     }
 

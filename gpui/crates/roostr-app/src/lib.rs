@@ -1,74 +1,102 @@
 //! The Roostr app as both front ends run it: the desktop binary (`roostr`)
-//! and the browser build (`roostr-web`). Feature initialization, the page
-//! for each route, and the object page that dispatches on an object's type.
+//! and the browser build (`roostr-web`). Every feature crate's listeners,
+//! the page for each route, and the object page that dispatches on an
+//! object's type, plugged into the shell ([`roostr_shell::Pages`]).
 
 mod object_page;
 
-use std::rc::Rc;
-
-use gpui_kit::*;
+use roostr_core::State;
 use roostr_core::nav::Route;
-use roostr_shell::{PageFactory, Workspace};
+use roostr_shell::{Pages, PanePart};
+use rune::{Cx, El, KeyEvent, Tx};
 
-pub use crate::object_page::{HomePage, ObjectPage};
+pub use crate::object_page::Pages as ObjectPages;
 
-/// Install every feature crate's globals. Call after [`roostr_core::init`].
-pub fn init(cx: &mut App) {
-    roostr_properties::init(cx);
-    roostr_editor::init(cx);
-    roostr_sets::init(cx);
-    roostr_discussion::init(cx);
-    roostr_graph::init(cx);
-    roostr_settings::init(cx);
-    roostr_site::init(cx);
-    roostr_shell::init(cx);
+/// Install every feature crate's listeners and the shell with every page.
+/// Call once on a new [`State`].
+pub fn register(s: &mut State) {
+    roostr_properties::register(s);
+    roostr_editor::register(s);
+    roostr_sets::register(s);
+    roostr_discussion::register(s);
+    roostr_graph::register(s);
+    roostr_settings::register(s);
+    roostr_site::register(s);
+    object_page::register(s);
+    roostr_shell::register(s, pages());
+}
+
+/// What the app plugs into the shell.
+pub fn pages() -> Pages {
+    Pages {
+        page,
+        pane,
+        identity_gate,
+        open_settings: roostr_settings::open_settings,
+        overlays,
+        shown,
+        closed,
+    }
 }
 
 /// The main area's view for each route.
-pub fn pages() -> PageFactory {
-    Rc::new(
-        |route: &Route, window: &mut Window, cx: &mut App| -> AnyView {
-            match route {
-                Route::Home => cx.new(|cx| HomePage::new(window, cx)).into(),
-                Route::Object(id) => cx.new(|cx| ObjectPage::new(id.clone(), window, cx)).into(),
-                Route::Graph { focus } => cx
-                    .new(|cx| roostr_graph::GraphView::new(focus.clone(), window, cx))
-                    .into(),
-                Route::Chat(id) => cx
-                    .new(|cx| roostr_discussion::ChatPage::new(id.clone(), window, cx))
-                    .into(),
-                Route::Site(page) => cx
-                    .new(|cx| roostr_site::SiteView::new(page.clone(), window, cx))
-                    .into(),
-            }
-        },
-    )
+fn page(s: &State, cx: &mut Cx<State>, route: &Route, layer: &mut Vec<El>) -> El {
+    let t = roostr_shell::theme(s, cx);
+    match route {
+        Route::Home => object_page::home(s, cx, t, layer),
+        Route::Object(id) => object_page::view(s, cx, t, layer, id),
+        Route::Graph { .. } => roostr_graph::view(s, cx),
+        Route::Chat(id) => roostr_discussion::chat_page(
+            s,
+            cx,
+            t,
+            layer,
+            id,
+            object_page::window_size(s),
+        ),
+        Route::Site(page) => roostr_site::view(s, cx, page),
+    }
 }
 
-/// The shell with every page, Settings and the identity gate.
-pub fn workspace(window: &mut Window, cx: &mut App) -> Entity<Workspace> {
-    cx.new(|cx| {
-        let mut workspace = Workspace::new(pages(), window, cx);
-        workspace.on_open_settings(roostr_settings::open_settings);
-        workspace.identity_gate(|window, cx| {
-            cx.new(|cx| roostr_settings::IdentityGate::new(window, cx))
-                .into()
-        });
-        workspace
-    })
+fn pane(s: &State, cx: &mut Cx<State>, id: &str, part: PanePart, layer: &mut Vec<El>) -> El {
+    let t = roostr_shell::theme(s, cx);
+    object_page::pane(s, cx, t, layer, id, part)
 }
 
-/// Open `route` in the active tab once the shell has picked the space (a
-/// path given at launch: `/app/object/<id>`, `/guide`, …).
-pub fn open_when_ready(route: Route, cx: &mut App) {
-    let nav = roostr_core::Navigator::global(cx);
-    let mut pending = Some(route);
-    cx.observe(&nav, move |nav, cx| {
-        if !nav.read(cx).space().is_empty()
-            && let Some(route) = pending.take()
-        {
-            roostr_core::nav::navigate(route, cx);
-        }
-    })
-    .detach();
+fn identity_gate(s: &State, cx: &mut Cx<State>, layer: &mut Vec<El>) -> El {
+    let t = roostr_shell::theme(s, cx);
+    roostr_settings::identity_gate(s, cx, t, layer)
+}
+
+/// Settings, over everything else.
+fn overlays(s: &State, cx: &mut Cx<State>, layer: &mut Vec<El>) {
+    let t = roostr_shell::theme(s, cx);
+    roostr_settings::settings_modal(s, cx, t, layer);
+}
+
+fn shown(s: &mut State, route: &Route) {
+    if let Route::Object(id) = route {
+        object_page::shown(s, id);
+    }
+}
+
+fn closed(s: &mut State, route: &Route) {
+    if let Route::Object(id) = route {
+        object_page::closed(s, id);
+    }
+}
+
+/// The window's `on_key`: the shell's shortcuts, a website page's keyboard
+/// scrolling, a table's sideways arrows, and Escape nobody else took.
+pub fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
+    if roostr_shell::on_key(s, ev, tx) {
+        return true;
+    }
+    if matches!(s.nav.route(), Route::Site(_)) && roostr_site::on_key(s, ev, tx) {
+        return true;
+    }
+    if roostr_sets::on_key(s, ev, tx) {
+        return true;
+    }
+    ev.key == rune::Key::Escape && object_page::on_escape(s)
 }

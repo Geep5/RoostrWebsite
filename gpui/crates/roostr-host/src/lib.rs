@@ -11,13 +11,13 @@
 //! the store's first load lands.
 
 use std::collections::HashSet;
-use std::sync::Arc;
 
-use roostr_core::daemon::{DaemonBackend, DaemonConfig};
-use roostr_core::harness::Harness;
-use roostr_core::{Connection, State};
-use roostr_ui::{Images, ThemePref};
-use rune::{AppSpec, Cx, El, Tx, Waker, col, el, text};
+use roostr_core::State;
+use roostr_ui::Images;
+use rune::{AppSpec, Cx, El, Tx, Waker};
+
+#[cfg(not(target_family = "wasm"))]
+pub use native::*;
 
 /// The device scale SVG icons rasterize at before the window reports its own.
 const ICON_SCALE: f32 = 2.0;
@@ -115,111 +115,186 @@ pub fn spec(
     }
 }
 
-/// The state over the daemon named by the environment (`ROOSTR_API`, `ROOSTR_API_TOKEN` or
-/// the token file `GLON_DATA` points at) with this computer's agent harness.
-pub fn daemon_state() -> Result<State, String> {
-    let config = DaemonConfig::from_env().map_err(|e| format!("{e:#}"))?;
-    let harness = Arc::new(Harness::new(config.clone()));
-    Ok(State::new(
-        Arc::new(DaemonBackend::new(config)),
-        Some(harness),
-    ))
-}
+/// The daemon, blocking waits and the example runner: desktop only (a browser tab
+/// can't block its one thread, and reaches its daemon through the pairing).
+#[cfg(not(target_family = "wasm"))]
+mod native {
+    use std::sync::Arc;
 
-/// Runs the state's futures on this thread until the store's first load lands (or fails, or
-/// `limit` passes): what a headless `--snap` needs, since its virtual clock does not wait for
-/// the network. Waits on the executor's wakes, never sleeps.
-pub fn wait_loaded(s: &mut State, limit: std::time::Duration) {
-    let (woke, wakes) = std::sync::mpsc::channel::<()>();
-    let woke = parking_lot::Mutex::new(woke);
-    s.rt.set_waker(Arc::new(move || {
-        let _ = woke.lock().send(());
-    }));
-    let deadline = std::time::Instant::now() + limit;
-    loop {
-        s.poll();
-        if s.store.loaded || matches!(s.store.connection, Connection::Failed(_)) {
-            return;
-        }
-        let left = deadline.saturating_duration_since(std::time::Instant::now());
-        if left.is_zero() || wakes.recv_timeout(left).is_err() {
-            return;
+    use roostr_core::daemon::{DaemonBackend, DaemonConfig};
+    use roostr_core::harness::Harness;
+    use roostr_core::{Connection, State};
+    use roostr_ui::ThemePref;
+    use rune::{Cx, El, col, el, text};
+
+    use super::spec;
+
+    /// The state over the daemon named by the environment (`ROOSTR_API`, `ROOSTR_API_TOKEN` or
+    /// the token file `GLON_DATA` points at) with this computer's agent harness.
+    pub fn daemon_state() -> Result<State, String> {
+        let config = DaemonConfig::from_env().map_err(|e| format!("{e:#}"))?;
+        let harness = Arc::new(Harness::new(config.clone()));
+        Ok(State::new(
+            Arc::new(DaemonBackend::new(config)),
+            Some(harness),
+        ))
+    }
+
+    /// Runs the state's futures on this thread until the store's first load lands (or fails, or
+    /// `limit` passes): what a headless `--snap` needs, since its virtual clock does not wait for
+    /// the network. Waits on the executor's wakes, never sleeps.
+    pub fn wait_loaded(s: &mut State, limit: std::time::Duration) {
+        let (woke, wakes) = std::sync::mpsc::channel::<()>();
+        let woke = parking_lot::Mutex::new(woke);
+        s.rt.set_waker(Arc::new(move || {
+            let _ = woke.lock().send(());
+        }));
+        let deadline = std::time::Instant::now() + limit;
+        loop {
+            s.poll();
+            if s.store.loaded || matches!(s.store.connection, Connection::Failed(_)) {
+                return;
+            }
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() || wakes.recv_timeout(left).is_err() {
+                return;
+            }
         }
     }
-}
 
-/// What an example shows, kept in its state.
-struct Example {
-    title: &'static str,
-    view: fn(&State, &mut Cx<State>) -> El,
-}
+    /// How long [`settle`] waits without a wake before it calls the state settled.
+    const QUIET: std::time::Duration = std::time::Duration::from_millis(600);
 
-/// Opens a window on the daemon named by the environment showing `view` in a page-like frame
-/// (the window's gutter around a rounded page card), after `register` set up the feature's
-/// listeners. It opens once the store's first load lands, so a headless `--snap` shows data.
-/// Command-line arguments Rune doesn't take are in [`rune::extra_args`] (an object id, say).
-pub fn run_example(
-    title: &'static str,
-    register: fn(&mut State),
-    view: fn(&State, &mut Cx<State>) -> El,
-) {
-    #[cfg(not(target_family = "wasm"))]
-    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn"))
-        .try_init();
-    let app = rune::App::new(spec(
-        title,
-        (1280.0, 860.0),
-        init_unconfigured,
-        example_view,
-    ))
-    .init(move || {
-        let mut s = daemon_state().unwrap_or_else(|error| panic!("{error}"));
-        register(&mut s);
-        wait_loaded(&mut s, std::time::Duration::from_secs(20));
-        s.put(Example { title, view });
-        s
-    });
-    app.run();
-}
+    /// Runs the state's futures on this thread until they go quiet: no wake for [`QUIET`] and no
+    /// timer due sooner (a page's loads landed, and whatever those started), or `limit` passes.
+    /// What a headless `--snap` of a whole page needs after [`wait_loaded`]: the loads the shown
+    /// page started through the poll listeners. Waits on the executor's wakes, never sleeps.
+    pub fn settle(s: &mut State, limit: std::time::Duration) {
+        let (woke, wakes) = std::sync::mpsc::channel::<()>();
+        let woke = parking_lot::Mutex::new(woke);
+        s.rt.set_waker(Arc::new(move || {
+            let _ = woke.lock().send(());
+        }));
+        let deadline = std::time::Instant::now() + limit;
+        loop {
+            let ran = s.poll();
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() {
+                return;
+            }
+            let soon = ran.next_timer.filter(|t| *t < QUIET);
+            let wait = soon.unwrap_or(QUIET).min(left);
+            if wakes.recv_timeout(wait).is_err() && soon.is_none() {
+                return;
+            }
+        }
+    }
 
-/// `AppSpec::init` must be a function; [`run_example`]'s `App::init` closure replaces it.
-fn init_unconfigured() -> State {
-    unreachable!("run_example installs its own init")
-}
+    /// What an example shows, kept in its state.
+    struct Example {
+        title: &'static str,
+        view: ExampleView,
+    }
 
-fn example_view(s: &State, cx: &mut Cx<State>) -> El {
-    let t = roostr_ui::theme(ThemePref::Dark, cx);
-    let Some(example) = s.get::<Example>() else {
-        return el();
-    };
-    let body = match (&s.store.connection, s.store.loaded) {
-        (_, true) => (example.view)(s, cx),
-        (Connection::Failed(error), false) => message(error, t.red),
-        (_, false) => message("Opening your vault…", t.muted),
-    };
-    let page = col()
-        .grow(1.0)
-        .min_h(0.0)
-        .mx(6.0).my(6.0)
-        .radius(roostr_ui::radius::PAGE)
-        .fill(t.bg)
-        .clip_rounded(roostr_ui::radius::PAGE)
-        .child(body);
-    let titlebar = el().h(38.0).w_full().window_drag().center().child(
-        text(example.title)
-            .font(roostr_ui::ty::ui(roostr_ui::ty::SM))
-            .color(t.muted),
-    );
-    roostr_ui::root(
-        col().w_full().h_full().fill(t.gutter).child(titlebar).child(page),
-        [],
-    )
-}
+    #[derive(Clone, Copy)]
+    enum ExampleView {
+        Plain(fn(&State, &mut Cx<State>) -> El),
+        /// A view that floats menus and popovers: they go into the window root's overlay layer.
+        Layered(fn(&State, &mut Cx<State>, &mut Vec<El>) -> El),
+    }
 
-fn message(line: &str, color: rune::Color) -> El {
-    el().padding(16.0).child(
-        text(line.to_owned())
-            .font(roostr_ui::ty::ui(roostr_ui::ty::BASE))
-            .color(color),
-    )
+    /// Opens a window on the daemon named by the environment showing `view` in a page-like frame
+    /// (the window's gutter around a rounded page card), after `register` set up the feature's
+    /// listeners. It opens once the store's first load lands, so a headless `--snap` shows data.
+    /// Command-line arguments Rune doesn't take are in [`rune::extra_args`] (an object id, say).
+    pub fn run_example(
+        title: &'static str,
+        register: fn(&mut State),
+        view: fn(&State, &mut Cx<State>) -> El,
+    ) {
+        run(title, register, ExampleView::Plain(view));
+    }
+
+    /// [`run_example`] for a view that pushes overlays (menus, popovers, editors) into `layer`,
+    /// which the window's root mounts above everything (`roostr_ui::root`), so window-point
+    /// overlays (context menus, a rubber band) land where the pointer is.
+    pub fn run_example_layered(
+        title: &'static str,
+        register: fn(&mut State),
+        view: fn(&State, &mut Cx<State>, &mut Vec<El>) -> El,
+    ) {
+        run(title, register, ExampleView::Layered(view));
+    }
+
+    fn run(title: &'static str, register: fn(&mut State), view: ExampleView) {
+        #[cfg(not(target_family = "wasm"))]
+        let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn"))
+            .try_init();
+        let app = rune::App::new(spec(
+            title,
+            (1280.0, 860.0),
+            init_unconfigured,
+            example_view,
+        ))
+        .init(move || {
+            let mut s = daemon_state().unwrap_or_else(|error| panic!("{error}"));
+            register(&mut s);
+            wait_loaded(&mut s, std::time::Duration::from_secs(20));
+            s.put(Example { title, view });
+            s
+        });
+        app.run();
+    }
+
+    /// `AppSpec::init` must be a function; [`run_example`]'s `App::init` closure replaces it.
+    fn init_unconfigured() -> State {
+        unreachable!("run_example installs its own init")
+    }
+
+    fn example_view(s: &State, cx: &mut Cx<State>) -> El {
+        let t = roostr_ui::theme(ThemePref::from_name(s.ui.theme_name()), cx);
+        let Some(example) = s.get::<Example>() else {
+            return el();
+        };
+        let mut layer = Vec::new();
+        let body = match (&s.store.connection, s.store.loaded) {
+            (_, true) => match example.view {
+                ExampleView::Plain(view) => view(s, cx),
+                ExampleView::Layered(view) => view(s, cx, &mut layer),
+            },
+            (Connection::Failed(error), false) => message(error, t.red),
+            (_, false) => message("Opening your vault…", t.muted),
+        };
+        let page = col()
+            .grow(1.0)
+            .min_h(0.0)
+            .mx(6.0)
+            .my(6.0)
+            .radius(roostr_ui::radius::PAGE)
+            .fill(t.bg)
+            .clip_rounded(roostr_ui::radius::PAGE)
+            .child(body);
+        let titlebar = el().h(38.0).w_full().window_drag().center().child(
+            text(example.title)
+                .font(roostr_ui::ty::ui(roostr_ui::ty::SM))
+                .color(t.muted),
+        );
+        roostr_ui::root(
+            col()
+                .w_full()
+                .h_full()
+                .fill(t.gutter)
+                .child(titlebar)
+                .child(page),
+            layer,
+        )
+    }
+
+    fn message(line: &str, color: rune::Color) -> El {
+        el().padding(16.0).child(
+            text(line.to_owned())
+                .font(roostr_ui::ty::ui(roostr_ui::ty::BASE))
+                .color(color),
+        )
+    }
 }

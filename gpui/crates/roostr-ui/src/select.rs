@@ -39,6 +39,8 @@ pub struct SelectItem {
     pub title: String,
     pub group: Option<String>,
     pub disabled: bool,
+    /// More words the search matches (gpui-kit's `SearchableListItem::matches` overrides).
+    pub keywords: Vec<String>,
 }
 
 impl SelectItem {
@@ -48,6 +50,7 @@ impl SelectItem {
             title: title.into(),
             group: None,
             disabled: false,
+            keywords: Vec::new(),
         }
     }
 
@@ -60,6 +63,12 @@ impl SelectItem {
 
     pub fn disabled(mut self, d: bool) -> Self {
         self.disabled = d;
+        self
+    }
+
+    /// More words the search matches besides the title.
+    pub fn keywords<I: IntoIterator<Item = S>, S: Into<String>>(mut self, k: I) -> Self {
+        self.keywords = k.into_iter().map(Into::into).collect();
         self
     }
 }
@@ -175,6 +184,7 @@ impl SelectState {
                 let it = &self.items[i];
                 q.is_empty()
                     || it.title.to_lowercase().contains(&q)
+                    || it.keywords.iter().any(|k| k.to_lowercase().contains(&q))
                     || it
                         .group
                         .as_ref()

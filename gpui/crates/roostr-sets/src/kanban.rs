@@ -3,22 +3,28 @@
 //! in every group it belongs to; dragging a card between columns rewrites
 //! its group value.
 
-use std::cell::Cell;
-use std::rc::Rc;
+use std::collections::HashMap;
 
-use gpui_kit::prelude::FluentBuilder as _;
-use gpui_kit::*;
-use roostr_core::motion::{self, LayoutGroup};
-use roostr_core::{QueryRow, RelationDef, Value, api, theme};
+use roostr_core::{QueryRow, RelationDef, State, Value, api};
+use roostr_ui::ty::Weights as _;
+use roostr_ui::{Theme, color::rgb, motion, shadow, ty};
+use rune::{Color, Cursor, Cx, Drag, El, Phase, PointerPress, Transition, Tx, col, el, row, text};
 use serde_json::json;
 
-use crate::common::{self, cached_object, engine_body};
-use crate::config;
-use crate::context_menu::{MenuEvent, RowContextMenu};
-use crate::views::{ViewInput, ViewMsg};
+use crate::common::{self, engine_body};
+use crate::gallery::hover_border;
+use crate::views::ViewInput;
+use crate::{Active, DataView, config, context_menu, dv, dv_mut};
 
 /// Boards with more cards than this never slide (Avoid: large lists).
 const SLIDE_MAX_CARDS: usize = 200;
+
+/// One card to the next before any is drawn (a one-line card + the 6px gap).
+const PITCH_GUESS: f32 = 42.;
+/// A column's header, before its first card.
+const HEAD_H: f32 = 30.;
+/// Pointer travel (points) that turns a press on a card into a drag.
+const DRAG_THRESHOLD: f32 = 2.;
 
 #[derive(Clone)]
 struct Column {
@@ -28,322 +34,302 @@ struct Column {
     color: String,
 }
 
-/// Payload of a card drag.
+/// The card a press is on: what a drag of it carries.
 #[derive(Clone)]
-struct CardDrag {
+struct CardRef {
     id: String,
     from: String,
-    name: SharedString,
+    name: String,
     icon: String,
 }
 
-impl Render for CardDrag {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        card_body(&self.icon, self.name.clone())
-            .w(px(204.))
-            .opacity(0.9)
-            .shadow(roostr_core::ui::drag_shadow())
-    }
+/// A card being dragged: the card, the pointer (window points) and where
+/// on the card it was grabbed.
+struct CardDrag {
+    card: CardRef,
+    at: [f32; 2],
+    grab: [f32; 2],
 }
 
-fn card_body(icon: &str, name: SharedString) -> Div {
-    div()
-        .flex()
-        .items_center()
-        .gap(px(8.))
-        .bg(theme::panel())
-        .border_1()
-        .border_color(theme::border())
-        .rounded(px(8.))
-        .px(px(10.))
-        .py(px(8.))
-        .text_size(px(13.))
-        .text_color(theme::fg())
-        .child(div().flex_none().child(icon.to_string()))
-        .child(
-            div()
-                .min_w_0()
-                .overflow_hidden()
-                .text_ellipsis()
-                .whitespace_nowrap()
-                .child(name),
-        )
-}
-
-pub(crate) struct KanbanView {
-    object_id: String,
+pub(crate) struct Kanban {
     input: ViewInput,
     rows: Vec<QueryRow>,
     generation: u64,
     drop_col: Option<String>,
-    ctx_menu: Option<Entity<RowContextMenu>>,
-    collection: Option<String>,
-    /// Card positions: the cards slide to their places after a drop.
-    cards_layout: LayoutGroup,
+    drag: Option<CardDrag>,
     /// A card was dropped: the next rows to arrive slide into place.
     slide_next: bool,
     /// The rows on show arrived after a drop (refreshes from sync snap).
     cards_slide: bool,
-    /// The board's top (window y) and the distance from one card to the
-    /// next, last frame: each column builds only the cards in and near the
-    /// window.
-    board_top: Rc<Cell<f32>>,
-    pitch: Rc<Cell<f32>>,
+    /// Each column's rect (window points, after scrolling) as last laid
+    /// out: the drop targets of a card drag.
+    col_rects: HashMap<String, [f32; 4]>,
 }
 
-/// One card to the next before any is drawn (a one-line card + the 6px gap).
-const PITCH_GUESS: f32 = 42.;
-/// A column's header, before its first card.
-const HEAD_H: f32 = 30.;
-
-impl EventEmitter<ViewMsg> for KanbanView {}
-
-impl KanbanView {
-    pub(crate) fn new(
-        object_id: String,
-        collection: Option<String>,
-        input: ViewInput,
-        cx: &mut Context<Self>,
-    ) -> Self {
-        let mut this = Self {
-            object_id,
+impl Kanban {
+    pub(crate) fn new(input: ViewInput) -> Self {
+        Self {
             input,
             rows: Vec::new(),
             generation: 0,
             drop_col: None,
-            ctx_menu: None,
-            collection,
-            cards_layout: LayoutGroup::default(),
+            drag: None,
             slide_next: false,
             cards_slide: false,
-            board_top: Rc::new(Cell::new(0.)),
-            pitch: Rc::new(Cell::new(PITCH_GUESS)),
-        };
-        this.load(cx);
-        this
-    }
-
-    pub(crate) fn set_input(&mut self, input: ViewInput, cx: &mut Context<Self>) {
-        if input != self.input {
-            self.input = input;
-            self.load(cx);
+            col_rects: HashMap::new(),
         }
-    }
-
-    pub(crate) fn load(&mut self, cx: &mut Context<Self>) {
-        let Some(body) = self.input.body.clone() else {
-            return;
-        };
-        self.generation += 1;
-        let generation = self.generation;
-        let task = api::query(
-            engine_body(
-                &body,
-                json!({"sorts": common::view_sorts_json(&self.input.sorts)}),
-            ),
-            cx,
-        );
-        cx.spawn(async move |this, cx| {
-            let Ok(res) = task.await else { return };
-            let _ = this.update(cx, |this, cx| {
-                if this.generation == generation {
-                    this.rows = res.records;
-                    this.cards_slide =
-                        std::mem::take(&mut this.slide_next) && this.rows.len() <= SLIDE_MAX_CARDS;
-                    cx.notify();
-                }
-            });
-        })
-        .detach();
     }
 
     pub(crate) fn row_ids(&self) -> impl Iterator<Item = &str> {
         self.rows.iter().map(|r| r.id.as_str())
     }
 
-    /// Escape: close the context menu.
-    pub(crate) fn dismiss(&mut self, cx: &mut Context<Self>) {
-        self.ctx_menu = None;
-        cx.notify();
-    }
-
-    fn rel(&self, cx: &App) -> Option<RelationDef> {
-        let object = cached_object(&self.object_id, cx)?;
-        let relations = common::scoped_relations(&object, cx);
-        let key = config::group_key(&object.fields).to_string();
-        relations.into_iter().find(|r| r.key == key)
-    }
-
-    fn columns(rel: &RelationDef) -> Vec<Column> {
-        if rel.format == "checkbox" {
-            return vec![
-                Column {
-                    id: "false".into(),
-                    name: "Not done".into(),
-                    color: String::new(),
-                },
-                Column {
-                    id: "true".into(),
-                    name: "Done".into(),
-                    color: String::new(),
-                },
-            ];
-        }
-        let mut out: Vec<Column> = rel
-            .options
-            .iter()
-            .map(|o| Column {
-                id: o.text.clone(),
-                name: o.text.clone(),
-                color: o.color.clone(),
-            })
-            .collect();
-        out.push(Column {
-            id: String::new(),
-            name: format!(
-                "No {}",
-                if rel.name.is_empty() {
-                    &rel.key
-                } else {
-                    &rel.name
-                }
-            ),
-            color: String::new(),
-        });
-        out
-    }
-
-    fn values_of(rel: &RelationDef, r: &QueryRow) -> Vec<String> {
-        let Some(v) = r.fields.get(&rel.key) else {
-            return Vec::new();
-        };
-        if rel.format == "checkbox" {
-            return vec![if v.bool_value == Some(true) {
-                "true".into()
-            } else {
-                "false".into()
-            }];
-        }
-        if let Some(s) = &v.string_value {
-            return if s.is_empty() {
-                vec![]
-            } else {
-                vec![s.clone()]
-            };
-        }
-        v.items()
-            .iter()
-            .filter_map(|i| i.string_value.clone())
-            .filter(|s| !s.is_empty())
-            .collect()
-    }
-
-    fn cards_for<'a>(&'a self, rel: &RelationDef, col: &Column) -> Vec<&'a QueryRow> {
-        self.rows
-            .iter()
-            .filter(|r| {
-                let vals = Self::values_of(rel, r);
-                if rel.format == "checkbox" {
-                    return vals.first() == Some(&col.id) || (col.id == "false" && vals.is_empty());
-                }
-                if col.id.is_empty() {
-                    vals.is_empty()
-                } else {
-                    vals.contains(&col.id)
-                }
-            })
-            .collect()
-    }
-
-    fn drop_on(&mut self, drag: &CardDrag, col: Column, cx: &mut Context<Self>) {
-        self.drop_col = None;
-        cx.notify();
-        let Some(rel) = self.rel(cx) else { return };
-        if drag.from == col.id {
-            return;
-        }
-        let Some(row) = self.rows.iter().find(|r| r.id == drag.id) else {
-            return;
-        };
-        self.slide_next = true;
-        let id = drag.id.clone();
-        let task = if rel.format == "checkbox" {
-            api::note::set_field(&id, &rel.key, Value::bool(col.id == "true"), cx)
-        } else if rel.format == "status" {
-            if col.id.is_empty() {
-                api::note::delete_field(&id, &rel.key, cx)
-            } else {
-                api::note::set_field(
-                    &id,
-                    &rel.key,
-                    Value::values(vec![Value::string(&col.id)]),
-                    cx,
-                )
-            }
-        } else {
-            // Multi-select: leave other memberships intact (Anytype board semantics).
-            let mut vals: Vec<String> = Self::values_of(&rel, row)
-                .into_iter()
-                .filter(|v| *v != drag.from)
-                .collect();
-            if !col.id.is_empty() && !vals.contains(&col.id) {
-                vals.push(col.id.clone());
-            }
-            if vals.is_empty() {
-                api::note::delete_field(&id, &rel.key, cx)
-            } else {
-                api::note::set_field(
-                    &id,
-                    &rel.key,
-                    Value::values(vals.into_iter().map(Value::string).collect()),
-                    cx,
-                )
-            }
-        };
-        cx.spawn(async move |this, cx| {
-            let _ = task.await;
-            let _ = this.update(cx, |this, cx| {
-                this.load(cx);
-                cx.emit(ViewMsg::Changed);
-            });
-        })
-        .detach();
-    }
-
-    fn open_menu(
-        &mut self,
-        id: String,
-        position: Point<Pixels>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let menu = cx.new(|cx| {
-            RowContextMenu::new(
-                position,
-                vec![id],
-                String::new(),
-                self.collection.clone(),
-                Vec::new(),
-                Default::default(),
-                window,
-                cx,
-            )
-        });
-        cx.subscribe(&menu, |this, _, event: &MenuEvent, cx| {
-            match event {
-                MenuEvent::Close => this.ctx_menu = None,
-                MenuEvent::Changed => this.load(cx),
-            }
-            cx.notify();
-        })
-        .detach();
-        self.ctx_menu = Some(menu);
-        cx.notify();
+    /// Escape: the board has nothing of its own to close (its row menu
+    /// lives on the data view, which closes it; Escape cancels a card drag
+    /// by itself).
+    pub(crate) fn dismiss(&mut self) -> bool {
+        false
     }
 }
 
+fn kanban<'a>(s: &'a State, id: &str) -> Option<&'a Kanban> {
+    match &dv(s, id)?.active {
+        Some(Active::Kanban(k)) => Some(k),
+        _ => None,
+    }
+}
+
+fn kanban_mut<'a>(s: &'a mut State, id: &str) -> Option<&'a mut Kanban> {
+    match &mut dv_mut(s, id)?.active {
+        Some(Active::Kanban(k)) => Some(k),
+        _ => None,
+    }
+}
+
+pub(crate) fn set_input(s: &mut State, id: &str, input: ViewInput) {
+    let Some(k) = kanban_mut(s, id) else { return };
+    if input != k.input {
+        k.input = input;
+        load(s, id);
+    }
+}
+
+pub(crate) fn load(s: &mut State, id: &str) {
+    let Some(k) = kanban_mut(s, id) else { return };
+    let Some(body) = k.input.body.clone() else {
+        return;
+    };
+    k.generation += 1;
+    let generation = k.generation;
+    let sorts = common::view_sorts_json(&k.input.sorts);
+    let task = api::query(engine_body(&body, json!({ "sorts": sorts })), s);
+    let view = id.to_string();
+    s.rt.spawn(async move |cx| {
+        let Ok(res) = task.await else { return };
+        cx.update(|s| {
+            if let Some(k) = kanban_mut(s, &view)
+                && k.generation == generation
+            {
+                k.rows = res.records;
+                k.cards_slide =
+                    std::mem::take(&mut k.slide_next) && k.rows.len() <= SLIDE_MAX_CARDS;
+            }
+        });
+    })
+    .detach();
+}
+
+/// The relation the board groups by.
+fn rel_of(s: &State, id: &str) -> Option<RelationDef> {
+    let object = s.store.object(id)?;
+    let relations = common::scoped_relations(s, &object);
+    let key = config::group_key(&object.fields);
+    relations.into_iter().find(|r| r.key == key)
+}
+
+fn columns(rel: &RelationDef) -> Vec<Column> {
+    if rel.format == "checkbox" {
+        return vec![
+            Column {
+                id: "false".into(),
+                name: "Not done".into(),
+                color: String::new(),
+            },
+            Column {
+                id: "true".into(),
+                name: "Done".into(),
+                color: String::new(),
+            },
+        ];
+    }
+    let mut out: Vec<Column> = rel
+        .options
+        .iter()
+        .map(|o| Column {
+            id: o.text.clone(),
+            name: o.text.clone(),
+            color: o.color.clone(),
+        })
+        .collect();
+    out.push(Column {
+        id: String::new(),
+        name: format!(
+            "No {}",
+            if rel.name.is_empty() {
+                &rel.key
+            } else {
+                &rel.name
+            }
+        ),
+        color: String::new(),
+    });
+    out
+}
+
+fn values_of(rel: &RelationDef, r: &QueryRow) -> Vec<String> {
+    let Some(v) = r.fields.get(&rel.key) else {
+        return Vec::new();
+    };
+    if rel.format == "checkbox" {
+        return vec![if v.bool_value == Some(true) {
+            "true".into()
+        } else {
+            "false".into()
+        }];
+    }
+    if let Some(s) = &v.string_value {
+        return if s.is_empty() {
+            vec![]
+        } else {
+            vec![s.clone()]
+        };
+    }
+    v.items()
+        .iter()
+        .filter_map(|i| i.string_value.clone())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+fn cards_for<'a>(rows: &'a [QueryRow], rel: &RelationDef, col: &Column) -> Vec<&'a QueryRow> {
+    rows.iter()
+        .filter(|r| {
+            let vals = values_of(rel, r);
+            if rel.format == "checkbox" {
+                return vals.first() == Some(&col.id) || (col.id == "false" && vals.is_empty());
+            }
+            if col.id.is_empty() {
+                vals.is_empty()
+            } else {
+                vals.contains(&col.id)
+            }
+        })
+        .collect()
+}
+
+/// The board column under a window point, from the rects last laid out.
+fn column_at(s: &State, id: &str, x: f32, y: f32) -> Option<Column> {
+    let k = kanban(s, id)?;
+    let rel = rel_of(s, id)?;
+    columns(&rel).into_iter().find(|c| {
+        k.col_rects
+            .get(&c.id)
+            .is_some_and(|r| common::inside(*r, x, y))
+    })
+}
+
+/// A press, drag and release on a card: a press released without travel
+/// opens the record; past the threshold the card drags (the column under
+/// the pointer lights up) and a release over another column moves it there.
+fn card_drag(s: &mut State, id: &str, card: &CardRef, d: &Drag) {
+    let [x, y] = d.window_point();
+    match d.phase {
+        Phase::Down => {}
+        Phase::Move => {
+            let over = column_at(s, id, x, y).map(|c| c.id);
+            let Some(k) = kanban_mut(s, id) else { return };
+            match &mut k.drag {
+                Some(drag) => drag.at = [x, y],
+                None if d.dx.hypot(d.dy) > DRAG_THRESHOLD => {
+                    k.drag = Some(CardDrag {
+                        card: card.clone(),
+                        at: [x, y],
+                        grab: [d.start_x, d.start_y],
+                    });
+                }
+                None => return,
+            }
+            if k.drop_col != over {
+                k.drop_col = over;
+            }
+        }
+        Phase::Up => {
+            let Some(k) = kanban_mut(s, id) else { return };
+            k.drop_col = None;
+            if k.drag.take().is_none() {
+                let inside = d.x >= 0. && d.y >= 0. && d.x <= d.w && d.y <= d.h;
+                if !d.cancelled() && inside {
+                    common::open_object(&card.id, s);
+                }
+                return;
+            }
+            if d.cancelled() {
+                return;
+            }
+            if let Some(col) = column_at(s, id, x, y) {
+                drop_on(s, id, card, &col);
+            }
+        }
+    }
+}
+
+fn drop_on(s: &mut State, view: &str, drag: &CardRef, col: &Column) {
+    let Some(rel) = rel_of(s, view) else { return };
+    if drag.from == col.id {
+        return;
+    }
+    let Some(k) = kanban_mut(s, view) else { return };
+    let Some(row) = k.rows.iter().find(|r| r.id == drag.id) else {
+        return;
+    };
+    let current = values_of(&rel, row);
+    k.slide_next = true;
+    let id = drag.id.as_str();
+    let task = if rel.format == "checkbox" {
+        api::note::set_field(id, &rel.key, Value::bool(col.id == "true"), s)
+    } else if rel.format == "status" {
+        if col.id.is_empty() {
+            api::note::delete_field(id, &rel.key, s)
+        } else {
+            api::note::set_field(id, &rel.key, Value::values(vec![Value::string(&col.id)]), s)
+        }
+    } else {
+        // Multi-select: leave other memberships intact (Anytype board semantics).
+        let mut vals: Vec<String> = current.into_iter().filter(|v| *v != drag.from).collect();
+        if !col.id.is_empty() && !vals.contains(&col.id) {
+            vals.push(col.id.clone());
+        }
+        if vals.is_empty() {
+            api::note::delete_field(id, &rel.key, s)
+        } else {
+            api::note::set_field(
+                id,
+                &rel.key,
+                Value::values(vals.into_iter().map(Value::string).collect()),
+                s,
+            )
+        }
+    };
+    let view = view.to_string();
+    s.rt.spawn(async move |cx| {
+        let _ = task.await;
+        cx.update(|s| load(s, &view));
+    })
+    .detach();
+}
+
 /// The CSS named colour a palette name resolves to in the browser (`ice` is not one).
-fn css_named_color(name: &str) -> Option<Hsla> {
+fn css_named_color(name: &str) -> Option<Color> {
     let value = match name {
         "grey" => 0x808080,
         "yellow" => 0xffff00,
@@ -356,174 +342,181 @@ fn css_named_color(name: &str) -> Option<Hsla> {
         "lime" => 0x00ff00,
         _ => return None,
     };
-    Some(rgb(value).into())
+    Some(rgb(value))
 }
 
-impl Render for KanbanView {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let Some(rel) = self.rel(cx) else {
-            return common::empty_state(
-                "Pick a property to group by (a status, tag, or checkbox).",
-                13.,
-            )
-            .into_any_element();
-        };
-        let mut board = div()
-            .id("board")
-            .flex()
-            .items_start()
-            .gap(px(10.))
-            .overflow_x_scroll()
-            .pt(px(4.))
-            .pb(px(16.));
-        // Each column builds only the cards in, or a window's height around,
-        // the window (the page scrolls the board, and each frame of it built
-        // every card); spacers keep the columns' heights.
-        let pitch = self.pitch.get().max(1.);
-        let view_h = f32::from(window.viewport_size().height);
-        let cards_top = self.board_top.get() + 4. + 8. + HEAD_H;
-        for col in Self::columns(&rel) {
-            let cards = self.cards_for(&rel, &col);
-            let n = cards.len();
-            let first = (((-view_h - cards_top) / pitch).floor().max(0.) as usize).min(n);
-            let last = ((((2. * view_h - cards_top) / pitch).ceil().max(0.)) as usize).clamp(first, n);
-            let pitch_cell = self.pitch.clone();
-            let over = self.drop_col.as_deref() == Some(col.id.as_str());
-            // The web sets `color: <option colour name>`: the browser reads it as a CSS colour.
-            let color = css_named_color(&col.color);
-            let col_id = col.id.clone();
-            let col_drop = col.clone();
-            let mut column = div()
-                .on_children_prepainted(move |bounds, _, _| {
-                    // Children: the header, the top spacer, the drawn cards, ...
-                    let drawn = bounds.get(2..2 + (last - first)).unwrap_or(&[]);
-                    if let (Some(a), Some(b)) = (drawn.first(), drawn.last())
-                        && drawn.len() > 1
-                    {
-                        pitch_cell.set(f32::from(b.top() - a.top()) / (drawn.len() - 1) as f32);
-                    }
-                })
-                .id(SharedString::from(format!("col-{}", col.id)))
-                .flex_none()
-                .w(px(236.))
-                .min_h(px(96.))
-                .flex()
-                .flex_col()
-                .gap(px(6.))
-                .p(px(8.))
-                .rounded(px(12.))
-                .bg(theme::hl_light())
-                .border_1()
-                .border_color(if over {
-                    theme::accent()
-                } else {
-                    transparent_black()
-                })
-                .on_drag_move(
-                    cx.listener(move |this, e: &DragMoveEvent<CardDrag>, _, cx| {
-                        let inside = e.bounds.contains(&e.event.position);
-                        if inside && this.drop_col.as_deref() != Some(col_id.as_str()) {
-                            this.drop_col = Some(col_id.clone());
-                            cx.notify();
-                        } else if !inside && this.drop_col.as_deref() == Some(col_id.as_str()) {
-                            this.drop_col = None;
-                            cx.notify();
-                        }
-                    }),
-                )
-                .on_drop(cx.listener(move |this, drag: &CardDrag, _, cx| {
-                    this.drop_on(drag, col_drop.clone(), cx)
-                }))
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .justify_between()
-                        .px(px(4.))
-                        .pb(px(4.))
-                        .child(
-                            div()
-                                .text_size(px(12.))
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .when_some(color, |d, c| d.text_color(c))
-                                .child(col.name.clone()),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(11.))
-                                .text_color(theme::muted())
-                                .child(cards.len().to_string()),
-                        ),
-                );
-            let empty = cards.is_empty();
-            // The gap after the spacer stands in for the hidden cards' last one.
-            column = column.child(div().flex_none().h(px((pitch * first as f32 - 6.).max(0.))));
-            for r in &cards[first..last] {
-                let icon = common::row_icon(r, cx);
-                let name = common::row_name(r);
-                let id = r.id.clone();
-                let id2 = r.id.clone();
-                let drag = CardDrag {
-                    id: r.id.clone(),
-                    from: col.id.clone(),
-                    name: name.clone(),
-                    icon: icon.clone(),
-                };
-                let card = card_body(&icon, name)
-                    .id(SharedString::from(format!("card-{}-{}", col.id, r.id)))
-                    .cursor_grab()
-                    .hover(|s| s.border_color(theme::accent()))
-                    .on_drag(drag, |d, _, _, cx| cx.new(|_| d.clone()))
-                    .on_click(move |_, _, cx| common::open_object(&id, cx))
-                    .on_mouse_down(
-                        MouseButton::Right,
-                        cx.listener(move |this, e: &MouseDownEvent, window, cx| {
-                            this.open_menu(id2.clone(), e.position, window, cx)
-                        }),
-                    );
-                // After a drop the cards below the moved one slide up (or
-                // down) to their places; the moved card lands at once.
-                column = column.child(
-                    self.cards_layout
-                        .position(
-                            SharedString::from(format!("card-pos-{}-{}", col.id, r.id)),
-                            card,
-                        )
-                        .enabled(self.cards_slide)
-                        .transition(motion::CONTROL.transition()),
-                );
-            }
-            column = column.child(div().flex_none().h(px((pitch * (n - last) as f32 - 6.).max(0.))));
-            if empty {
-                column = column.child(
-                    div()
-                        .text_center()
-                        .text_size(px(12.))
-                        .text_color(theme::muted())
-                        .p(px(6.))
-                        .child("—"),
-                );
-            }
-            board = board.child(column);
-        }
-        let board_top = self.board_top.clone();
-        let board = board.child(
-            canvas(move |bounds, _, _| board_top.set(f32::from(bounds.top())), |_, _, _, _| {})
-                .absolute()
-                .size_full(),
+fn card_body(s: &State, t: &Theme, icon: &str, name: &str) -> El {
+    row()
+        .center_y()
+        .gap(8.)
+        .fill(t.panel)
+        .border(1., t.border)
+        .border_layout()
+        .radius(8.)
+        .px(10.)
+        .py(8.)
+        .child(common::icon(s, icon, ty::ui(13.)))
+        .child(
+            text(name.to_string())
+                .font(ty::ui(13.))
+                .color(t.fg)
+                .truncate()
+                .shrink(),
+        )
+}
+
+/// The board of the data view `v`; a dragged card follows the pointer in `layer`.
+pub(crate) fn view(
+    s: &State,
+    cx: &mut Cx<State>,
+    t: &Theme,
+    layer: &mut Vec<El>,
+    v: &DataView,
+) -> El {
+    let Some(Active::Kanban(k)) = &v.active else {
+        return el();
+    };
+    let Some(rel) = rel_of(s, &v.id) else {
+        return common::empty_state(
+            t,
+            "Pick a property to group by (a status, tag, or checkbox).",
+            13.,
         );
-        // Cards measure their slides from the board: the page moving it slides nothing.
-        let board = self
-            .cards_layout
-            .position("board-layout", board)
-            .enabled(false);
-        div().child(board).into_any_element()
+    };
+    let id = v.id.clone();
+    let board_key = format!("{id}/board");
+    let mut board = row()
+        .key(board_key.clone())
+        .items_start()
+        .gap(10.)
+        .scroll_x()
+        .pt(4.)
+        .pb(16.);
+    // Each column builds only the cards in, or a window's height around,
+    // the window (the page scrolls the board, and each frame of it built
+    // every card); spacers keep the columns' heights. The board's top is
+    // read in 256pt bands (the view re-runs when it crosses one, well inside
+    // the window's margin), the distance from one card to the next from the
+    // first card drawn.
+    let probe = format!("{id}/kprobe");
+    let pitch = cx
+        .layout_with(&probe, |r| r[3] + 6.)
+        .unwrap_or(PITCH_GUESS)
+        .max(1.);
+    let view_h = cx.layout_with("kit-root", |r| r[3]).unwrap_or(0.);
+    let band = cx
+        .window_layout_with(&board_key, |r| (r[1] / 256.0).floor() as i32)
+        .unwrap_or(0);
+    let cards_top = band as f32 * 256.0 + 4. + 8. + HEAD_H;
+    let mut probed = false;
+    for group in columns(&rel) {
+        let cards = cards_for(&k.rows, &rel, &group);
+        let n = cards.len();
+        let first = (((-view_h - cards_top) / pitch).floor().max(0.) as usize).min(n);
+        let last = ((((2. * view_h - cards_top) / pitch).ceil().max(0.)) as usize).clamp(first, n);
+        let over = k.drop_col.as_deref() == Some(group.id.as_str());
+        // The web sets `color: <option colour name>`: the browser reads it as a CSS colour.
+        let color = css_named_color(&group.color).unwrap_or(t.fg);
+        let (layout_view, layout_col) = (id.clone(), group.id.clone());
+        let mut column = col()
+            .key(format!("{id}/col-{}", group.id))
+            .w(236.)
+            .min_h(96.)
+            .items_stretch()
+            .gap(6.)
+            .padding(8.)
+            .radius(12.)
+            .fill(t.hl_light)
+            .border(1., if over { t.accent } else { Color::TRANSPARENT })
+            .border_layout()
+            .on_layout_tx(move |s: &mut State, r: [f32; 4], tx: &mut Tx| {
+                if let Some(k) = kanban_mut(s, &layout_view) {
+                    k.col_rects.insert(layout_col.clone(), r);
+                }
+                tx.live_only();
+            })
+            .child(
+                row()
+                    .center_y()
+                    .justify_between()
+                    .px(4.)
+                    .pb(4.)
+                    .child(
+                        text(group.name.clone())
+                            .font(ty::ui(12.).semibold())
+                            .color(color),
+                    )
+                    .child(text(n.to_string()).font(ty::ui(11.)).color(t.muted)),
+            );
+        // The gap after the spacer stands in for the hidden cards' last one.
+        column = column.child(el().h((pitch * first as f32 - 6.).max(0.)));
+        for r in &cards[first..last] {
+            let card = CardRef {
+                id: r.id.clone(),
+                from: group.id.clone(),
+                name: common::row_name(r),
+                icon: common::row_icon(s, r),
+            };
+            // The first card drawn on the board measures the pitch.
+            let key = if probed {
+                format!("{id}/card-{}-{}", group.id, r.id)
+            } else {
+                probed = true;
+                probe.clone()
+            };
+            let (drag_view, menu_view, menu_id) = (id.clone(), id.clone(), r.id.clone());
+            let mut card_el = card_body(s, t, &card.icon, &card.name)
+                .key(key)
+                .cursor(Cursor::Grab)
+                .hover_group()
+                .child(hover_border(8., t.accent))
+                .on_drag(move |s: &mut State, d: &mut Drag, _: &mut Tx| {
+                    card_drag(s, &drag_view, &card, d)
+                })
+                .on_secondary_press(move |s: &mut State, p: PointerPress, _: &mut Tx| {
+                    context_menu::open(
+                        s,
+                        &menu_view,
+                        vec![menu_id.clone()],
+                        (p.x, p.y),
+                        HashMap::new(),
+                        Vec::new(),
+                    )
+                })
+                // A card moved to another column is a new card there: it
+                // lands at once.
+                .transition(Transition::none());
+            // After a drop the cards below the moved one slide up (or down)
+            // to their places; any other refresh snaps.
+            card_el = if k.cards_slide {
+                card_el.motion(motion::CONTROL.spring())
+            } else {
+                card_el.instant_changes()
+            };
+            column = column.child(card_el);
+        }
+        column = column.child(el().h((pitch * (n - last) as f32 - 6.).max(0.)));
+        if n == 0 {
+            column = column.child(
+                row()
+                    .justify_center()
+                    .padding(6.)
+                    .child(text("—").font(ty::ui(12.)).color(t.muted)),
+            );
+        }
+        board = board.child(column);
     }
-}
-
-impl KanbanView {
-    /// The open row menu; the data view paints it above everything.
-    pub(crate) fn ctx_menu(&self) -> Option<Entity<RowContextMenu>> {
-        self.ctx_menu.clone()
+    if let Some(drag) = &k.drag {
+        // The drag preview: the card at 204px, under the pointer where it was grabbed.
+        layer.push(
+            card_body(s, t, &drag.card.icon, &drag.card.name)
+                .w(204.)
+                .opacity(0.9)
+                .box_shadow(shadow::drag())
+                .absolute(drag.at[0] - drag.grab[0], drag.at[1] - drag.grab[1])
+                .transition(Transition::none())
+                .a11y_hidden(),
+        );
     }
+    col().child(board)
 }

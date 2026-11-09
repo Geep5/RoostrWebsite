@@ -2,26 +2,25 @@
 //! (`PropertyFlow.svelte`): 1. the current properties with visibility
 //! switches and "Add property"; 2. filter / pick an existing property or a
 //! format to create; 3. Name + Type (custom format submenu) + Create.
+//!
+//! The host keeps the flow's state while it is open and places the panel; the
+//! panel pushes its own outside-press scrim into `layer`.
 
-use std::cell::Cell;
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 
-use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::input::{Escape, InputEvent, InputState};
-use gpui_kit::component::label::Label;
-use gpui_kit::component::list::ListItem;
-use gpui_kit::component::separator::Separator;
-use gpui_kit::component::switch::Switch;
-use gpui_kit::component::{Icon, Sizable as _};
-use gpui_kit::prelude::FluentBuilder as _;
-use gpui_kit::*;
 use roostr_core::relations::{create_relation, is_reserved_key, space_relations};
-use roostr_core::ui::{disabled as ui_disabled, prop_icon};
-use roostr_core::{Glyph, RelationDef, Store, motion, theme};
+use roostr_core::{RelationDef, State};
+use roostr_ui::overlay::dismissable;
+use roostr_ui::ty::Weights as _;
+use roostr_ui::{
+    Button, Glyph, Input, InputState, ListItem, Switch, Theme, color, disabled as ui_disabled,
+    glyph, motion, prop_icon, radius, ty,
+};
+use rune::{Align, Cx, El, Key, KeyEvent, ScrollSpec, Side, Tx, col, el, row, text};
 
 use crate::credentials::{COOKIE_META, is_secret_field};
-use crate::type_limit::{TypeLimitPicker, toggled};
-use crate::widgets::{FieldSkin, empty_note, field, pop_shadow, rule};
+use crate::type_limit::{toggled, type_limit_picker};
+use crate::widgets::{FieldSkin, Lens, empty_note, field, lens, pop_shadow, rule};
 
 /// A stage-1 row: a current/available property and its toggle state.
 #[derive(Clone, Debug, PartialEq)]
@@ -43,6 +42,8 @@ pub enum FlowEvent {
     /// Escape from the list, a press outside, or done.
     Close,
 }
+
+type EventFn = Rc<dyn Fn(&mut State, FlowEvent)>;
 
 /// Anytype getRelationTypes order, mapped to our formats.
 const FORMATS: &[(&str, &str)] = &[
@@ -90,98 +91,56 @@ fn is_system(key: &str) -> bool {
     SYSTEM_KEYS.contains(&key) || is_secret_field(key)
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Stage {
     List,
     Suggest,
     Edit,
 }
 
-/// The cascading add-property popover (table "+" column).
-pub struct PropertyFlow {
+/// The add-property flow's state, kept by the host while the flow is open.
+#[derive(Clone)]
+pub struct PropertyFlowState {
     items: Vec<FlowItem>,
     exclude: Vec<String>,
     space_id: String,
     stage: Stage,
-    query: Entity<InputState>,
-    name: Entity<InputState>,
+    query: InputState,
+    name: InputState,
     edit_format: Option<String>,
     format_menu: bool,
     edit_types: Vec<String>,
-    /// Where the format submenu painted (it hangs outside the flow's own bounds).
-    menu_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
-    _subs: Vec<Subscription>,
+    /// Dropped with the host's state: a create answering after the flow closed stays quiet.
+    alive: Rc<()>,
 }
 
-impl EventEmitter<FlowEvent> for PropertyFlow {}
-
-impl PropertyFlow {
+impl PropertyFlowState {
     /// `items`: stage-1 rows; `exclude`: keys this surface covers another way.
-    pub fn new(
-        items: Vec<FlowItem>,
-        exclude: Vec<String>,
-        space_id: String,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Self {
-        let query = cx.new(|cx| InputState::new(window, cx).placeholder("Filter or create…"));
-        let name = cx.new(|cx| InputState::new(window, cx).placeholder("Property name"));
-        let subs = vec![
-            cx.subscribe_in(
-                &query,
-                window,
-                |this, _, ev: &InputEvent, window, cx| match ev {
-                    InputEvent::Change => cx.notify(),
-                    InputEvent::PressEnter { .. } => {
-                        let (library, _, can_create) = this.sections(cx);
-                        if let Some(first) = library.into_iter().next() {
-                            this.add(first, cx);
-                        } else if can_create {
-                            let q = this.query.read(cx).value().trim().to_string();
-                            this.open_edit(q, None, window, cx);
-                        }
-                    }
-                    _ => {}
-                },
-            ),
-            cx.subscribe_in(
-                &name,
-                window,
-                |this, _, ev: &InputEvent, window, cx| match ev {
-                    InputEvent::Change => cx.notify(),
-                    InputEvent::PressEnter { .. } => this.submit(window, cx),
-                    _ => {}
-                },
-            ),
-            cx.observe(&Store::global(cx), |_, _, cx| cx.notify()),
-        ];
+    pub fn new(items: Vec<FlowItem>, exclude: Vec<String>, space_id: String) -> Self {
         Self {
             items,
             exclude,
             space_id,
             stage: Stage::List,
-            query,
-            name,
+            query: InputState::new(),
+            name: InputState::new(),
             edit_format: None,
             format_menu: false,
             edit_types: vec![],
-            menu_bounds: Rc::new(Cell::new(None)),
-            _subs: subs,
+            alive: Rc::new(()),
         }
     }
 
     /// The host's rows changed (a switch was applied).
-    pub fn set_items(&mut self, items: Vec<FlowItem>, cx: &mut Context<Self>) {
+    pub fn set_items(&mut self, items: Vec<FlowItem>) {
         if self.items != items {
             self.items = items;
-            cx.notify();
         }
     }
 
     /// (my properties, system properties, can create) for the current filter.
-    fn sections(&self, cx: &App) -> (Vec<RelationDef>, Vec<RelationDef>, bool) {
-        let store = Store::global(cx).read(cx);
-        let q = self.query.read(cx).value().trim().to_lowercase();
+    fn sections(&self, relations: &[RelationDef]) -> (Vec<RelationDef>, Vec<RelationDef>, bool) {
+        let q = self.query.value().trim().to_lowercase();
         let label = |r: &RelationDef| {
             if r.name.is_empty() {
                 r.key.clone()
@@ -189,7 +148,7 @@ impl PropertyFlow {
                 r.name.clone()
             }
         };
-        let all: Vec<RelationDef> = space_relations(&store.relations, &self.space_id)
+        let all: Vec<RelationDef> = space_relations(relations, &self.space_id)
             .into_iter()
             .filter(|r| {
                 !r.hidden
@@ -209,442 +168,530 @@ impl PropertyFlow {
         (library, system, !q.is_empty() && !exact)
     }
 
-    fn add(&mut self, rel: RelationDef, cx: &mut Context<Self>) {
-        cx.emit(FlowEvent::Add(rel));
-        cx.emit(FlowEvent::Close);
-    }
-
-    fn set_stage(&mut self, stage: Stage, window: &mut Window, cx: &mut Context<Self>) {
+    fn set_stage(&mut self, stage: Stage) {
         self.stage = stage;
         match stage {
-            Stage::Suggest => self.query.update(cx, |s, cx| s.focus(window, cx)),
-            Stage::Edit => self.name.update(cx, |s, cx| s.focus(window, cx)),
+            Stage::Suggest => self.query.focus(),
+            Stage::Edit => self.name.focus(),
             Stage::List => {}
         }
-        cx.notify();
     }
 
-    fn open_edit(
-        &mut self,
-        name: String,
-        format: Option<&str>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.name.update(cx, |s, cx| s.set_value(name, window, cx));
+    fn open_edit(&mut self, name: String, format: Option<&str>) {
+        self.name.set_value(name);
         self.edit_format = format.map(str::to_string);
         self.format_menu = false;
-        self.set_stage(Stage::Edit, window, cx);
+        self.set_stage(Stage::Edit);
+    }
+}
+
+/// The flow's handlers: its state and the host's event sink.
+#[derive(Clone)]
+struct Hooks {
+    lens: Lens<PropertyFlowState>,
+    on_event: Option<EventFn>,
+}
+
+impl Hooks {
+    fn emit(&self, s: &mut State, ev: FlowEvent) {
+        if let Some(f) = &self.on_event {
+            f(s, ev);
+        }
     }
 
-    fn submit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let name = self.name.read(cx).value().trim().to_string();
-        let Some(format) = self.edit_format.clone() else {
+    fn add(&self, s: &mut State, rel: RelationDef) {
+        self.emit(s, FlowEvent::Add(rel));
+        self.emit(s, FlowEvent::Close);
+    }
+
+    fn escape(&self, s: &mut State) {
+        let st = (self.lens)(s);
+        match st.stage {
+            Stage::Edit => st.set_stage(Stage::Suggest),
+            Stage::Suggest => st.set_stage(Stage::List),
+            Stage::List => self.emit(s, FlowEvent::Close),
+        }
+    }
+
+    /// Enter in the filter: the first of my properties, else create the query.
+    fn enter_query(&self, s: &mut State) {
+        let st = (self.lens)(s).clone();
+        let (library, _, can_create) = st.sections(&s.store.relations);
+        if let Some(first) = library.into_iter().next() {
+            self.add(s, first);
+        } else if can_create {
+            let q = st.query.value().trim().to_string();
+            (self.lens)(s).open_edit(q, None);
+        }
+    }
+
+    fn submit(&self, s: &mut State) {
+        let st = (self.lens)(s);
+        let name = st.name.value().trim().to_string();
+        let Some(format) = st.edit_format.clone() else {
             return;
         };
         if name.is_empty() {
             return;
         }
-        let task = create_relation(&name, &format, &self.edit_types, &self.space_id, cx);
-        cx.spawn_in(window, async move |this, cx| match task.await {
+        let (types, space) = (st.edit_types.clone(), st.space_id.clone());
+        let alive: Weak<()> = Rc::downgrade(&st.alive);
+        let task = create_relation(&name, &format, &types, &space, s);
+        let hooks = self.clone();
+        s.rt.spawn(async move |cx| match task.await {
             Ok(rel) => {
-                let _ = this.update(cx, |this, cx| this.add(rel, cx));
+                if alive.upgrade().is_some() {
+                    cx.update(|s| hooks.add(s, rel));
+                }
             }
             Err(error) => log::error!("create property: {error:#}"),
         })
         .detach();
     }
 
-    fn escape(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        match self.stage {
-            Stage::Edit => self.set_stage(Stage::Suggest, window, cx),
-            Stage::Suggest => self.set_stage(Stage::List, window, cx),
-            Stage::List => cx.emit(FlowEvent::Close),
+    /// Escape in a field steps back; the field keeps every other key.
+    fn field_key(&self) -> impl Fn(&mut State, &KeyEvent, &mut Tx) -> bool + 'static {
+        let h = self.clone();
+        move |s: &mut State, ev: &KeyEvent, _: &mut Tx| {
+            if ev.key == Key::Escape {
+                h.escape(s);
+                true
+            } else {
+                false
+            }
         }
     }
 }
 
 /// A flow list row (kit `ListItem`): 13px, 8px glyph gap, list hover.
-fn row(id: impl Into<ElementId>) -> ListItem {
-    ListItem::new(id)
-        .px(px(8.))
-        .py(px(5.))
-        .rounded(theme::radius::sm())
-        .text_size(px(13.))
-        .text_color(theme::fg())
+fn flow_row(t: &Theme, key: impl Into<String>) -> ListItem {
+    ListItem::new(key)
+        .px(8.0)
+        .py(5.0)
+        .radius(radius::SM)
+        .text_size(13.0)
+        .text_color(t.fg)
 }
 
 /// A row's content: the 18px glyph column, name, then any trailing marks.
-fn line() -> Div {
-    div().flex().items_center().gap(px(8.)).w_full().min_w_0()
+fn line() -> El {
+    row().center_y().gap(8.0).grow(1.0).shrink().min_w(0.0)
 }
 
 /// The 18px glyph column: the property's emoji, else its format's line icon.
-fn glyph(emoji: Option<String>, format: Option<&str>) -> Div {
-    let col = div().flex_none().w(px(18.)).flex().justify_center();
+fn lead(t: &Theme, emoji: Option<String>, format: Option<&str>) -> El {
+    let col_ = el().w(18.0).center();
     match emoji {
-        Some(e) => col.text_color(theme::fg()).child(e),
-        None => col
-            .text_color(theme::muted())
-            .child(Icon::new(format.map_or(Glyph::PropText, prop_icon)).size(px(14.))),
+        Some(e) => col_.child(text(e).font(ty::ui(13.0)).color(t.fg)),
+        None => col_.child(glyph(format.map_or(Glyph::PropText, prop_icon), 14.0).color(t.muted)),
     }
 }
 
-fn r_name(text: impl Into<SharedString>) -> Div {
-    div()
-        .flex_1()
-        .min_w_0()
-        .overflow_hidden()
-        .whitespace_nowrap()
-        .text_ellipsis()
-        .text_left()
-        .child(text.into())
+fn r_name(t: &Theme, name: impl Into<String>) -> El {
+    text(name.into())
+        .font(ty::ui(13.0))
+        .color(t.fg)
+        .truncate()
+        .grow(1.0)
+        .shrink()
+        .min_w(0.0)
 }
 
-fn chevron() -> Icon {
-    Icon::new(Glyph::ChevronRight)
-        .size(px(14.))
-        .text_color(theme::muted())
+fn chevron(t: &Theme) -> El {
+    glyph(Glyph::ChevronRight, 14.0).color(t.muted)
 }
 
-fn sep() -> Separator {
-    rule().flex_none().my(px(4.))
+fn sep(t: &Theme) -> El {
+    el().w_full().py(4.0).child(rule(t))
 }
 
-fn section(text: &'static str) -> Label {
-    Label::new(text)
-        .px(px(8.))
-        .pt(px(4.))
-        .pb(px(2.))
-        .text_size(px(11.))
-        .text_color(theme::muted())
+fn section(t: &Theme, label: &'static str) -> El {
+    el().px(8.0)
+        .pt(4.0)
+        .pb(2.0)
+        .child(text(label).font(ty::ui(11.0)).color(t.muted))
 }
 
-/// Anytype's switch as the kit `Switch` (small: 28×16 track, 12px knob).
-/// The track recolours over Roostr's 150ms control tween: the checked colour
-/// is mixed from the motion keyed `switch-knob-{key}`, so turning on fades in
-/// as before; the knob's travel is the kit's spring.
-fn switch(key: &str, on: bool, window: &mut Window, cx: &mut App) -> Switch {
-    let p = motion::progress(
-        SharedString::from(format!("switch-knob-{key}")),
-        on,
-        motion::CONTROL,
-        window,
-        cx,
-    );
-    Switch::new(SharedString::from(format!("switch-{key}")))
+/// Anytype's switch as the kit `Switch` (small: 28×16 track, 12px knob); the
+/// track recolours to the accent over Rune's colour motion.
+fn switch(t: &Theme, key: &str, on: bool) -> Switch {
+    Switch::new(format!("switch-{key}"))
         .checked(on)
         .small()
         .tab_stop(false)
-        .color(motion::mix(theme::hover(), theme::accent(), p))
-        .flex_none()
+        .color(t.accent)
 }
 
-impl Render for PropertyFlow {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let mut flow = div()
-            .id("property-flow")
-            .w(px(300.))
-            .max_h(px(420.))
-            .flex()
-            .flex_col()
-            .gap(px(4.))
-            .bg(theme::panel())
-            .border_1()
-            .border_color(theme::border())
-            .rounded(theme::radius::menu())
-            .p(px(8.))
-            .shadow(pop_shadow())
-            .text_color(theme::fg())
-            .occlude()
-            .on_mouse_down_out(cx.listener(|this, ev: &MouseDownEvent, _, cx| {
-                if this.format_menu
-                    && this
-                        .menu_bounds
-                        .get()
-                        .is_some_and(|b| b.contains(&ev.position))
-                {
-                    return;
-                }
-                cx.emit(FlowEvent::Close)
-            }))
-            .capture_action(cx.listener(|this, _: &Escape, window, cx| {
-                cx.stop_propagation();
-                this.escape(window, cx);
-            }))
-            .on_key_down(cx.listener(|this, ev: &KeyDownEvent, window, cx| {
-                if ev.keystroke.key == "escape" {
-                    cx.stop_propagation();
-                    this.escape(window, cx);
-                }
-            }));
-        match self.stage {
+/// The cascading add-property popover (table "+" column).
+pub struct PropertyFlow {
+    key: String,
+    state: PropertyFlowState,
+    lens: Option<Lens<PropertyFlowState>>,
+    on_event: Option<EventFn>,
+}
+
+impl PropertyFlow {
+    pub fn new(key: impl Into<String>, state: &PropertyFlowState) -> Self {
+        Self {
+            key: key.into(),
+            state: state.clone(),
+            lens: None,
+            on_event: None,
+        }
+    }
+
+    /// Where the host keeps this flow's state.
+    pub fn on_state(
+        mut self,
+        f: impl for<'a> Fn(&'a mut State) -> &'a mut PropertyFlowState + 'static,
+    ) -> Self {
+        self.lens = Some(lens(f));
+        self
+    }
+
+    /// Toggle / Add (then Close) / Close; the host closes the flow on Close.
+    pub fn on_event(mut self, f: impl Fn(&mut State, FlowEvent) + 'static) -> Self {
+        self.on_event = Some(Rc::new(f));
+        self
+    }
+
+    pub fn build(self, s: &State, _cx: &mut Cx<State>, t: &Theme, layer: &mut Vec<El>) -> El {
+        let key = self.key.clone();
+        let st = &self.state;
+        let hooks = self.lens.clone().map(|lens| Hooks {
+            lens,
+            on_event: self.on_event.clone(),
+        });
+        // Every handler goes through the host's lens; without one the flow only draws.
+        let on = |e: El, f: Box<dyn Fn(&Hooks, &mut State)>| match &hooks {
+            Some(h) => {
+                let h = h.clone();
+                e.on_press(move |s: &mut State| f(&h, s))
+            }
+            None => e,
+        };
+        let mut flow = col()
+            .key(key.clone())
+            .w(300.0)
+            .max_h(420.0)
+            .min_h(0.0)
+            .gap(4.0)
+            .fill(t.panel)
+            .border(1.0, t.border)
+            .radius(radius::MENU)
+            .padding(8.0)
+            .box_shadow(pop_shadow())
+            .items_stretch();
+        let mut menu = None;
+        match st.stage {
             Stage::List => {
-                let mut list = div()
-                    .id("flow-list")
-                    .flex()
-                    .flex_col()
-                    .gap(px(1.))
-                    .overflow_y_scroll();
-                for it in &self.items {
-                    let key = it.key.clone();
-                    let on = it.on;
-                    list = list.child(
-                        row(SharedString::from(format!("item-{}", it.key))).child(
-                            line()
-                                .child(glyph(it.emoji.clone(), Some(&it.format)))
-                                .child(r_name(it.name.clone()))
-                                .child(switch(&it.key, on, window, cx).on_click(cx.listener(
-                                    move |_, next: &bool, _, cx| {
-                                        cx.emit(FlowEvent::Toggle(key.clone(), *next))
-                                    },
-                                ))),
-                        ),
+                let mut list = col()
+                    .key("flow-list")
+                    .gap(1.0)
+                    .min_h(0.0)
+                    .shrink()
+                    .scroll(ScrollSpec {
+                        stick_bottom: false,
+                    })
+                    .items_stretch();
+                let mut rows = col().gap(1.0).items_stretch();
+                for it in &st.items {
+                    let mut sw = switch(t, &it.key, it.on);
+                    if let Some(h) = &hooks {
+                        let (h, k) = (h.clone(), it.key.clone());
+                        sw = sw.on_change(move |s: &mut State, next: bool| {
+                            h.emit(s, FlowEvent::Toggle(k.clone(), next))
+                        });
+                    }
+                    rows = rows.child(
+                        flow_row(t, format!("item-{}", it.key))
+                            .child(
+                                line()
+                                    .child(lead(t, it.emoji.clone(), Some(&it.format)))
+                                    .child(r_name(t, it.name.clone()))
+                                    .child(sw.build(t)),
+                            )
+                            .build(t),
                     );
                 }
-                if self.items.is_empty() {
-                    list = list.child(
-                        empty_note("No properties yet.")
-                            .px(px(8.))
-                            .py(px(4.))
-                            .text_size(px(12.)),
-                    );
+                if st.items.is_empty() {
+                    rows = rows.child(el().px(8.0).py(4.0).child(empty_note(
+                        t,
+                        "No properties yet.",
+                        12.0,
+                    )));
                 }
-                flow = flow.child(list).child(sep()).child(
-                    Button::new("add-row")
-                        .ghost()
-                        .w_full()
-                        .justify_start()
-                        .px(px(8.))
-                        .py(px(6.))
-                        .h_auto()
-                        .rounded(theme::radius::sm())
-                        .text_color(theme::fg())
-                        .tab_stop(false)
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.set_stage(Stage::Suggest, window, cx)
-                        }))
-                        // The kit's inner label box forces 14px and centres:
-                        // the row's 13px and left alignment live on the child.
-                        .child(
-                            line()
-                                .text_size(px(13.))
-                                .child(Icon::new(Glyph::Plus).size(px(14.)))
-                                .child("Add property"),
-                        ),
-                );
+                list = list.child(rows);
+                let mut add = Button::new("add-row")
+                    .ghost()
+                    .h_auto()
+                    .px(8.0)
+                    .py(6.0)
+                    .radius(radius::SM)
+                    .text_color(t.fg)
+                    .child(
+                        line()
+                            .child(glyph(Glyph::Plus, 14.0).color(t.fg))
+                            .child(text("Add property").font(ty::ui(13.0)).color(t.fg)),
+                    );
+                if let Some(h) = &hooks {
+                    let h = h.clone();
+                    add = add.on_press(move |s: &mut State| (h.lens)(s).set_stage(Stage::Suggest));
+                }
+                flow = flow.child(list).child(sep(t)).child(add.build(t));
             }
             Stage::Suggest => {
-                let (library, system, can_create) = self.sections(cx);
-                let q = self.query.read(cx).value().trim().to_string();
+                let (library, system, can_create) = st.sections(&s.store.relations);
+                let q = st.query.value().trim().to_string();
                 let ql = q.to_lowercase();
                 let formats: Vec<_> = FORMATS
                     .iter()
                     .filter(|f| ql.is_empty() || f.1.to_lowercase().contains(&ql))
                     .collect();
-                flow = flow.child(field(&self.query, FieldSkin::Filter, window, cx));
-                let mut scroll = div()
-                    .id("flow-scroll")
-                    .flex()
-                    .flex_col()
-                    .gap(px(1.))
-                    .min_h_0()
-                    .overflow_y_scroll();
-                let rel_row = |rel: &RelationDef, cx: &mut Context<Self>| {
+                let mut input =
+                    Input::new("flow-query", &st.query).placeholder("Filter or create…");
+                if let Some(h) = &hooks {
+                    let (l, h1) = (h.lens.clone(), h.clone());
+                    input = input
+                        .on_edit(move |s: &mut State| &mut l(s).query)
+                        .on_submit(move |s: &mut State, _: &mut Tx| h1.enter_query(s))
+                        .on_key(h.field_key());
+                }
+                flow = flow.child(field(t, input, st.query.is_focused(), FieldSkin::Filter));
+                let mut scroll = col()
+                    .key("flow-scroll")
+                    .gap(1.0)
+                    .min_h(0.0)
+                    .shrink()
+                    .scroll(ScrollSpec {
+                        stick_bottom: false,
+                    })
+                    .items_stretch();
+                let rel_row = |rel: &RelationDef| {
                     let r = rel.clone();
                     let emoji = rel.icon_emoji.clone().filter(|e| !e.is_empty());
-                    row(SharedString::from(format!("rel-{}", rel.key)))
-                        .on_click(cx.listener(move |this, _, _, cx| this.add(r.clone(), cx)))
-                        .child(line().child(glyph(emoji, Some(&rel.format))).child(r_name(
-                            if rel.name.is_empty() {
-                                rel.key.clone()
-                            } else {
-                                rel.name.clone()
-                            },
-                        )))
+                    let name = if rel.name.is_empty() {
+                        rel.key.clone()
+                    } else {
+                        rel.name.clone()
+                    };
+                    let item = flow_row(t, format!("rel-{}", rel.key))
+                        .child(
+                            line()
+                                .child(lead(t, emoji, Some(&rel.format)))
+                                .child(r_name(t, name)),
+                        )
+                        .build(t);
+                    on(item, Box::new(move |h, s| h.add(s, r.clone())))
                 };
                 if !library.is_empty() {
-                    scroll = scroll.child(section("My properties"));
+                    scroll = scroll.child(section(t, "My properties"));
                     for rel in &library {
-                        scroll = scroll.child(rel_row(rel, cx));
+                        scroll = scroll.child(rel_row(rel));
                     }
                 }
                 if !system.is_empty() {
                     if !library.is_empty() {
-                        scroll = scroll.child(sep());
+                        scroll = scroll.child(sep(t));
                     }
-                    scroll = scroll.child(section("System properties"));
+                    scroll = scroll.child(section(t, "System properties"));
                     for rel in &system {
-                        scroll = scroll.child(rel_row(rel, cx));
+                        scroll = scroll.child(rel_row(rel));
                     }
                 }
                 if can_create || !formats.is_empty() {
                     if !library.is_empty() || !system.is_empty() {
-                        scroll = scroll.child(sep());
+                        scroll = scroll.child(sep(t));
                     }
-                    scroll = scroll.child(section("Create new"));
+                    scroll = scroll.child(section(t, "Create new"));
                     if can_create {
                         let name = q.clone();
-                        scroll = scroll.child(
-                            row("create")
-                                .text_color(theme::accent())
-                                .on_click(cx.listener(move |this, _, window, cx| {
-                                    this.open_edit(name.clone(), None, window, cx)
-                                }))
-                                .child(format!("＋ Create property “{q}”")),
-                        );
+                        let item = flow_row(t, "create")
+                            .text_color(t.accent)
+                            .label(format!("＋ Create property “{q}”"))
+                            .build(t);
+                        scroll = scroll.child(on(
+                            item,
+                            Box::new(move |h, s| (h.lens)(s).open_edit(name.clone(), None)),
+                        ));
                     }
                     for f in formats {
                         let name = q.clone();
                         let id = f.0;
-                        scroll = scroll.child(
-                            row(SharedString::from(format!("fmt-{id}")))
-                                .on_click(cx.listener(move |this, _, window, cx| {
-                                    this.open_edit(name.clone(), Some(id), window, cx)
-                                }))
-                                .child(
-                                    line()
-                                        .child(glyph(None, Some(id)))
-                                        .child(r_name(f.1))
-                                        .child(chevron()),
-                                ),
-                        );
+                        let item = flow_row(t, format!("fmt-{id}"))
+                            .child(
+                                line()
+                                    .child(lead(t, None, Some(id)))
+                                    .child(r_name(t, f.1))
+                                    .child(chevron(t)),
+                            )
+                            .build(t);
+                        scroll = scroll.child(on(
+                            item,
+                            Box::new(move |h, s| (h.lens)(s).open_edit(name.clone(), Some(id))),
+                        ));
                     }
                 }
                 flow = flow.child(scroll);
             }
             Stage::Edit => {
-                let fmt = self.edit_format.clone();
-                let label = |t: &'static str| {
-                    Label::new(t)
-                        .px(px(2.))
-                        .pt(px(2.))
-                        .text_size(px(11.))
-                        .text_color(theme::muted())
+                let fmt = st.edit_format.clone();
+                let label = |l: &'static str| {
+                    el().px(2.0)
+                        .pt(2.0)
+                        .child(text(l).font(ty::ui(11.0)).color(t.muted))
                 };
-                let mut type_wrap = div().relative().child(
-                    Button::new("type-row")
-                        .outline()
-                        .w_full()
-                        .h(px(30.))
-                        .px(px(8.))
-                        .justify_start()
-                        .rounded(theme::radius::md())
-                        .border_color(theme::border())
-                        .text_color(theme::fg())
-                        .tab_stop(false)
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.format_menu = !this.format_menu;
-                            cx.notify();
-                        }))
-                        .child(
-                            line()
-                                .text_size(px(13.))
-                                .child(glyph(None, fmt.as_deref()))
-                                .child(r_name(fmt.as_deref().map_or_else(
+                let type_row = Button::new("type-row")
+                    .outline()
+                    .h(30.0)
+                    .px(8.0)
+                    .radius(radius::MD)
+                    .border_color(t.border)
+                    .text_color(t.fg)
+                    .child(
+                        line()
+                            .child(lead(t, None, fmt.as_deref()))
+                            .child(r_name(
+                                t,
+                                fmt.as_deref().map_or_else(
                                     || "Select property type".to_string(),
                                     format_name,
-                                )))
-                                .child(chevron()),
-                        ),
-                );
-                if self.format_menu {
-                    let mut menu = div()
-                        .id("type-menu")
-                        .w(px(282.))
-                        .max_h(px(240.))
-                        .overflow_y_scroll()
-                        .bg(theme::panel())
-                        .border_1()
-                        .border_color(theme::border())
-                        .rounded(theme::radius::menu())
-                        .p(px(4.))
-                        .shadow(pop_shadow())
-                        .occlude()
-                        .child({
-                            let cell = self.menu_bounds.clone();
-                            canvas(move |b, _, _| cell.set(Some(b)), |_, _, _, _| {})
-                                .absolute()
-                                .top_0()
-                                .left_0()
-                                .size_full()
-                        });
+                                ),
+                            ))
+                            .child(chevron(t)),
+                    );
+                let type_row = match &hooks {
+                    Some(h) => {
+                        let h = h.clone();
+                        type_row.on_press(move |s: &mut State| {
+                            let st = (h.lens)(s);
+                            st.format_menu = !st.format_menu;
+                        })
+                    }
+                    None => type_row,
+                };
+                if st.format_menu {
+                    let mut m = col()
+                        .key("type-menu")
+                        .w(282.0)
+                        .max_h(240.0)
+                        .min_h(0.0)
+                        .scroll(ScrollSpec {
+                            stick_bottom: false,
+                        })
+                        .fill(t.panel)
+                        .border(1.0, t.border)
+                        .radius(radius::MENU)
+                        .padding(4.0)
+                        .box_shadow(pop_shadow())
+                        .items_stretch();
+                    let mut rows = col().items_stretch();
                     for f in FORMATS {
                         let active = fmt.as_deref() == Some(f.0);
                         let id = f.0;
-                        menu = menu.child(
-                            row(SharedString::from(format!("menu-{id}")))
-                                .when(active, |d| d.bg(theme::hl_med()))
-                                .check_icon(Icon::new(Glyph::Check))
-                                .confirmed(active)
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.edit_format = Some(id.to_string());
-                                    this.format_menu = false;
-                                    cx.notify();
-                                }))
-                                .child(line().child(glyph(None, Some(id))).child(r_name(f.1))),
-                        );
+                        let item = flow_row(t, format!("menu-{id}"))
+                            .check_icon(Glyph::Check)
+                            .confirmed(active)
+                            .child(line().child(lead(t, None, Some(id))).child(r_name(t, f.1)))
+                            .build(t);
+                        let item = if active { item.fill(t.hl_med) } else { item };
+                        rows = rows.child(on(
+                            item,
+                            Box::new(move |h, s| {
+                                let st = (h.lens)(s);
+                                st.edit_format = Some(id.to_string());
+                                st.format_menu = false;
+                            }),
+                        ));
                     }
-                    let menu =
-                        motion::appear_frame("type-menu-appear", -4., window, cx).apply(menu);
-                    type_wrap = type_wrap.child(
-                        div().absolute().left_0().top(px(34.)).child(
-                            deferred(anchored().snap_to_window_with_margin(px(8.)).child(menu))
-                                .with_priority(3),
-                        ),
+                    m = m.child(rows);
+                    // Hangs under the Type button, above the rest of the form (the
+                    // flow's last child); presses on it stay inside the flow.
+                    menu = Some(
+                        m.anchored(format!("{key}/type-row"), Side::Bottom, Align::Start, 4.0)
+                            .transition(motion::appear(-4.0))
+                            .instant_changes(),
                     );
                 }
-                let disabled = self.name.read(cx).value().trim().is_empty() || fmt.is_none();
-                let mut form = div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(6.))
+                let disabled = st.name.value().trim().is_empty() || fmt.is_none();
+                let mut name = Input::new("flow-name", &st.name).placeholder("Property name");
+                if let Some(h) = &hooks {
+                    let (l, h1) = (h.lens.clone(), h.clone());
+                    name = name
+                        .on_edit(move |s: &mut State| &mut l(s).name)
+                        .on_submit(move |s: &mut State, _: &mut Tx| h1.submit(s))
+                        .on_key(h.field_key());
+                }
+                let mut form = col()
+                    .gap(6.0)
+                    .items_stretch()
                     .child(label("Name"))
-                    .child(field(&self.name, FieldSkin::Filter, window, cx))
+                    .child(field(t, name, st.name.is_focused(), FieldSkin::Filter))
                     .child(label("Type"))
-                    .child(type_wrap);
+                    .child(type_row.build(t));
                 if fmt.as_deref() == Some("object") {
-                    let entity = cx.entity().downgrade();
-                    form = form.child(TypeLimitPicker::new(
-                        "limit",
-                        self.edit_types.clone(),
-                        self.space_id.clone(),
-                        move |id, _, cx| {
-                            let _ = entity.update(cx, |this, cx| {
-                                this.edit_types = toggled(&this.edit_types, id);
-                                cx.notify();
-                            });
-                        },
+                    let toggle: Rc<dyn Fn(&mut State, &str)> = match &hooks {
+                        Some(h) => {
+                            let l = h.lens.clone();
+                            Rc::new(move |s: &mut State, id: &str| {
+                                let st = l(s);
+                                st.edit_types = toggled(&st.edit_types, id);
+                            })
+                        }
+                        None => Rc::new(|_: &mut State, _: &str| {}),
+                    };
+                    form = form.child(type_limit_picker(
+                        s,
+                        t,
+                        "type-limit",
+                        &st.edit_types,
+                        &st.space_id,
+                        toggle,
                     ));
                 }
-                form = form.child(
-                    ui_disabled(
-                        Button::new("submit")
-                            .primary()
-                            .accessibility_label("Create")
-                            .w_full()
-                            .h(px(32.))
-                            .mt(px(4.))
-                            .rounded(theme::radius::md())
-                            .cursor_pointer()
-                            .on_click(cx.listener(|this, _, window, cx| this.submit(window, cx)))
-                            // Text styles on the child: the kit's label box
-                            // ignores them on the root.
-                            .child(
-                                div()
-                                    .text_size(px(13.))
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(rgb(0x14161a))
-                                    .child("Create"),
-                            ),
-                        disabled,
-                    )
-                    .when(disabled, |b| b.opacity(0.4)),
-                );
+                let mut submit = Button::new("submit")
+                    .primary()
+                    .accessibility_label("Create")
+                    .h(32.0)
+                    .radius(radius::MD)
+                    .pointer()
+                    .child(
+                        text("Create")
+                            .font(ty::ui(13.0).semibold())
+                            .color(color::rgb(0x14161a)),
+                    );
+                if let Some(h) = &hooks {
+                    let h = h.clone();
+                    submit = submit.on_press(move |s: &mut State| h.submit(s));
+                }
+                let submit = ui_disabled(submit, disabled).build(t);
+                let submit = if disabled {
+                    submit.opacity(0.4)
+                } else {
+                    submit
+                };
+                form = form.child(col().items_stretch().pt(4.0).child(submit));
                 flow = flow.child(form);
             }
         }
+        if let Some(m) = menu {
+            flow = flow.child(m);
+        }
         // The popover drops in as it opens; it takes keys from its first frame.
-        motion::appear_frame("property-flow-appear", -4., window, cx).apply(flow)
+        let flow = flow.transition(motion::appear(-4.0));
+        let close = hooks.clone();
+        let flow = dismissable(
+            flow,
+            &key,
+            move |s: &mut State| {
+                if let Some(h) = &close {
+                    h.emit(s, FlowEvent::Close)
+                }
+            },
+            layer,
+        );
+        // Escape with no field focused (the list): the modal's close above; in a field the
+        // field's own key handler steps back first.
+        flow
     }
 }

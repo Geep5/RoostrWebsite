@@ -1,140 +1,89 @@
 //! Gallery view (GalleryView.svelte): a responsive grid of cards, each with
 //! icon + name and the view's visible relation values as compact cells.
 
-use std::cell::Cell;
-use std::rc::Rc;
+use std::collections::HashMap;
 
-use gpui_kit::component::Icon;
-use gpui_kit::prelude::FluentBuilder as _;
-use gpui_kit::*;
 use roostr_core::dates::{DateStyle, show_date_with};
-use roostr_core::options::badge_colors;
-use roostr_core::{QueryRow, RelationDef, api, theme};
+use roostr_core::{QueryRow, RelationDef, State, api};
 use roostr_properties::{CredentialCell, credential_cell_badge, reconnect_target};
+use roostr_ui::tags::badge_colors;
+use roostr_ui::ty::Weights as _;
+use roostr_ui::{Theme, glyph, ty};
+use rune::{Cursor, Cx, El, PointerPress, Tx, col, el, row, text};
 use serde_json::json;
 
-use crate::common::{self, cached_object, engine_body, tag_pill};
-use crate::config;
-use crate::context_menu::{MenuEvent, RowContextMenu};
+use crate::common::{self, engine_body, tag_pill};
 use crate::views::ViewInput;
+use crate::{Active, DataView, config, context_menu, dv_mut};
 
 const CARD_MIN: f32 = 180.;
 const GAP: f32 = 10.;
 
-pub(crate) struct GalleryView {
-    object_id: String,
-    input: ViewInput,
-    rows: Vec<QueryRow>,
-    generation: u64,
-    ctx_menu: Option<Entity<RowContextMenu>>,
-    collection: Option<String>,
-    /// The grid's width last frame (auto-fill columns).
-    width: Rc<Cell<Pixels>>,
-    columns: usize,
-    /// The grid's top (window y) and a line of cards' height, gap included,
-    /// last frame: only the lines in and near the window are built.
-    top: Rc<Cell<f32>>,
-    line_h: Rc<Cell<f32>>,
-}
-
 /// A line of cards' height before one is drawn (a card's 100px minimum + gap).
 const LINE_H_GUESS: f32 = 110.;
 
-impl GalleryView {
-    pub(crate) fn new(
-        object_id: String,
-        collection: Option<String>,
-        input: ViewInput,
-        cx: &mut Context<Self>,
-    ) -> Self {
-        let mut this = Self {
-            object_id,
+pub(crate) struct Gallery {
+    input: ViewInput,
+    rows: Vec<QueryRow>,
+    generation: u64,
+}
+
+impl Gallery {
+    pub(crate) fn new(input: ViewInput) -> Self {
+        Self {
             input,
             rows: Vec::new(),
             generation: 0,
-            ctx_menu: None,
-            collection,
-            width: Rc::new(Cell::new(px(0.))),
-            columns: 4,
-            top: Rc::new(Cell::new(0.)),
-            line_h: Rc::new(Cell::new(LINE_H_GUESS)),
-        };
-        this.load(cx);
-        this
-    }
-
-    pub(crate) fn set_input(&mut self, input: ViewInput, cx: &mut Context<Self>) {
-        if input != self.input {
-            self.input = input;
-            self.load(cx);
         }
-    }
-
-    pub(crate) fn load(&mut self, cx: &mut Context<Self>) {
-        let Some(body) = self.input.body.clone() else {
-            return;
-        };
-        self.generation += 1;
-        let generation = self.generation;
-        let task = api::query(
-            engine_body(
-                &body,
-                json!({"sorts": common::view_sorts_json(&self.input.sorts)}),
-            ),
-            cx,
-        );
-        cx.spawn(async move |this, cx| {
-            let Ok(res) = task.await else { return };
-            let _ = this.update(cx, |this, cx| {
-                if this.generation == generation {
-                    this.rows = res.records;
-                    cx.notify();
-                }
-            });
-        })
-        .detach();
     }
 
     pub(crate) fn row_ids(&self) -> impl Iterator<Item = &str> {
         self.rows.iter().map(|r| r.id.as_str())
     }
 
-    /// Escape: close the context menu.
-    pub(crate) fn dismiss(&mut self, cx: &mut Context<Self>) {
-        self.ctx_menu = None;
-        cx.notify();
+    /// Escape: the gallery has nothing of its own to close (its row menu
+    /// lives on the data view, which closes it).
+    pub(crate) fn dismiss(&mut self) -> bool {
+        false
     }
+}
 
-    fn open_menu(
-        &mut self,
-        id: String,
-        position: Point<Pixels>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let menu = cx.new(|cx| {
-            RowContextMenu::new(
-                position,
-                vec![id],
-                String::new(),
-                self.collection.clone(),
-                Vec::new(),
-                Default::default(),
-                window,
-                cx,
-            )
-        });
-        cx.subscribe(&menu, |this, _, event: &MenuEvent, cx| {
-            match event {
-                MenuEvent::Close => this.ctx_menu = None,
-                MenuEvent::Changed => this.load(cx),
-            }
-            cx.notify();
-        })
-        .detach();
-        self.ctx_menu = Some(menu);
-        cx.notify();
+fn gallery_mut<'a>(s: &'a mut State, id: &str) -> Option<&'a mut Gallery> {
+    match &mut dv_mut(s, id)?.active {
+        Some(Active::Gallery(g)) => Some(g),
+        _ => None,
     }
+}
+
+pub(crate) fn set_input(s: &mut State, id: &str, input: ViewInput) {
+    let Some(g) = gallery_mut(s, id) else { return };
+    if input != g.input {
+        g.input = input;
+        load(s, id);
+    }
+}
+
+pub(crate) fn load(s: &mut State, id: &str) {
+    let Some(g) = gallery_mut(s, id) else { return };
+    let Some(body) = g.input.body.clone() else {
+        return;
+    };
+    g.generation += 1;
+    let generation = g.generation;
+    let sorts = common::view_sorts_json(&g.input.sorts);
+    let task = api::query(engine_body(&body, json!({ "sorts": sorts })), s);
+    let view = id.to_string();
+    s.rt.spawn(async move |cx| {
+        let Ok(res) = task.await else { return };
+        cx.update(|s| {
+            if let Some(g) = gallery_mut(s, &view)
+                && g.generation == generation
+            {
+                g.rows = res.records;
+            }
+        });
+    })
+    .detach();
 }
 
 fn cell_text(r: &QueryRow, rel: &RelationDef) -> String {
@@ -178,225 +127,223 @@ pub(crate) fn js_number_string(f: f64) -> String {
     }
 }
 
-impl Render for GalleryView {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let Some(object) = cached_object(&self.object_id, cx) else {
-            return div().into_any_element();
-        };
-        let relations = common::scoped_relations(&object, cx);
-        // The view's visible relations (same list the table shows), name excluded.
-        let visible: Vec<RelationDef> = config::visible_keys(&object.fields)
-            .iter()
-            .filter_map(|k| relations.iter().find(|r| r.key == *k).cloned())
-            .collect();
-
-        // CSS grid `repeat(auto-fill, minmax(180px, 1fr))`.
-        let w = f32::from(self.width.get());
-        let cols = if w > 0. {
-            (((w + GAP) / (CARD_MIN + GAP)).floor() as usize).max(1)
-        } else {
-            self.columns
-        };
-        if cols != self.columns {
-            self.columns = cols;
-        }
-        let width_cell = self.width.clone();
-        let top_cell = self.top.clone();
-        let entity = cx.entity().downgrade();
-        let measure = canvas(
-            move |bounds, _, cx| {
-                top_cell.set(f32::from(bounds.top()));
-                if width_cell.get() != bounds.size.width {
-                    width_cell.set(bounds.size.width);
-                    let entity = entity.clone();
-                    cx.defer(move |cx| {
-                        let _ = entity.update(cx, |_, cx| cx.notify());
-                    });
-                }
-            },
-            |_, _, _, _| {},
-        )
-        .absolute()
-        .top_0()
-        .left_0()
-        .size_full();
-        // Lines of `cols` cards (the CSS grid's rows): only those in, or a
-        // window's height around, the window are built - the page scrolls the
-        // gallery, and each frame of it built every card. Spacers keep the
-        // gallery's full height.
-        let lines = self.rows.len().div_ceil(cols);
-        let line_h = self.line_h.get().max(1.);
-        let (first, last) = {
-            let view_h = f32::from(window.viewport_size().height);
-            let top = self.top.get() + 4.;
-            let first = (((-view_h - top) / line_h).floor().max(0.) as usize).min(lines);
-            let last = ((((2. * view_h - top) / line_h).ceil().max(0.)) as usize).clamp(first, lines);
-            (first, last)
-        };
-        let line_h_cell = self.line_h.clone();
-        let mut grid = div()
-            .flex()
-            .flex_col()
-            .pt(px(4.))
-            .pb(px(24.))
-            .on_children_prepainted(move |bounds, _, _| {
-                // Children: the top spacer, the drawn lines, the bottom spacer.
-                let drawn = bounds.get(1..1 + (last - first)).unwrap_or(&[]);
-                if !drawn.is_empty() {
-                    let h = drawn.iter().map(|b| f32::from(b.size.height)).sum::<f32>();
-                    line_h_cell.set(h / drawn.len() as f32);
-                }
-            })
-            .child(div().flex_none().h(px(line_h * first as f32)));
-        let mut line = div().flex().gap(px(GAP)).pb(px(GAP));
-        let mut in_line = 0;
-        let end = (last * cols).min(self.rows.len());
-        for r in &self.rows[first * cols..end] {
-            let id = r.id.clone();
-            let id2 = r.id.clone();
-            let mut card = div()
-                .id(SharedString::from(format!("gcard-{}", r.id)))
-                .flex()
-                .flex_col()
-                .items_start()
-                .gap(px(6.))
-                .min_w_0()
-                .min_h(px(100.))
-                .p(px(12.))
-                .rounded(px(12.))
-                .bg(theme::hl_light())
-                .border_1()
-                .border_color(theme::border())
-                .text_color(theme::fg())
-                .cursor_pointer()
-                .hover(|s| s.border_color(theme::accent()))
-                .on_click(move |_, _, cx| common::open_object(&id, cx))
-                .on_mouse_down(
-                    MouseButton::Right,
-                    cx.listener(move |this, e: &MouseDownEvent, window, cx| {
-                        this.open_menu(id2.clone(), e.position, window, cx)
-                    }),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(8.))
-                        .w_full()
-                        .child(div().flex_none().child(common::row_icon(r, cx)))
-                        .child(
-                            div()
-                                .min_w_0()
-                                .text_size(px(14.))
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .overflow_hidden()
-                                .text_ellipsis()
-                                .whitespace_nowrap()
-                                .child(common::row_name(r)),
-                        ),
-                );
-            for rel in &visible {
-                let t = cell_text(r, rel);
-                let target = reconnect_target(r, &rel.key);
-                let cell = || {
-                    div()
-                        .flex()
-                        .flex_wrap()
-                        .gap(px(4.))
-                        .max_w_full()
-                        .overflow_hidden()
-                        .text_size(px(12.))
-                        .text_color(theme::muted())
-                };
-                if let Some(target) = target.clone()
-                    && r.type_key == "credential"
-                    && rel.key == "status"
-                {
-                    let (text, glyph, color) = credential_cell_badge(r, cx);
-                    let colors = badge_colors(color);
-                    let name = common::row_name(r);
-                    card = card.child(
-                        cell().child(
-                            CredentialCell::new(
-                                SharedString::from(format!("gcred-{}", r.id)),
-                                r.clone(),
-                                target,
-                                format!("Reconnect {name}: {text}").into(),
-                            )
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap(px(4.))
-                                    .text_color(colors.fg)
-                                    .child(Icon::new(glyph).size(px(13.)).text_color(colors.icon))
-                                    .child(text),
-                            ),
-                        ),
-                    );
-                } else if let Some(target) = target
-                    && rel.key == "error"
-                {
-                    card = card.child(
-                        cell().child(
-                            CredentialCell::new(
-                                SharedString::from(format!("gerr-{}", r.id)),
-                                r.clone(),
-                                target,
-                                format!("Reconnect: {t}").into(),
-                            )
-                            .child(t.clone()),
-                        ),
-                    );
-                } else if !t.is_empty() {
-                    if rel.format == "tag" || rel.format == "status" {
-                        let mut c = cell();
-                        for tg in t.split(", ") {
-                            let color = rel
-                                .options
-                                .iter()
-                                .find(|o| o.text == tg)
-                                .map(|o| o.color.clone())
-                                .unwrap_or_default();
-                            c = c.child(tag_pill(tg.to_string(), &color, true, theme::muted()));
-                        }
-                        card = card.child(c);
-                    } else {
-                        card = card.child(cell().child(t));
-                    }
-                }
-            }
-            line = line.child(div().flex_1().min_w_0().flex().child(card.flex_1()));
-            in_line += 1;
-            if in_line == cols {
-                grid = grid.child(std::mem::replace(&mut line, div().flex().gap(px(GAP)).pb(px(GAP))));
-                in_line = 0;
-            }
-        }
-        if in_line > 0 {
-            // A short last line keeps the columns' width.
-            for _ in in_line..cols {
-                line = line.child(div().flex_1().min_w_0());
-            }
-            grid = grid.child(line);
-        }
-        grid = grid.child(div().flex_none().h(px(line_h * (lines - last) as f32)));
-        let empty = self.rows.is_empty();
-        div()
-            .relative()
-            .w_full()
-            .child(measure)
-            .child(grid)
-            .when(empty, |d| {
-                d.child(common::empty_state("No objects match.", 13.))
-            })
-            .into_any_element()
-    }
+/// A 1px `color` ring over a card's border that shows while the card (the
+/// nearest hover group) is hovered: CSS `:hover { border-color }` (Rune's
+/// `hover` is a fill overlay). For a card with a 1px layout border and
+/// corner `radius`.
+pub(crate) fn hover_border(radius: f32, color: rune::Color) -> El {
+    el().pin(Some(-1.0), Some(-1.0), Some(-1.0), Some(-1.0))
+        .radius(radius)
+        .border(1.0, color)
+        .group_opacity(0.0, 1.0)
+        .a11y_hidden()
 }
 
-impl GalleryView {
-    /// The open row menu; the data view paints it above everything.
-    pub(crate) fn ctx_menu(&self) -> Option<Entity<RowContextMenu>> {
-        self.ctx_menu.clone()
+/// The gallery of the data view `v`: lines of cards, only those in or a
+/// window's height around the window built.
+pub(crate) fn view(
+    s: &State,
+    cx: &mut Cx<State>,
+    t: &Theme,
+    layer: &mut Vec<El>,
+    v: &DataView,
+) -> El {
+    let Some(Active::Gallery(g)) = &v.active else {
+        return el();
+    };
+    let Some(object) = s.store.object(&v.id) else {
+        return el();
+    };
+    let id = v.id.clone();
+    let relations = common::scoped_relations(s, &object);
+    // The view's visible relations (same list the table shows), name excluded.
+    let visible: Vec<&RelationDef> = config::visible_keys(&object.fields)
+        .iter()
+        .filter_map(|k| relations.iter().find(|r| r.key == *k))
+        .collect();
+
+    let key = format!("{id}/gallery");
+    // CSS grid `repeat(auto-fill, minmax(180px, 1fr))`: the view re-runs only
+    // when the column count changes.
+    let cols = cx
+        .layout_with(&key, |r| {
+            (((r[2] + GAP) / (CARD_MIN + GAP)).floor() as usize).max(1)
+        })
+        .unwrap_or(4);
+    // Lines of `cols` cards (the CSS grid's rows): only those in, or a
+    // window's height around, the window are built - the page scrolls the
+    // gallery, and each frame of it built every card. Spacers keep the
+    // gallery's full height. The gallery's top is read in 256pt bands (the
+    // view re-runs when it crosses one, well inside the window's margin), a
+    // line's height from the first line drawn.
+    let probe = format!("{id}/gline-first");
+    let rows = &g.rows;
+    let lines = rows.len().div_ceil(cols);
+    let line_h = cx
+        .layout_with(&probe, |r| r[3])
+        .unwrap_or(LINE_H_GUESS)
+        .max(1.);
+    let (first, last) = {
+        let view_h = cx.layout_with("kit-root", |r| r[3]).unwrap_or(0.);
+        let band = cx
+            .window_layout_with(&key, |r| (r[1] / 256.0).floor() as i32)
+            .unwrap_or(0);
+        let top = band as f32 * 256.0 + 4.;
+        let first = (((-view_h - top) / line_h).floor().max(0.) as usize).min(lines);
+        let last = ((((2. * view_h - top) / line_h).ceil().max(0.)) as usize).clamp(first, lines);
+        (first, last)
+    };
+    let mut grid = col().pt(4.).pb(24.).child(el().h(line_h * first as f32));
+    let new_line = |index: usize| {
+        let key = if index == first {
+            probe.clone()
+        } else {
+            format!("{id}/gline-{index}")
+        };
+        row().key(key).items_stretch().gap(GAP).pb(GAP)
+    };
+    let mut line = new_line(first);
+    let mut line_index = first;
+    let mut in_line = 0;
+    let end = (last * cols).min(rows.len());
+    for r in &rows[first * cols..end] {
+        let card = card(s, cx, t, layer, &id, r, &visible);
+        line = line.child(row().grow(1.).min_w(0.).child(card.grow(1.)));
+        in_line += 1;
+        if in_line == cols {
+            line_index += 1;
+            grid = grid.child(std::mem::replace(&mut line, new_line(line_index)));
+            in_line = 0;
+        }
     }
+    if in_line > 0 {
+        // A short last line keeps the columns' width.
+        for _ in in_line..cols {
+            line = line.child(el().grow(1.).min_w(0.));
+        }
+        grid = grid.child(line);
+    }
+    grid = grid.child(el().h(line_h * (lines - last) as f32));
+    let mut out = col().key(key).w_full().child(grid);
+    if rows.is_empty() {
+        out = out.child(common::empty_state(t, "No objects match.", 13.));
+    }
+    out
+}
+
+/// One card: icon + name, then a compact cell per visible relation value.
+fn card(
+    s: &State,
+    cx: &mut Cx<State>,
+    t: &Theme,
+    layer: &mut Vec<El>,
+    view: &str,
+    r: &QueryRow,
+    visible: &[&RelationDef],
+) -> El {
+    let (open_id, menu_id) = (r.id.clone(), r.id.clone());
+    let menu_view = view.to_string();
+    let name = common::row_name(r);
+    let mut card = col()
+        .key(format!("{view}/gcard-{}", r.id))
+        .items_start()
+        .gap(6.)
+        .min_w(0.)
+        .min_h(100.)
+        .padding(12.)
+        .radius(12.)
+        .fill(t.hl_light)
+        .border(1., t.border)
+        .border_layout()
+        .cursor(Cursor::Pointer)
+        .hover_group()
+        .child(hover_border(12., t.accent))
+        .on_press(move |s: &mut State| common::open_object(&open_id, s))
+        .on_secondary_press(move |s: &mut State, p: PointerPress, _: &mut Tx| {
+            context_menu::open(
+                s,
+                &menu_view,
+                vec![menu_id.clone()],
+                (p.x, p.y),
+                HashMap::new(),
+                Vec::new(),
+            )
+        })
+        .child(
+            row()
+                .center_y()
+                .gap(8.)
+                .self_stretch()
+                .child(common::icon(s, &common::row_icon(s, r), ty::ui(14.)))
+                .child(
+                    text(name.clone())
+                        .font(ty::ui(14.).semibold())
+                        .color(t.fg)
+                        .truncate()
+                        .shrink(),
+                ),
+        );
+    for rel in visible {
+        let value = cell_text(r, rel);
+        let target = reconnect_target(r, &rel.key);
+        let cell = || row().flex_wrap().gap(4.).self_stretch().min_w(0.);
+        if let Some(target) = target.clone()
+            && r.type_key == "credential"
+            && rel.key == "status"
+        {
+            let (label, icon, color) = credential_cell_badge(r, s);
+            let colors = badge_colors(t, color);
+            card = card.child(
+                cell().child(
+                    CredentialCell::new(
+                        format!("{view}/gcred-{}", r.id),
+                        r.clone(),
+                        target,
+                        format!("Reconnect {name}: {label}"),
+                    )
+                    .child(
+                        row()
+                            .center_y()
+                            .gap(4.)
+                            .child(glyph(icon, 13.).color(colors.icon))
+                            .child(text(label).font(ty::ui(12.)).color(colors.fg)),
+                    )
+                    .build(s, cx, t, layer),
+                ),
+            );
+        } else if let Some(target) = target
+            && rel.key == "error"
+        {
+            card = card.child(
+                cell().child(
+                    CredentialCell::new(
+                        format!("{view}/gerr-{}", r.id),
+                        r.clone(),
+                        target,
+                        format!("Reconnect: {value}"),
+                    )
+                    .child(text(value.clone()).font(ty::ui(12.)).color(t.muted).wrap())
+                    .build(s, cx, t, layer),
+                ),
+            );
+        } else if !value.is_empty() {
+            if rel.format == "tag" || rel.format == "status" {
+                let mut c = cell();
+                for tg in value.split(", ") {
+                    let color = rel
+                        .options
+                        .iter()
+                        .find(|o| o.text == tg)
+                        .map(|o| o.color.as_str())
+                        .unwrap_or_default();
+                    c = c.child(tag_pill(t, tg, color, true, t.muted));
+                }
+                card = card.child(c);
+            } else {
+                card =
+                    card.child(cell().child(text(value).font(ty::ui(12.)).color(t.muted).wrap()));
+            }
+        }
+    }
+    card
 }

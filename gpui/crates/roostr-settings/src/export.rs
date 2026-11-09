@@ -13,10 +13,10 @@ use std::sync::Arc;
 #[cfg(not(target_family = "wasm"))]
 use anyhow::Context as _;
 use anyhow::Result;
-use roostr_core::io::MaybeSend;
 use roostr_core::store::query_all;
 use roostr_core::types::{Block, Object, Value};
 use roostr_core::{Backend, Fields};
+use roostr_rt::MaybeSend;
 use serde::Serialize as _;
 use serde_json::json;
 
@@ -339,7 +339,7 @@ fn download_path(dir: &Path, file: &str) -> PathBuf {
 
 /// Export every object as Markdown or JSON into one zip in the Downloads
 /// folder (a browser download on the web). Run it through
-/// [`roostr_core::io::spawn`]; `progress(done, total)` reports each
+/// `Executor::background`; `progress(done, total)` reports each
 /// prepared object. Returns the number of objects.
 pub async fn export_all(
     backend: Arc<dyn Backend>,

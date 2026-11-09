@@ -1,36 +1,25 @@
 [package]
 name = "roostr-graph"
-description = "Per-space schema/object graph"
+description = "The per-space schema graph: types as clusters of their objects, the properties they use, zoom levels, a finder and a side panel"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
 
 [dependencies]
 roostr-core.workspace = true
-gpui-kit.workspace = true
-serde.workspace = true
+roostr-rt.workspace = true
+roostr-ui.workspace = true
+rune.workspace = true
 serde_json.workspace = true
-anyhow.workspace = true
 log.workspace = true
-web-time.workspace = true
 chrono.workspace = true
-lyon = "1.0"
-image = { version = "0.25", default-features = false, features = ["png"] }
+web-time.workspace = true
 
-# Labels are laid out by Core Text in the system fonts the web uses (SF Pro,
-# SF Mono) and tessellated by lyon into world-space meshes.
-[target.'cfg(target_os = "macos")'.dependencies]
-core-text = "21.0"
-core-foundation = "0.10"
-core-graphics = "0.24"
+[dev-dependencies]
+roostr-host.workspace = true
+anyhow.workspace = true
+futures.workspace = true
+parking_lot.workspace = true
 
-# Elsewhere usvg (SVG text semantics, the version gpui renders SVGs with) lays
-# them out: in the system fonts on a desktop, in the bundled fonts in a browser.
-# resvg (gpui's own) rasterizes color-outline (COLR) emoji glyphs.
-[target.'cfg(not(target_os = "macos"))'.dependencies]
-usvg = { version = "0.46", default-features = false, features = ["text"] }
-resvg = { version = "0.46", default-features = false }
-ttf-parser = "0.25"
-
-[target.'cfg(not(any(target_os = "macos", target_family = "wasm")))'.dependencies]
-usvg = { version = "0.46", default-features = false, features = ["text", "system-fonts", "memmap-fonts"] }
+[[example]]
+name = "graph"

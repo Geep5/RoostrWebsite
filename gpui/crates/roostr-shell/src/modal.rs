@@ -1,287 +1,177 @@
 //! Small modals standing in for the web's `prompt()` / `alert()` (New space,
-//! New type, the type-key clash) and the delete-property confirmation, on
-//! gpui-kit's [`Dialog`] skinned as `.prop-del-modal` (panel, radius 12,
-//! padding 20, width min(420, vw−40), centred): [`small_dialog`].
+//! New type, the type-key clash, a failed create) and the card the
+//! delete-property confirmation shares: [`small_dialog`], skinned as
+//! `.prop-del-modal` (panel, 1px border, radius 12, padding 20, width
+//! min(420, vw−40), centred over the dim, rising 8 pt as it fades in).
 
-use std::cell::Cell;
-use std::rc::Rc;
+use roostr_core::State;
+use roostr_ui::overlay;
+use roostr_ui::{Input, InputState, Theme, motion, outline_button, radius, shadow, ty};
+use rune::{Cx, El, Key, KeyEvent, Mods, Tx, col, el, row, text};
 
-use gpui_kit::component::dialog::{
-    Dialog, DialogAction, DialogClose, DialogEntrance, DialogFooter,
-};
-use gpui_kit::component::input::{Enter, Escape, Input, InputState};
-use gpui_kit::component::{ElementExt as _, WindowExt as _};
-use gpui_kit::prelude::FluentBuilder as _;
-use gpui_kit::*;
-use roostr_core::{motion, theme, ui};
-
-actions!(roostr_shell_prompt, [Cancel, Confirm]);
-
-const CONTEXT: &str = "ShellPrompt";
-
-/// The card's height before its first layout (message, field, buttons).
-const FIRST_HEIGHT: Pixels = px(150.);
-
-pub(crate) fn init(cx: &mut App) {
-    cx.bind_keys([
-        KeyBinding::new("escape", Cancel, Some(CONTEXT)),
-        KeyBinding::new("enter", Confirm, Some(CONTEXT)),
-    ]);
+/// The open prompt or alert (one at a time; a new one replaces it).
+#[derive(Default)]
+struct Prompts {
+    open: Option<Prompt>,
+    /// The prompt's text field (shown only for a prompt).
+    input: InputState,
 }
 
-pub(crate) enum PromptEvent {
-    /// The entered text (alerts submit "").
-    Submit(String),
-    Cancel,
+struct Prompt {
+    message: String,
+    /// `prompt`: the field shows, and OK (or Enter) runs this with its text. `None`: an alert.
+    on_submit: Option<fn(&mut State, String)>,
 }
 
-/// A prompt or alert. It lives in the window's dialog layer (opened on
-/// creation, closed by its own Submit / Cancel); the entity is the state
-/// that layer renders and the event source the opener subscribes to.
-pub(crate) struct Prompt {
-    message: SharedString,
-    input: Option<Entity<InputState>>,
-    focus: FocusHandle,
-    /// The card's laid-out height, to seat it in the window's middle.
-    height: Rc<Cell<Pixels>>,
+/// `prompt(message)`: a field with Cancel / OK; OK (or Enter) calls `on_submit` with the text.
+/// Cancel, Escape and a press outside close it without calling anything.
+pub(crate) fn ask(s: &mut State, message: impl Into<String>, on_submit: fn(&mut State, String)) {
+    let prompts = s.slot::<Prompts>();
+    prompts.input = InputState::new();
+    prompts.input.focus();
+    prompts.open = Some(Prompt {
+        message: message.into(),
+        on_submit: Some(on_submit),
+    });
 }
 
-impl EventEmitter<PromptEvent> for Prompt {}
+/// `alert(message)`: the message and OK (Escape, Enter and a press outside close it too).
+pub(crate) fn alert(s: &mut State, message: impl Into<String>) {
+    s.slot::<Prompts>().open = Some(Prompt {
+        message: message.into(),
+        on_submit: None,
+    });
+}
 
-impl Prompt {
-    /// `prompt(message)`: a text field with Cancel / OK.
-    pub(crate) fn ask(
-        message: impl Into<SharedString>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Self {
-        let input = cx.new(|cx| InputState::new(window, cx));
-        Self::open(cx.weak_entity(), window, cx);
-        input.update(cx, |input, cx| input.focus(window, cx));
-        Self {
-            message: message.into(),
-            input: Some(input),
-            focus: cx.focus_handle(),
-            height: first_height(),
-        }
-    }
-
-    /// `alert(message)`: the message and OK.
-    pub(crate) fn alert(
-        message: impl Into<SharedString>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Self {
-        let focus = cx.focus_handle();
-        Self::open(cx.weak_entity(), window, cx);
-        window.focus(&focus, cx);
-        Self {
-            message: message.into(),
-            input: None,
-            focus,
-            height: first_height(),
-        }
-    }
-
-    /// Push the dialog onto the window's dialog layer; it renders `this`
-    /// (weak: the opener owns the prompt, and the prompt closes the dialog
-    /// whenever it answers).
-    fn open(this: WeakEntity<Self>, window: &mut Window, cx: &mut App) {
-        window.open_dialog(cx, move |dialog, window, cx| match this.upgrade() {
-            Some(this) => Self::dialog(&this, dialog, window, cx),
-            // Dropped without answering: take the layer down.
-            None => {
-                window.defer(cx, |window, cx| window.close_dialog(cx));
-                dialog.close_button(false)
-            }
-        });
-    }
-
-    fn submit(&mut self, cx: &mut Context<Self>) {
-        let text = self
-            .input
-            .as_ref()
-            .map(|i| i.read(cx).value().to_string())
-            .unwrap_or_default();
-        cx.emit(PromptEvent::Submit(text));
-    }
-
-    fn cancel(&mut self, cx: &mut Context<Self>) {
-        if self.input.is_some() {
-            cx.emit(PromptEvent::Cancel);
-        } else {
-            cx.emit(PromptEvent::Submit(String::new()));
-        }
-    }
-
-    /// Answer from a key: emit, then take the dialog down (the dialog's own
-    /// OK / Cancel / backdrop paths close it themselves).
-    fn answer(this: &Entity<Self>, submit: bool, window: &mut Window, cx: &mut App) {
-        this.update(cx, |this, cx| {
-            if submit {
-                this.submit(cx)
-            } else {
-                this.cancel(cx)
-            }
-        });
-        window.close_dialog(cx);
-    }
-
-    /// The card: the message, the field (prompts), Cancel (prompts) and OK.
-    /// It rises 8px into place ([`dialog_appear`]) while the layer, dim
-    /// included, fades in.
-    fn dialog(this: &Entity<Self>, dialog: Dialog, window: &mut Window, cx: &mut App) -> Dialog {
-        let prompt = this.read(cx);
-        let message = prompt.message.clone();
-        let input = prompt.input.clone();
-        let focus = prompt.focus.clone();
-        let height = prompt.height.clone();
-        let (ok, cancel) = (this.clone(), this.clone());
-        let (key_ok, key_cancel) = (this.clone(), this.clone());
-        let (enter_ok, escape_cancel) = (this.clone(), this.clone());
-        small_dialog(dialog, "prompt-appear", &height, window, cx)
-            .on_ok(move |_, _, cx| {
-                ok.update(cx, |this, cx| this.submit(cx));
-                true
-            })
-            .on_cancel(move |_, _, cx| {
-                cancel.update(cx, |this, cx| this.cancel(cx));
-                true
-            })
-            .child(
-                div()
-                    .id("prompt")
-                    .key_context(CONTEXT)
-                    .track_focus(&focus)
-                    .flex()
-                    .flex_col()
-                    .gap(px(12.))
-                    .on_action(move |_: &Cancel, window, cx| {
-                        Self::answer(&key_cancel, false, window, cx)
-                    })
-                    .on_action(move |_: &Confirm, window, cx| {
-                        Self::answer(&key_ok, true, window, cx)
-                    })
-                    .capture_action(move |_: &Enter, window, cx| {
-                        cx.stop_propagation();
-                        Self::answer(&enter_ok, true, window, cx);
-                    })
-                    .capture_action(move |_: &Escape, window, cx| {
-                        cx.stop_propagation();
-                        Self::answer(&escape_cancel, false, window, cx);
-                    })
-                    .child(
-                        div()
-                            .text_size(px(16.))
-                            .text_color(theme::fg())
-                            .child(message),
-                    )
-                    .when_some(input.clone(), |d, input| d.child(Input::new(&input)))
-                    .child(
-                        DialogFooter::new()
-                            .when(input.is_some(), |d| {
-                                d.child(
-                                    div().flex_none().child(
-                                        DialogClose::new()
-                                            .child(ui::outline_button("prompt-cancel", "Cancel")),
-                                    ),
-                                )
-                            })
-                            .child(div().flex_none().child(
-                                DialogAction::new().child(ui::outline_button("prompt-ok", "OK")),
-                            )),
-                    )
-                    .on_prepaint(track_height(height)),
-            )
+/// OK: close, then hand the field's text to the opener (an alert submits "" to nobody).
+fn submit(s: &mut State) {
+    let prompts = s.slot::<Prompts>();
+    let Some(prompt) = prompts.open.take() else {
+        return;
+    };
+    let text = prompts.input.value().to_string();
+    if let Some(f) = prompt.on_submit {
+        f(s, text);
     }
 }
 
-/// `dialog` as the small modal card, centred on its last laid-out `height`
-/// (record it with [`track_height`] on the card's body): it rises 8px into
-/// place ([`dialog_appear`] keyed `appear`) while the layer, dim included,
-/// fades in. No close button; callers add the body and handlers.
+/// Cancel / Escape / outside press: a prompt closes unanswered; an alert answers "" (closes).
+fn cancel(s: &mut State) {
+    s.slot::<Prompts>().open = None;
+}
+
+/// The small modal card's outer width: min(420, vw−40) of content plus 2×20 padding and
+/// 2×1 border (narrower windows: the window's width).
+const CARD_MAX_W: f32 = 420.0 + 42.0;
+
+/// The small modal card (`.prop-del-modal`) centred over a dim, holding `body`;
+/// `dismiss` runs on a click outside or Escape (`None`: it can't be dismissed now).
+///
+/// The card (keyed `key`) rises 8 pt into place while it fades in over `FADE`; the dim
+/// (`{key}-dim`) fades in with it. It is modal from its first frame: focus stays inside and
+/// Return presses the button marked `El::default_button()`.
 pub(crate) fn small_dialog(
-    dialog: Dialog,
-    appear: &'static str,
-    height: &Rc<Cell<Pixels>>,
-    window: &mut Window,
-    cx: &mut App,
-) -> Dialog {
-    let enter = dialog_appear(appear, window, cx);
-    let viewport = window.viewport_size();
-    // Centred like a flex-centring overlay: the card's last height (body +
-    // 2×20 padding + 2×1 border), then the rise.
-    let card = height.get() + px(42.);
-    let top = ((viewport.height - card) / 2.).max(px(0.)) + px(enter.target().y_px());
-    dialog
-        .entrance(DialogEntrance::Fade)
-        .close_button(false)
-        .w(card_width(window))
-        .margin_top(top)
-        .p(px(20.))
-        .bg(theme::panel())
-        .border_color(theme::border())
-        .rounded(theme::radius::pane())
-        .line_height(relative(1.2))
-}
-
-/// A prepaint hook recording the small modal body's height into `height`
-/// (asking for another frame when it changed, to re-centre the card).
-pub(crate) fn track_height(
-    height: Rc<Cell<Pixels>>,
-) -> impl FnOnce(Bounds<Pixels>, &mut Window, &mut App) + 'static {
-    move |bounds, window, _| {
-        if height.get() != bounds.size.height {
-            height.set(bounds.size.height);
-            window.request_animation_frame();
-        }
+    t: &Theme,
+    key: &str,
+    body: El,
+    dismiss: Option<fn(&mut State)>,
+    layer: &mut Vec<El>,
+) {
+    layer.push(
+        el().key(format!("{key}-dim"))
+            .absolute(0.0, 0.0)
+            .w_full()
+            .h_full()
+            .fill(t.kit.overlay)
+            .transition(motion::appear(0.0)),
+    );
+    let mut card = col()
+        .key(key.to_string())
+        .role("dialog")
+        .w_full()
+        .max_w(CARD_MAX_W)
+        .padding(20.0)
+        .items_stretch()
+        .fill(t.panel)
+        .border(1.0, t.border)
+        .radius(radius::PANE);
+    for sh in shadow::kit_xl() {
+        card = card.box_shadow(sh);
     }
+    let card = card
+        .child(body)
+        .transition(motion::appear(8.0))
+        .instant_changes();
+    let card = match dismiss {
+        Some(close) => overlay::dismissable(card, key, close, layer),
+        None => card.modal(false, |_: &mut State| {}),
+    };
+    layer.push(
+        col()
+            .key(format!("{key}-host"))
+            .absolute(0.0, 0.0)
+            .w_full()
+            .h_full()
+            .items_center()
+            .justify_center()
+            .child(card),
+    );
 }
 
-/// The card's height before its first layout (message, field, buttons).
-pub(crate) fn first_height() -> Rc<Cell<Pixels>> {
-    Rc::new(Cell::new(FIRST_HEIGHT))
-}
-
-/// A dialog appearing: the card fades in rising 8px over [`motion::FADE`]
-/// (the overlay's dim follows its opacity). It takes keys from its first
-/// frame and closes at once.
-pub(crate) fn dialog_appear(
-    id: impl Into<ElementId>,
-    window: &mut Window,
-    cx: &mut App,
-) -> motion::Frame {
-    motion::appear_frame(id, 8., window, cx)
-}
-
-/// The small modal card's outer width: min(420, vw−40) of content plus
-/// 2×20 padding and 2×1 border.
-fn card_width(window: &Window) -> Pixels {
-    (window.viewport_size().width - px(40.)).min(px(420.)) + px(42.)
-}
-
-impl Render for Prompt {
-    /// The card renders in the window's dialog layer ([`Self::open`]).
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        Empty
+/// The open prompt or alert, if any: the message (16 pt), the field (prompts), Cancel
+/// (prompts) and OK.
+pub(crate) fn overlay(s: &State, _cx: &mut Cx<State>, t: &Theme, layer: &mut Vec<El>) {
+    let Some(prompts) = s.get::<Prompts>() else {
+        return;
+    };
+    let Some(prompt) = &prompts.open else {
+        return;
+    };
+    let asks = prompt.on_submit.is_some();
+    let mut body = col().key("prompt").gap(12.0).items_stretch().child(
+        text(prompt.message.clone())
+            .font(ty::ui(16.0))
+            .color(t.fg)
+            .wrap(),
+    );
+    if asks {
+        body = body.child(
+            Input::new("prompt-input", &prompts.input)
+                .on_edit(prompt_input)
+                .on_key(prompt_key)
+                .build(t),
+        );
     }
+    let mut footer = row().key("prompt-footer").gap(8.0).justify_end().center_y();
+    if asks {
+        footer = footer.child(
+            outline_button("prompt-cancel", "Cancel")
+                .on_press(cancel)
+                .build(t),
+        );
+    }
+    footer = footer.child(
+        outline_button("prompt-ok", "OK")
+            .on_press(submit)
+            .build(t)
+            .default_button(),
+    );
+    small_dialog(t, "prompt-modal", body.child(footer), Some(cancel), layer);
 }
 
-impl crate::workspace::Workspace {
-    /// `alert(message)`.
-    pub(crate) fn show_alert(
-        &mut self,
-        message: String,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let alert = cx.new(|cx| Prompt::alert(message, window, cx));
-        cx.subscribe(&alert, |this, _, _: &PromptEvent, cx| {
-            this.prompt = None;
-            cx.notify();
-        })
-        .detach();
-        self.prompt = Some(alert);
-        cx.notify();
+fn prompt_input(s: &mut State) -> &mut InputState {
+    &mut s.slot::<Prompts>().input
+}
+
+/// The field's Enter answers OK and Escape cancels (before the editor sees them).
+fn prompt_key(s: &mut State, ev: &KeyEvent, _: &mut Tx) -> bool {
+    if ev.mods != Mods::default() {
+        return false;
     }
+    match ev.key {
+        Key::Enter => submit(s),
+        Key::Escape => cancel(s),
+        _ => return false,
+    }
+    true
 }

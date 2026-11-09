@@ -3,9 +3,8 @@
 //! `/claude-plan*`), with their wire shapes.
 
 use anyhow::{Result, anyhow};
-use gpui_kit::{App, Task};
-use roostr_core::harness::harness;
-use roostr_core::io;
+use roostr_core::State;
+use roostr_rt::Task;
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value as Json;
@@ -13,11 +12,11 @@ use serde_json::Value as Json;
 /// `GET path` on the harness, decoded. Fails when this app has no harness.
 pub fn get<T: DeserializeOwned + Send + 'static>(
     path: impl Into<String>,
-    cx: &App,
+    s: &State,
 ) -> Task<Result<T>> {
     let path = path.into();
-    let harness = harness(cx);
-    io::spawn(cx, async move {
+    let harness = s.harness.clone();
+    s.rt.background(async move {
         let harness = harness.ok_or_else(|| anyhow!("No local daemon for this app."))?;
         Ok(serde_json::from_value(harness.get_json(&path).await?)?)
     })
@@ -27,11 +26,11 @@ pub fn get<T: DeserializeOwned + Send + 'static>(
 pub fn post<T: DeserializeOwned + Send + 'static>(
     path: impl Into<String>,
     body: Json,
-    cx: &App,
+    s: &State,
 ) -> Task<Result<T>> {
     let path = path.into();
-    let harness = harness(cx);
-    io::spawn(cx, async move {
+    let harness = s.harness.clone();
+    s.rt.background(async move {
         let harness = harness.ok_or_else(|| anyhow!("No local daemon for this app."))?;
         Ok(serde_json::from_value(
             harness.post_json(&path, &body).await?,
@@ -109,10 +108,10 @@ struct JoinRequests {
 
 /// `listJoinRequests`: every pending request this daemon (or, in replica
 /// mode, this device) holds.
-pub fn list_join_requests(cx: &App) -> Task<Result<Vec<JoinRequest>>> {
-    let harness = harness(cx);
-    let account = roostr_core::account::account(cx);
-    io::spawn(cx, async move {
+pub fn list_join_requests(s: &State) -> Task<Result<Vec<JoinRequest>>> {
+    let harness = s.harness.clone();
+    let account = roostr_core::account::account(s);
+    s.rt.background(async move {
         if let Some(account) = account {
             return account
                 .join_requests()
@@ -133,13 +132,13 @@ pub fn list_join_requests(cx: &App) -> Task<Result<Vec<JoinRequest>>> {
 }
 
 /// `clearJoinRequest`: dismiss (or finish) one request.
-pub fn clear_join_request(key: &str, cx: &App) -> Task<Result<()>> {
-    let harness = harness(cx);
-    if let Some(account) = roostr_core::account::account(cx) {
-        return io::spawn(cx, account.clear_join_request(key));
+pub fn clear_join_request(key: &str, s: &State) -> Task<Result<()>> {
+    let harness = s.harness.clone();
+    if let Some(account) = roostr_core::account::account(s) {
+        return s.rt.background(account.clear_join_request(key));
     }
     let body = serde_json::json!({ "key": key });
-    io::spawn(cx, async move {
+    s.rt.background(async move {
         let harness = harness.ok_or_else(|| anyhow!("No local daemon for this app."))?;
         harness
             .post_json("/join-requests/clear", &body)

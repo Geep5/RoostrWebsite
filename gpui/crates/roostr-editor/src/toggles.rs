@@ -5,27 +5,26 @@
 
 use std::collections::BTreeMap;
 
-use gpui_kit::App;
 use roostr_core::UiState;
 
 fn key(object_id: &str) -> String {
     format!("toggles-{object_id}")
 }
 
-fn read(object_id: &str, cx: &App) -> BTreeMap<String, bool> {
-    UiState::get(cx, &key(object_id)).unwrap_or_default()
+fn read(object_id: &str, ui: &UiState) -> BTreeMap<String, bool> {
+    ui.get(&key(object_id)).unwrap_or_default()
 }
 
-pub fn is_toggle_open(object_id: &str, block_id: &str, cx: &App) -> bool {
-    read(object_id, cx).get(block_id).copied().unwrap_or(false)
+pub fn is_toggle_open(object_id: &str, block_id: &str, ui: &UiState) -> bool {
+    read(object_id, ui).get(block_id).copied().unwrap_or(false)
 }
 
-pub fn set_toggle_open(object_id: &str, block_id: &str, open: bool, cx: &mut App) {
-    let mut m = read(object_id, cx);
+pub fn set_toggle_open(object_id: &str, block_id: &str, open: bool, ui: &mut UiState) {
+    let mut m = read(object_id, ui);
     if open {
         m.insert(block_id.to_string(), true);
     } else {
         m.remove(block_id);
     }
-    UiState::set(cx, &key(object_id), &m);
+    ui.set(&key(object_id), &m);
 }

@@ -17,3 +17,8 @@ name = "gallery"
 
 [dev-dependencies]
 ttf-parser = "0.25"
+
+# Native file dialogs on the desktop (Rune refuses the feature on the web). Every Rune crate
+# depends on roostr-ui, so this one place gives them all the same Rune build.
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+rune = { workspace = true, features = ["native-file-dialog"] }

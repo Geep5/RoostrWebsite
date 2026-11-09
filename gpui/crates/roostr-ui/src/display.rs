@@ -627,6 +627,9 @@ pub struct Alert {
     size: KitSize,
     banner: bool,
     close: Acts,
+    text_size: Option<f32>,
+    line_height: Option<f32>,
+    text_color: Option<Color>,
 }
 
 impl Alert {
@@ -640,6 +643,9 @@ impl Alert {
             size: KitSize::Medium,
             banner: false,
             close: Acts::default(),
+            text_size: None,
+            line_height: None,
+            text_color: None,
         }
     }
     pub fn info(key: impl Into<String>, message: impl Into<String>) -> Self {
@@ -686,6 +692,22 @@ impl Alert {
         self.close.press(f);
         self
     }
+    /// The message's text size in points (a screen's `.text_size(..)` on the kit alert).
+    pub fn text_size(mut self, size: f32) -> Self {
+        self.text_size = Some(size);
+        self
+    }
+    /// The message's line height as a multiple of its size (`.line_height(relative(..))`).
+    pub fn line_height(mut self, factor: f32) -> Self {
+        self.line_height = Some(factor);
+        self
+    }
+    /// The text and icon colour in place of the variant's (`.text_color(..)` on the kit
+    /// alert); the fill and border keep the variant's.
+    pub fn text_color(mut self, c: Color) -> Self {
+        self.text_color = Some(c);
+        self
+    }
 
     pub fn build(self, t: &Theme) -> El {
         let k = &t.kit;
@@ -697,6 +719,7 @@ impl Alert {
             AlertVariant::Warning => (k.warning, tint(k.warning, 0.04), tint(k.warning, 0.3)),
             AlertVariant::Error => (k.danger, tint(k.danger, 0.04), tint(k.danger, 0.3)),
         };
+        let fg = self.text_color.unwrap_or(fg);
         let (r, px, py, gap) = match self.size {
             KitSize::XSmall => (radius::KIT, 12.0, 6.0, 6.0),
             KitSize::Small => (radius::KIT, 12.0, 8.0, 6.0),
@@ -714,7 +737,11 @@ impl Alert {
                     .truncate(),
             );
         }
-        body = body.child(text(self.message.clone()).font(font).color(fg).wrap());
+        let mut message = self.text_size.map_or(font, ty::ui);
+        if let Some(lh) = self.line_height {
+            message = message.lh(message.size * lh);
+        }
+        body = body.child(text(self.message.clone()).font(message).color(fg).wrap());
         let mut icon = glyph(self.icon, ts).color(fg);
         if !self.banner {
             icon = icon.mt(5.0);

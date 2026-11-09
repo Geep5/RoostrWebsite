@@ -1,25 +1,21 @@
-//! What the graph page's SVG draws, layer by layer (`+page.svelte` markup):
-//! geometry built once per graph and level of detail, the selection's
-//! highlight geometry, and the per-frame paint of each layer.
+//! What the graph page's SVG draws, layer by layer (`+page.svelte` markup): geometry
+//! flattened once per graph and level of detail, the selection's highlight geometry, and the
+//! world-space elements of each layer.
 
 use std::collections::HashMap;
-use std::f64::consts::PI;
-use std::rc::Rc;
 
-use gpui_kit::{
-    App, Bounds, Hsla, PathBuilder, Pixels, SharedString, TextAlign, TextRun, Window, font, point,
-    px,
-};
-use roostr_core::theme;
+use rune::{Color, El, LineCap, el, text};
 
+use crate::geom::{Pen, Poly, circle, dash, fade, hex, quad, tolerance};
+use crate::labels::{Anchor, Family, Label, LabelSpec, SpanSpec};
+use crate::live::Hub;
 use crate::model::{DOT_SPACING, GraphObject, GraphProperty, GraphType, SchemaGraph};
-use crate::paint::{Mesh, Screen, Shape, View, fade, hex, tolerance};
-use crate::text::{Anchor, Family, Label, LabelSpec, SpanSpec};
 
 /// Type→property curve bend: 0 straight, toward 1 pulled to the centre.
 const CURVATURE: f64 = 0.55;
 /// Object dot radius (world units).
-const DOT_R: f64 = 4.3;
+pub(crate) const DOT_R: f64 = 4.3;
+const WHITE: u32 = 0xffffff;
 
 /// What is hovered or pinned: a type, a property (by key), or one object of a type.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -163,67 +159,25 @@ impl Derived {
     }
 }
 
-/// A screen-space circle: filled, or stroked `width` wide.
-fn circle(
-    window: &mut Window,
-    at: gpui_kit::Point<Pixels>,
-    r: f32,
-    width: Option<f32>,
-    color: Hsla,
-) {
-    let mut path = match width {
-        Some(w) => PathBuilder::stroke(px(w)),
-        None => PathBuilder::fill(),
-    };
-    for i in 0..=48 {
-        let th = i as f32 / 48. * std::f32::consts::TAU;
-        let p = point(at.x + px(r * th.cos()), at.y + px(r * th.sin()));
-        if i == 0 {
-            path.move_to(p);
-        } else {
-            path.line_to(p);
-        }
-    }
-    if let Ok(path) = path.build() {
-        window.paint_path(path, color);
-    }
-}
-
-/// A screen-space line `width` wide.
-fn line(
-    window: &mut Window,
-    a: gpui_kit::Point<Pixels>,
-    b: gpui_kit::Point<Pixels>,
-    width: f32,
-    color: Hsla,
-) {
-    let mut path = PathBuilder::stroke(px(width));
-    path.move_to(a);
-    path.line_to(b);
-    if let Ok(path) = path.build() {
-        window.paint_path(path, color);
-    }
-}
-
 fn xy(x: f64, y: f64) -> (f64, f64) {
     (x, y)
 }
 
 /// A point (an object dot, or a type's centre) → property, bent toward the centre.
-fn edge(shape: &mut Shape, s: (f64, f64), p: (f64, f64)) {
+fn edge(s: (f64, f64), p: (f64, f64), tol: f64) -> Poly {
     let c = (
         ((s.0 + p.0) / 2.) * (1. - CURVATURE),
         ((s.1 + p.1) / 2.) * (1. - CURVATURE),
     );
-    shape.quad(s, c, p);
+    quad(s, c, p, tol)
 }
 
 pub(crate) fn prop_radius(p: &GraphProperty) -> f64 {
     4. + (p.users.len() as f64).sqrt() * 2.4
 }
 
-/// A label along the radius at angle `a`; flipped on the left half so it
-/// never reads upside down. `out`: text runs away from the centre.
+/// A label along the radius at angle `a`; flipped on the left half so it never reads upside
+/// down. `out`: text runs away from the centre.
 fn radial(a: f64, dist: f64, out: bool) -> (f64, f64, Anchor, f64) {
     let (x, y) = (a.cos() * dist, a.sin() * dist);
     let deg = a.to_degrees();
@@ -260,8 +214,8 @@ fn shadow_span(t: &GraphType, size: f64, dx: f64) -> Option<SpanSpec> {
     })
 }
 
-/// Every world-space label, in [`Labels`] order: far type labels, schema type
-/// labels, property labels, then the four centre texts.
+/// Every world-space label, in [`Labels`] order: far type labels, schema type labels,
+/// property labels, then the four centre texts.
 pub(crate) fn label_specs(g: &SchemaGraph, prop_labels: &[String]) -> Vec<LabelSpec> {
     let mut specs = Vec::new();
     for t in &g.types {
@@ -386,6 +340,8 @@ pub(crate) fn label_specs(g: &SchemaGraph, prop_labels: &[String]) -> Vec<LabelS
 
 /// The laid-out labels, split by role.
 pub(crate) struct Labels {
+    /// The property label texts they were laid out for (renames lay them out again).
+    pub texts: Vec<String>,
     pub far: Vec<Label>,
     pub types: Vec<Label>,
     pub props: Vec<Label>,
@@ -394,11 +350,17 @@ pub(crate) struct Labels {
 }
 
 impl Labels {
-    pub fn split(mut all: Vec<Label>, types: usize, props: usize) -> Self {
+    pub fn layout(g: &SchemaGraph, texts: Vec<String>) -> Self {
+        let mut all: Vec<Label> = label_specs(g, &texts)
+            .into_iter()
+            .map(Label::layout)
+            .collect();
+        let (types, props) = (g.types.len(), g.props.len());
         let center = all.split_off(2 * types + props);
         let props_v = all.split_off(2 * types);
         let types_v = all.split_off(types);
         Self {
+            texts,
             far: all,
             types: types_v,
             props: props_v,
@@ -407,51 +369,27 @@ impl Labels {
     }
 }
 
-/// Tessellated labels for one level of detail.
-pub(crate) struct LabelGeo {
-    pub lod: i32,
-    far: Vec<Vec<Mesh>>,
-    types: Vec<Vec<Mesh>>,
-    props: Vec<Vec<Mesh>>,
-    center: Vec<Vec<Mesh>>,
-}
-
-impl LabelGeo {
-    pub fn build(labels: &Labels, lod: i32) -> Self {
-        let tol = tolerance(lod);
-        let all = |v: &[Label]| v.iter().map(|l| l.meshes(tol)).collect();
-        Self {
-            lod,
-            far: all(&labels.far),
-            types: all(&labels.types),
-            props: all(&labels.props),
-            center: all(&labels.center),
-        }
-    }
-}
-
-/// Static geometry of a graph at one level of detail.
+/// Static geometry of a graph at one level of detail (world units).
 pub(crate) struct Geo {
     pub lod: i32,
-    /// Per type: its object→property lines (stroke 0.7, round caps).
-    edges: Vec<Mesh>,
-    /// Per type: its object dots.
-    dots: Vec<Mesh>,
-    /// Per type (lite): its faint "not loaded" placeholder dots.
-    shadow_dots: Vec<Mesh>,
-    cluster_fill: Vec<Mesh>,
-    /// Per type: cluster outline at 1.5 and 2.5.
-    cluster_stroke: Vec<[Mesh; 2]>,
+    /// Per type: its object→property curves.
+    edges: Vec<Vec<Poly>>,
+    /// Per type: its object dots' centres (discs of [`DOT_R`]).
+    dots: Vec<Vec<[f32; 2]>>,
+    /// Per type (lite): its faint "not loaded" placeholder dots' centres.
+    shadow_dots: Vec<Vec<[f32; 2]>>,
+    /// Per type: the cluster's circle.
+    clusters: Vec<Poly>,
     /// Per type: the far-level spoke from the property ring to the cluster.
-    spokes: Vec<Mesh>,
-    ring_fill: Mesh,
-    ring_stroke: Mesh,
-    prop_fill: Vec<Mesh>,
-    prop_stroke: Vec<Mesh>,
-    prop_stroke_idle: Vec<Mesh>,
-    prop_ring: Vec<Mesh>,
-    /// (property, curve at width 1.2, curve at width 2) for each limited-to type.
-    targets: Vec<(usize, Mesh, Mesh)>,
+    spokes: Vec<Poly>,
+    ring: Poly,
+    ring_dashes: Vec<Poly>,
+    props: Vec<Poly>,
+    props_idle: Vec<Vec<Poly>>,
+    /// Object-format properties limited to types here: the ring around their dot.
+    prop_rings: Vec<Option<Poly>>,
+    /// (property, its dashed curve) for each limited-to type.
+    targets: Vec<(usize, Vec<Poly>)>,
 }
 
 impl Geo {
@@ -461,122 +399,64 @@ impl Geo {
         let mut edges = Vec::new();
         let mut dots = Vec::new();
         let mut shadow_dots = Vec::new();
-        let mut cluster_fill = Vec::new();
-        let mut cluster_stroke = Vec::new();
+        let mut clusters = Vec::new();
         let mut spokes = Vec::new();
         for t in &g.types {
-            let mut shape = Shape::new();
+            let mut curves = Vec::new();
             for o in &t.objects {
                 for key in &o.held {
                     if let Some(p) = b.prop_index(key).map(|i| &g.props[i]) {
-                        edge(&mut shape, xy(o.x, o.y), xy(p.x, p.y));
+                        curves.push(edge(xy(o.x, o.y), xy(p.x, p.y), tol));
                     }
                 }
             }
-            let mut mesh = Mesh::default();
-            mesh.stroke(&shape.build(), 0.7, true, None, tol);
-            edges.push(mesh);
-
-            let mut shape = Shape::new();
-            for o in &t.objects {
-                shape.circle(xy(o.x, o.y), DOT_R);
-            }
-            let mut mesh = Mesh::default();
-            mesh.fill(&shape.build(), tol);
-            dots.push(mesh);
-
+            edges.push(curves);
+            dots.push(t.objects.iter().map(|o| [o.x as f32, o.y as f32]).collect());
             // Lite: placeholders continue the cluster's phyllotaxis past its objects.
-            let mut shape = Shape::new();
-            for j in t.objects.len()..t.objects.len() + t.shadow_dots() {
-                let rr = DOT_SPACING * (j as f64 + 0.5).sqrt();
-                let th = j as f64 * 2.39996;
-                shape.circle(xy(t.x + rr * th.cos(), t.y + rr * th.sin()), DOT_R);
-            }
-            let mut mesh = Mesh::default();
-            mesh.fill(&shape.build(), tol);
-            shadow_dots.push(mesh);
-
-            let mut circle = Shape::new();
-            circle.circle(xy(t.x, t.y), t.rad);
-            let circle = circle.build();
-            let mut fill = Mesh::default();
-            fill.fill(&circle, tol);
-            cluster_fill.push(fill);
-            let mut thin = Mesh::default();
-            thin.stroke(&circle, 1.5, false, None, tol);
-            let mut thick = Mesh::default();
-            thick.stroke(&circle, 2.5, false, None, tol);
-            cluster_stroke.push([thin, thick]);
-
-            let mut spoke = Shape::new();
-            spoke.line(
-                xy(t.a.cos() * (g.rp + 16.), t.a.sin() * (g.rp + 16.)),
-                xy(
-                    t.x - t.a.cos() * (t.rad + 8.),
-                    t.y - t.a.sin() * (t.rad + 8.),
-                ),
+            shadow_dots.push(
+                (t.objects.len()..t.objects.len() + t.shadow_dots())
+                    .map(|j| {
+                        let rr = DOT_SPACING * (j as f64 + 0.5).sqrt();
+                        let th = j as f64 * 2.39996;
+                        [(t.x + rr * th.cos()) as f32, (t.y + rr * th.sin()) as f32]
+                    })
+                    .collect(),
             );
-            let mut mesh = Mesh::default();
-            mesh.stroke(
-                &spoke.build(),
-                (2. + t.usage.len() as f64 * 2.2) as f32,
-                true,
-                None,
-                tol,
-            );
-            spokes.push(mesh);
+            clusters.push(circle(xy(t.x, t.y), t.rad, tol));
+            spokes.push(vec![
+                [
+                    (t.a.cos() * (g.rp + 16.)) as f32,
+                    (t.a.sin() * (g.rp + 16.)) as f32,
+                ],
+                [
+                    (t.x - t.a.cos() * (t.rad + 8.)) as f32,
+                    (t.y - t.a.sin() * (t.rad + 8.)) as f32,
+                ],
+            ]);
         }
-
-        let mut ring = Shape::new();
-        ring.circle(xy(0., 0.), g.rp);
-        let ring = ring.build();
-        let mut ring_fill = Mesh::default();
-        ring_fill.fill(&ring, tol);
-        let mut ring_stroke = Mesh::default();
-        ring_stroke.stroke(&ring, 3., false, Some(&[4., 14.]), tol);
-
-        let mut prop_fill = Vec::new();
-        let mut prop_stroke = Vec::new();
-        let mut prop_stroke_idle = Vec::new();
-        let mut prop_ring = Vec::new();
+        let ring = circle(xy(0., 0.), g.rp, tol);
+        let ring_dashes = dash(&ring, true, &[4., 14.]);
+        let mut props = Vec::new();
+        let mut props_idle = Vec::new();
+        let mut prop_rings = Vec::new();
         let mut targets = Vec::new();
         for (i, p) in g.props.iter().enumerate() {
             let r = prop_radius(p);
-            let mut c = Shape::new();
-            c.circle(xy(p.x, p.y), r);
-            let c = c.build();
-            let mut fill = Mesh::default();
-            fill.fill(&c, tol);
-            prop_fill.push(fill);
-            let mut stroke = Mesh::default();
-            stroke.stroke(&c, 2., false, None, tol);
-            prop_stroke.push(stroke);
-            let mut idle = Mesh::default();
-            idle.stroke(&c, 2., false, Some(&[3., 3.]), tol);
-            prop_stroke_idle.push(idle);
-            let mut ring = Mesh::default();
-            if !p.targets.is_empty() {
-                let mut rr = Shape::new();
-                rr.circle(xy(p.x, p.y), r + 5.);
-                ring.stroke(&rr.build(), 1., false, None, tol);
-            }
-            prop_ring.push(ring);
+            let c = circle(xy(p.x, p.y), r, tol);
+            props_idle.push(dash(&c, true, &[3., 3.]));
+            props.push(c);
+            prop_rings.push((!p.targets.is_empty()).then(|| circle(xy(p.x, p.y), r + 5., tol)));
             for &tt in &p.targets {
                 let t = &g.types[tt];
                 let ex = t.x - t.a.cos() * t.rad;
                 let ey = t.y - t.a.sin() * t.rad;
-                let mut curve = Shape::new();
-                curve.quad(
+                let curve = quad(
                     xy(p.x, p.y),
                     xy((p.x + ex) * 0.15, (p.y + ey) * 0.15),
                     xy(ex, ey),
+                    tol,
                 );
-                let curve = curve.build();
-                let mut thin = Mesh::default();
-                thin.stroke(&curve, 1.2, true, Some(&[2., 7.]), tol);
-                let mut thick = Mesh::default();
-                thick.stroke(&curve, 2., true, Some(&[2., 7.]), tol);
-                targets.push((i, thin, thick));
+                targets.push((i, dash(&curve, false, &[2., 7.])));
             }
         }
         Self {
@@ -584,138 +464,115 @@ impl Geo {
             edges,
             dots,
             shadow_dots,
-            cluster_fill,
-            cluster_stroke,
+            clusters,
             spokes,
-            ring_fill,
-            ring_stroke,
-            prop_fill,
-            prop_stroke,
-            prop_stroke_idle,
-            prop_ring,
+            ring,
+            ring_dashes,
+            props,
+            props_idle,
+            prop_rings,
             targets,
         }
     }
 }
 
-/// Highlight geometry of one selection at one level of detail.
+/// Highlight geometry of one selection (world units).
 pub(crate) struct SelGeo {
-    pub key: (Option<Sel>, i32),
-    /// The highlighted lines: the selected object's, a type's, or every type's to the selected property.
-    lit: Vec<(Hsla, Mesh)>,
+    /// The highlighted lines: the selected object's, a type's, or every type's to the
+    /// selected property.
+    lit: Vec<(Color, Vec<Poly>)>,
     /// A selected type's dashed curves to the properties none of its objects hold.
-    unused: Option<(Hsla, Mesh)>,
-    /// The selected object's ring (fill, white stroke).
-    marker: Option<(Hsla, Mesh, Mesh)>,
-    /// Connection curves (color, mesh), then the end dots (fill color, fill, white stroke).
-    links: Vec<(Hsla, Mesh)>,
-    link_dots: Vec<(Hsla, Mesh, Mesh)>,
+    unused: Option<(Color, Vec<Poly>)>,
+    /// The selected object's ring (fill colour, outline).
+    marker: Option<(Color, Poly)>,
+    /// Connection curves (colour, dashes), then the end dots (fill colour, outline).
+    links: Vec<(Color, Vec<Poly>)>,
+    link_dots: Vec<(Color, Poly)>,
 }
 
 impl SelGeo {
     pub fn build(b: &Built, d: &Derived, lod: i32) -> Self {
         let g = &b.g;
         let tol = tolerance(lod);
-        let stroke = |shape: Shape, w: f32, round: bool, dash: Option<&[f32]>| {
-            let mut m = Mesh::default();
-            m.stroke(&shape.build(), w, round, dash, tol);
-            m
-        };
-        let dot = |x: f64, y: f64, r: f64, w: f32| {
-            let mut c = Shape::new();
-            c.circle(xy(x, y), r);
-            let c = c.build();
-            let mut fill = Mesh::default();
-            fill.fill(&c, tol);
-            let mut ring = Mesh::default();
-            ring.stroke(&c, w, false, None, tol);
-            (fill, ring)
-        };
         let mut lit = Vec::new();
         let mut unused = None;
         let mut marker = None;
         let mut links = Vec::new();
         let mut link_dots = Vec::new();
+        let held_edges = |o: &GraphObject, out: &mut Vec<Poly>| {
+            for key in &o.held {
+                if let Some(p) = b.prop_index(key).map(|i| &g.props[i]) {
+                    out.push(edge(xy(o.x, o.y), xy(p.x, p.y), tol));
+                }
+            }
+        };
         if d.any {
             if let (Some(o), Some(t)) = (d.sel_obj_ref(b), d.sel_type) {
-                let mut shape = Shape::new();
-                for key in &o.held {
-                    if let Some(p) = b.prop_index(key).map(|i| &g.props[i]) {
-                        edge(&mut shape, xy(o.x, o.y), xy(p.x, p.y));
-                    }
-                }
-                lit.push((g.types[t].color, stroke(shape, 1.4, true, None)));
+                let mut curves = Vec::new();
+                held_edges(o, &mut curves);
+                lit.push((g.types[t].color, curves));
             } else if let Some(t) = d.sel_type {
                 let ty = &g.types[t];
-                let mut shape = Shape::new();
+                let mut curves = Vec::new();
                 for o in &ty.objects {
-                    for key in &o.held {
-                        if let Some(p) = b.prop_index(key).map(|i| &g.props[i]) {
-                            edge(&mut shape, xy(o.x, o.y), xy(p.x, p.y));
-                        }
-                    }
+                    held_edges(o, &mut curves);
                 }
-                lit.push((ty.color, stroke(shape, 1.4, true, None)));
+                lit.push((ty.color, curves));
             } else if let Some(pi) = d.sel_prop {
                 let p = &g.props[pi];
                 for ty in &g.types {
-                    let mut shape = Shape::new();
-                    let mut any = false;
-                    for o in ty.objects.iter().filter(|o| o.held.contains(&p.key)) {
-                        edge(&mut shape, xy(o.x, o.y), xy(p.x, p.y));
-                        any = true;
-                    }
-                    if any {
-                        lit.push((ty.color, stroke(shape, 1.4, true, None)));
+                    let curves: Vec<Poly> = ty
+                        .objects
+                        .iter()
+                        .filter(|o| o.held.contains(&p.key))
+                        .map(|o| edge(xy(o.x, o.y), xy(p.x, p.y), tol))
+                        .collect();
+                    if !curves.is_empty() {
+                        lit.push((ty.color, curves));
                     }
                 }
             }
         }
         if let (Some(Sel::Type(_)), Some(t)) = (&d.sel, d.sel_type) {
             let ty = &g.types[t];
-            let mut shape = Shape::new();
-            for p in g.props.iter().filter(|p| !ty.uses(&p.key)) {
-                edge(&mut shape, xy(ty.x, ty.y), xy(p.x, p.y));
-            }
-            unused = Some((
-                fade(ty.color, 0.28),
-                stroke(shape, 1.2, false, Some(&[3., 9.])),
-            ));
+            let curves = g
+                .props
+                .iter()
+                .filter(|p| !ty.uses(&p.key))
+                .flat_map(|p| dash(&edge(xy(ty.x, ty.y), xy(p.x, p.y), tol), false, &[3., 9.]))
+                .collect();
+            unused = Some((fade(ty.color, 0.28), curves));
         }
         if let (Some(o), Some(t)) = (d.sel_obj_ref(b), d.sel_type) {
-            let (fill, ring) = dot(o.x, o.y, 6.5, 1.5);
-            marker = Some((g.types[t].color, fill, ring));
+            marker = Some((g.types[t].color, circle(xy(o.x, o.y), 6.5, tol)));
             let sel_color = fade(g.types[t].color, 0.85);
             for &(lt, lj) in &d.out {
                 let l = b.object(lt, lj);
-                let mut shape = Shape::new();
-                shape.quad(
+                let curve = quad(
                     xy(o.x, o.y),
                     xy((o.x + l.x) * 0.35, (o.y + l.y) * 0.35),
                     xy(l.x, l.y),
+                    tol,
                 );
-                links.push((sel_color, stroke(shape, 1.6, false, None)));
-                let (fill, ring) = dot(l.x, l.y, 6., 1.2);
-                link_dots.push((g.types[lt].color, fill, ring));
+                links.push((sel_color, vec![curve]));
+                link_dots.push((g.types[lt].color, circle(xy(l.x, l.y), 6., tol)));
             }
             for &(lt, lj) in &d.inc {
                 let l = b.object(lt, lj);
-                let mut shape = Shape::new();
-                shape.quad(
+                let curve = quad(
                     xy(l.x, l.y),
                     xy((o.x + l.x) * 0.35, (o.y + l.y) * 0.35),
                     xy(o.x, o.y),
+                    tol,
                 );
                 links.push((
                     fade(g.types[lt].color, 0.85),
-                    stroke(shape, 1.6, false, Some(&[5., 4.])),
+                    dash(&curve, false, &[5., 4.]),
                 ));
-                let (fill, ring) = dot(l.x, l.y, 6., 1.2);
-                link_dots.push((g.types[lt].color, fill, ring));
+                link_dots.push((g.types[lt].color, circle(xy(l.x, l.y), 6., tol)));
             }
         }
         Self {
-            key: (d.sel.clone(), lod),
             lit,
             unused,
             marker,
@@ -726,7 +583,7 @@ impl SelGeo {
 }
 
 /// Layer opacities for a scale (`applyView`).
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Layers {
     pub far: f64,
     pub schema: f64,
@@ -748,448 +605,384 @@ impl Layers {
     }
 }
 
-/// Everything one frame paints, shared by the layer canvases.
-pub(crate) struct Frame {
-    pub b: Rc<Built>,
-    pub labels: Option<Rc<Labels>>,
-    pub geo: Rc<Geo>,
-    pub label_geo: Option<Rc<LabelGeo>>,
-    pub sel_geo: Rc<SelGeo>,
-    pub d: Derived,
-    pub view: View,
-    /// Objects whose labels show (type, index).
-    pub label_objs: Vec<(usize, usize)>,
-    /// This computer's engine and harness (`live`), when it serves the space.
-    pub hub: Option<crate::live::Hub>,
+/// What the world layers draw from: the graph, its labels and geometry, and the selection.
+pub(crate) struct Scene<'a> {
+    pub b: &'a Built,
+    pub labels: &'a Labels,
+    pub geo: &'a Geo,
+    pub sel_geo: &'a SelGeo,
+    pub d: &'a Derived,
 }
 
-const WHITE: u32 = 0xffffff;
+/// Elements drawn in order, one after another.
+fn stack(parts: impl IntoIterator<Item = El>) -> El {
+    parts.into_iter().fold(el(), El::child)
+}
 
-impl Frame {
-    fn screen(&self, bounds: Bounds<Pixels>) -> Screen {
-        Screen {
-            view: self.view,
-            bounds,
-        }
-    }
-
-    fn paint_label(
-        &self,
-        meshes: &[Mesh],
-        label: Option<&Label>,
-        colors: &[Hsla],
-        screen: &Screen,
-        window: &mut Window,
-        cx: &mut App,
-    ) {
-        for (mesh, color) in meshes.iter().zip(colors) {
-            mesh.paint(screen, *color, window);
-        }
-        if let Some(label) = label {
-            label.paint_emoji(screen, window, cx);
-        }
-    }
-
-    /// `radial-gradient(ellipse at 50% 45%, #141823 0%, #0c0e13 70%)` in steps.
-    pub fn paint_background(bounds: Bounds<Pixels>, window: &mut Window) {
-        const STEPS: usize = 28;
-        let (w, h) = (f32::from(bounds.size.width), f32::from(bounds.size.height));
-        let (cx, cy) = (
-            f32::from(bounds.origin.x) + w * 0.5,
-            f32::from(bounds.origin.y) + h * 0.45,
-        );
-        // farthest-corner ellipse
-        let (rx, ry) = (
-            w * 0.5 * std::f32::consts::SQRT_2,
-            h * 0.55 * std::f32::consts::SQRT_2,
-        );
-        let inner = gpui_kit::Rgba::from(hex(0x141823, 1.));
-        let outer = gpui_kit::Rgba::from(hex(0x0c0e13, 1.));
-        for k in (1..=STEPS).rev() {
-            let f = k as f32 / STEPS as f32;
-            let at = (f - 0.5 / STEPS as f32).max(0.);
-            let mix = |a: f32, b: f32| a + (b - a) * at;
-            let color = gpui_kit::Rgba {
-                r: mix(inner.r, outer.r),
-                g: mix(inner.g, outer.g),
-                b: mix(inner.b, outer.b),
-                a: 1.,
-            };
-            let (ex, ey) = (rx * 0.7 * f, ry * 0.7 * f);
-            let mut path = PathBuilder::fill();
-            let n = 96;
-            for i in 0..=n {
-                let th = i as f32 / n as f32 * std::f32::consts::TAU;
-                let p = point(px(cx + ex * th.cos()), px(cy + ey * th.sin()));
-                if i == 0 {
-                    path.move_to(p);
-                } else {
-                    path.line_to(p);
-                }
-            }
-            path.close();
-            if let Ok(path) = path.build() {
-                window.paint_path(path, color);
+impl Scene<'_> {
+    /// The schema layer's object→property lines (stroke 0.7) at rest or dimmed.
+    pub fn edges(&self) -> El {
+        let mut pen = Pen::new();
+        for t in &self.b.g.types {
+            let color = fade(t.color, if self.d.any { 0.025 } else { 0.12 });
+            for curve in &self.geo.edges[t.index] {
+                pen.stroke(curve, 0.7, LineCap::Butt, color);
             }
         }
+        pen.build()
     }
 
-    /// The stage's 12px rounded corners, masked in the page color over the drawing.
-    pub fn paint_corners(bounds: Bounds<Pixels>, window: &mut Window) {
-        let r = 12f32;
-        let (x0, y0) = (f32::from(bounds.origin.x), f32::from(bounds.origin.y));
-        let (x1, y1) = (
-            x0 + f32::from(bounds.size.width),
-            y0 + f32::from(bounds.size.height),
-        );
-        for (cx, cy, sx, sy) in [
-            (x0 + r, y0 + r, -1., -1.),
-            (x1 - r, y0 + r, 1., -1.),
-            (x0 + r, y1 - r, -1., 1.),
-            (x1 - r, y1 - r, 1., 1.),
-        ] {
-            let mut path = PathBuilder::fill();
-            path.move_to(point(px(cx + sx * r), px(cy + sy * r)));
-            path.line_to(point(px(cx + sx * r), px(cy)));
-            for i in 0..=12 {
-                let th = i as f32 / 12. * PI as f32 / 2.;
-                path.line_to(point(
-                    px(cx + sx * r * th.cos()),
-                    px(cy + sy * r * th.sin()),
-                ));
-            }
-            path.line_to(point(px(cx), px(cy + sy * r)));
-            path.close();
-            if let Ok(path) = path.build() {
-                window.paint_path(path, theme::bg());
-            }
-        }
-    }
-
-    /// The schema layer: object→property lines, highlights, type→unused and
-    /// property→type curves, the "N properties in use" caption.
-    pub fn paint_schema(&self, bounds: Bounds<Pixels>, window: &mut Window, cx: &mut App) {
-        let screen = self.screen(bounds);
+    /// The schema layer's highlights: lit lines, a type's unused properties, property→type
+    /// curves, then the "N properties in use" caption.
+    pub fn schema(&self) -> El {
         let g = &self.b.g;
-        let d = &self.d;
-        for t in &g.types {
-            self.geo.edges[t.index].paint(
-                &screen,
-                fade(t.color, if d.any { 0.025 } else { 0.12 }),
-                window,
-            );
+        let d = self.d;
+        let mut lit = Pen::new();
+        for (color, curves) in &self.sel_geo.lit {
+            for c in curves {
+                lit.stroke(c, 1.4, LineCap::Butt, fade(*color, 0.6));
+            }
         }
-        for (color, mesh) in &self.sel_geo.lit {
-            mesh.paint(&screen, fade(*color, 0.6), window);
+        let mut unused = Pen::new();
+        if let Some((color, dashes)) = &self.sel_geo.unused {
+            for c in dashes {
+                unused.stroke(c, 1.2, LineCap::Butt, *color);
+            }
         }
-        if let Some((color, mesh)) = &self.sel_geo.unused {
-            mesh.paint(&screen, *color, window);
-        }
-        let sel_obj = d.sel_obj_ref(&self.b);
-        for (pi, thin, thick) in &self.geo.targets {
+        let mut targets = Pen::new();
+        let sel_obj = d.sel_obj_ref(self.b);
+        for (pi, dashes) in &self.geo.targets {
             let p = &g.props[*pi];
-            let lit = d.any
+            let on = d.any
                 && (d.sel_prop == Some(*pi)
                     || (d.sel_obj.is_none()
                         && d.sel_type.is_some_and(|t| g.types[t].uses(&p.key)))
                     || sel_obj.is_some_and(|o| o.held.contains(&p.key)));
-            let alpha = if lit {
+            let alpha = if on {
                 0.55
             } else if d.any {
                 0.03
             } else {
                 0.1
             };
-            (if lit { thick } else { thin }).paint(&screen, hex(0xe7e9ee, alpha), window);
-        }
-        if let (Some(labels), Some(geo)) = (&self.labels, &self.label_geo) {
-            self.paint_label(
-                &geo.center[0],
-                labels.center.first(),
-                &[hex(0xc9cfdc, 1.)],
-                &screen,
-                window,
-                cx,
-            );
-            self.paint_label(
-                &geo.center[1],
-                labels.center.get(1),
-                &[hex(0x6f7686, 1.)],
-                &screen,
-                window,
-                cx,
-            );
-        }
-    }
-
-    /// The far layer: the property ring, its count, the spokes and big type labels.
-    pub fn paint_far(&self, bounds: Bounds<Pixels>, window: &mut Window, cx: &mut App) {
-        let screen = self.screen(bounds);
-        let g = &self.b.g;
-        self.geo.ring_fill.paint(&screen, hex(WHITE, 0.02), window);
-        self.geo
-            .ring_stroke
-            .paint(&screen, hex(WHITE, 0.18), window);
-        let geo = self.label_geo.as_ref();
-        let labels = self.labels.as_ref();
-        if let (Some(labels), Some(geo)) = (labels, geo) {
-            self.paint_label(
-                &geo.center[2],
-                labels.center.get(2),
-                &[hex(0xe7e9ee, 1.)],
-                &screen,
-                window,
-                cx,
-            );
-            self.paint_label(
-                &geo.center[3],
-                labels.center.get(3),
-                &[hex(0x7d8496, 1.)],
-                &screen,
-                window,
-                cx,
-            );
-        }
-        for t in &g.types {
-            let on = self.d.type_on(&self.b, t.index);
-            self.geo.spokes[t.index].paint(
-                &screen,
-                fade(t.color, if on { 0.45 } else { 0.08 }),
-                window,
-            );
-            if let (Some(labels), Some(geo)) = (labels, geo) {
-                let colors = if on {
-                    [hex(0xe7e9ee, 1.), t.color]
-                } else {
-                    [hex(0x4a4f5c, 1.), hex(0x3a3f4a, 1.)]
-                };
-                self.paint_label(
-                    &geo.far[t.index],
-                    labels.far.get(t.index),
-                    &colors,
-                    &screen,
-                    window,
-                    cx,
+            for c in dashes {
+                targets.stroke(
+                    c,
+                    if on { 2. } else { 1.2 },
+                    LineCap::Round,
+                    hex(0xe7e9ee, alpha),
                 );
             }
         }
+        let captions = self
+            .labels
+            .center
+            .iter()
+            .zip([0xc9cfdc, 0x6f7686])
+            .map(|(label, color)| label.el(&[hex(color, 1.)]));
+        stack(
+            [lit.build(), unused.build(), targets.build()]
+                .into_iter()
+                .chain(captions),
+        )
+    }
+
+    /// The far layer: the property ring, its count, the spokes and big type labels.
+    pub fn far(&self) -> El {
+        let g = &self.b.g;
+        let mut ring = Pen::new();
+        ring.fill(&self.geo.ring, hex(WHITE, 0.02));
+        let mut dashes = Pen::new();
+        for c in &self.geo.ring_dashes {
+            dashes.stroke(c, 3., LineCap::Butt, hex(WHITE, 0.18));
+        }
+        let mut spokes = Pen::new();
+        for t in &g.types {
+            let on = self.d.type_on(self.b, t.index);
+            spokes.stroke(
+                &self.geo.spokes[t.index],
+                (2. + t.usage.len() as f64 * 2.2) as f32,
+                LineCap::Round,
+                fade(t.color, if on { 0.45 } else { 0.08 }),
+            );
+        }
+        let count = self
+            .labels
+            .center
+            .iter()
+            .skip(2)
+            .zip([0xe7e9ee, 0x7d8496])
+            .map(|(label, color)| label.el(&[hex(color, 1.)]));
+        let names = g.types.iter().filter_map(|t| {
+            let colors = if self.d.type_on(self.b, t.index) {
+                [hex(0xe7e9ee, 1.), t.color]
+            } else {
+                [hex(0x4a4f5c, 1.), hex(0x3a3f4a, 1.)]
+            };
+            Some(self.labels.far.get(t.index)?.el(&colors))
+        });
+        stack(
+            [ring.build(), dashes.build()]
+                .into_iter()
+                .chain(count)
+                .chain([spokes.build()])
+                .chain(names),
+        )
     }
 
     /// The type clusters (circle + dots), the selected object's ring and its connections.
-    pub fn paint_clusters(&self, bounds: Bounds<Pixels>, window: &mut Window) {
-        let screen = self.screen(bounds);
+    pub fn clusters(&self) -> El {
         let g = &self.b.g;
+        let (mut fills, mut outlines, mut shadows, mut dots) =
+            (Pen::new(), Pen::new(), Pen::new(), Pen::new());
+        let (mut marker, mut marker_ring) = (Pen::new(), Pen::new());
         for t in &g.types {
             let is_sel = self.d.sel_type == Some(t.index);
-            let k = if self.d.type_on(&self.b, t.index) {
+            let k = if self.d.type_on(self.b, t.index) {
                 1.
             } else {
                 0.18
             };
-            self.geo.cluster_fill[t.index].paint(
-                &screen,
-                fade(t.color, k * if is_sel { 0.14 } else { 0.06 }),
-                window,
-            );
-            self.geo.cluster_stroke[t.index][usize::from(is_sel)].paint(
-                &screen,
+            let outline = &self.geo.clusters[t.index];
+            fills.fill(outline, fade(t.color, k * if is_sel { 0.14 } else { 0.06 }));
+            outlines.ring(
+                outline,
+                if is_sel { 2.5 } else { 1.5 },
                 fade(t.color, k * if is_sel { 0.7 } else { 0.22 }),
-                window,
             );
-            self.geo.shadow_dots[t.index].paint(&screen, fade(t.color, k * 0.22), window);
-            self.geo.dots[t.index].paint(&screen, fade(t.color, k), window);
-            if is_sel && let Some((color, fill, ring)) = &self.sel_geo.marker {
-                fill.paint(&screen, fade(*color, k), window);
-                ring.paint(&screen, hex(WHITE, k as f32), window);
+            for &dot in &self.geo.shadow_dots[t.index] {
+                shadows.disc(dot, DOT_R as f32, fade(t.color, k * 0.22));
+            }
+            for &dot in &self.geo.dots[t.index] {
+                dots.disc(dot, DOT_R as f32, fade(t.color, k));
+            }
+            if is_sel && let Some((color, ring)) = &self.sel_geo.marker {
+                marker.fill(ring, fade(*color, k));
+                marker_ring.ring(ring, 1.5, hex(WHITE, k as f32));
             }
         }
-        for (color, mesh) in &self.sel_geo.links {
-            mesh.paint(&screen, *color, window);
+        let mut links = Pen::new();
+        for (color, dashes) in &self.sel_geo.links {
+            for c in dashes {
+                links.stroke(c, 1.6, LineCap::Butt, *color);
+            }
         }
-        for (color, fill, ring) in &self.sel_geo.link_dots {
-            fill.paint(&screen, *color, window);
-            ring.paint(&screen, hex(WHITE, 1.), window);
+        let (mut ends, mut end_rings) = (Pen::new(), Pen::new());
+        for (color, ring) in &self.sel_geo.link_dots {
+            ends.fill(ring, *color);
+            end_rings.ring(ring, 1.2, hex(WHITE, 1.));
         }
+        stack(
+            [
+                fills,
+                outlines,
+                shadows,
+                dots,
+                marker,
+                marker_ring,
+                links,
+                ends,
+                end_rings,
+            ]
+            .map(Pen::build),
+        )
     }
 
     /// Property dots and labels, small type labels.
-    pub fn paint_schema_labels(&self, bounds: Bounds<Pixels>, window: &mut Window, cx: &mut App) {
-        let screen = self.screen(bounds);
-        let b = &self.b;
+    pub fn schema_labels(&self) -> El {
+        let b = self.b;
         let g = &b.g;
-        let d = &self.d;
-        for (i, _) in g.props.iter().enumerate() {
+        let d = self.d;
+        let bright = hex(0xe9ebf0, 1.);
+        let dim = hex(0x3a3f4a, 1.);
+        let (mut fills, mut outlines) = (Pen::new(), Pen::new());
+        for i in 0..g.props.len() {
             let on = d.prop_on(b, i);
             let idle = d.prop_idle(b, i);
-            let bright = hex(0xe9ebf0, 1.);
-            let dim = hex(0x3a3f4a, 1.);
-            self.geo.prop_fill[i].paint(
-                &screen,
+            let outline = &self.geo.props[i];
+            fills.fill(
+                outline,
                 if on && !idle {
                     bright
                 } else {
                     hex(0x0c0e13, 1.)
                 },
-                window,
             );
             if idle {
-                self.geo.prop_stroke_idle[i].paint(&screen, hex(WHITE, 0.35), window);
-            } else {
-                self.geo.prop_stroke[i].paint(&screen, if on { bright } else { dim }, window);
-            }
-            self.geo.prop_ring[i].paint(&screen, fade(if on { bright } else { dim }, 0.5), window);
-            if let (Some(labels), Some(geo)) = (&self.labels, &self.label_geo) {
-                let color = if idle {
-                    hex(0x6f7686, 1.)
-                } else if on {
-                    hex(0xdfe2ea, 1.)
-                } else {
-                    hex(0x3f4450, 1.)
-                };
-                if let Some(meshes) = geo.props.get(i) {
-                    self.paint_label(meshes, labels.props.get(i), &[color], &screen, window, cx);
+                for c in &self.geo.props_idle[i] {
+                    outlines.stroke(c, 2., LineCap::Butt, hex(WHITE, 0.35));
                 }
+            } else {
+                outlines.ring(outline, 2., if on { bright } else { dim });
+            }
+            if let Some(ring) = &self.geo.prop_rings[i] {
+                outlines.ring(ring, 1., fade(if on { bright } else { dim }, 0.5));
             }
         }
-        if let (Some(labels), Some(geo)) = (&self.labels, &self.label_geo) {
-            for t in &g.types {
-                let on = d.type_on(b, t.index);
-                let colors = if on {
-                    [hex(0xe7e9ee, 1.), t.color]
-                } else {
-                    [hex(0x4f5461, 1.), hex(0x3d424d, 1.)]
-                };
-                self.paint_label(
-                    &geo.types[t.index],
-                    labels.types.get(t.index),
-                    &colors,
-                    &screen,
-                    window,
-                    cx,
-                );
-            }
-        }
+        let props = self.labels.props.iter().enumerate().map(|(i, label)| {
+            let color = if d.prop_idle(b, i) {
+                hex(0x6f7686, 1.)
+            } else if d.prop_on(b, i) {
+                hex(0xdfe2ea, 1.)
+            } else {
+                hex(0x3f4450, 1.)
+            };
+            label.el(&[color])
+        });
+        let types = g.types.iter().filter_map(|t| {
+            let colors = if d.type_on(b, t.index) {
+                [hex(0xe7e9ee, 1.), t.color]
+            } else {
+                [hex(0x4f5461, 1.), hex(0x3d424d, 1.)]
+            };
+            Some(self.labels.types.get(t.index)?.el(&colors))
+        });
+        stack(
+            [fills.build(), outlines.build()]
+                .into_iter()
+                .chain(props)
+                .chain(types),
+        )
     }
 
     /// Object names right of their dots (only those in view, zoomed in).
-    pub fn paint_object_labels(&self, bounds: Bounds<Pixels>, window: &mut Window, cx: &mut App) {
-        let screen = self.screen(bounds);
-        let size = px((4.2 * self.view.s) as f32);
-        let sel = self.d.sel_obj_ref(&self.b).map(|o| o.id.as_str());
-        for &(t, j) in &self.label_objs {
+    pub fn object_labels(&self, objs: &[(usize, usize)]) -> El {
+        const SIZE: f32 = 4.2;
+        let sel = self.d.sel_obj_ref(self.b).map(|o| o.id.as_str());
+        let style = rune::TextStyle::new(SIZE, 400.);
+        let mut layer = el();
+        for &(t, j) in objs {
             let o = self.b.object(t, j);
             let color = if sel == Some(o.id.as_str()) {
                 hex(WHITE, 1.)
             } else {
                 hex(0xc6cbd6, 1.)
             };
-            let text = SharedString::from(o.name.clone());
-            let run = TextRun {
-                len: text.len(),
-                font: font(theme::fonts::UI),
-                color,
-                background_color: None,
-                underline: None,
-                strikethrough: None,
-            };
-            let line = window.text_system().shape_line(text, size, &[run], None);
-            let height = line.ascent + line.descent;
-            let at = screen.project(o.x + 6.5, o.y);
-            let origin = point(at.x, at.y - height / 2.);
-            if origin.x > bounds.origin.x + bounds.size.width
-                || origin.x + line.width < bounds.origin.x
-            {
-                continue;
-            }
-            let _ = line.paint(origin, height, TextAlign::Left, None, window, cx);
+            layer = layer.child(text(o.name.clone()).font(style).color(color).pin(
+                Some((o.x + 6.5) as f32),
+                Some(o.y as f32 - style.line_px() / 2.),
+                None,
+                None,
+            ));
         }
+        layer
     }
+}
 
-    /// This computer, live: lines to its agents (lit while they work), a
-    /// pulse from each working agent to the object its turn is on, and a
-    /// card with its engine and harness.
-    pub fn paint_live(&self, bounds: Bounds<Pixels>, window: &mut Window, cx: &mut App) {
-        let Some(hub) = &self.hub else {
-            return;
-        };
-        let screen = self.screen(bounds);
-        let green = hex(0x4ade80, 1.);
-        let at = screen.project(hub.at.0, hub.at.1);
-        let dot_r = (DOT_R * self.view.s) as f32;
-        for &((x, y), working) in &hub.agents {
-            let p = screen.project(x, y);
-            line(
-                window,
-                at,
-                p,
-                1.5,
-                if working {
-                    fade(green, 0.75)
-                } else {
-                    hex(WHITE, 0.16)
-                },
-            );
-            if working {
-                circle(window, p, dot_r.max(3.) + 4., Some(2.), green);
-            }
-        }
-        for &((ax, ay), (ox, oy)) in &hub.pulses {
-            let (a, o) = (screen.project(ax, ay), screen.project(ox, oy));
-            line(window, a, o, 1.5, fade(green, 0.35));
-            let t = hub.phase as f32;
-            let p = point(a.x + (o.x - a.x) * t, a.y + (o.y - a.y) * t);
-            circle(window, p, 4., None, green);
-        }
-        let color = if hub.answering {
-            green
-        } else {
-            hex(0x8a90a0, 1.)
-        };
-        let r = dot_r.max(5.) + 6.;
-        if !hub.pulses.is_empty() || hub.agents.iter().any(|(_, w)| *w) {
-            let k = hub.phase as f32;
-            circle(
-                window,
-                at,
-                r + 10. * k,
-                Some(2.),
-                fade(color, f64::from(1. - k)),
-            );
-        }
-        circle(window, at, r, Some(2.5), color);
+/// `radial-gradient(ellipse at 50% 45%, #141823 0%, #0c0e13 70%)` over a stage `w`×`h`.
+pub(crate) fn background(stage: El, w: f32, h: f32) -> El {
+    let outer = hex(0x0c0e13, 1.);
+    let stage = stage.fill(outer);
+    if w <= 0. || h <= 0. {
+        return stage;
+    }
+    // GPUI's farthest-corner ellipse.
+    let (rx, ry) = (
+        w * 0.5 * std::f32::consts::SQRT_2,
+        h * 0.55 * std::f32::consts::SQRT_2,
+    );
+    stage.radial_gradient(
+        [0.5, 0.45],
+        [rx, ry],
+        [(0., hex(0x141823, 1.)), (0.7, outer), (1., outer)],
+    )
+}
 
-        // The card, right of the computer.
-        let rows = [
-            (hub.name.as_str(), hex(WHITE, 1.)),
-            (hub.lines[0].as_str(), hex(0xc6cbd6, 1.)),
-            (hub.lines[1].as_str(), color),
-        ];
-        let lines: Vec<_> = rows
-            .iter()
-            .map(|(text, color)| {
-                let text = SharedString::from(text.to_string());
-                let run = TextRun {
-                    len: text.len(),
-                    font: font(theme::fonts::UI),
-                    color: *color,
-                    background_color: None,
-                    underline: None,
-                    strikethrough: None,
-                };
-                window.text_system().shape_line(text, px(12.), &[run], None)
+/// This computer, live: lines to its agents (lit while they work), a pulse from each working
+/// agent to the object its turn is on, and a card with its engine and harness. Drawn in stage
+/// points (its strokes and card keep their size at any zoom); `project` maps world points.
+pub(crate) fn hub(
+    hub: &Hub,
+    project: impl Fn(f64, f64) -> (f64, f64),
+    s: f64,
+    stage: [f32; 2],
+) -> El {
+    let green = hex(0x4ade80, 1.);
+    let p = |(x, y): (f64, f64)| {
+        let (a, b) = project(x, y);
+        [a as f32, b as f32]
+    };
+    let at = p(hub.at);
+    let dot_r = (DOT_R * s) as f32;
+    let ring = |c: [f32; 2], r: f32| -> Poly {
+        (0..48)
+            .map(|i| {
+                let th = i as f32 / 48. * std::f32::consts::TAU;
+                [c[0] + r * th.cos(), c[1] + r * th.sin()]
             })
-            .collect();
-        let line_h = px(17.);
-        let width = lines.iter().map(|l| l.width).fold(px(0.), |a, b| a.max(b));
-        let origin = point(at.x + px(r + 12.), at.y - line_h * 1.5 - px(8.));
-        let card = Bounds::new(
-            origin,
-            gpui_kit::size(width + px(20.), line_h * 3. + px(16.)),
+            .collect()
+    };
+    let mut shape = rune::Shape::new();
+    for &(agent, working) in &hub.agents {
+        let q = p(agent);
+        shape = shape.line(
+            at,
+            q,
+            1.5,
+            LineCap::Butt,
+            if working {
+                fade(green, 0.75)
+            } else {
+                hex(WHITE, 0.16)
+            },
         );
-        window.paint_quad(gpui_kit::fill(card, hex(0x0c0e13, 0.88)).corner_radii(px(8.)));
-        for (i, l) in lines.iter().enumerate() {
-            let o = point(origin.x + px(10.), origin.y + px(8.) + line_h * i as f32);
-            let _ = l.paint(o, line_h, TextAlign::Left, None, window, cx);
+        if working {
+            shape = shape.stroke_with(ring(q, dot_r.max(3.) + 4.), true, 2., LineCap::Butt, green);
         }
     }
+    for &(a, o) in &hub.pulses {
+        let (a, o) = (p(a), p(o));
+        shape = shape.line(a, o, 1.5, LineCap::Butt, fade(green, 0.35));
+        let t = hub.phase as f32;
+        let q = [a[0] + (o[0] - a[0]) * t, a[1] + (o[1] - a[1]) * t];
+        shape = shape.fill(ring(q, 4.), green);
+    }
+    let color = if hub.answering {
+        green
+    } else {
+        hex(0x8a90a0, 1.)
+    };
+    let r = dot_r.max(5.) + 6.;
+    if !hub.pulses.is_empty() || hub.agents.iter().any(|(_, w)| *w) {
+        let k = hub.phase as f32;
+        shape = shape.stroke_with(
+            ring(at, r + 10. * k),
+            true,
+            2.,
+            LineCap::Butt,
+            fade(color, f64::from(1. - k)),
+        );
+    }
+    shape = shape.stroke_with(ring(at, r), true, 2.5, LineCap::Butt, color);
+
+    // The card, right of the computer.
+    let line_h = 17f32;
+    let rows = [
+        (hub.name.as_str(), hex(WHITE, 1.)),
+        (hub.lines[0].as_str(), hex(0xc6cbd6, 1.)),
+        (hub.lines[1].as_str(), color),
+    ];
+    let style = rune::TextStyle::new(12., 400.).lh(line_h);
+    let card = rows.iter().fold(
+        rune::col()
+            .pin(
+                Some(at[0] + r + 12.),
+                Some(at[1] - line_h * 1.5 - 8.),
+                None,
+                None,
+            )
+            .px(10.)
+            .py(8.)
+            .radius(8.)
+            .fill(hex(0x0c0e13, 0.88)),
+        |card, (line, color)| card.child(text(line.to_string()).font(style).color(*color)),
+    );
+    el().pin(Some(0.), Some(0.), None, None)
+        .size(stage[0], stage[1])
+        .child(
+            rune::canvas(shape)
+                .pin(Some(0.), Some(0.), None, None)
+                .size(stage[0], stage[1]),
+        )
+        .child(card)
 }

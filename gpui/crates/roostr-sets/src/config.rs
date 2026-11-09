@@ -507,7 +507,10 @@ mod tests {
             format: "object".into(),
             ..RelationDef::default()
         };
-        let ids: Vec<&str> = conditions_for(&[rel], "agent").iter().map(|c| c.id).collect();
+        let ids: Vec<&str> = conditions_for(&[rel], "agent")
+            .iter()
+            .map(|c| c.id)
+            .collect();
         assert_eq!(ids, ["in", "allIn", "notIn", "empty", "notEmpty"]);
     }
 }

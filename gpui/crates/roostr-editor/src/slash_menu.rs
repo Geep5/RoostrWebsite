@@ -2,20 +2,22 @@
 //! typed, sectioned items with a rendered style preview + description,
 //! filtered live by the text typed after the slash (name + aliases). The
 //! editor keeps keyboard focus (typing goes on into the block) and owns
-//! navigation keys.
+//! navigation keys (`keys.rs` calls [`Editor::slash_move`] and
+//! [`Editor::slash_confirm`]).
+//!
+//! Also the kit command-list look the three editor menus share (the slash
+//! menu, the block menu, the link picker): panel, headings, rows.
 
-use std::rc::Rc;
-
-use gpui_kit::component::IndexPath;
-use gpui_kit::component::command::{Command, CommandGroup, CommandItem, CommandState};
-use gpui_kit::*;
-use roostr_core::theme;
+use roostr_core::State;
 use roostr_core::types::style;
+use roostr_ui::ty::Weights as _;
+use roostr_ui::{Theme, radius, rems, shadow, ty};
+use rune::{Color, Cursor, El, TextStyle, Tx, col, el, row, text};
 
-use crate::editor::Editor;
+use crate::editor::{Editor, with_editor};
 
 #[derive(Clone, Debug, PartialEq)]
-pub enum SlashPick {
+pub(crate) enum SlashPick {
     Style(u32),
     Table,
     Divider(&'static str),
@@ -27,7 +29,7 @@ pub enum SlashPick {
 
 /// How a preview tile draws (`pv-*` classes).
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub enum Preview {
+pub(crate) enum Preview {
     P,
     H1,
     H2,
@@ -44,10 +46,10 @@ pub enum Preview {
 }
 
 #[derive(Clone, Debug)]
-pub struct SlashEntry {
+pub(crate) struct SlashEntry {
     pub section: &'static str,
-    pub label: SharedString,
-    pub desc: SharedString,
+    pub label: String,
+    pub desc: String,
     pub preview: &'static str,
     pub cls: Preview,
     pub aliases: Vec<String>,
@@ -65,8 +67,8 @@ fn entry(
 ) -> SlashEntry {
     SlashEntry {
         section,
-        label: label.to_string().into(),
-        desc: desc.to_string().into(),
+        label: label.to_string(),
+        desc: desc.to_string(),
         preview,
         cls,
         aliases: aliases.iter().map(|a| a.to_string()).collect(),
@@ -253,11 +255,11 @@ impl Editor {
             all.push(SlashEntry {
                 section: "Properties",
                 label: if name.is_empty() {
-                    key.clone().into()
+                    key.clone()
                 } else {
-                    name.clone().into()
+                    name.clone()
                 },
-                desc: format.clone().into(),
+                desc: format.clone(),
                 preview: "≔",
                 cls: Preview::Rel,
                 aliases: vec![key.clone(), "property".into(), "relation".into()],
@@ -277,230 +279,352 @@ impl Editor {
             .collect()
     }
 
-    /// The open slash menu (300px, at the caret; flips above when there's no
-    /// room): a kit command list without its own query field — the filter is
-    /// the text typed after the slash, and the editor keeps focus and routes
-    /// ↑/↓/Enter to the list's highlight.
-    pub(crate) fn render_slash(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
-        let slash = self.slash.clone()?;
-        let anchor = match slash.pos {
-            Some(p) => p,
-            None => {
-                let layouts = self.layouts.borrow();
-                let layout = layouts.get(&slash.block)?;
-                let caret = layout.position_for_index(slash.start + 1);
-                let p = point(caret.x, caret.y + layout.line_height + px(6.));
-                drop(layouts);
-                if let Some(s) = self.slash.as_mut() {
-                    s.pos = Some(p);
-                }
-                p
-            }
-        };
-        let cmd = match slash.cmd {
-            Some(cmd) => cmd,
-            None => {
-                let cmd = cx.new(|cx| CommandState::new(window, cx));
-                if let Some(s) = self.slash.as_mut() {
-                    s.cmd = Some(cmd.clone());
-                }
-                cmd
-            }
-        };
-        let filtered = self.slash_entries(&slash.filter);
-        let groups = slash_groups(&filtered);
-        let viewport = window.viewport_size();
-        let w = px(300.);
-        // Rows are 48px (36px tile + padding), section headings ~28px.
-        let h = px((12. + filtered.len() as f32 * 48. + groups.len() as f32 * 28.).min(360.));
-        let left = anchor.x.min(viewport.width - w - px(12.));
-        let top = if anchor.y + h > viewport.height - px(12.) {
-            (anchor.y - h - px(28.)).max(px(12.))
-        } else {
-            anchor.y
-        };
-
-        let picks: Rc<Vec<Vec<SlashPick>>> = Rc::new(
-            groups
-                .iter()
-                .map(|(_, items)| items.iter().map(|e| e.pick.clone()).collect())
-                .collect(),
-        );
-        let editor = cx.entity().downgrade();
-        let mut list = Command::new(&cmd)
-            .searchable(false)
-            .max_h(px(348.))
-            .on_confirm(move |ix, window, cx| {
-                let Some(pick) = picks.get(ix.section).and_then(|s| s.get(ix.row)).cloned() else {
-                    return;
-                };
-                let _ = editor.update(cx, |this, cx| this.apply_slash(pick, window, cx));
+    /// A new filter typed after the slash: the highlight stays on the same
+    /// entry when it survives the filter, else goes to the first (the kit
+    /// CommandState's behaviour).
+    pub(crate) fn slash_set_filter(&mut self, filter: String) {
+        let Some(slash) = &self.slash else { return };
+        let current = self
+            .slash_entries(&slash.filter)
+            .into_iter()
+            .nth(slash.selected)
+            .map(|e| e.pick);
+        let selected = current
+            .and_then(|pick| {
+                self.slash_entries(&filter)
+                    .iter()
+                    .position(|e| e.pick == pick)
             })
-            .empty(|_, _, _| {
-                div()
-                    .p(px(12.))
-                    .text_size(px(12.))
-                    .text_color(theme::muted())
-                    .child("No matches")
-            })
-            .w(w)
-            .p(px(2.))
-            .shadow(roostr_core::ui::menu_shadow());
-        let mut i = 0;
-        for (section, items) in groups {
-            let mut group = CommandGroup::new().label(section.to_uppercase());
-            for e in items {
-                let ix = i;
-                i += 1;
-                let keywords = e.aliases.clone();
-                group = group.item(
-                    CommandItem::new()
-                        .label(e.label.clone())
-                        .keywords(keywords)
-                        .child(move |_, _| slash_row(ix, &e)),
-                );
-            }
-            list = list.group(group);
+            .unwrap_or(0);
+        if let Some(slash) = self.slash.as_mut() {
+            slash.filter = filter;
+            slash.selected = selected;
         }
-        // Appears once per opening (keyed by where the `/` was typed), so
-        // filtering re-renders it in place.
-        let appear = roostr_core::motion::appear_frame(
-            ElementId::Name(format!("slash-appear-{}-{}", slash.block, slash.start).into()),
-            -4.,
-            window,
-            cx,
-        );
-        Some(
-            deferred(
-                anchored().position(point(left, top)).child(
-                    appear.apply(
-                        div()
-                            .id("slash-menu")
-                            // The editor keeps focus: the list must not take
-                            // it on click (its keys belong to the block).
-                            .capture_any_mouse_down(|_, window, _| window.prevent_default())
-                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                            .child(list),
-                    ),
-                ),
-            )
-            .with_priority(2)
-            .into_any_element(),
-        )
+    }
+
+    /// ↑/↓ while the menu is open: move the highlight, wrapping. Returns the
+    /// key of the newly highlighted row, for the caller to reveal
+    /// (`tx.scroll_into_view`).
+    pub(crate) fn slash_move(&mut self, delta: isize) -> Option<String> {
+        let slash = self.slash.as_ref()?;
+        let n = self.slash_entries(&slash.filter).len() as isize;
+        if n == 0 {
+            return None;
+        }
+        let sel = (slash.selected as isize).min(n - 1);
+        let next = (sel + delta).rem_euclid(n) as usize;
+        self.slash.as_mut()?.selected = next;
+        Some(slash_row_key(next))
+    }
+
+    /// Enter/Tab while the menu is open: apply the highlighted entry (the
+    /// first when none was moved to); nothing matching closes the menu.
+    pub(crate) fn slash_confirm(&mut self, s: &mut State) {
+        let Some(slash) = self.slash.clone() else {
+            return;
+        };
+        match self
+            .slash_entries(&slash.filter)
+            .into_iter()
+            .nth(slash.selected)
+        {
+            Some(entry) => self.apply_slash(entry.pick, s),
+            None => self.slash = None,
+        }
     }
 }
 
-/// The entries split into their (contiguous) sections, in order.
-fn slash_groups(entries: &[SlashEntry]) -> Vec<(&'static str, Vec<SlashEntry>)> {
-    let mut out: Vec<(&'static str, Vec<SlashEntry>)> = Vec::new();
-    for e in entries {
+fn slash_row_key(index: usize) -> String {
+    format!("slash-{index}")
+}
+
+/// The entries split into their (contiguous) sections, in order, each entry
+/// with its flat index.
+fn slash_groups(entries: &[SlashEntry]) -> Vec<(&'static str, Vec<(usize, &SlashEntry)>)> {
+    let mut out: Vec<(&'static str, Vec<(usize, &SlashEntry)>)> = Vec::new();
+    for (i, e) in entries.iter().enumerate() {
         match out.last_mut() {
-            Some((section, items)) if *section == e.section => items.push(e.clone()),
-            _ => out.push((e.section, vec![e.clone()])),
+            Some((section, items)) if *section == e.section => items.push((i, e)),
+            _ => out.push((e.section, vec![(i, e)])),
         }
     }
     out
 }
 
-/// The command-list path of each entry, in flat order.
-pub(crate) fn slash_paths(entries: &[SlashEntry]) -> Vec<IndexPath> {
-    slash_groups(entries)
-        .iter()
-        .enumerate()
-        .flat_map(|(section, (_, items))| {
-            (0..items.len()).map(move |row| IndexPath::new(row).section(section))
-        })
-        .collect()
+const SLASH_W: f32 = 300.;
+
+/// The open slash menu (300pt, under the caret; flips above when there's no
+/// room): a kit command list without its own query field. The filter is the
+/// text typed after the slash; the block's field keeps the keyboard, and a
+/// press on a row leaves it there.
+pub(crate) fn slash_view(
+    _s: &State,
+    cx: &mut rune::Cx<State>,
+    t: &Theme,
+    e: &Editor,
+    layer: &mut Vec<El>,
+) {
+    let Some(slash) = &e.slash else { return };
+    if e.editing() != Some(slash.block.as_str()) {
+        return;
+    }
+    let Some([cx_x, cx_y, _, cx_h]) = cx.caret(&format!("text-{}", slash.block)) else {
+        return;
+    };
+    let entries = e.slash_entries(&slash.filter);
+    let groups = slash_groups(&entries);
+    let [vw, vh] = window_size(cx);
+    // Rows are 48pt (36pt tile + padding), section headings ~28pt: the
+    // estimate until the menu has been laid out once.
+    let estimate = (12. + entries.len() as f32 * 48. + groups.len() as f32 * 28.).min(360.);
+    let h = cx
+        .layout_size("slash-menu")
+        .map_or(estimate, |[_, h]| h.min(360.));
+    let below = cx_y + cx_h + 6.;
+    let left = cx_x.min(vw - SLASH_W - 12.).max(0.);
+    let top = if below + h > vh - 12. {
+        (cx_y - 6. - h).max(12.)
+    } else {
+        below
+    };
+
+    let oid = e.object_id.clone();
+    let mut list = col().padding(rems(0.25)).items_stretch();
+    if entries.is_empty() {
+        list = list.child(
+            row()
+                .padding(12.)
+                .child(text("No matches").font(ty::ui(12.)).color(t.muted)),
+        );
+    }
+    for (section, items) in groups {
+        list = list.child(cmd_heading(t, &section.to_uppercase()));
+        for (i, entry) in items {
+            let selected = slash.selected == i;
+            let pick = entry.pick.clone();
+            let (press_oid, hover_oid) = (oid.clone(), oid.clone());
+            list = list.child(
+                cmd_item(t, slash_row_key(i), selected)
+                    .label(entry.label.clone())
+                    .child(slash_row(t, entry))
+                    .on_press(move |s: &mut State| {
+                        let pick = pick.clone();
+                        with_editor(s, &press_oid, |e, s| e.apply_slash(pick, s));
+                    })
+                    .on_hover_change(move |s: &mut State, inside: bool, _: &mut Tx| {
+                        if inside {
+                            with_editor(s, &hover_oid, |e, _| {
+                                if let Some(slash) = e.slash.as_mut() {
+                                    slash.selected = i;
+                                }
+                            });
+                        }
+                    }),
+            );
+        }
+    }
+    let menu = cmd_panel(t)
+        .key("slash-menu")
+        .w(SLASH_W)
+        .padding(2.)
+        .box_shadow(shadow::menu())
+        // The block's field keeps the keyboard: its keys drive the list.
+        .preserve_focus_on_press(true)
+        .child(cmd_scroll(list, 348.))
+        .absolute(left, top)
+        .transition(roostr_ui::motion::appear(-4.))
+        .instant_changes();
+    layer.push(menu);
 }
 
-/// One slash row: the preview tile, the name and its description.
-fn slash_row(i: usize, e: &SlashEntry) -> Stateful<Div> {
-    div()
-        .id(("slash-item", i))
-        .flex()
-        .items_center()
-        .gap(px(10.))
-        .w_full()
-        .cursor_pointer()
+/// One slash row's body: the preview tile, the name and its description.
+fn slash_row(t: &Theme, e: &SlashEntry) -> El {
+    row()
+        .grow(1.)
+        .shrink()
+        .min_w(0.)
+        .center_y()
+        .gap(10.)
         .child(preview_tile(
+            t,
             e.preview,
             e.cls,
-            px(36.),
-            px(36.),
-            theme::bg(),
+            [36., 36.],
+            t.bg,
+            None,
+            false,
         ))
         .child(
-            div()
-                .flex()
-                .flex_col()
-                .min_w_0()
+            col()
+                .shrink()
+                .min_w(0.)
                 .child(
-                    div()
-                        .text_size(px(13.))
-                        .font_weight(FontWeight(550.))
-                        .text_color(theme::fg())
-                        .child(e.label.clone()),
+                    text(e.label.clone())
+                        .font(ty::ui(13.).weight(550.))
+                        .color(t.fg)
+                        .truncate()
+                        .a11y_hidden(),
                 )
                 .child(
-                    div()
-                        .text_size(px(11.))
-                        .text_color(theme::muted())
-                        .child(e.desc.clone()),
+                    text(e.desc.clone())
+                        .font(ty::ui(11.))
+                        .color(t.muted)
+                        .truncate()
+                        .a11y_hidden(),
                 ),
         )
 }
 
-/// The rendered style preview tile (`.preview` + `pv-*`).
+/// The rendered style preview tile (`.preview` + `pv-*`), `size` = [w, h].
+/// `ink` overrides the class's text colour; `strike` crosses the text out.
 pub(crate) fn preview_tile(
-    text: &'static str,
+    t: &Theme,
+    label: &str,
     cls: Preview,
-    w: Pixels,
-    h: Pixels,
-    bg: Hsla,
-) -> Div {
-    let (size, weight, color, italic, mono) = match cls {
-        Preview::P => (12., 400., theme::muted(), false, false),
-        Preview::H1 => (16., 750., theme::fg(), false, false),
-        Preview::H2 => (14., 650., theme::fg(), false, false),
-        Preview::H3 => (12., 600., theme::fg(), false, false),
-        Preview::List => (11., 400., theme::muted(), false, false),
-        Preview::Check => (14., 400., theme::accent(), false, false),
-        Preview::Quote => (12., 400., theme::fg(), true, false),
-        Preview::Code => (10., 400., theme::muted(), false, true),
-        Preview::Callout => (12., 400., theme::fg(), false, false),
-        Preview::Table => (16., 400., theme::muted(), false, false),
-        Preview::Div => (12., 400., theme::fg(), false, false),
-        Preview::Link => (12., 400., theme::fg(), false, false),
-        Preview::Rel => (14., 400., theme::accent(), false, false),
+    size: [f32; 2],
+    bg: Color,
+    ink: Option<Color>,
+    strike: bool,
+) -> El {
+    let (pt, weight, color, italic, mono) = match cls {
+        Preview::P => (12., 400., t.muted, false, false),
+        Preview::H1 => (16., 750., t.fg, false, false),
+        Preview::H2 => (14., 650., t.fg, false, false),
+        Preview::H3 => (12., 600., t.fg, false, false),
+        Preview::List => (11., 400., t.muted, false, false),
+        Preview::Check => (14., 400., t.accent, false, false),
+        Preview::Quote => (12., 400., t.fg, true, false),
+        Preview::Code => (10., 400., t.muted, false, true),
+        Preview::Callout => (12., 400., t.fg, false, false),
+        Preview::Table => (16., 400., t.muted, false, false),
+        Preview::Div => (12., 400., t.fg, false, false),
+        Preview::Link => (12., 400., t.fg, false, false),
+        Preview::Rel => (14., 400., t.accent, false, false),
     };
-    let mut tile = div()
-        .flex_none()
-        .w(w)
-        .h(h)
-        .flex()
-        .items_center()
-        .justify_center()
-        .border_1()
-        .border_color(theme::border())
-        .rounded(px(6.))
-        .bg(if cls == Preview::Callout {
-            theme::hover()
-        } else {
-            bg
+    let font = if mono { ty::mono(pt) } else { ty::ui(pt) }.weight(weight);
+    let font = TextStyle { italic, ..font };
+    let mut glyphs = text(label.to_string())
+        .font(font)
+        .color(ink.unwrap_or(color))
+        .a11y_hidden();
+    if strike {
+        glyphs = glyphs.strike(0, label.len(), None);
+    }
+    let tile = el()
+        .size(size[0], size[1])
+        .center()
+        .radius(6.)
+        .clip_rounded(6.)
+        .fill(if cls == Preview::Callout { t.hover } else { bg });
+    let tile = if italic {
+        // `.italic().border_l(3).border_color(accent)`: every side takes the accent.
+        tile.border_sides([1., 1., 1., 3.], t.accent)
+    } else {
+        tile.border(1., t.border)
+    };
+    tile.child(glyphs)
+}
+
+// ───────────────────────────────────────────── kit command-list look
+
+/// The window's size in points (the kit root fills it).
+pub(crate) fn window_size(cx: &rune::Cx<State>) -> [f32; 2] {
+    cx.layout_size("kit-root").unwrap_or([f32::MAX, f32::MAX])
+}
+
+/// gpui-kit's `Command` surface: popover fill, radius 10 with its clip, a
+/// 1pt border, a column of rows. Callers set width, padding and shadow.
+pub(crate) fn cmd_panel(t: &Theme) -> El {
+    col()
+        .items_stretch()
+        .fill(t.kit.popover)
+        .radius(radius::KIT_LG)
+        .clip_rounded(radius::KIT_LG)
+        .border(1., t.kit.border)
+        .padding(1.)
+}
+
+/// The command list's scroll viewport, at most `max_h` tall.
+pub(crate) fn cmd_scroll(list: El, max_h: f32) -> El {
+    col()
+        .role("listbox")
+        .w_full()
+        .max_h(max_h)
+        .min_h(0.)
+        .shrink()
+        .scroll(rune::ScrollSpec {
+            stick_bottom: false,
         })
-        .overflow_hidden()
-        .text_size(px(size))
-        .font_weight(FontWeight(weight))
-        .text_color(color);
-    if italic {
-        tile = tile.italic().border_l(px(3.)).border_color(theme::accent());
-    }
-    if mono {
-        tile = tile.font_family(theme::fonts::MONO);
-    }
-    tile.child(text)
+        .child(list)
+}
+
+/// A group heading (the kit's 12px medium muted label).
+pub(crate) fn cmd_heading(t: &Theme, label: &str) -> El {
+    row().w_full().px(rems(0.5)).py(rems(0.375)).child(
+        text(label.to_string())
+            .font(ty::ui(rems(0.75)).medium())
+            .color(t.kit.muted_foreground),
+    )
+}
+
+/// A rule between groups.
+pub(crate) fn cmd_separator(t: &Theme) -> El {
+    el().w_full()
+        .py(4.)
+        .child(el().w_full().h(1.).fill(t.kit.border))
+        .a11y_hidden()
+}
+
+/// A kit command row keyed `key`: padding 7 × 5.25, the inner radius, the
+/// accent fill while highlighted. Callers add the body and handlers.
+pub(crate) fn cmd_item(t: &Theme, key: String, highlighted: bool) -> El {
+    let r = row()
+        .key(key)
+        .role("option")
+        .checked(highlighted)
+        .w_full()
+        .center_y()
+        .gap(rems(0.5))
+        .px(rems(0.5))
+        .py(rems(0.375))
+        .radius(radius::KIT_LG - rems(0.25) - 1.)
+        .cursor(Cursor::Pointer);
+    if highlighted { r.fill(t.kit.accent) } else { r }
+}
+
+/// The kit command search field over `edit` (12.25px on a 17.5 line), keyed
+/// `key`. Callers bind `on_edit` and the keys.
+pub(crate) fn cmd_field(t: &Theme, edit: &rune::TextEdit, key: &str, placeholder: &str) -> El {
+    rune::text_input(edit, TextStyle::new(rems(0.875), ty::NORMAL).lh(rems(1.25)))
+        .single_line()
+        .key(key.to_string())
+        .grow(1.)
+        .shrink()
+        .min_w(0.)
+        .color(t.kit.foreground)
+        .placeholder(placeholder.to_string(), t.kit.muted_foreground)
+        .label(placeholder.to_string())
+        .caret(t.kit.caret, t.kit.selection)
+        .no_focus_ring()
+}
+
+/// The kit command search bar: a magnifier and `field`, a rule under them.
+pub(crate) fn cmd_search(t: &Theme, field: El) -> El {
+    row()
+        .px(rems(0.75))
+        .pb(1.)
+        .border_sides([0., 0., 1., 0.], t.kit.border)
+        .child(
+            row()
+                .w_full()
+                .h(rems(2.))
+                .gap(6.)
+                .center_y()
+                .cursor(Cursor::Text)
+                .child(
+                    roostr_ui::glyph(roostr_ui::Glyph::KitSearch, rems(1.))
+                        .color(t.kit.muted_foreground),
+                )
+                .child(field),
+        )
 }

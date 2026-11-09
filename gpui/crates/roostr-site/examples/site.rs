@@ -1,59 +1,54 @@
 //! `cargo run -p roostr-site --example site -- landing|guide|privacy|join:<blob>`
+//! (`--snap out.png --size WxH` for a headless snapshot).
 //!
-//! Shows one website page. Links between site pages swap the page in place
-//! (the app's shell does the same through its page factory); `/app` links
-//! are logged, since this window has no workspace.
+//! Shows one website page filling the window, as the app and the browser do. Links between
+//! site pages swap the page in place (the route changes); `/app` links are logged, since this
+//! window has no workspace.
 
-use gpui_kit::*;
-use roostr_core::nav::{NavEvent, Navigator, Route, SitePage};
-use roostr_site::SiteView;
+use roostr_core::State;
+use roostr_core::nav::{self, NavEvent, Route, SitePage};
+use roostr_ui::ThemePref;
+use rune::{Cx, El, el};
 
-struct Host {
-    view: Entity<SiteView>,
-    _nav: Subscription,
-}
-
-impl Host {
-    fn new(page: SitePage, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let view = cx.new(|cx| SiteView::new(page, window, cx));
-        let nav = cx.subscribe_in(
-            &Navigator::global(cx),
-            window,
-            |this, nav, event: &NavEvent, window, cx| {
-                if *event != NavEvent::Navigated {
-                    return;
-                }
-                match nav.read(cx).route().clone() {
-                    Route::Site(page) => {
-                        this.view = cx.new(|cx| SiteView::new(page, window, cx));
-                        cx.notify();
-                    }
-                    other => println!("navigate: {}", other.path()),
-                }
-            },
-        );
-        Self { view, _nav: nav }
+fn page_arg() -> SitePage {
+    let arg = rune::extra_args().first().cloned().unwrap_or_default();
+    match arg.as_str() {
+        "guide" => SitePage::Guide,
+        "privacy" => SitePage::Privacy,
+        other => match other.strip_prefix("join:") {
+            Some(blob) => SitePage::Join(blob.to_string()),
+            None => SitePage::Landing,
+        },
     }
 }
 
-impl Render for Host {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        div().size_full().child(self.view.clone())
+fn init() -> State {
+    let mut s = roostr_host::daemon_state().unwrap_or_else(|_| State::unopened());
+    roostr_site::register(&mut s);
+    s.on_nav(log_app_routes);
+    nav::navigate(Route::Site(page_arg()), &mut s);
+    s
+}
+
+fn log_app_routes(s: &mut State, event: &NavEvent) {
+    if *event == NavEvent::Navigated && !matches!(s.nav.route(), Route::Site(_)) {
+        println!("navigate: {}", s.nav.route().path());
     }
+}
+
+fn view(s: &State, cx: &mut Cx<State>) -> El {
+    roostr_ui::theme(ThemePref::Dark, cx);
+    let page = match s.nav.route() {
+        Route::Site(page) => roostr_site::view(s, cx, page),
+        _ => el(),
+    };
+    roostr_ui::root(el().w_full().h_full().child(page), [])
 }
 
 fn main() {
-    roostr_core::dev::run_example("Site", |args, window, cx| {
-        roostr_site::init(cx);
-        let arg = args.first().cloned().unwrap_or_else(|| "landing".into());
-        let page = match arg.as_str() {
-            "guide" => SitePage::Guide,
-            "privacy" => SitePage::Privacy,
-            other => match other.strip_prefix("join:") {
-                Some(blob) => SitePage::Join(blob.to_string()),
-                None => SitePage::Landing,
-            },
-        };
-        cx.new(|cx| Host::new(page, window, cx)).into()
-    });
+    let spec = rune::AppSpec {
+        on_key: Some(roostr_site::on_key),
+        ..roostr_host::spec("Roostr", (1280.0, 860.0), init, view)
+    };
+    rune::App::new(spec).run();
 }

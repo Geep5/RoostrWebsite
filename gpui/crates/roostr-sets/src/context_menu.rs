@@ -2,34 +2,21 @@
 //! open in new tab, change type, edit properties, add to / remove from a
 //! collection, move to bin. Bulk by construction: it acts on every id given.
 
-use std::cell::Cell;
 use std::collections::HashMap;
-use std::rc::Rc;
 
-use gpui_kit::component::Icon;
-use gpui_kit::component::empty::Empty;
-use gpui_kit::component::input::{Escape as InputEscape, Input, InputEvent, InputState};
-use gpui_kit::component::list::ListItem;
-use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
-use gpui_kit::prelude::FluentBuilder as _;
-use gpui_kit::*;
 use roostr_core::nav::{self, Route};
 use roostr_core::objects::{object_icon, type_glyph};
 use roostr_core::protected::blockers_for;
 use roostr_core::relations::{is_reserved_key, space_relations};
-use roostr_core::{Fields, Glyph, RelationDef, Store, Value, api, theme};
+use roostr_core::{Fields, Object, RelationDef, State, Value, api, field_str};
 use roostr_properties::PropertyValue;
+use roostr_rt::Task;
+use roostr_ui::overlay::{self, Placement, scrim};
+use roostr_ui::ty::{self, Weights};
+use roostr_ui::{Glyph, Input, InputState, Theme, glyph, radius, rems, shadow};
+use rune::{Cursor, Cx, El, Key, KeyEvent, PointerPress, ScrollSpec, Tx, col, el, row, text};
 
-use crate::common;
-use crate::config;
-
-/// What the menu tells its host.
-pub(crate) enum MenuEvent {
-    /// Close the menu (and clear the host's selection).
-    Close,
-    /// Records changed: reload.
-    Changed,
-}
+use crate::{DataView, common, config, dv, dv_mut};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Fly {
@@ -46,18 +33,23 @@ fn is_merge(rel: &RelationDef) -> bool {
 fn list_of(fields: Option<&Fields>, key: &str) -> Vec<String> {
     fields
         .and_then(|f| f.get(key))
-        .map(|v| {
-            v.items()
-                .iter()
-                .filter_map(|i| i.string_value.clone())
-                .filter(|s| !s.is_empty())
-                .collect()
-        })
+        .map(strings)
         .unwrap_or_default()
 }
 
-pub(crate) struct RowContextMenu {
-    position: Point<Pixels>,
+/// The non-empty string items of a value.
+fn strings(v: &Value) -> Vec<String> {
+    v.items()
+        .iter()
+        .filter_map(|i| i.string_value.clone())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+/// The open row menu of one data view (`DataView.menu`).
+pub(crate) struct RowMenu {
+    /// The window point it opened at (its top-left corner).
+    at: (f32, f32),
     ids: Vec<String>,
     space_id: String,
     /// Collections only: "Remove from collection" severs membership.
@@ -67,98 +59,14 @@ pub(crate) struct RowContextMenu {
     /// Row fields the host already holds.
     fields_of: HashMap<String, Fields>,
     fly: Option<Fly>,
-    type_filter: Entity<InputState>,
-    prop_filter: Entity<InputState>,
+    type_filter: InputState,
+    prop_filter: InputState,
     edit_key: String,
     edit_value: Option<Value>,
     blocked: HashMap<String, String>,
-    /// The kit menu of top-level rows, and the protected-id count it was
-    /// built for (rebuilt when that changes).
-    menu: Entity<PopupMenu>,
-    menu_blocked: Option<usize>,
-    /// Set by a flyout row's click so the menu's dismiss keeps it open.
-    keep_open: Rc<Cell<bool>>,
-    /// The menu's bounds on the last frame and each flyout row's: a flyout
-    /// sits against the menu, level with its row.
-    menu_bounds: common::BoundsCell,
-    fly_rows: [common::BoundsCell; 3],
-    _subs: Vec<Subscription>,
 }
 
-impl EventEmitter<MenuEvent> for RowContextMenu {}
-
-impl RowContextMenu {
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn new(
-        position: Point<Pixels>,
-        ids: Vec<String>,
-        space_id: String,
-        collection: Option<String>,
-        relation_keys: Vec<String>,
-        fields_of: HashMap<String, Fields>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Self {
-        let type_filter = cx.new(|cx| InputState::new(window, cx).placeholder("Search types..."));
-        let prop_filter =
-            cx.new(|cx| InputState::new(window, cx).placeholder("Filter properties..."));
-        let menu = PopupMenu::build(window, cx, |menu, _, _| menu);
-        let subs = vec![
-            cx.subscribe_in(
-                &type_filter,
-                window,
-                |this, _, event: &InputEvent, _, cx| match event {
-                    InputEvent::PressEnter { .. } => {
-                        if let Some(key) = this.filtered_types(cx).first().map(|t| t.0.clone()) {
-                            this.retype(key, cx);
-                        }
-                    }
-                    _ => cx.notify(),
-                },
-            ),
-            cx.observe(&prop_filter, |_, _, cx| cx.notify()),
-            cx.subscribe_in(&menu, window, |this, _, _: &DismissEvent, window, cx| {
-                this.menu_dismissed(window, cx)
-            }),
-        ];
-        // Keyboard focus starts in the menu: arrows, Enter and Escape.
-        window.focus(&menu.focus_handle(cx), cx);
-        let task = blockers_for(&ids, cx);
-        cx.spawn(async move |this, cx| {
-            if let Ok(blocked) = task.await {
-                let _ = this.update(cx, |this, cx| {
-                    this.blocked = blocked;
-                    cx.notify();
-                });
-            }
-        })
-        .detach();
-        Self {
-            position,
-            ids,
-            space_id,
-            collection,
-            relation_keys,
-            fields_of,
-            fly: None,
-            type_filter,
-            prop_filter,
-            edit_key: String::new(),
-            edit_value: None,
-            blocked: HashMap::new(),
-            menu,
-            menu_blocked: None,
-            keep_open: Rc::new(Cell::new(false)),
-            menu_bounds: common::bounds_cell(),
-            fly_rows: [
-                common::bounds_cell(),
-                common::bounds_cell(),
-                common::bounds_cell(),
-            ],
-            _subs: subs,
-        }
-    }
-
+impl RowMenu {
     fn suffix(&self) -> String {
         if self.ids.len() > 1 {
             format!(" ({})", self.ids.len())
@@ -174,747 +82,872 @@ impl RowContextMenu {
             .cloned()
             .collect()
     }
+}
 
-    fn close(&mut self, cx: &mut Context<Self>) {
-        cx.emit(MenuEvent::Close);
-    }
+fn menu_of<'a>(s: &'a State, id: &str) -> Option<&'a RowMenu> {
+    dv(s, id).and_then(|v| v.menu.as_ref())
+}
 
-    /// Space types plus bundled ones, filtered by the search box: (key, label).
-    fn filtered_types(&self, cx: &App) -> Vec<(String, String)> {
-        let q = self.type_filter.read(cx).value().trim().to_lowercase();
-        let store = Store::global(cx).read(cx);
-        store
-            .types
-            .iter()
-            .filter(|t| t.space.is_empty() || t.space == self.space_id)
-            .filter(|t| {
-                q.is_empty()
-                    || (if t.name.is_empty() { &t.key } else { &t.name })
-                        .to_lowercase()
-                        .contains(&q)
-            })
-            .map(|t| {
-                let icon = if t.icon.is_empty() {
-                    type_glyph(store, &t.key, &self.space_id)
-                } else {
-                    t.icon.clone()
-                };
-                (
-                    t.key.clone(),
-                    format!(
-                        "{} {}",
-                        icon,
-                        if t.name.is_empty() { &t.key } else { &t.name }
-                    ),
-                )
-            })
-            .collect()
-    }
+fn menu_mut<'a>(s: &'a mut State, id: &str) -> Option<&'a mut RowMenu> {
+    dv_mut(s, id).and_then(|v| v.menu.as_mut())
+}
 
-    fn prop_rels(&self, cx: &App) -> Vec<RelationDef> {
-        let store = Store::global(cx).read(cx);
-        let all: Vec<&RelationDef> = space_relations(&store.relations, &self.space_id)
-            .into_iter()
-            .filter(|r| !r.hidden && !r.read_only && !is_reserved_key(&r.key))
-            .collect();
-        let head: Vec<&RelationDef> = self
-            .relation_keys
-            .iter()
-            .filter_map(|k| all.iter().find(|r| r.key == *k).copied())
-            .collect();
-        let rest = all
-            .iter()
-            .filter(|r| !head.iter().any(|h| h.id == r.id))
-            .copied();
-        head.iter().copied().chain(rest).cloned().collect()
-    }
-
-    fn open_fly(&mut self, kind: Fly, window: &mut Window, cx: &mut Context<Self>) {
-        if kind == Fly::Types {
-            self.type_filter
-                .update(cx, |s, cx| s.set_value("", window, cx));
-        }
-        if kind == Fly::Props {
-            self.edit_key.clear();
-            self.edit_value = None;
-        }
-        self.fly = if self.fly == Some(kind) {
-            None
-        } else {
-            Some(kind)
-        };
-        if self.fly == Some(Fly::Types) {
-            self.type_filter.update(cx, |s, cx| s.focus(window, cx));
-        }
-        cx.notify();
-    }
-
-    fn open(&mut self, cx: &mut Context<Self>) {
-        let targets = self.ids.clone();
-        self.fly = None;
-        self.close(cx);
-        // One object opens in place; a multi-selection opens each as a tab.
-        if targets.len() == 1 {
-            common::open_object(&targets[0], cx);
-            return;
-        }
-        for id in targets {
-            nav::open_tab(Route::Object(id), true, cx);
-        }
-    }
-
-    fn open_tabs(&mut self, cx: &mut Context<Self>) {
-        let targets = self.ids.clone();
-        self.close(cx);
-        for id in targets {
-            common::open_object_tab(&id, cx);
-        }
-    }
-
-    fn remove(&mut self, cx: &mut Context<Self>) {
-        let Some(collection) = self.collection.clone() else {
-            return;
-        };
-        let targets = self.ids.clone();
-        self.close(cx);
-        let task = common::remove_members(&collection, &targets, cx);
-        cx.spawn(async move |this, cx| {
-            let _ = task.await;
-            let _ = this.update(cx, |_, cx| cx.emit(MenuEvent::Changed));
-        })
-        .detach();
-    }
-
-    fn bin(&mut self, cx: &mut Context<Self>) {
-        let targets = self.deletable();
-        self.close(cx);
-        cx.spawn(async move |this, cx| {
-            for id in targets {
-                let task = cx.update(|cx| api::note::delete(&id, cx));
-                let _ = task.await;
-            }
-            let _ = this.update(cx, |_, cx| cx.emit(MenuEvent::Changed));
-        })
-        .detach();
-    }
-
-    /// Retype in place: blocks and fields survive.
-    fn retype(&mut self, type_key: String, cx: &mut Context<Self>) {
-        let targets = self.ids.clone();
-        self.close(cx);
-        cx.spawn(async move |this, cx| {
-            for id in targets {
-                let task = cx.update(|cx| api::note::set_type(&id, &type_key, cx));
-                let _ = task.await;
-            }
-            let _ = this.update(cx, |_, cx| cx.emit(MenuEvent::Changed));
-        })
-        .detach();
-    }
-
-    fn add_to(&mut self, collection_id: String, cx: &mut Context<Self>) {
-        let targets = self.ids.clone();
-        self.close(cx);
-        let fetch = Store::global(cx).read(cx).fetch_object(&collection_id, cx);
-        cx.spawn(async move |this, cx| {
-            if let Ok(col) = fetch.await {
-                let have = config::member_ids(&col.fields);
-                let mut merged = have.clone();
-                for id in targets {
-                    if !merged.contains(&id) {
-                        merged.push(id);
-                    }
-                }
-                if merged.len() != have.len() {
-                    let task = cx.update(|cx| common::set_members(&collection_id, &merged, cx));
-                    let _ = task.await;
-                }
-            }
-            let _ = this.update(cx, |_, cx| cx.emit(MenuEvent::Changed));
-        })
-        .detach();
-    }
-
-    /// Fields of every target: the host's rows, else fetched.
-    #[allow(clippy::result_large_err)]
-    fn values_of(&self, cx: &App) -> Task<Vec<Option<Fields>>> {
-        let store = Store::global(cx).read(cx);
-        let tasks: Vec<Result<Fields, Task<anyhow::Result<roostr_core::Object>>>> = self
-            .ids
-            .iter()
-            .map(|id| match self.fields_of.get(id) {
-                Some(f) => Ok(f.clone()),
-                None => Err(store.fetch_object(id, cx)),
-            })
-            .collect();
-        cx.background_spawn(async move {
-            let mut out = Vec::new();
-            for t in tasks {
-                out.push(match t {
-                    Ok(f) => Some(f),
-                    Err(task) => task.await.ok().map(|o| o.fields),
-                });
-            }
-            out
-        })
-    }
-
-    /// Open one property: the initial value is the cross-record intersection.
-    fn open_prop(&mut self, key: String, cx: &mut Context<Self>) {
-        self.edit_key = key.clone();
-        self.edit_value = None;
-        cx.notify();
-        let Some(rel) = self.prop_rels(cx).into_iter().find(|r| r.key == key) else {
-            return;
-        };
-        let values = self.values_of(cx);
-        cx.spawn(async move |this, cx| {
-            let all = values.await;
-            let initial = if is_merge(&rel) {
-                let mut inter = list_of(all.first().and_then(Option::as_ref), &key);
-                for f in all.iter().skip(1) {
-                    let l = list_of(f.as_ref(), &key);
-                    inter.retain(|v| l.contains(v));
-                }
-                Some(Value::values(
-                    inter.into_iter().map(Value::string).collect(),
-                ))
-            } else {
-                let first = all
-                    .first()
-                    .and_then(|f| f.as_ref().and_then(|f| f.get(&key).cloned()));
-                if all
-                    .iter()
-                    .skip(1)
-                    .all(|f| f.as_ref().and_then(|f| f.get(&key).cloned()) == first)
+/// Open the menu at window point `at` for `targets`, the protected ones
+/// loading behind it.
+pub(crate) fn open(
+    s: &mut State,
+    id: &str,
+    targets: Vec<String>,
+    at: (f32, f32),
+    fields_of: HashMap<String, Fields>,
+    relation_keys: Vec<String>,
+) {
+    let space_id = s
+        .store
+        .object(id)
+        .map(|o| field_str(&o.fields, "channel").to_string())
+        .unwrap_or_default();
+    let Some(v) = dv_mut(s, id) else { return };
+    let collection = v.collection_id();
+    v.menu = Some(RowMenu {
+        at,
+        ids: targets.clone(),
+        space_id,
+        collection,
+        relation_keys,
+        fields_of,
+        fly: None,
+        type_filter: InputState::new(),
+        prop_filter: InputState::new(),
+        edit_key: String::new(),
+        edit_value: None,
+        blocked: HashMap::new(),
+    });
+    let task = blockers_for(&targets, s);
+    let view = id.to_string();
+    s.rt.spawn(async move |cx| {
+        if let Ok(blocked) = task.await {
+            cx.update(|s| {
+                // A menu opened since for other rows keeps its own answer.
+                if let Some(m) = menu_mut(s, &view)
+                    && m.ids == targets
                 {
-                    first
-                } else {
-                    None
-                }
-            };
-            let _ = this.update(cx, |this, cx| {
-                if this.edit_key == key {
-                    this.edit_value = initial;
-                    cx.notify();
+                    m.blocked = blocked;
                 }
             });
-        })
-        .detach();
-    }
+        }
+    })
+    .detach();
+}
 
-    fn apply_prop(&mut self, rel: RelationDef, v: Value, cx: &mut Context<Self>) {
-        let targets = self.ids.clone();
-        let base: Vec<String> = self
-            .edit_value
-            .as_ref()
-            .map(|e| {
-                e.items()
-                    .iter()
-                    .filter_map(|i| i.string_value.clone())
-                    .filter(|s| !s.is_empty())
-                    .collect()
-            })
-            .unwrap_or_default();
-        let values = self.values_of(cx);
-        // Back to the property list; the menu stays open for the next one.
-        self.edit_key.clear();
-        self.edit_value = None;
-        cx.notify();
-        cx.spawn(async move |this, cx| {
-            if is_merge(&rel) {
-                let next: Vec<String> = v
-                    .items()
-                    .iter()
-                    .filter_map(|i| i.string_value.clone())
-                    .filter(|s| !s.is_empty())
-                    .collect();
-                let added: Vec<String> =
-                    next.iter().filter(|x| !base.contains(x)).cloned().collect();
-                let removed: Vec<String> =
-                    base.iter().filter(|x| !next.contains(x)).cloned().collect();
-                let all = values.await;
-                for (id, fields) in targets.iter().zip(all) {
-                    let cur = list_of(fields.as_ref(), &rel.key);
-                    let mut merged: Vec<String> = cur
-                        .iter()
-                        .filter(|x| !removed.contains(x))
-                        .cloned()
-                        .collect();
-                    merged.extend(added.iter().filter(|x| !cur.contains(x)).cloned());
-                    let value = Value::values(merged.into_iter().map(Value::string).collect());
-                    let task = cx.update(|cx| api::note::set_field(id, &rel.key, value, cx));
-                    let _ = task.await;
-                }
+/// Close the menu and clear the host's selection.
+fn close(s: &mut State, id: &str) {
+    if let Some(v) = dv_mut(s, id) {
+        v.menu = None;
+    }
+    crate::table::clear_selection(s, id);
+}
+
+/// Records changed: reload once `task` is done.
+fn reload_after(s: &mut State, id: &str, task: Task<()>) {
+    let view = id.to_string();
+    s.rt.spawn(async move |cx| {
+        task.await;
+        cx.update(|s| crate::reload(s, &view));
+    })
+    .detach();
+}
+
+/// Space types plus bundled ones, filtered by the search box: (key, label).
+fn filtered_types(s: &State, m: &RowMenu) -> Vec<(String, String)> {
+    let q = m.type_filter.value().trim().to_lowercase();
+    let store = &s.store;
+    store
+        .types
+        .iter()
+        .filter(|t| t.space.is_empty() || t.space == m.space_id)
+        .filter(|t| {
+            q.is_empty()
+                || (if t.name.is_empty() { &t.key } else { &t.name })
+                    .to_lowercase()
+                    .contains(&q)
+        })
+        .map(|t| {
+            let icon = if t.icon.is_empty() {
+                type_glyph(store, &t.key, &m.space_id)
             } else {
-                for id in &targets {
-                    let task = cx.update(|cx| api::note::set_field(id, &rel.key, v.clone(), cx));
-                    let _ = task.await;
-                }
-            }
-            let _ = this.update(cx, |_, cx| cx.emit(MenuEvent::Changed));
+                t.icon.clone()
+            };
+            (
+                t.key.clone(),
+                format!(
+                    "{} {}",
+                    icon,
+                    if t.name.is_empty() { &t.key } else { &t.name }
+                ),
+            )
         })
-        .detach();
-    }
+        .collect()
+}
 
-    fn render_fly(
-        &mut self,
-        kind: Fly,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Stateful<Div> {
-        // `.ctx-fly`: max-height min(340px, 60vh) (content-box: + padding and border).
-        let max_h = (window.viewport_size().height * 0.6).min(px(340.)) + px(10.);
-        let mut fly = div()
-            .id("ctx-fly")
-            .flex()
-            .flex_col()
-            .w(px(250.))
-            .max_h(max_h)
-            .overflow_y_scroll()
-            .bg(theme::panel())
-            .border_1()
-            .border_color(theme::border())
-            .rounded(px(10.))
-            .p(px(4.))
-            .text_size(px(13.))
-            .text_color(theme::fg())
-            .shadow(menu_shadow())
-            .occlude();
-        let mut list = div().flex().flex_col();
-        match kind {
-            Fly::Types => {
-                fly = fly.child(
-                    div()
-                        .mx(px(6.))
-                        .mt(px(4.))
-                        .mb(px(6.))
-                        // The Input binds Escape itself: catch its action first.
-                        .capture_action(cx.listener(|this, _: &InputEscape, window, cx| {
-                            cx.stop_propagation();
-                            if this.type_filter.read(cx).value().is_empty() {
-                                this.fly = None;
-                                // Keep keyboard focus in the menu: the next Escape closes it.
-                                window.focus(&this.menu.focus_handle(cx), cx);
-                            } else {
-                                this.type_filter
-                                    .update(cx, |s, cx| s.set_value("", window, cx));
-                            }
-                            cx.notify();
-                        }))
-                        .child(Input::new(&self.type_filter).text_size(px(13.))),
-                );
-                let types = self.filtered_types(cx);
-                if types.is_empty() {
-                    let q = self.type_filter.read(cx).value().trim().to_string();
-                    list = list.child(none_row(format!("No type matches “{q}”")));
-                }
-                for (key, label) in types {
-                    list = list.child(
-                        menu_item(SharedString::from(format!("type-{key}")))
-                            .child(label)
-                            .on_click(
-                                cx.listener(move |this, _, _, cx| this.retype(key.clone(), cx)),
-                            ),
-                    );
+fn prop_rels(s: &State, m: &RowMenu) -> Vec<RelationDef> {
+    let all: Vec<&RelationDef> = space_relations(&s.store.relations, &m.space_id)
+        .into_iter()
+        .filter(|r| !r.hidden && !r.read_only && !is_reserved_key(&r.key))
+        .collect();
+    let head: Vec<&RelationDef> = m
+        .relation_keys
+        .iter()
+        .filter_map(|k| all.iter().find(|r| r.key == *k).copied())
+        .collect();
+    let rest = all
+        .iter()
+        .filter(|r| !head.iter().any(|h| h.id == r.id))
+        .copied();
+    head.iter().copied().chain(rest).cloned().collect()
+}
+
+fn open_fly(s: &mut State, id: &str, kind: Fly) {
+    let Some(m) = menu_mut(s, id) else { return };
+    if kind == Fly::Types {
+        m.type_filter.clear();
+    }
+    if kind == Fly::Props {
+        leave_edit(s, id);
+    }
+    let Some(m) = menu_mut(s, id) else { return };
+    m.fly = if m.fly == Some(kind) {
+        None
+    } else {
+        Some(kind)
+    };
+    if m.fly == Some(Fly::Types) {
+        m.type_filter.focus();
+    }
+}
+
+fn open_rows(s: &mut State, id: &str) {
+    let Some(m) = menu_of(s, id) else { return };
+    let targets = m.ids.clone();
+    close(s, id);
+    // One object opens in place; a multi-selection opens each as a tab.
+    if targets.len() == 1 {
+        common::open_object(&targets[0], s);
+        return;
+    }
+    for target in targets {
+        nav::open_tab(Route::Object(target), true, s);
+    }
+}
+
+fn open_tabs(s: &mut State, id: &str) {
+    let Some(m) = menu_of(s, id) else { return };
+    let targets = m.ids.clone();
+    close(s, id);
+    for target in targets {
+        common::open_object_tab(&target, s);
+    }
+}
+
+fn remove(s: &mut State, id: &str) {
+    let Some(m) = menu_of(s, id) else { return };
+    let Some(collection) = m.collection.clone() else {
+        return;
+    };
+    let targets = m.ids.clone();
+    close(s, id);
+    let task = common::remove_members(&collection, &targets, s);
+    let done = s.rt.spawn(async move |_| {
+        let _ = task.await;
+    });
+    reload_after(s, id, done);
+}
+
+fn bin(s: &mut State, id: &str) {
+    let Some(m) = menu_of(s, id) else { return };
+    let targets = m.deletable();
+    close(s, id);
+    let done = s.rt.spawn(async move |cx| {
+        for target in targets {
+            let task = cx.update(|s| api::note::delete(&target, s));
+            let _ = task.await;
+        }
+    });
+    reload_after(s, id, done);
+}
+
+/// Retype in place: blocks and fields survive.
+fn retype(s: &mut State, id: &str, type_key: String) {
+    let Some(m) = menu_of(s, id) else { return };
+    let targets = m.ids.clone();
+    close(s, id);
+    let done = s.rt.spawn(async move |cx| {
+        for target in targets {
+            let task = cx.update(|s| api::note::set_type(&target, &type_key, s));
+            let _ = task.await;
+        }
+    });
+    reload_after(s, id, done);
+}
+
+fn add_to(s: &mut State, id: &str, collection_id: String) {
+    let Some(m) = menu_of(s, id) else { return };
+    let targets = m.ids.clone();
+    close(s, id);
+    let fetch = s.store.fetch_object(&collection_id);
+    let done = s.rt.spawn(async move |cx| {
+        if let Ok(col) = fetch.await {
+            let have = config::member_ids(&col.fields);
+            let mut merged = have.clone();
+            for target in targets {
+                if !merged.contains(&target) {
+                    merged.push(target);
                 }
             }
-            Fly::Cols => {
-                let store = Store::global(cx).read(cx);
-                let cols: Vec<(String, String)> = store
-                    .summaries
-                    .iter()
-                    .filter(|s| {
-                        s.type_key == "collection"
-                            && s.channel_id == self.space_id
-                            && !self.ids.contains(&s.id)
-                    })
-                    .map(|s| {
-                        let icon = object_icon(store, &s.icon, &s.type_key, &self.space_id);
-                        (
-                            s.id.clone(),
-                            format!(
-                                "{icon} {}",
-                                if s.name.is_empty() {
-                                    "Untitled"
-                                } else {
-                                    &s.name
-                                }
-                            ),
-                        )
-                    })
-                    .collect();
-                if cols.is_empty() {
-                    list = list.child(none_row("No collections in this space".into()));
-                }
-                for (id, label) in cols {
-                    list = list.child(
-                        menu_item(SharedString::from(format!("col-{id}")))
-                            .child(label)
-                            .on_click(
-                                cx.listener(move |this, _, _, cx| this.add_to(id.clone(), cx)),
-                            ),
-                    );
-                }
-            }
-            Fly::Props => {
-                let rels = self.prop_rels(cx);
-                if let Some(rel) = rels.iter().find(|r| r.key == self.edit_key).cloned() {
-                    let label = format!(
-                        "{}{}",
-                        rel.icon_emoji
-                            .as_deref()
-                            .filter(|e| !e.is_empty())
-                            .map(|e| format!("{e} "))
-                            .unwrap_or_default(),
-                        if rel.name.is_empty() {
-                            &rel.key
-                        } else {
-                            &rel.name
-                        }
-                    );
-                    let entity = cx.entity().downgrade();
-                    let save_rel = rel.clone();
-                    fly = fly
-                        .child(
-                            menu_item("ctx-back")
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .child(
-                                    div()
-                                        .flex()
-                                        .items_center()
-                                        .gap(px(9.))
-                                        .child(Icon::new(Glyph::ChevronLeft).size(px(14.)))
-                                        .child(label),
-                                )
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.edit_key.clear();
-                                    this.edit_value = None;
-                                    cx.notify();
-                                })),
-                        )
-                        .child(
-                            div().px(px(6.)).pt(px(2.)).pb(px(8.)).child(
-                                PropertyValue::new(
-                                    SharedString::from(format!("ctx-edit-{}", rel.key)),
-                                    rel,
-                                    self.edit_value.clone(),
-                                )
-                                .auto_open(true)
-                                .on_save(move |v, _, cx| {
-                                    let v = v.clone();
-                                    let rel = save_rel.clone();
-                                    let _ =
-                                        entity.update(cx, |this, cx| this.apply_prop(rel, v, cx));
-                                }),
-                            ),
-                        );
-                    return fly;
-                }
-                if rels.len() > 6 {
-                    fly = fly.child(
-                        div()
-                            .mx(px(6.))
-                            .mt(px(4.))
-                            .mb(px(6.))
-                            .child(Input::new(&self.prop_filter).text_size(px(13.))),
-                    );
-                }
-                let q = self.prop_filter.read(cx).value().trim().to_lowercase();
-                let filtered: Vec<RelationDef> = rels
-                    .into_iter()
-                    .filter(|r| {
-                        q.is_empty()
-                            || (if r.name.is_empty() { &r.key } else { &r.name })
-                                .to_lowercase()
-                                .contains(&q)
-                    })
-                    .collect();
-                if filtered.is_empty() {
-                    list = list.child(none_row("No properties".into()));
-                }
-                for r in filtered {
-                    let key = r.key.clone();
-                    let label = format!(
-                        "{}{}",
-                        r.icon_emoji
-                            .as_deref()
-                            .filter(|e| !e.is_empty())
-                            .map(|e| format!("{e} "))
-                            .unwrap_or_default(),
-                        if r.name.is_empty() { &r.key } else { &r.name }
-                    );
-                    list = list.child(
-                        menu_item(SharedString::from(format!("prop-{key}")))
-                            .child(label)
-                            .on_click(
-                                cx.listener(move |this, _, _, cx| this.open_prop(key.clone(), cx)),
-                            ),
-                    );
-                }
+            if merged.len() != have.len() {
+                let task = cx.update(|s| common::set_members(&collection_id, &merged, s));
+                let _ = task.await;
             }
         }
-        fly.child(list)
+    });
+    reload_after(s, id, done);
+}
+
+/// Fields of every target: the host's rows, else fetched.
+type Pending = Vec<Result<Fields, Task<anyhow::Result<Object>>>>;
+
+fn values_of(s: &State, m: &RowMenu) -> Pending {
+    m.ids
+        .iter()
+        .map(|id| match m.fields_of.get(id) {
+            Some(f) => Ok(f.clone()),
+            None => Err(s.store.fetch_object(id)),
+        })
+        .collect()
+}
+
+async fn resolve(pending: Pending) -> Vec<Option<Fields>> {
+    let mut out = Vec::with_capacity(pending.len());
+    for t in pending {
+        out.push(match t {
+            Ok(f) => Some(f),
+            Err(task) => task.await.ok().map(|o| o.fields),
+        });
+    }
+    out
+}
+
+/// Back to the property list: the open editor goes with its state.
+fn leave_edit(s: &mut State, id: &str) {
+    let Some(m) = menu_mut(s, id) else { return };
+    let key = std::mem::take(&mut m.edit_key);
+    m.edit_value = None;
+    if !key.is_empty() {
+        roostr_properties::value::forget(s, &edit_key(id, &key));
     }
 }
 
-fn menu_shadow() -> Vec<BoxShadow> {
-    vec![common::shadow(hsla(0., 0., 0., 0.4), 0., 8., 24., 0.)]
+fn edit_key(id: &str, key: &str) -> String {
+    format!("{id}/ctx-edit-{key}")
 }
 
-/// A flyout row (`.ctx-item`), the kit list row.
-fn menu_item(id: impl Into<ElementId>) -> ListItem {
-    ListItem::new(id)
-        .gap(px(9.))
+/// Open one property: the initial value is the cross-record intersection.
+fn open_prop(s: &mut State, id: &str, key: String) {
+    leave_edit(s, id);
+    let Some(m) = menu_mut(s, id) else { return };
+    m.edit_key = key.clone();
+    let Some(m) = menu_of(s, id) else { return };
+    let Some(rel) = prop_rels(s, m).into_iter().find(|r| r.key == key) else {
+        return;
+    };
+    let pending = values_of(s, m);
+    let ids = m.ids.clone();
+    let view = id.to_string();
+    s.rt.spawn(async move |cx| {
+        let all = resolve(pending).await;
+        let initial = if is_merge(&rel) {
+            let mut inter = list_of(all.first().and_then(Option::as_ref), &key);
+            for f in all.iter().skip(1) {
+                let l = list_of(f.as_ref(), &key);
+                inter.retain(|v| l.contains(v));
+            }
+            Some(Value::values(
+                inter.into_iter().map(Value::string).collect(),
+            ))
+        } else {
+            let first = all
+                .first()
+                .and_then(|f| f.as_ref().and_then(|f| f.get(&key).cloned()));
+            if all
+                .iter()
+                .skip(1)
+                .all(|f| f.as_ref().and_then(|f| f.get(&key).cloned()) == first)
+            {
+                first
+            } else {
+                None
+            }
+        };
+        cx.update(|s| {
+            if let Some(m) = menu_mut(s, &view)
+                && m.ids == ids
+                && m.edit_key == key
+            {
+                m.edit_value = initial;
+            }
+        });
+    })
+    .detach();
+}
+
+fn apply_prop(s: &mut State, id: &str, rel: RelationDef, v: Value) {
+    let Some(m) = menu_of(s, id) else { return };
+    let targets = m.ids.clone();
+    let base = m.edit_value.as_ref().map(strings).unwrap_or_default();
+    let pending = values_of(s, m);
+    // Back to the property list; the menu stays open for the next one.
+    leave_edit(s, id);
+    let done = s.rt.spawn(async move |cx| {
+        if is_merge(&rel) {
+            let next = strings(&v);
+            let added: Vec<String> = next.iter().filter(|x| !base.contains(x)).cloned().collect();
+            let removed: Vec<String> = base.iter().filter(|x| !next.contains(x)).cloned().collect();
+            let all = resolve(pending).await;
+            for (target, fields) in targets.iter().zip(all) {
+                let cur = list_of(fields.as_ref(), &rel.key);
+                let mut merged: Vec<String> = cur
+                    .iter()
+                    .filter(|x| !removed.contains(x))
+                    .cloned()
+                    .collect();
+                merged.extend(added.iter().filter(|x| !cur.contains(x)).cloned());
+                let value = Value::values(merged.into_iter().map(Value::string).collect());
+                let task = cx.update(|s| api::note::set_field(target, &rel.key, value, s));
+                let _ = task.await;
+            }
+        } else {
+            for target in &targets {
+                let task = cx.update(|s| api::note::set_field(target, &rel.key, v.clone(), s));
+                let _ = task.await;
+            }
+        }
+    });
+    reload_after(s, id, done);
+}
+
+// ── Drawing ──────────────────────────────────────────────────────
+
+/// A flyout row (`.ctx-item`), the kit list row: gap 9, padding 7 × 10,
+/// radius 6, 13px fg, the kit list hover.
+fn menu_item(t: &Theme, key: String) -> El {
+    row()
+        .key(key)
+        .center_y()
+        .gap(9.0)
         .w_full()
-        .px(px(10.))
-        .py(px(7.))
-        .rounded(px(6.))
-        .text_size(px(13.))
-        .text_color(theme::fg())
-        .cursor_pointer()
+        .px(10.0)
+        .py(7.0)
+        .radius(6.0)
+        .cursor(Cursor::Pointer)
+        .focusable(true)
+        .no_focus_ring()
+        .hover(t.kit.list_hover)
+        .focus_highlight(t.kit.list_hover)
+}
+
+fn item_label(t: &Theme, s: impl Into<String>) -> El {
+    text(s.into()).font(ty::ui(13.0)).color(t.fg).truncate()
 }
 
 /// A flyout's "nothing here" line, the kit empty state.
-fn none_row(text: String) -> Empty {
-    common::empty_state(text, 12.).px(px(8.)).py(px(4.))
+fn none_row(t: &Theme, line: &str) -> El {
+    common::empty_state(t, line, 12.0).px(8.0).py(4.0)
 }
 
 /// One top-level row's content (`.ctx-item`: 16px icon, 9px gap, 13px label,
-/// 7×10 padding). It spans the kit row edge to edge (the kit pads 8px) so the
-/// open-flyout highlight covers the whole row.
-fn row_body(glyph: Glyph, label: SharedString) -> Div {
-    div()
-        .flex()
-        .flex_1()
-        .items_center()
-        .gap(px(9.))
-        .mx(px(-8.))
-        .px(px(10.))
-        .py(px(7.))
-        .rounded(px(6.))
-        .text_size(px(13.))
-        .child(Icon::new(glyph).size(px(16.)))
-        .child(label)
+/// 7×10 padding). It spans the kit row edge to edge (the kit pads 0.5 rem)
+/// so the open-flyout highlight covers the whole row.
+fn row_body(t: &Theme, g: Glyph, label: String, ink: Option<rune::Color>) -> El {
+    let (fg, lit) = match ink {
+        Some(c) => (c, c),
+        None => (t.kit.foreground, t.kit.accent_foreground),
+    };
+    row()
+        .grow(1.0)
+        .shrink()
+        .center_y()
+        .gap(9.0)
+        .mx(-rems(0.5))
+        .px(10.0)
+        .py(7.0)
+        .radius(6.0)
+        .child(glyph(g, 16.0).color(fg).group_color(lit))
+        .child(
+            text(label)
+                .font(ty::ui(13.0))
+                .color(fg)
+                .group_color(lit)
+                .truncate()
+                .grow(1.0)
+                .shrink(),
+        )
 }
 
-impl RowContextMenu {
-    /// Fill the kit menu: Open, Open in new tab, the three flyout rows,
-    /// Remove from collection, a separator, then Move to bin or the locked
-    /// "Can't delete" line. Rebuilt when the protected ids arrive.
-    fn build_menu(&self, menu: PopupMenu, this: &WeakEntity<Self>) -> PopupMenu {
-        let suffix = self.suffix();
-        let act = |f: fn(&mut Self, &mut Context<Self>)| {
-            let this = this.clone();
-            move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
-                let _ = this.update(cx, |this, cx| f(this, cx));
-            }
-        };
-        let plain = |glyph: Glyph, label: String| {
-            let label = SharedString::from(label);
-            PopupMenuItem::element(move |_, _| row_body(glyph, label.clone()))
-        };
-        let fly_row = |glyph: Glyph, label: String, kind: Fly| {
-            let label = SharedString::from(label);
-            let (this, keep_open, cell) = (
-                this.clone(),
-                self.keep_open.clone(),
-                self.fly_rows[kind as usize].clone(),
-            );
-            let open_this = this.clone();
-            PopupMenuItem::element(move |_, cx| {
-                let open = this.upgrade().is_some_and(|e| e.read(cx).fly == Some(kind));
-                row_body(glyph, label.clone())
-                    .relative()
-                    .when(open, |d| d.bg(theme::hover()))
-                    .child(
-                        div()
-                            .ml_auto()
-                            .flex()
-                            .text_color(theme::muted())
-                            .child(Icon::new(Glyph::ChevronRight).size(px(14.))),
-                    )
-                    .child(common::track_bounds(&cell))
-            })
-            .on_click(move |_, window, cx| {
-                // A flyout row toggles its flyout; the menu stays open.
-                keep_open.set(true);
-                let _ = open_this.update(cx, |this, cx| this.open_fly(kind, window, cx));
-            })
-        };
+/// A kit menu row (`PopupMenuItem::element`) around `content`: at least an
+/// item tall, the accent highlight shared by pointer and keyboard.
+fn kit_row(t: &Theme, key: String, content: El, disabled: bool) -> El {
+    let e = row()
+        .key(key)
+        .role("menuitem")
+        .px(rems(0.5))
+        .gap(rems(0.25))
+        .radius(radius::KIT.min(8.0))
+        .center_y()
+        .min_h(rems(1.625))
+        .child(content);
+    if disabled {
+        return e.disabled(true);
+    }
+    e.focusable(true)
+        .no_focus_ring()
+        .hover_group_focus()
+        .focus_highlight(t.kit.accent)
+        .cursor(Cursor::Pointer)
+}
 
-        let mut menu = menu
-            .min_w(px(200.))
-            .item(plain(Glyph::ArrowUpRight, format!("Open{suffix}")).on_click(act(Self::open)))
-            .item(
-                plain(Glyph::ExternalLink, format!("Open in new tab{suffix}"))
-                    .on_click(act(Self::open_tabs)),
+/// The kit separator between groups.
+fn kit_separator(t: &Theme) -> El {
+    el().h(2.0)
+        .my(rems(0.125))
+        .mx(-rems(0.25))
+        .fill(t.kit.border)
+        .a11y_hidden()
+}
+
+/// The top-level rows: Open, Open in new tab, the three flyout rows, Remove
+/// from collection, a separator, then Move to bin or the locked "Can't
+/// delete" line.
+fn menu_rows(t: &Theme, id: &str, m: &RowMenu) -> El {
+    let suffix = m.suffix();
+    let k = |name: &str| format!("{id}/ctx-{name}");
+    let act = |f: fn(&mut State, &str)| {
+        let id = id.to_string();
+        move |s: &mut State| f(s, &id)
+    };
+    let fly_row = |g: Glyph, label: String, kind: Fly| {
+        let open = m.fly == Some(kind);
+        let mut body =
+            row_body(t, g, label, None).child(glyph(Glyph::ChevronRight, 14.0).color(t.muted));
+        if open {
+            body = body.fill(t.hover);
+        }
+        let view = id.to_string();
+        // A flyout row toggles its flyout; the menu stays open.
+        kit_row(t, fly_key(id, kind), body, false)
+            .expanded(open)
+            .on_press(move |s: &mut State| open_fly(s, &view, kind))
+    };
+
+    let mut rows = col()
+        .key("items")
+        .items_stretch()
+        .padding(rems(0.25))
+        .gap(rems(0.125))
+        .min_w(200.0)
+        .max_w(rems(31.25))
+        .child(
+            kit_row(
+                t,
+                k("open"),
+                row_body(t, Glyph::ArrowUpRight, format!("Open{suffix}"), None),
+                false,
             )
-            .item(fly_row(
-                Glyph::ArrowLeftRight,
-                format!("Change type{suffix}"),
-                Fly::Types,
-            ))
-            .item(fly_row(
-                Glyph::SlidersHorizontal,
-                format!("Edit properties{suffix}"),
-                Fly::Props,
-            ))
-            .item(fly_row(
-                Glyph::FolderPlus,
-                format!("Add to collection{suffix}"),
-                Fly::Cols,
-            ));
-        if self.collection.is_some() {
-            menu = menu.item(
-                plain(
+            .on_press(act(open_rows)),
+        )
+        .child(
+            kit_row(
+                t,
+                k("open-tab"),
+                row_body(
+                    t,
+                    Glyph::ExternalLink,
+                    format!("Open in new tab{suffix}"),
+                    None,
+                ),
+                false,
+            )
+            .on_press(act(open_tabs)),
+        )
+        .child(fly_row(
+            Glyph::ArrowLeftRight,
+            format!("Change type{suffix}"),
+            Fly::Types,
+        ))
+        .child(fly_row(
+            Glyph::SlidersHorizontal,
+            format!("Edit properties{suffix}"),
+            Fly::Props,
+        ))
+        .child(fly_row(
+            Glyph::FolderPlus,
+            format!("Add to collection{suffix}"),
+            Fly::Cols,
+        ));
+    if m.collection.is_some() {
+        rows = rows.child(
+            kit_row(
+                t,
+                k("remove"),
+                row_body(
+                    t,
                     Glyph::FolderMinus,
                     format!("Remove from collection{suffix}"),
-                )
-                .on_click(act(Self::remove)),
-            );
-        }
-        menu = menu.separator();
-        let deletable = self.deletable();
-        if deletable.is_empty() {
-            let why = SharedString::from(format!(
-                "Can't delete: {}",
-                self.blocked.values().next().cloned().unwrap_or_default()
-            ));
-            menu.item(
-                PopupMenuItem::element(move |_, _| {
-                    div()
-                        .id("ctx-locked")
-                        .flex()
-                        .flex_1()
-                        .items_center()
-                        .gap(px(9.))
-                        .mx(px(-8.))
-                        .px(px(10.))
-                        .py(px(7.))
-                        .text_size(px(12.))
-                        .text_color(theme::muted())
-                        .tooltip(roostr_core::ui::tooltip(
-                            "Types and properties Roostr or your queries rely on can't be deleted",
-                        ))
-                        .child(Icon::new(Glyph::Lock).size(px(16.)))
-                        .child(why.clone())
-                })
-                .disabled(true),
+                    None,
+                ),
+                false,
             )
-        } else {
-            let label = SharedString::from(format!(
-                "Move to bin{}{}",
-                if deletable.len() > 1 {
-                    format!(" ({})", deletable.len())
-                } else {
-                    String::new()
-                },
-                if self.blocked.is_empty() {
-                    String::new()
-                } else {
-                    format!(" - {} protected kept", self.blocked.len())
-                }
-            ));
-            menu.item(
-                PopupMenuItem::element(move |_, _| {
-                    row_body(Glyph::Trash, label.clone()).text_color(theme::red())
-                })
-                .on_click(act(Self::bin)),
-            )
-        }
+            .on_press(act(remove)),
+        );
     }
+    rows = rows.child(kit_separator(t));
+    let deletable = m.deletable();
+    if deletable.is_empty() {
+        let why = format!(
+            "Can't delete: {}",
+            m.blocked.values().next().cloned().unwrap_or_default()
+        );
+        let locked = roostr_ui::tooltip(
+            row()
+                .key(k("locked"))
+                .grow(1.0)
+                .shrink()
+                .center_y()
+                .gap(9.0)
+                .mx(-rems(0.5))
+                .px(10.0)
+                .py(7.0)
+                .child(glyph(Glyph::Lock, 16.0).color(t.muted))
+                .child(text(why).font(ty::ui(12.0)).color(t.muted).grow(1.0)),
+            "Types and properties Roostr or your queries rely on can't be deleted",
+        );
+        rows.child(kit_row(t, k("locked-row"), locked, true))
+    } else {
+        let label = format!(
+            "Move to bin{}{}",
+            if deletable.len() > 1 {
+                format!(" ({})", deletable.len())
+            } else {
+                String::new()
+            },
+            if m.blocked.is_empty() {
+                String::new()
+            } else {
+                format!(" - {} protected kept", m.blocked.len())
+            }
+        );
+        rows.child(
+            kit_row(
+                t,
+                k("bin"),
+                row_body(t, Glyph::Trash, label, Some(t.red)),
+                false,
+            )
+            .on_press(act(bin)),
+        )
+    }
+}
 
-    /// The kit menu closed itself. A flyout row asked to stay open; a press
-    /// outside is the backdrop's to handle (it must not close the menu while
-    /// a flyout's own popovers take clicks); a key (Escape, Enter on a row)
-    /// closes it.
-    fn menu_dismissed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.keep_open.replace(false) {
-            return;
+fn fly_key(id: &str, kind: Fly) -> String {
+    let name = match kind {
+        Fly::Types => "types",
+        Fly::Props => "props",
+        Fly::Cols => "cols",
+    };
+    format!("{id}/ctx-row-{name}")
+}
+
+/// A filter field atop a flyout (13px; its wrapper sets `mx 6, mt 4, mb 6`).
+fn filter_field(
+    key: String,
+    state: &InputState,
+    placeholder: &str,
+    lens: impl for<'a> Fn(&'a mut State) -> &'a mut InputState + 'static,
+) -> Input {
+    Input::new(key, state)
+        .placeholder(placeholder)
+        .text_size(13.0)
+        .on_edit(lens)
+}
+
+fn type_filter_lens(id: String) -> impl for<'a> Fn(&'a mut State) -> &'a mut InputState + 'static {
+    move |s: &mut State| {
+        &mut menu_mut(s, &id)
+            .expect("row menu open while its field is edited")
+            .type_filter
+    }
+}
+
+fn prop_filter_lens(id: String) -> impl for<'a> Fn(&'a mut State) -> &'a mut InputState + 'static {
+    move |s: &mut State| {
+        &mut menu_mut(s, &id)
+            .expect("row menu open while its field is edited")
+            .prop_filter
+    }
+}
+
+fn rel_label(r: &RelationDef) -> String {
+    format!(
+        "{}{}",
+        r.icon_emoji
+            .as_deref()
+            .filter(|e| !e.is_empty())
+            .map(|e| format!("{e} "))
+            .unwrap_or_default(),
+        if r.name.is_empty() { &r.key } else { &r.name }
+    )
+}
+
+fn render_fly(
+    s: &State,
+    cx: &mut Cx<State>,
+    t: &Theme,
+    layer: &mut Vec<El>,
+    id: &str,
+    m: &RowMenu,
+    kind: Fly,
+) -> El {
+    // `.ctx-fly`: max-height min(340px, 60vh) (content-box: + padding and border).
+    let window_h = cx.layout_with("kit-root", |r| r[3]).unwrap_or(f32::MAX);
+    let fly = col()
+        .key(format!("{id}/ctx-fly-{}", kind as usize))
+        .items_stretch()
+        .w(250.0)
+        .max_h((window_h * 0.6).min(340.0) + 10.0)
+        .min_h(0.0)
+        .scroll(ScrollSpec {
+            stick_bottom: false,
+        })
+        .fill(t.panel)
+        .border(1.0, t.border)
+        .radius(10.0)
+        .padding(4.0)
+        // `.ctx-fly`'s shadow: `0 8 24 rgba(0,0,0,.4)`.
+        .box_shadow(shadow::gpui(8.0, 24.0, 0.0, 0.4));
+    let mut list = col().items_stretch();
+    match kind {
+        Fly::Types => {
+            let view = id.to_string();
+            let enter = id.to_string();
+            let field = filter_field(
+                format!("{id}/ctx-types-q"),
+                &m.type_filter,
+                "Search types...",
+                type_filter_lens(id.to_string()),
+            )
+            .on_submit(move |s: &mut State, _: &mut Tx| {
+                let first = menu_of(s, &enter)
+                    .and_then(|m| filtered_types(s, m).into_iter().next())
+                    .map(|t| t.0);
+                if let Some(key) = first {
+                    retype(s, &enter, key);
+                }
+            })
+            // The field sees Escape first: it clears, then closes the flyout.
+            .on_key(move |s: &mut State, ev: &KeyEvent, tx: &mut Tx| {
+                if ev.key != Key::Escape {
+                    return false;
+                }
+                let Some(m) = menu_mut(s, &view) else {
+                    return false;
+                };
+                if m.type_filter.value().is_empty() {
+                    m.fly = None;
+                    // Keep keyboard focus in the menu: the next Escape closes it.
+                    tx.focus(fly_key(&view, Fly::Types), false);
+                } else {
+                    m.type_filter.clear();
+                }
+                true
+            });
+            let fly = fly.child(el().mx(6.0).mt(4.0).mb(6.0).child(field.build(t)));
+            let types = filtered_types(s, m);
+            if types.is_empty() {
+                let q = m.type_filter.value().trim();
+                list = list.child(none_row(t, &format!("No type matches “{q}”")));
+            }
+            for (key, label) in types {
+                let view = id.to_string();
+                list = list.child(
+                    menu_item(t, format!("{id}/type-{key}"))
+                        .child(item_label(t, label))
+                        .on_press(move |s: &mut State| retype(s, &view, key.clone())),
+                );
+            }
+            fly.child(list)
         }
-        if window.last_input_was_keyboard() {
-            self.close(cx);
+        Fly::Cols => {
+            let store = &s.store;
+            let cols: Vec<(String, String)> = store
+                .summaries
+                .iter()
+                .filter(|o| {
+                    o.type_key == "collection"
+                        && o.channel_id == m.space_id
+                        && !m.ids.contains(&o.id)
+                })
+                .map(|o| {
+                    let icon = object_icon(store, &o.icon, &o.type_key, &m.space_id);
+                    (
+                        o.id.clone(),
+                        format!(
+                            "{icon} {}",
+                            if o.name.is_empty() {
+                                "Untitled"
+                            } else {
+                                &o.name
+                            }
+                        ),
+                    )
+                })
+                .collect();
+            if cols.is_empty() {
+                list = list.child(none_row(t, "No collections in this space"));
+            }
+            for (col_id, label) in cols {
+                let view = id.to_string();
+                list = list.child(
+                    menu_item(t, format!("{id}/col-{col_id}"))
+                        .child(item_label(t, label))
+                        .on_press(move |s: &mut State| add_to(s, &view, col_id.clone())),
+                );
+            }
+            fly.child(list)
+        }
+        Fly::Props => {
+            let rels = prop_rels(s, m);
+            if let Some(rel) = rels.iter().find(|r| r.key == m.edit_key).cloned() {
+                let back = id.to_string();
+                let save = id.to_string();
+                let save_rel = rel.clone();
+                let editor =
+                    PropertyValue::new(edit_key(id, &rel.key), rel.clone(), m.edit_value.clone())
+                        .auto_open(true)
+                        .on_save(move |s: &mut State, v: Value| {
+                            apply_prop(s, &save, save_rel.clone(), v)
+                        })
+                        .build(s, cx, t, layer);
+                return fly
+                    .child(
+                        menu_item(t, format!("{id}/ctx-back"))
+                            .child(glyph(Glyph::ChevronLeft, 14.0).color(t.fg))
+                            .child(
+                                text(rel_label(&rel))
+                                    .font(ty::ui(13.0).semibold())
+                                    .color(t.fg)
+                                    .truncate(),
+                            )
+                            .on_press(move |s: &mut State| leave_edit(s, &back)),
+                    )
+                    .child(el().px(6.0).pt(2.0).pb(8.0).child(editor));
+            }
+            let mut fly = fly;
+            if rels.len() > 6 {
+                let field = filter_field(
+                    format!("{id}/ctx-props-q"),
+                    &m.prop_filter,
+                    "Filter properties...",
+                    prop_filter_lens(id.to_string()),
+                );
+                fly = fly.child(el().mx(6.0).mt(4.0).mb(6.0).child(field.build(t)));
+            }
+            let q = m.prop_filter.value().trim().to_lowercase();
+            let filtered: Vec<RelationDef> = rels
+                .into_iter()
+                .filter(|r| {
+                    q.is_empty()
+                        || (if r.name.is_empty() { &r.key } else { &r.name })
+                            .to_lowercase()
+                            .contains(&q)
+                })
+                .collect();
+            if filtered.is_empty() {
+                list = list.child(none_row(t, "No properties"));
+            }
+            for r in filtered {
+                let key = r.key.clone();
+                let view = id.to_string();
+                list = list.child(
+                    menu_item(t, format!("{id}/prop-{key}"))
+                        .child(item_label(t, rel_label(&r)))
+                        .on_press(move |s: &mut State| open_prop(s, &view, key.clone())),
+                );
+            }
+            fly.child(list)
         }
     }
 }
 
-impl Render for RowContextMenu {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if self.menu_blocked != Some(self.blocked.len()) {
-            self.menu_blocked = Some(self.blocked.len());
-            let this = cx.weak_entity();
-            let menu = self.menu.clone();
-            let state = &*self;
-            menu.update(cx, |menu, cx| {
-                menu.rebuild(window, cx, |menu, _, _| state.build_menu(menu, &this))
-            });
-        }
-        let viewport = window.viewport_size();
-        let pos = point(
-            self.position.x.min(viewport.width - px(230.)),
-            self.position.y,
-        );
-        let flyout = self.fly.map(|kind| {
-            let content = self.render_fly(kind, window, cx);
-            // Each flyout enters as it opens (switching flyouts mounts the next).
-            let content = common::appear(("ctx-fly", kind as usize), content, window, cx);
-            // Flush against the menu's right edge, centred on its row
-            // (estimated 320px tall); flipped to the menu's left edge within
-            // 10px of the window edge, clamped to the window.
-            let menu = self.menu_bounds.get();
-            let row = self.fly_rows[kind as usize].get();
-            let flip = menu.right() + px(250.) > viewport.width - px(10.);
-            let x = if flip {
-                menu.left() - px(5.)
-            } else {
-                menu.right() + px(5.)
-            };
-            anchored()
-                .position(point(x, row.top() + px(15.5 - 160.)))
-                .anchor(if flip {
-                    Anchor::TopRight
-                } else {
-                    Anchor::TopLeft
-                })
-                .snap_to_window_with_margin(px(8.))
-                .child(content)
-        });
-        // In-tree overlays (inputs keep their keyboard actions); the data view
-        // paints this menu after everything else.
-        div()
-            // The click-away backdrop.
-            .child(
-                anchored().position(point(px(0.), px(0.))).child(
-                    div()
-                        .id("ctx-backdrop")
-                        .w(viewport.width)
-                        .h(viewport.height)
-                        .occlude()
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(|this, _, _, cx| this.close(cx)),
-                        )
-                        .on_mouse_down(
-                            MouseButton::Right,
-                            cx.listener(|this, _, _, cx| this.close(cx)),
-                        ),
-                ),
-            )
-            .child(
-                anchored()
-                    .position(pos)
-                    .snap_to_window_with_margin(px(8.))
-                    .child(common::appear(
-                        "ctx-menu",
-                        div()
-                            .relative()
-                            .child(common::track_bounds(&self.menu_bounds))
-                            .child(self.menu.clone()),
-                        window,
-                        cx,
-                    )),
-            )
-            .children(flyout)
+/// The open menu, pushed into `layer`: a full-window modal holding the
+/// click-away backdrop, the menu at its point and the open flyout beside its
+/// row (flipped to the menu's left near the window edge). The flyout's own
+/// popovers mount inside it so they stay live under the modal.
+pub(crate) fn view(s: &State, cx: &mut Cx<State>, t: &Theme, layer: &mut Vec<El>, v: &DataView) {
+    let Some(m) = v.menu.as_ref() else { return };
+    let id = v.id.as_str();
+    let closer = |id: &str| {
+        let id = id.to_string();
+        move |s: &mut State| close(s, &id)
+    };
+    let right = closer(id);
+    let backdrop = scrim(format!("{id}/ctx-backdrop"), closer(id))
+        .on_secondary_press(move |s: &mut State, _: PointerPress, _: &mut Tx| right(s));
+    let point = format!("{id}/ctx-point");
+    let window_w = cx.layout_with("kit-root", |r| r[2]).unwrap_or(f32::MAX);
+    let mut surface = col()
+        .key(format!("{id}/ctx-menu"))
+        .role("menu")
+        .focus_group()
+        .autofocus()
+        .items_stretch()
+        .fill(t.kit.popover)
+        .radius(radius::KIT);
+    for sh in shadow::kit_popover(t) {
+        surface = surface.box_shadow(sh);
     }
+    let surface = surface.child(menu_rows(t, id, m));
+    let mut inner = Vec::new();
+    let flyout = m.fly.map(|kind| {
+        let content = render_fly(s, cx, t, &mut inner, id, m, kind);
+        // Flush against the menu's edge (the kit row sits 0.25 rem inside it,
+        // GPUI left 5 px), centred on its row; Rune flips it to the left
+        // edge when it doesn't fit and keeps it 8 points inside the window.
+        overlay::anchored(
+            content,
+            &fly_key(id, kind),
+            Placement::Right,
+            5.0 + rems(0.25),
+        )
+    });
+    let modal = el()
+        .key(format!("{id}/ctx"))
+        .absolute(0.0, 0.0)
+        .w_full()
+        .h_full()
+        .child(backdrop)
+        .child(
+            // Kept 230 in from the window's right edge, as GPUI placed it.
+            el().key(point.clone())
+                .absolute(m.at.0.min(window_w - 230.0), m.at.1)
+                .size(0.0, 0.0),
+        )
+        .child(overlay::anchored(
+            surface,
+            &point,
+            Placement::BottomStart,
+            0.0,
+        ))
+        .children(flyout)
+        .children(inner)
+        .modal(false, closer(id));
+    layer.push(modal);
 }

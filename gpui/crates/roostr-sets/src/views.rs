@@ -1,4 +1,4 @@
-//! What the data view hands every record view, and what views tell it back.
+//! What the data view hands every record view.
 
 use serde_json::Value as Json;
 
@@ -11,10 +11,4 @@ pub(crate) struct ViewInput {
     pub body: Option<Json>,
     pub sorts: Vec<SortRule>,
     pub updated_at: i64,
-}
-
-/// What a record view tells the data view.
-pub(crate) enum ViewMsg {
-    /// Records changed (the web's `onchanged`).
-    Changed,
 }

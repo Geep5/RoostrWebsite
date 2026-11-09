@@ -1,548 +1,266 @@
-//! Rich text editing for one block: the live text + marks (the web's
-//! contenteditable DOM), its caret/selection, and the element that shapes,
-//! paints and hit-tests it.
+//! The live text of one block (the web's contenteditable DOM): a Rune
+//! [`TextEdit`] - which owns the caret, selection, typing and the input
+//! method - plus the block's marks as byte [`Span`]s.
+//!
+//! Rune edits the text; [`TextState::sync`] then reads what changed (one
+//! replaced range, found by diffing against the text it last saw) and moves
+//! the marks the way the web's typing does ([`marks::adjust_delete`] and
+//! [`marks::adjust_insert`]). The spans are the truth; the edit's own marks
+//! are rebuilt from them after every change for the two kinds Rune draws
+//! itself: strikethrough and links (mentions are links to `roostr:object/<id>`,
+//! so Rune's link press opens them).
 
-use std::cell::RefCell;
-use std::collections::HashMap;
 use std::ops::Range;
-use std::rc::Rc;
 
-use gpui_kit::*;
-use unicode_segmentation::UnicodeSegmentation as _;
+use roostr_core::types::mark;
+use rune::{Mark, MarkRange, TextEdit};
 
 use crate::marks::{self, Span};
 
+/// The link a mention mark is drawn and pressed as.
+pub const MENTION_SCHEME: &str = "roostr:object/";
+
+/// What a change to the text was: `removed` (in the old text) became `inserted`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Change {
+    pub removed: Range<usize>,
+    pub inserted: String,
+    /// The text before the change.
+    pub before: String,
+}
+
 /// The text a block shows right now: what the person typed, not yet saved.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct TextState {
-    pub text: String,
+    pub edit: TextEdit,
     pub spans: Vec<Span>,
-    /// Selection in bytes; empty = caret.
-    pub sel: Range<usize>,
-    /// The caret sits at `sel.start` (selection made leftwards).
-    pub reversed: bool,
-    /// Input-method composition in progress.
-    pub marked: Option<Range<usize>>,
+    /// `edit.text` as the spans last matched it.
+    seen: String,
 }
 
 impl TextState {
     pub fn new(text: String, spans: Vec<Span>) -> Self {
-        Self {
-            text,
+        let mut t = Self {
+            edit: TextEdit::new(text.clone()),
             spans,
-            ..Self::default()
-        }
+            seen: text,
+        };
+        t.edit.set_caret(0);
+        t.apply_marks();
+        t
     }
 
+    pub fn text(&self) -> &str {
+        &self.edit.text
+    }
+
+    /// The selection, ordered; empty = caret.
+    pub fn sel(&self) -> Range<usize> {
+        let (a, b) = self.edit.range();
+        a..b
+    }
+
+    /// Where the caret is (the moving end of a selection).
     pub fn cursor(&self) -> usize {
-        if self.reversed {
-            self.sel.start
-        } else {
-            self.sel.end
-        }
+        marks::floor_char(&self.edit.text, self.edit.focus.min(self.edit.text.len()))
+    }
+
+    pub fn focused(&self) -> bool {
+        self.edit.focused
+    }
+
+    /// An input method is composing here (its text isn't in `text` yet).
+    pub fn composing(&self) -> bool {
+        self.edit.is_composing()
     }
 
     /// Replace the content (the web's `el.innerHTML = toHtml(...)`), keeping
-    /// the caret inside the new text.
+    /// the caret inside the new text and the field's focus.
     pub fn set_content(&mut self, text: String, spans: Vec<Span>) {
-        self.text = text;
+        let (a, f) = (self.edit.anchor, self.edit.focus);
+        if self.edit.text != text {
+            self.edit.replace_text(text.clone());
+        }
+        let len = text.len();
+        let a = marks::floor_char(&text, a.min(len));
+        let f = marks::floor_char(&text, f.min(len));
+        self.edit.set_selection(a, f);
+        self.seen = text;
         self.spans = spans;
-        let len = self.text.len();
-        let start = marks::floor_char(&self.text, self.sel.start.min(len));
-        let end = marks::floor_char(&self.text, self.sel.end.min(len));
-        self.sel = start..end;
-        self.marked = None;
+        self.apply_marks();
     }
 
     pub fn move_to(&mut self, offset: usize) {
-        let o = marks::floor_char(&self.text, offset.min(self.text.len()));
-        self.sel = o..o;
-        self.reversed = false;
+        let o = marks::floor_char(&self.edit.text, offset.min(self.edit.text.len()));
+        self.edit.set_caret(o);
+        self.edit.break_history_group();
     }
 
-    pub fn select_to(&mut self, offset: usize) {
-        let o = marks::floor_char(&self.text, offset.min(self.text.len()));
-        if self.reversed {
-            self.sel.start = o;
-        } else {
-            self.sel.end = o;
-        }
-        if self.sel.end < self.sel.start {
-            self.reversed = !self.reversed;
-            self.sel = self.sel.end..self.sel.start;
-        }
-    }
-
-    /// Replace `range` with `new`, marks following the edit; caret after it.
+    /// Replace `range` with `new` from code (not typing), marks following the edit; caret after it.
     pub fn replace(&mut self, range: Range<usize>, new: &str) {
-        let start = marks::floor_char(&self.text, range.start.min(self.text.len()));
-        let end = marks::floor_char(&self.text, range.end.min(self.text.len()).max(start));
+        let text = &self.edit.text;
+        let start = marks::floor_char(text, range.start.min(text.len()));
+        let end = marks::floor_char(text, range.end.min(text.len()).max(start));
         marks::adjust_delete(&mut self.spans, start..end);
         marks::adjust_insert(&mut self.spans, start, new.len());
-        self.text.replace_range(start..end, new);
+        let mut next = self.edit.text.clone();
+        next.replace_range(start..end, new);
         let at = start + new.len();
-        self.sel = at..at;
-        self.reversed = false;
+        self.edit.replace_text(next.clone());
+        self.edit.set_caret(at);
+        self.seen = next;
+        self.apply_marks();
     }
 
-    pub fn prev_boundary(&self, offset: usize) -> usize {
-        self.text
-            .grapheme_indices(true)
-            .rev()
-            .find_map(|(i, _)| (i < offset).then_some(i))
-            .unwrap_or(0)
-    }
-
-    pub fn next_boundary(&self, offset: usize) -> usize {
-        self.text
-            .grapheme_indices(true)
-            .find_map(|(i, _)| (i > offset).then_some(i))
-            .unwrap_or(self.text.len())
-    }
-
-    pub fn prev_word(&self, offset: usize) -> usize {
-        let mut last = 0;
-        for (i, w) in self.text.split_word_bound_indices() {
-            if i >= offset {
-                break;
-            }
-            if w.chars().any(char::is_alphanumeric) {
-                last = i;
-            }
+    /// After Rune changed `edit.text`: the change, with the marks moved to match.
+    /// `None` when the text is what the spans already match.
+    pub fn sync(&mut self) -> Option<Change> {
+        if self.edit.text == self.seen {
+            return None;
         }
-        last
+        let old = std::mem::take(&mut self.seen);
+        let new = &self.edit.text;
+        let (removed, inserted) = diff(&old, new);
+        marks::adjust_delete(&mut self.spans, removed.clone());
+        marks::adjust_insert(&mut self.spans, removed.start, inserted.len());
+        self.seen = new.clone();
+        self.apply_marks();
+        Some(Change {
+            removed,
+            inserted,
+            before: old,
+        })
     }
 
-    pub fn next_word(&self, offset: usize) -> usize {
-        for (i, w) in self.text.split_word_bound_indices() {
-            let end = i + w.len();
-            if end > offset && w.chars().any(char::is_alphanumeric) {
-                return end;
-            }
-        }
-        self.text.len()
-    }
-
-    /// The word around `offset` (double click).
-    pub fn word_at(&self, offset: usize) -> Range<usize> {
-        for (i, w) in self.text.split_word_bound_indices() {
-            if offset >= i && offset < i + w.len() {
-                return i..i + w.len();
-            }
-        }
-        self.text.len()..self.text.len()
-    }
-
-    pub fn offset_to_utf16(&self, offset: usize) -> usize {
-        marks::byte_to_utf16(&self.text, offset)
-    }
-
-    pub fn offset_from_utf16(&self, offset: usize) -> usize {
-        marks::utf16_to_byte(&self.text, offset)
-    }
-
-    pub fn range_to_utf16(&self, r: &Range<usize>) -> Range<usize> {
-        self.offset_to_utf16(r.start)..self.offset_to_utf16(r.end)
-    }
-
-    pub fn range_from_utf16(&self, r: &Range<usize>) -> Range<usize> {
-        self.offset_from_utf16(r.start)..self.offset_from_utf16(r.end)
-    }
-}
-
-/// One visual row of laid-out text.
-#[derive(Clone, Debug)]
-struct Row {
-    /// Global byte range of the row (a hard line's last row ends before its `\n`).
-    start: usize,
-    end: usize,
-    /// Which shaped (hard) line, and the x where this row starts in it.
-    line: usize,
-    line_start: usize,
-    start_x: Pixels,
-    width: Pixels,
-    top: Pixels,
-}
-
-/// Where a block's text was laid out on the last frame (for mouse and caret math).
-pub struct TextLayout {
-    /// The text box in window coordinates.
-    pub bounds: Bounds<Pixels>,
-    pub line_height: Pixels,
-    align: TextAlign,
-    lines: Rc<Vec<WrappedLine>>,
-    rows: Vec<Row>,
-}
-
-/// Shared per-frame text geometry, by block id.
-pub type Layouts = Rc<RefCell<HashMap<String, TextLayout>>>;
-
-impl TextLayout {
-    fn new(
-        bounds: Bounds<Pixels>,
-        line_height: Pixels,
-        align: TextAlign,
-        lines: Rc<Vec<WrappedLine>>,
-    ) -> Self {
-        let mut rows = Vec::new();
-        let mut offset = 0;
-        let mut top = px(0.);
-        for (li, line) in lines.iter().enumerate() {
-            let layout = &line.unwrapped_layout;
-            let mut start = (0usize, px(0.));
-            for b in line.wrap_boundaries.iter() {
-                let glyph = &layout.runs[b.run_ix].glyphs[b.glyph_ix];
-                rows.push(Row {
-                    start: offset + start.0,
-                    end: offset + glyph.index,
-                    line: li,
-                    line_start: offset,
-                    start_x: start.1,
-                    width: glyph.position.x - start.1,
-                    top,
-                });
-                top += line_height;
-                start = (glyph.index, glyph.position.x);
-            }
-            rows.push(Row {
-                start: offset + start.0,
-                end: offset + line.len(),
-                line: li,
-                line_start: offset,
-                start_x: start.1,
-                width: layout.width - start.1,
-                top,
-            });
-            top += line_height;
-            offset += line.len() + 1;
-        }
-        Self {
-            bounds,
-            line_height,
-            align,
-            lines,
-            rows,
-        }
-    }
-
-    fn align_offset(&self, width: Pixels) -> Pixels {
-        match self.align {
-            TextAlign::Left => px(0.),
-            TextAlign::Center => (self.bounds.size.width - width) / 2.,
-            TextAlign::Right => self.bounds.size.width - width,
-        }
-    }
-
-    fn row_for_index(&self, index: usize) -> usize {
-        // A wrap boundary index belongs to the row it starts.
-        let mut found = 0;
-        for (i, r) in self.rows.iter().enumerate() {
-            if index >= r.start && index <= r.end {
-                found = i;
-                if index < r.end || self.rows.get(i + 1).is_none_or(|n| n.line != r.line) {
-                    return i;
-                }
-            }
-        }
-        found
-    }
-
-    fn x_in_row(&self, row: &Row, index: usize) -> Pixels {
-        let line = &self.lines[row.line];
-        let local = index.saturating_sub(row.line_start).min(line.len());
-        line.unwrapped_layout.x_for_index(local) - row.start_x + self.align_offset(row.width)
-    }
-
-    /// Byte index nearest to a window point.
-    pub fn index_for_point(&self, p: Point<Pixels>) -> usize {
-        let local = p - self.bounds.origin;
-        let Some(row) = self
-            .rows
-            .iter()
-            .find(|r| local.y < r.top + self.line_height)
-            .or(self.rows.last())
-        else {
-            return 0;
-        };
-        let line = &self.lines[row.line];
-        let x = local.x - self.align_offset(row.width) + row.start_x;
-        let idx = row.line_start + line.unwrapped_layout.closest_index_for_x(x.max(px(0.)));
-        idx.clamp(row.start, row.end)
-    }
-
-    /// Top-left of the caret slot before byte `index`, in window coordinates.
-    pub fn position_for_index(&self, index: usize) -> Point<Pixels> {
-        let Some(row) = self.rows.get(self.row_for_index(index)) else {
-            return self.bounds.origin;
-        };
-        self.bounds.origin + point(self.x_in_row(row, index), row.top)
-    }
-
-    /// The index on the row above/below `index` nearest its x (ArrowUp/Down inside a block).
-    pub fn vertical(&self, index: usize, down: bool) -> Option<usize> {
-        let row = self.row_for_index(index);
-        let target = if down { row + 1 } else { row.checked_sub(1)? };
-        let r = self.rows.get(target)?;
-        let p = self.position_for_index(index);
-        Some(self.index_for_point(point(
-            p.x,
-            self.bounds.origin.y + r.top + self.line_height / 2.,
-        )))
-    }
-
-    /// Selection rectangles (window coordinates), one per row crossed.
-    fn selection_rects(&self, range: &Range<usize>) -> Vec<Bounds<Pixels>> {
+    /// Rebuild the edit's own marks from the spans: strikethrough, and links
+    /// (web links and mentions) so the field draws and presses them.
+    pub fn apply_marks(&mut self) {
+        let len = self.edit.text.len();
         let mut out = Vec::new();
-        for (i, r) in self.rows.iter().enumerate() {
-            let a = range.start.max(r.start);
-            let b = range.end.min(r.end);
-            let continues = range.end > r.end && range.start <= r.end;
-            if a > b || (a == b && !continues) {
+        for s in &self.spans {
+            let (from, to) = (s.from.min(len), s.to.min(len));
+            if from >= to {
                 continue;
             }
-            let x1 = self.x_in_row(r, a);
-            let mut x2 = self.x_in_row(r, b);
-            if continues {
-                // The selection runs on past this row: cover its end (and the
-                // newline of a hard line, like a browser's selection does).
-                let wraps = self.rows.get(i + 1).is_some_and(|n| n.line == r.line);
-                x2 = if wraps {
-                    x2.max(self.align_offset(r.width) + r.width)
-                } else {
-                    x2 + px(4.)
-                };
-            }
-            let top = self.bounds.origin.y + r.top;
-            out.push(Bounds::from_corners(
-                point(self.bounds.origin.x + x1, top),
-                point(
-                    self.bounds.origin.x + x2.max(x1 + px(1.)),
-                    top + self.line_height,
-                ),
-            ));
+            let m = match s.kind {
+                mark::STRIKETHROUGH => Mark::Strike,
+                mark::LINK => match s.param.as_deref().map(str::trim) {
+                    Some(url) if !url.is_empty() => Mark::Link(url.to_string()),
+                    _ => continue,
+                },
+                mark::MENTION => match s.param.as_deref() {
+                    Some(id) if !id.is_empty() => Mark::Link(format!("{MENTION_SCHEME}{id}")),
+                    _ => continue,
+                },
+                _ => continue,
+            };
+            out.push(MarkRange::new(from..to, m));
         }
-        out
+        if self.edit.marks() != out.as_slice() {
+            self.edit.set_marks(out);
+        }
     }
 }
 
-/// One paragraph of shaped text: wraps to its box, paints marks, selection,
-/// caret and placeholder, and takes keyboard input when it holds the caret.
-pub struct RichText {
-    pub key: String,
-    pub text: SharedString,
-    pub runs: Vec<TextRun>,
-    pub font_size: Pixels,
-    pub line_height: Pixels,
-    pub align: TextAlign,
-    /// Shown while the text is empty.
-    pub placeholder: Option<(SharedString, TextRun)>,
-    pub selection: Option<(Range<usize>, Hsla)>,
-    pub caret: Option<(usize, Hsla)>,
-    /// Registers the IME/text input handler while `FocusHandle` is focused.
-    pub input: Option<(FocusHandle, InputHook)>,
-    pub layouts: Layouts,
-}
-
-/// Registers the editor as the window's input handler for these bounds.
-pub type InputHook = Rc<dyn Fn(Bounds<Pixels>, &mut Window, &mut App)>;
-
-impl IntoElement for RichText {
-    type Element = Self;
-
-    fn into_element(self) -> Self::Element {
-        self
+/// The one replaced range that turns `old` into `new`: the common prefix
+/// and suffix stay (both on character boundaries).
+fn diff(old: &str, new: &str) -> (Range<usize>, String) {
+    let mut start = old
+        .bytes()
+        .zip(new.bytes())
+        .take_while(|(a, b)| a == b)
+        .count();
+    while !old.is_char_boundary(start) || !new.is_char_boundary(start) {
+        start -= 1;
     }
+    let max_tail = (old.len() - start).min(new.len() - start);
+    let mut tail = old
+        .bytes()
+        .rev()
+        .zip(new.bytes().rev())
+        .take(max_tail)
+        .take_while(|(a, b)| a == b)
+        .count();
+    while !old.is_char_boundary(old.len() - tail) || !new.is_char_boundary(new.len() - tail) {
+        tail -= 1;
+    }
+    (
+        start..old.len() - tail,
+        new[start..new.len() - tail].to_string(),
+    )
 }
 
-pub struct RichPrepaint {
-    lines: Rc<Vec<WrappedLine>>,
-    placeholder: Option<Vec<WrappedLine>>,
-    selection: Vec<PaintQuad>,
-    caret: Option<PaintQuad>,
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-fn shape(
-    window: &Window,
-    text: &SharedString,
-    runs: &[TextRun],
-    font_size: Pixels,
-    width: Option<Pixels>,
-) -> Vec<WrappedLine> {
-    let shaped = window
-        .text_system()
-        .shape_text(text.clone(), font_size, runs, width, None)
-        .map(|l| l.into_vec())
-        .unwrap_or_default();
-    if shaped.is_empty() {
-        let run: Vec<TextRun> = runs
-            .first()
-            .map(|r| TextRun {
-                len: 0,
-                ..r.clone()
-            })
-            .into_iter()
+    #[test]
+    fn diff_finds_the_one_replaced_range() {
+        assert_eq!(diff("hello", "hello!"), (5..5, "!".into()));
+        assert_eq!(diff("hello", "help"), (3..5, "p".into()));
+        assert_eq!(diff("aaa", "aaaa"), (3..3, "a".into()));
+        assert_eq!(diff("abc", "ac"), (1..2, String::new()));
+        assert_eq!(diff("x↗", "x↘"), (1..4, "↘".into()));
+    }
+
+    #[test]
+    fn typing_moves_the_marks_like_the_web() {
+        let bold = |from, to| Span {
+            from,
+            to,
+            kind: mark::BOLD,
+            param: None,
+        };
+        let mut t = TextState::new("ab cd".into(), vec![bold(3, 5)]);
+        // Typing at the end of a mark extends it; before it shifts it.
+        t.edit.text = "ab cdX".into();
+        t.sync();
+        assert_eq!(t.spans, vec![bold(3, 6)]);
+        t.edit.text = "Yab cdX".into();
+        t.sync();
+        assert_eq!(t.spans, vec![bold(4, 7)]);
+        t.edit.text = "Y".into();
+        t.sync();
+        assert!(t.spans.is_empty());
+    }
+
+    #[test]
+    fn strike_and_links_become_the_fields_marks() {
+        let t = TextState::new(
+            "see it now".into(),
+            vec![
+                Span {
+                    from: 0,
+                    to: 3,
+                    kind: mark::STRIKETHROUGH,
+                    param: None,
+                },
+                Span {
+                    from: 4,
+                    to: 6,
+                    kind: mark::MENTION,
+                    param: Some("obj-1".into()),
+                },
+                Span {
+                    from: 7,
+                    to: 10,
+                    kind: mark::BOLD,
+                    param: None,
+                },
+            ],
+        );
+        let marks: Vec<_> = t
+            .edit
+            .marks()
+            .iter()
+            .map(|m| (m.start, m.end, m.mark.clone()))
             .collect();
-        return window
-            .text_system()
-            .shape_text(SharedString::default(), font_size, &run, width, None)
-            .map(|l| l.into_vec())
-            .unwrap_or_default();
-    }
-    shaped
-}
-
-impl Element for RichText {
-    type RequestLayoutState = ();
-    type PrepaintState = RichPrepaint;
-
-    fn id(&self) -> Option<ElementId> {
-        None
-    }
-
-    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
-        None
-    }
-
-    fn request_layout(
-        &mut self,
-        _id: Option<&GlobalElementId>,
-        _inspector: Option<&InspectorElementId>,
-        window: &mut Window,
-        _cx: &mut App,
-    ) -> (LayoutId, ()) {
-        let mut style = Style::default();
-        style.size.width = relative(1.).into();
-        let text = self.text.clone();
-        let runs = self.runs.clone();
-        let font_size = self.font_size;
-        let line_height = self.line_height;
-        let layout_id =
-            window.request_measured_layout(style, move |known, available, window, _cx| {
-                let wrap = known.width.or(match available.width {
-                    AvailableSpace::Definite(w) => Some(w),
-                    _ => None,
-                });
-                let lines = shape(window, &text, &runs, font_size, wrap);
-                let mut height = px(0.);
-                let mut width = px(0.);
-                for l in &lines {
-                    let s = l.size(line_height);
-                    height += s.height;
-                    width = width.max(s.width);
-                }
-                size(known.width.unwrap_or(width), height.max(line_height))
-            });
-        (layout_id, ())
-    }
-
-    fn prepaint(
-        &mut self,
-        _id: Option<&GlobalElementId>,
-        _inspector: Option<&InspectorElementId>,
-        bounds: Bounds<Pixels>,
-        _: &mut (),
-        window: &mut Window,
-        _cx: &mut App,
-    ) -> RichPrepaint {
-        let lines = Rc::new(shape(
-            window,
-            &self.text,
-            &self.runs,
-            self.font_size,
-            Some(bounds.size.width),
-        ));
-        let layout = TextLayout::new(bounds, self.line_height, self.align, lines.clone());
-        let selection = match &self.selection {
-            Some((range, color)) if !range.is_empty() => layout
-                .selection_rects(range)
-                .into_iter()
-                .map(|b| fill(b, *color))
-                .collect(),
-            _ => Vec::new(),
-        };
-        let caret = self.caret.map(|(at, color)| {
-            let p = layout.position_for_index(at);
-            fill(Bounds::new(p, size(px(1.5), self.line_height)), color)
-        });
-        let placeholder = if self.text.is_empty() {
-            self.placeholder.as_ref().map(|(text, run)| {
-                shape(
-                    window,
-                    text,
-                    std::slice::from_ref(&TextRun {
-                        len: text.len(),
-                        ..run.clone()
-                    }),
-                    self.font_size,
-                    Some(bounds.size.width),
-                )
-            })
-        } else {
-            None
-        };
-        self.layouts.borrow_mut().insert(self.key.clone(), layout);
-        RichPrepaint {
-            lines,
-            placeholder,
-            selection,
-            caret,
-        }
-    }
-
-    fn paint(
-        &mut self,
-        _id: Option<&GlobalElementId>,
-        _inspector: Option<&InspectorElementId>,
-        bounds: Bounds<Pixels>,
-        _: &mut (),
-        state: &mut RichPrepaint,
-        window: &mut Window,
-        cx: &mut App,
-    ) {
-        if let Some((focus, input)) = &self.input
-            && focus.is_focused(window)
-        {
-            input(bounds, window, cx);
-        }
-        for quad in state.selection.drain(..) {
-            window.paint_quad(quad);
-        }
-        let mut origin = bounds.origin;
-        if let Some(lines) = &state.placeholder {
-            for line in lines.iter() {
-                let _ = line.paint(
-                    origin,
-                    self.line_height,
-                    self.align,
-                    Some(bounds),
-                    window,
-                    cx,
-                );
-                origin.y += line.size(self.line_height).height;
-            }
-        } else {
-            for line in state.lines.iter() {
-                let _ = line.paint_background(
-                    origin,
-                    self.line_height,
-                    self.align,
-                    Some(bounds),
-                    window,
-                    cx,
-                );
-                let _ = line.paint(
-                    origin,
-                    self.line_height,
-                    self.align,
-                    Some(bounds),
-                    window,
-                    cx,
-                );
-                origin.y += line.size(self.line_height).height;
-            }
-        }
-        if let Some(caret) = state.caret.take() {
-            window.paint_quad(caret);
-        }
+        assert_eq!(
+            marks,
+            vec![
+                (0, 3, Mark::Strike),
+                (4, 6, Mark::Link("roostr:object/obj-1".into()))
+            ]
+        );
     }
 }

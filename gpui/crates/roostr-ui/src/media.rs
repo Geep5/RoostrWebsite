@@ -159,6 +159,25 @@ impl Images {
     pub fn failed(&self, uri: &str) {
         self.entries.borrow_mut().insert(uri.to_owned(), None);
     }
+
+    /// An image compiled into the app (`include_bytes!`), decoded once and kept under `key`:
+    /// SVG (recognised by its content) rasterized to fit `size` points at the cache's scale,
+    /// anything else as [`ImageCache::load`] reads it. A pending image draws nothing.
+    pub fn bundled(&self, key: &str, bytes: &'static [u8], size: f32) -> Image {
+        if let Some(Some(hit)) = self.entries.borrow().get(key) {
+            return hit.clone();
+        }
+        let head = &bytes[..bytes.len().min(256)];
+        let image = if head.windows(4).any(|w| w == b"<svg") {
+            self.cache.svg(bytes, size, self.scale)
+        } else {
+            self.cache.load(bytes)
+        };
+        self.entries
+            .borrow_mut()
+            .insert(key.to_owned(), Some(image.clone()));
+        image
+    }
 }
 
 /// An object/space icon: an image for a web address or `data:image/` URL (rounded 4, cover),

@@ -1,188 +1,135 @@
-//! `/app/chat/:id` (`routes/app/chat/[id]/+page.svelte`): the full-screen
-//! discussion - header with back, object icon + name and comment count,
-//! messages filling the window, composer pinned to the bottom.
+//! `/app/chat/:id` (`routes/app/chat/[id]/+page.svelte`): the full-screen discussion -
+//! header with back, object icon + name and comment count, messages filling the window,
+//! composer pinned to the bottom.
 
-use gpui_kit::component::IconNamed as _;
-use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
-use gpui_kit::component::label::Label;
-use gpui_kit::*;
 use roostr_core::nav::{self, Route};
 use roostr_core::objects::object_icon;
-use roostr_core::{Glyph, Navigator, Object, Store, theme};
+use roostr_core::{Object, State};
+use roostr_ui::layout::is_mobile;
+use roostr_ui::ty::Weights as _;
+use roostr_ui::{
+    Button, ButtonCustomVariant, Glyph, Images, Theme, emoji_or_image_icon, glyph, is_image_icon,
+    ty,
+};
+use rune::{Cx, El, col, el, row, text};
 
 use crate::chat::{DISCUSSION, chat_blocks};
-use crate::discussion::{Discussion, DiscussionOptions};
-
-pub struct ChatPage {
-    object_id: String,
-    discussion: Entity<Discussion>,
-    _store: Subscription,
-}
-
-impl ChatPage {
-    /// The full-screen chat of `object_id`.
-    pub fn new(object_id: String, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let store = Store::global(cx);
-        store.update(cx, |s, cx| s.ensure_object(&object_id, cx));
-        let id = object_id.clone();
-        let discussion = cx.new(|cx| {
-            Discussion::new(
-                id,
-                DiscussionOptions {
-                    full: true,
-                    page_mode: true,
-                    thread_id: DISCUSSION.into(),
-                    embedded: false,
-                },
-                window,
-                cx,
-            )
-        });
-        let subscription = cx.observe(&store, |_, _, cx| cx.notify());
-        Self {
-            object_id,
-            discussion,
-            _store: subscription,
-        }
-    }
-}
+use crate::discussion::Place;
+use crate::discussion_view::{instance, place_options, view};
 
 /// Chat lines directly under the discussion root (the header's count).
 fn comment_count(object: &Object) -> usize {
     chat_blocks(object, DISCUSSION).len()
 }
 
-impl Render for ChatPage {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let store = Store::global(cx);
-        let object = store.read(cx).object(&self.object_id);
-        let mut shell = div()
-            .size_full()
-            .flex()
-            .flex_col()
-            .bg(theme::bg())
-            .text_color(theme::fg())
-            .overflow_hidden();
-        let Some(object) = object else { return shell };
-        let space = roostr_core::nav::Navigator::global(cx)
-            .read(cx)
-            .space()
-            .to_string();
-        let icon = object_icon(
-            store.read(cx),
-            object.field_str("iconEmoji"),
-            &object.type_key,
-            &space,
+/// The full-screen chat of `object_id`; fills a bounded parent.
+pub fn chat_page(
+    s: &State,
+    cx: &mut Cx<State>,
+    t: &Theme,
+    layer: &mut Vec<El>,
+    object_id: &str,
+    window: [f32; 2],
+) -> El {
+    let shell = col().key("chat-page").w_full().h_full().fill(t.bg);
+    // The page's discussion exists (and loads the object) from its first frame.
+    let discussion = instance(s, object_id, &place_options(Place::Page));
+    let Some(object) = s.store.object(object_id) else {
+        return shell;
+    };
+    let space = s.nav.space().to_string();
+    let icon = object_icon(
+        &s.store,
+        object.field_str("iconEmoji"),
+        &object.type_key,
+        &space,
+    );
+    let name = if object.name().is_empty() {
+        "Untitled".to_string()
+    } else {
+        object.name().to_string()
+    };
+    let comments = comment_count(&object);
+    let back_target = object.id.clone();
+    // A chat object opens here in its own page's place on a phone, so that page would only
+    // send it straight back: go back past it.
+    let back_in_history = object.type_key == "chat" && is_mobile(window[0]);
+    let icon_el = if is_image_icon(&icon) {
+        match s.get::<Images>() {
+            Some(images) => emoji_or_image_icon(&icon, 15., images),
+            None => el().size(15., 15.),
+        }
+    } else {
+        text(icon).font(ty::ui(15.))
+    };
+    // The round back button with the phone's back glyph.
+    let back = Button::new("back")
+        .custom(
+            ButtonCustomVariant::new(t)
+                .color(t.panel)
+                .foreground(t.fg)
+                .hover(t.panel)
+                .active(t.panel),
+        )
+        .square(40.)
+        .p(0.)
+        .radius(20.)
+        .bg(t.panel)
+        .on_press(move |s: &mut State| {
+            if back_in_history {
+                if s.nav.can_go_back() {
+                    s.nav.back(&mut s.ui);
+                } else {
+                    s.nav.navigate(Route::Home, &mut s.ui);
+                }
+            } else {
+                nav::navigate(Route::Object(back_target.clone()), s)
+            }
+        })
+        .child(glyph(Glyph::MobileBack, 20.).color(t.fg))
+        .build(t);
+    let title = col()
+        .grow(1.)
+        .shrink()
+        .min_w(0.)
+        .items_center()
+        .child(
+            row()
+                .center_y()
+                .gap(4.)
+                .shrink()
+                .min_w(0.)
+                .child(icon_el)
+                .child(
+                    text(name)
+                        .font(ty::ui(15.).semibold().lh(15. * 1.618))
+                        .color(t.fg)
+                        .truncate()
+                        .shrink(),
+                ),
+        )
+        .child(
+            text(format!(
+                "{comments} comment{}",
+                if comments == 1 { "" } else { "s" }
+            ))
+            .font(ty::ui(12.).lh(12. * 1.618))
+            .color(t.muted),
         );
-        let name = if object.name().is_empty() {
-            "Untitled".to_string()
-        } else {
-            object.name().to_string()
-        };
-        let comments = comment_count(&object);
-        let back_target = object.id.clone();
-        // A chat object opens here in its own page's place on a phone, so
-        // that page would only send it straight back: go back past it.
-        let back_in_history = object.type_key == "chat" && roostr_core::layout::is_mobile(window);
-        let icon_el = if roostr_core::objects::is_image_icon(&icon) {
-            div().child(roostr_core::ui::emoji_or_image_icon(&icon, px(15.)))
-        } else {
-            div().text_size(px(15.)).child(icon)
-        };
-        shell = shell
-            .child(
-                div()
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .gap(px(4.))
-                    .pt(px(10.))
-                    .px(px(12.))
-                    .pb(px(8.))
-                    .child(
-                        // The round back button with the phone's back glyph.
-                        Button::new("back")
-                            .custom(
-                                ButtonCustomVariant::new(cx)
-                                    .color(theme::panel())
-                                    .foreground(theme::fg())
-                                    .hover(theme::panel())
-                                    .active(theme::panel()),
-                            )
-                            .flex_none()
-                            .size(px(40.))
-                            .p_0()
-                            .rounded(px(20.))
-                            .bg(theme::panel())
-                            .on_click(move |_, _, cx| {
-                                if back_in_history {
-                                    Navigator::global(cx).update(cx, |nav, cx| {
-                                        if nav.can_go_back() {
-                                            nav.back(cx);
-                                        } else {
-                                            nav.navigate(Route::Home, cx);
-                                        }
-                                    });
-                                } else {
-                                    nav::navigate(Route::Object(back_target.clone()), cx)
-                                }
-                            })
-                            .child(
-                                svg()
-                                    .path(Glyph::MobileBack.path())
-                                    .size(px(20.))
-                                    .text_color(theme::fg()),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .flex()
-                            .flex_col()
-                            .items_center()
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap(px(4.))
-                                    .max_w_full()
-                                    .overflow_hidden()
-                                    .whitespace_nowrap()
-                                    .text_size(px(15.))
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .child(icon_el)
-                                    .child(
-                                        Label::new(name)
-                                            .min_w_0()
-                                            .overflow_hidden()
-                                            .text_ellipsis()
-                                            .line_height(phi())
-                                            .text_color(theme::fg()),
-                                    ),
-                            )
-                            .child(
-                                Label::new(format!(
-                                    "{comments} comment{}",
-                                    if comments == 1 { "" } else { "s" }
-                                ))
-                                .line_height(phi())
-                                .text_size(px(12.))
-                                .text_color(theme::muted()),
-                            ),
-                    )
-                    .child(div().flex_none().w(px(40.))),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .flex()
-                    .flex_col()
-                    .px(px(12.))
-                    .pb(px(8.))
-                    .child(self.discussion.clone()),
-            );
-        shell
-    }
+    let header = row()
+        .center_y()
+        .gap(4.)
+        .pt(10.)
+        .px(12.)
+        .pb(8.)
+        .child(back)
+        .child(title)
+        .child(el().w(40.));
+    let messages = match discussion {
+        Some(d) => view(d, s, cx, t, layer, window),
+        None => col(),
+    };
+    shell
+        .child(header)
+        .child(col().grow(1.).min_h(0.).px(12.).pb(8.).child(messages))
 }

@@ -149,6 +149,7 @@ glyphs! {
     FileText => "file-text" => FILE_TEXT,
     Inbox => "inbox" => INBOX,
     Info => "info" => INFO,
+    KitArrowUp => "kit-arrow-up" => KIT_ARROW_UP,
     KitChevronDown => "kit-chevron-down" => KIT_CHEVRON_DOWN,
     KitCopy => "kit-copy" => KIT_COPY,
     KitExternalLink => "kit-external-link" => KIT_EXTERNAL_LINK,

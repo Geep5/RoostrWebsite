@@ -77,6 +77,7 @@ fi
 
 rm -rf "$OUT"
 mkdir -p "$OUT"
+# Also writes snippets/: Rune's page bridge (its JS modules), loaded by roostr_web.js.
 "$BINDGEN" "$WASM" --out-dir "$OUT" --target web --no-typescript
 
 # One page per website route, with the Svelte site's title and link-preview
@@ -100,9 +101,10 @@ cp crates/roostr-web/www/main.js "$OUT/"
 # The replica's engine (its sha256 is checked against engine-core.json again
 # when the tab loads it), and the files the pages and the manifest name.
 cp "$STATIC"/{engine.wasm,engine-core.json,favicon.png,logo.png,manifest.json,robots.txt} "$OUT/"
-# The color emoji font, fetched after the app starts (theme::EMOJI_FONT_PATH).
+# The color emoji font, fetched with the GPU's start-up, before the first
+# frame (roostr_ui::fonts::EMOJI_FONT_PATH).
 mkdir -p "$OUT/fonts"
-cp crates/roostr-core/fonts/TwemojiMozilla.ttf crates/roostr-core/fonts/TwemojiMozilla-LICENSE.md "$OUT/fonts/"
+cp crates/roostr-ui/fonts/TwemojiMozilla.ttf crates/roostr-ui/fonts/TwemojiMozilla-LICENSE.md "$OUT/fonts/"
 
 for FILE in roostr_web_bg.wasm roostr_web.js engine.wasm fonts/TwemojiMozilla.ttf; do
   RAW=$(wc -c <"$OUT/$FILE" | tr -d ' ')

@@ -1,72 +1,118 @@
 //! Chat message markdown (`renderMarkdown` + the Discussion's `.md` styles and
 //! `mentionPills`): `roostr_core::markdown` parses, this lays the blocks out
 //! and paints inline styles, links, object links and @agent mention pills.
-//! Every line takes part in the window text selection, as the web view's DOM
-//! text did: a drag selects across lines and messages, ⌘C copies, and on a
-//! touch screen a long press selects a word with handles and a Copy menu.
+//! Every line is selectable text in the conversation's one selection group, as
+//! the web view's DOM text was: a drag selects across lines and messages, ⌘C
+//! copies.
 
-use std::cell::Cell;
-use std::ops::Range;
-
-use gpui_kit::base::{
-    TextSelection, TextSelectionHandle, TextSelectionRegistration, TextSelectionRun, Theme,
-    TouchHandleLayout,
-};
-use gpui_kit::component::Sizable as _;
-use gpui_kit::component::separator::Separator;
-use gpui_kit::prelude::FluentBuilder as _;
-use gpui_kit::*;
+use roostr_core::Store;
 use roostr_core::markdown::{Align, Block, Inline, Link, Span, TaskCheck, parse};
-use roostr_core::nav::{self, Route};
-use roostr_core::objects::{is_image_icon, object_icon};
-use roostr_core::options::{TagPaint, tint_paint};
-use roostr_core::{Store, theme};
+use roostr_core::objects::object_icon;
+use roostr_ui::tags::{TagPaint, tint_paint};
+use roostr_ui::{Theme, is_image_icon, radius, ty};
+use rune::{Color, El, TextStyle, col, rich, row, text};
 
-/// Colors of the bubble the text sits in.
+use crate::discussion::{OBJECT_GREEN, agent_tag_paint};
+
+/// Colours of the bubble the text sits in.
 pub(crate) struct MdTheme {
-    /// Body text color (bubble ink in a colored bubble).
-    pub ink: Hsla,
-    /// A colored bubble's tint (inline code, object links); `None` = the default grey bubble.
-    pub tint: Option<Hsla>,
+    /// Body text colour (bubble ink in a coloured bubble).
+    pub ink: Color,
+    /// A coloured bubble's tint (inline code, object links); `None` = the default grey bubble.
+    pub tint: Option<Color>,
     /// Known agents (name, icon): `@Name` becomes a pill.
     pub mention_names: Vec<(String, String)>,
 }
 
-enum Click {
-    Object(String),
-    Url(String),
+/// What a message body is laid out against: the theme, the store (object links' icons, agent
+/// tag colours) and the active space.
+pub(crate) struct MdEnv<'a> {
+    pub t: &'a Theme,
+    pub store: &'a Store,
+    pub space: &'a str,
 }
 
-/// One rendered line: text, runs, clickable ranges and the ranges drawn as
-/// tags (a kit-tag box painted behind the text, see [`SelectableLine`]).
+/// A link's id as `on_link` hears it: an object to open here, or a web address.
+pub(crate) const OBJECT_LINK: &str = "object:";
+pub(crate) const URL_LINK: &str = "url:";
+
+/// One laid-out line: text, styled ranges, the ranges drawn as tags (fill, 1px ring) and the
+/// links.
+#[derive(Default)]
 struct Line {
     text: String,
-    runs: Vec<TextRun>,
-    clicks: Vec<(Range<usize>, Click)>,
-    tags: Vec<(Range<usize>, TagPaint)>,
+    spans: Vec<rune::Span>,
+    rings: Vec<(usize, usize, Color, f32)>,
+    strikes: Vec<(usize, usize, Option<Color>)>,
+    links: Vec<(std::ops::Range<usize>, String)>,
 }
 
-impl Line {
-    fn push(&mut self, text: &str, run: &TextRun) {
-        if text.is_empty() {
-            return;
+/// How a run of text is painted.
+#[derive(Clone, Copy)]
+struct Run {
+    color: Color,
+    weight: Option<f32>,
+    italic: bool,
+    mono: bool,
+    bg: Option<(Color, f32)>,
+    underline: Option<Color>,
+    strike: bool,
+}
+
+impl Run {
+    fn plain(color: Color) -> Run {
+        Run {
+            color,
+            weight: None,
+            italic: false,
+            mono: false,
+            bg: None,
+            underline: None,
+            strike: false,
         }
-        self.text.push_str(text);
-        self.runs.push(TextRun {
-            len: text.len(),
-            ..run.clone()
-        });
     }
 }
 
-fn base_run(ink: Hsla) -> TextRun {
-    TextRun {
-        len: 0,
-        font: font(theme::fonts::UI),
-        color: ink,
-        background_color: None,
-        underline: None,
-        strikethrough: None,
+impl Line {
+    /// Appends `text` painted as `run`; returns its byte range.
+    fn push(&mut self, text: &str, run: Run) -> std::ops::Range<usize> {
+        let start = self.text.len();
+        if text.is_empty() {
+            return start..start;
+        }
+        self.text.push_str(text);
+        let end = self.text.len();
+        let mut span = rune::Span::new(start, end).color(run.color);
+        if let Some(w) = run.weight {
+            span = span.weight(w);
+        }
+        if run.italic {
+            span = span.italic();
+        }
+        if run.mono {
+            span = span.mono();
+        }
+        if let Some((bg, pad)) = run.bg {
+            span = span.bg(bg, pad);
+        }
+        if let Some(u) = run.underline {
+            span = span.underline(u);
+        }
+        if run.strike {
+            self.strikes.push((start, end, None));
+        }
+        self.spans.push(span);
+        start..end
+    }
+
+    /// The kit tag look behind `range`: fill, 1px border, 2px past the glyphs.
+    fn tag(&mut self, range: std::ops::Range<usize>, paint: TagPaint) {
+        for span in self.spans.iter_mut() {
+            if span.start as usize >= range.start && span.end as usize <= range.end {
+                *span = span.clone().bg(paint.bg, 2.0);
+            }
+        }
+        self.rings.push((range.start, range.end, paint.border, 1.0));
     }
 }
 
@@ -92,103 +138,68 @@ fn text_icon(icon: &str, fallback: &str) -> String {
     }
 }
 
-fn build_line(inline: &Inline, md: &MdTheme, names: &[(String, String)], cx: &App) -> Line {
-    let mut line = Line {
-        text: String::new(),
-        runs: Vec::new(),
-        clicks: Vec::new(),
-        tags: Vec::new(),
-    };
-    let store = Store::global(cx);
-    let store = store.read(cx);
-    let space = roostr_core::nav::Navigator::global(cx)
-        .read(cx)
-        .space()
-        .to_string();
+fn build_line(inline: &Inline, md: &MdTheme, names: &[(String, String)], env: &MdEnv) -> Line {
+    let t = env.t;
+    let mut line = Line::default();
     for span in inline {
-        let mut run = base_run(md.ink);
+        let mut run = Run::plain(md.ink);
         if span.bold {
-            run.font.weight = FontWeight::BOLD;
+            run.weight = Some(ty::BOLD);
         }
-        if span.italic {
-            run.font.style = FontStyle::Italic;
-        }
-        if span.strike {
-            run.strikethrough = Some(StrikethroughStyle {
-                thickness: px(1.),
-                color: None,
-            });
-        }
+        run.italic = span.italic;
+        run.strike = span.strike;
         if span.code {
-            run.font = font(theme::fonts::MONO);
-            run.background_color = Some(md.tint.unwrap_or(theme::hover()));
+            run.mono = true;
+            run.bg = Some((md.tint.unwrap_or(t.hover), 0.0));
         }
         if let Some(link) = &span.link {
-            let start = line.text.len();
             match &link.object_id {
                 // A linked object: the same pill as a mention, green so it reads as a thing.
                 Some(id) => {
-                    let summary = store.summary(id);
+                    let summary = env.store.summary(id);
+                    let type_key = summary.map(|s| s.type_key.as_str()).unwrap_or("page");
                     let icon = object_icon(
-                        store,
+                        env.store,
                         summary.map(|s| s.icon.as_str()).unwrap_or(""),
-                        summary.map(|s| s.type_key.as_str()).unwrap_or("page"),
-                        &space,
+                        type_key,
+                        env.space,
                     );
-                    let type_icon = object_icon(
-                        store,
-                        "",
-                        summary.map(|s| s.type_key.as_str()).unwrap_or("page"),
-                        &space,
-                    );
-                    // The composer's !object tag: the kit tag look in green
-                    // (a coloured bubble keeps its own tint).
+                    let type_icon = object_icon(env.store, "", type_key, env.space);
+                    // The composer's !object tag: the kit tag look in green (a coloured
+                    // bubble keeps its own tint).
                     let paint = match md.tint {
                         Some(tint) => {
-                            run.background_color = Some(tint);
+                            run.bg = Some((tint, 2.0));
                             run.color = md.ink;
                             None
                         }
                         None => {
-                            let paint = tint_paint(rgb(crate::discussion::OBJECT_GREEN).into());
+                            let paint = tint_paint(t, roostr_ui::color::rgb(OBJECT_GREEN));
                             run.color = paint.fg;
                             Some(paint)
                         }
                     };
                     // A narrow no-break space: the icon stays with the name.
-                    line.push(&format!("{}\u{202f}", text_icon(&icon, &type_icon)), &run);
-                    line.push(&span.text, &run);
+                    let start = line.text.len();
+                    line.push(&format!("{}\u{202f}", text_icon(&icon, &type_icon)), run);
+                    let end = line.push(&span.text, run).end.max(line.text.len());
                     if let Some(paint) = paint {
-                        line.tags.push((start..line.text.len(), paint));
+                        line.tag(start..end, paint);
                     }
-                    line.clicks
-                        .push((start..line.text.len(), Click::Object(id.clone())));
+                    line.links.push((start..end, format!("{OBJECT_LINK}{id}")));
                 }
                 None => {
-                    if md.tint.is_some() {
-                        run.color = md.ink;
-                        run.underline = Some(UnderlineStyle {
-                            thickness: px(1.),
-                            color: Some(md.ink),
-                            wavy: false,
-                        });
-                    } else {
-                        run.color = theme::accent();
-                        run.underline = Some(UnderlineStyle {
-                            thickness: px(1.),
-                            color: Some(theme::accent()),
-                            wavy: false,
-                        });
-                    }
-                    line.push(&span.text, &run);
-                    line.clicks
-                        .push((start..line.text.len(), Click::Url(link.href.clone())));
+                    let color = if md.tint.is_some() { md.ink } else { t.accent };
+                    run.color = color;
+                    run.underline = Some(color);
+                    let range = line.push(&span.text, run);
+                    line.links.push((range, format!("{URL_LINK}{}", link.href)));
                 }
             }
             continue;
         }
         if span.code || names.is_empty() {
-            line.push(&span.text, &run);
+            line.push(&span.text, run);
             continue;
         }
         // Discord-style mention pills: `@Agent Name` for any known agent.
@@ -199,282 +210,56 @@ fn build_line(inline: &Inline, md: &MdTheme, names: &[(String, String)], cx: &Ap
             if text.as_bytes()[i] == b'@'
                 && let Some((name, icon)) = mention_at(&text[i..], names)
             {
-                line.push(&text[copied..i], &run);
+                line.push(&text[copied..i], run);
                 // An @agent tag in that agent's own chat colour.
-                let space = roostr_core::nav::Navigator::global(cx)
-                    .read(cx)
-                    .space()
-                    .to_string();
-                let paint =
-                    roostr_core::options::agent_tag_paint(Store::global(cx).read(cx), name, &space);
-                let pill = TextRun {
+                let paint = agent_tag_paint(t, env.store, name, env.space);
+                let pill = Run {
                     color: paint.fg,
-                    font: Font {
-                        weight: FontWeight::MEDIUM,
-                        ..run.font.clone()
-                    },
-                    ..run.clone()
+                    weight: Some(ty::MEDIUM),
+                    ..run
                 };
-                let start = line.text.len();
                 // A narrow no-break space: the icon stays with `@name`.
-                line.push(&format!("{}\u{202f}@{name}", text_icon(icon, "🤖")), &pill);
-                line.tags.push((start..line.text.len(), paint));
+                let range = line.push(&format!("{}\u{202f}@{name}", text_icon(icon, "🤖")), pill);
+                line.tag(range, paint);
                 i += 1 + name.len();
                 copied = i;
                 continue;
             }
             i += text[i..].chars().next().map_or(1, char::len_utf8);
         }
-        line.push(&text[copied..], &run);
+        line.push(&text[copied..], run);
     }
     line
 }
 
+/// One line of message text: selectable, its links pressable.
 fn render_line(
-    id: ElementId,
+    key: String,
     inline: &Inline,
     md: &MdTheme,
     names: &[(String, String)],
-    order: &Cell<u64>,
-    cx: &App,
-) -> AnyElement {
-    let line = build_line(inline, md, names, cx);
+    style: TextStyle,
+    env: &MdEnv,
+) -> El {
+    line_el(key, build_line(inline, md, names, env), style, md.ink)
+}
+
+fn line_el(key: String, line: Line, style: TextStyle, ink: Color) -> El {
     if line.text.is_empty() {
         // An empty line still takes a line's height (`<br>`).
-        return div().child(" ").into_any_element();
+        return text(" ").key(key).font(style).color(ink);
     }
-    let text = SharedString::from(line.text);
-    let styled = StyledText::new(text.clone()).with_runs(line.runs);
-    let layout = styled.layout().clone();
-    let element = if line.clicks.is_empty() {
-        styled.into_any_element()
-    } else {
-        let (ranges, targets): (Vec<Range<usize>>, Vec<Click>) = line.clicks.into_iter().unzip();
-        InteractiveText::new(id.clone(), styled)
-            .on_click(ranges, move |ix, _, cx| match &targets[ix] {
-                Click::Object(id) => nav::navigate(Route::Object(id.clone()), cx),
-                Click::Url(url) => cx.open_url(url),
-            })
-            .into_any_element()
-    };
-    SelectableLine::new(id, text, layout, element, order)
-        .tags(line.tags)
-        .into_any_element()
-}
-
-/// One laid-out line of message text in the window text selection: gpui-base's
-/// `SelectableText`, for text with styled runs and links (the line's own
-/// `StyledText` or `InteractiveText`, which it lays out and paints).
-struct SelectableLine {
-    id: ElementId,
-    text: SharedString,
-    layout: TextLayout,
-    element: AnyElement,
-    /// Reading order among the lines of the conversation.
-    order: u64,
-    /// Ranges painted as tags behind the text.
-    tags: Vec<(Range<usize>, TagPaint)>,
-}
-
-impl SelectableLine {
-    /// `element` is laid out as `layout`, showing `text`; the line takes the
-    /// next reading position from `order`.
-    fn new(
-        id: ElementId,
-        text: SharedString,
-        layout: TextLayout,
-        element: AnyElement,
-        order: &Cell<u64>,
-    ) -> Self {
-        let this = Self {
-            id,
-            text,
-            layout,
-            element,
-            order: order.get(),
-            tags: Vec::new(),
-        };
-        order.set(order.get() + 1);
-        this
+    let mut el = rich(line.text, line.spans)
+        .key(key)
+        .font(style)
+        .color(ink)
+        .selectable(true)
+        .span_rings(line.rings)
+        .strikes(line.strikes);
+    for (range, id) in line.links {
+        el = el.link(rune::Link::new(range, id));
     }
-
-    fn tags(mut self, tags: Vec<(Range<usize>, TagPaint)>) -> Self {
-        self.tags = tags;
-        self
-    }
-}
-
-impl IntoElement for SelectableLine {
-    type Element = Self;
-
-    fn into_element(self) -> Self::Element {
-        self
-    }
-}
-
-impl Element for SelectableLine {
-    type RequestLayoutState = TextSelectionHandle;
-    type PrepaintState = (Hitbox, TouchHandleLayout);
-
-    fn id(&self) -> Option<ElementId> {
-        Some(self.id.clone())
-    }
-
-    fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
-        None
-    }
-
-    fn request_layout(
-        &mut self,
-        global_id: Option<&GlobalElementId>,
-        _: Option<&InspectorElementId>,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> (LayoutId, Self::RequestLayoutState) {
-        let handle = window.with_element_state(
-            global_id.expect("a selectable line has an id"),
-            |retained: Option<TextSelectionHandle>, _| {
-                let handle =
-                    retained.unwrap_or_else(|| TextSelectionHandle::new(self.text.clone(), cx));
-                (handle.clone(), handle)
-            },
-        );
-        handle.set_fallback_copy_text(self.text.clone(), cx);
-        (self.element.request_layout(window, cx), handle)
-    }
-
-    fn prepaint(
-        &mut self,
-        _: Option<&GlobalElementId>,
-        _: Option<&InspectorElementId>,
-        bounds: Bounds<Pixels>,
-        handle: &mut Self::RequestLayoutState,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> Self::PrepaintState {
-        self.element.prepaint(window, cx);
-        let hitbox = window.insert_hitbox(bounds, HitboxBehavior::Normal);
-        let handles = handle.prepaint_touch_handles(window, cx);
-        (hitbox, handles)
-    }
-
-    fn paint(
-        &mut self,
-        _: Option<&GlobalElementId>,
-        _: Option<&InspectorElementId>,
-        bounds: Bounds<Pixels>,
-        handle: &mut Self::RequestLayoutState,
-        (hitbox, handles): &mut Self::PrepaintState,
-        window: &mut Window,
-        cx: &mut App,
-    ) {
-        let selected_before = TextSelection::selected_text(window, cx);
-        let projection = handle.update_runs(
-            &[
-                TextSelectionRun::new(self.text.clone(), self.layout.clone(), bounds)
-                    .with_document_order(self.order),
-            ],
-            cx,
-        );
-        if selected_before != TextSelection::selected_text(window, cx) {
-            window.refresh();
-        }
-        let line_height = self.layout.line_height();
-        // Tags: the kit tag box (fill, 1px border, radius 4) behind each
-        // range, one box per row a wrapped tag covers, 2px past the glyphs.
-        for (range, paint) in &self.tags {
-            let (Some(mut start), Some(end)) = (
-                self.layout.position_for_index(range.start),
-                self.layout.position_for_index(range.end),
-            ) else {
-                continue;
-            };
-            // A tag the line wraps right before reports its start at the end
-            // of the previous row: it really starts at the next row's edge.
-            let first = self.text[range.start..]
-                .chars()
-                .next()
-                .map_or(0, char::len_utf8);
-            if let Some(after) = self.layout.position_for_index(range.start + first)
-                && after.y > start.y
-            {
-                start = point(bounds.left(), after.y);
-            }
-            for row in selection_quads(start, end, bounds, line_height) {
-                let row = Bounds::from_corners(
-                    point(row.left() - px(2.), row.top() + px(1.)),
-                    point(row.right() + px(2.), row.bottom() - px(1.)),
-                );
-                window.paint_quad(quad(
-                    row,
-                    px(4.),
-                    paint.bg,
-                    px(1.),
-                    paint.border,
-                    BorderStyle::Solid,
-                ));
-            }
-        }
-        let color = Theme::global(cx).tokens.colors.selection;
-        let mut edges = None;
-        for range in projection.ranges().iter().flatten() {
-            let (Some(start), Some(end)) = (
-                self.layout.position_for_index(range.start),
-                self.layout.position_for_index(range.end),
-            ) else {
-                continue;
-            };
-            for quad in selection_quads(start, end, bounds, line_height) {
-                window.paint_quad(fill(quad, color));
-            }
-            let caret = |at: Point<Pixels>| Bounds::new(at, size(px(0.), line_height));
-            edges = Some((caret(start), caret(end)));
-        }
-        let registration = TextSelectionRegistration::new(hitbox.clone(), bounds)
-            .with_document_order(self.order)
-            .with_text_bounds(vec![bounds])
-            .with_rendered_element(handle, window, cx);
-        let registration = match edges {
-            Some((start, end)) => registration.with_selection_edges(start, end),
-            None => registration,
-        };
-        handle.register(registration, window, cx);
-        // Links set the pointing hand over themselves as they paint.
-        window.set_cursor_style(CursorStyle::IBeam, hitbox);
-        self.element.paint(window, cx);
-        handle.paint_touch_handles(handles, theme::accent(), window, cx);
-    }
-}
-
-/// The highlight of `start..end` on a wrapped line: the first row from the
-/// start, full middle rows, the last row to the end.
-fn selection_quads(
-    start: Point<Pixels>,
-    end: Point<Pixels>,
-    bounds: Bounds<Pixels>,
-    line_height: Pixels,
-) -> Vec<Bounds<Pixels>> {
-    if start.y == end.y {
-        return vec![Bounds::from_corners(
-            start,
-            point(end.x, end.y + line_height),
-        )];
-    }
-    let mut quads = vec![Bounds::from_corners(
-        start,
-        point(bounds.right(), start.y + line_height),
-    )];
-    if end.y > start.y + line_height {
-        quads.push(Bounds::from_corners(
-            point(bounds.left(), start.y + line_height),
-            point(bounds.right(), end.y),
-        ));
-    }
-    quads.push(Bounds::from_corners(
-        point(bounds.left(), end.y),
-        point(end.x, end.y + line_height),
-    ));
-    quads
+    el
 }
 
 /// CSS vertical margins of one block (top, bottom).
@@ -485,242 +270,6 @@ fn margins(block: &Block) -> (f32, f32) {
         Block::Rule => (8., 8.),
         Block::List { .. } | Block::Quote(_) => (4., 4.),
         Block::Code { .. } | Block::Table(_) => (6., 6.),
-    }
-}
-
-fn lines(
-    id: &str,
-    ix: usize,
-    lines: &[Inline],
-    md: &MdTheme,
-    names: &[(String, String)],
-    order: &Cell<u64>,
-    cx: &App,
-) -> Div {
-    div()
-        .flex()
-        .flex_col()
-        .children(lines.iter().enumerate().map(|(i, l)| {
-            render_line(
-                ElementId::Name(format!("{id}-{ix}-{i}").into()),
-                l,
-                md,
-                names,
-                order,
-                cx,
-            )
-        }))
-}
-
-fn render_block(
-    id: &str,
-    ix: usize,
-    block: &Block,
-    md: &MdTheme,
-    names: &[(String, String)],
-    order: &Cell<u64>,
-    cx: &App,
-) -> AnyElement {
-    match block {
-        Block::Paragraph(ls) => lines(id, ix, ls, md, names, order, cx).into_any_element(),
-        Block::Heading { level, text } => div()
-            .font_weight(FontWeight::BOLD)
-            .text_size(px(match level {
-                1 => 17.,
-                2 => 15.5,
-                _ => 14.,
-            }))
-            .child(render_line(
-                ElementId::Name(format!("{id}-{ix}").into()),
-                &bold(text),
-                md,
-                names,
-                order,
-                cx,
-            ))
-            .into_any_element(),
-        Block::Rule => Separator::horizontal()
-            .color(theme::border())
-            .into_any_element(),
-        Block::Quote(ls) => {
-            let quote = MdTheme {
-                ink: theme::muted(),
-                tint: md.tint,
-                mention_names: Vec::new(),
-            };
-            div()
-                .border_l_2()
-                .border_color(theme::accent())
-                .px(px(10.))
-                .py(px(2.))
-                .text_color(theme::muted())
-                .child(lines(id, ix, ls, &quote, names, order, cx))
-                .into_any_element()
-        }
-        Block::Code { lang, code } => div()
-            .id(ElementId::Name(format!("{id}-{ix}-code").into()))
-            .flex()
-            .flex_col()
-            .font_family(theme::fonts::MONO)
-            .text_size(px(12.5))
-            .line_height(relative(1.5))
-            .bg(theme::hover())
-            // The box is the theme's, not the bubble's: its text too, or a
-            // tinted bubble's dark ink vanishes on a dark theme's box.
-            .text_color(theme::fg())
-            .border_1()
-            .border_color(theme::border())
-            .rounded(theme::radius::md())
-            .px(px(10.))
-            .py(px(8.))
-            .overflow_x_scroll()
-            .when(!lang.is_empty(), |d| {
-                d.child(
-                    div()
-                        .text_size(px(10.))
-                        .text_color(theme::muted())
-                        .mb(px(4.))
-                        .child(lang.to_uppercase()),
-                )
-            })
-            .child(div().whitespace_nowrap().child({
-                let code = SharedString::from(code.clone());
-                let styled = StyledText::new(code.clone());
-                let layout = styled.layout().clone();
-                SelectableLine::new(
-                    ElementId::Name(format!("{id}-{ix}-code-text").into()),
-                    code,
-                    layout,
-                    styled.into_any_element(),
-                    order,
-                )
-            }))
-            .into_any_element(),
-        Block::List { ordered, items } => {
-            let tasky = items.iter().any(|i| i.check.is_some());
-            let rows = items.iter().enumerate().map(|(i, item)| {
-                let text = render_line(
-                    ElementId::Name(format!("{id}-{ix}-li{i}").into()),
-                    &item.text,
-                    md,
-                    names,
-                    order,
-                    cx,
-                );
-                if tasky {
-                    let done = item.check == Some(TaskCheck::Done);
-                    let check = roostr_core::ui::checkbox_display(
-                        ElementId::Name(format!("{id}-{ix}-check{i}").into()),
-                        done,
-                    )
-                    .small()
-                    .flex_none()
-                    .mt(px(3.));
-                    div()
-                        .flex()
-                        .items_start()
-                        .gap(px(7.))
-                        .when(item.check.is_some(), |d| d.child(check))
-                        .child(
-                            div()
-                                .min_w_0()
-                                .when(done, |d| d.opacity(0.6).line_through())
-                                .child(text),
-                        )
-                        .into_any_element()
-                } else {
-                    let marker = if *ordered {
-                        format!("{}.", i + 1)
-                    } else {
-                        "•".into()
-                    };
-                    div()
-                        .flex()
-                        .child(
-                            div()
-                                .flex_none()
-                                .w(px(20.))
-                                .pr(px(6.))
-                                .flex()
-                                .justify_end()
-                                .child(marker),
-                        )
-                        .child(div().min_w_0().child(text))
-                        .into_any_element()
-                }
-            });
-            div()
-                .flex()
-                .flex_col()
-                .when(tasky, |d| d.pl(px(2.)))
-                .children(rows)
-                .into_any_element()
-        }
-        Block::Table(table) => {
-            let n = table.head.len().max(1);
-            let border = theme::border();
-            let head_border = border.blend(theme::fg().opacity(0.5));
-            let cell = |key: String, inline: &Inline, align: Align, head: bool, last: bool| {
-                let theme_for = MdTheme {
-                    ink: if head { theme::muted() } else { md.ink },
-                    tint: md.tint,
-                    mention_names: Vec::new(),
-                };
-                div()
-                    .px(px(8.))
-                    .py(px(4.))
-                    .when(!last, |d| {
-                        d.border_b_1()
-                            .border_color(if head { head_border } else { border })
-                    })
-                    .when(head, |d| d.font_weight(FontWeight::SEMIBOLD))
-                    .map(|d| match align {
-                        Align::Right => d.text_right().whitespace_nowrap(),
-                        Align::Center => d.text_center(),
-                        _ => d,
-                    })
-                    .child(render_line(
-                        ElementId::Name(key.into()),
-                        &if head { bold(inline) } else { inline.clone() },
-                        &theme_for,
-                        names,
-                        order,
-                        cx,
-                    ))
-            };
-            let rows = table.rows.len();
-            let mut grid = div()
-                .grid()
-                .grid_cols(n as u16)
-                .text_size(px(13.))
-                .line_height(relative(1.35));
-            for (c, h) in table.head.iter().enumerate() {
-                grid = grid.child(cell(
-                    format!("{id}-{ix}-h{c}"),
-                    h,
-                    table.aligns.get(c).copied().unwrap_or_default(),
-                    true,
-                    false,
-                ));
-            }
-            for (r, row) in table.rows.iter().enumerate() {
-                for (c, value) in row.iter().enumerate() {
-                    grid = grid.child(cell(
-                        format!("{id}-{ix}-{r}-{c}"),
-                        value,
-                        table.aligns.get(c).copied().unwrap_or_default(),
-                        false,
-                        r + 1 == rows,
-                    ));
-                }
-            }
-            div()
-                .id(ElementId::Name(format!("{id}-{ix}-table").into()))
-                .max_w_full()
-                .overflow_x_scroll()
-                .child(grid)
-                .into_any_element()
-        }
     }
 }
 
@@ -735,21 +284,231 @@ fn bold(inline: &Inline) -> Inline {
         .collect()
 }
 
-/// A message body: parsed markdown laid out with the chat's `.md` styles.
-/// Its lines take part in the window text selection in reading order from
-/// `order` (one message's lines after the previous message's). `origin`
-/// (object id, name) leads the body as that object's tag, the same pill an
-/// object link in the text gets.
+#[allow(clippy::too_many_arguments)]
+fn lines(
+    key: &str,
+    ix: usize,
+    lines: &[Inline],
+    md: &MdTheme,
+    names: &[(String, String)],
+    style: TextStyle,
+    env: &MdEnv,
+) -> El {
+    col().children(
+        lines
+            .iter()
+            .enumerate()
+            .map(|(i, l)| render_line(format!("{key}-{ix}-{i}"), l, md, names, style, env)),
+    )
+}
+
+fn render_block(
+    key: &str,
+    ix: usize,
+    block: &Block,
+    md: &MdTheme,
+    names: &[(String, String)],
+    style: TextStyle,
+    env: &MdEnv,
+) -> El {
+    let t = env.t;
+    match block {
+        Block::Paragraph(ls) => lines(key, ix, ls, md, names, style, env),
+        Block::Heading { level, text } => {
+            let size = match level {
+                1 => 17.,
+                2 => 15.5,
+                _ => 14.,
+            };
+            let heading = TextStyle {
+                size,
+                weight: ty::BOLD,
+                line_height: size * 1.45,
+                ..style
+            };
+            render_line(format!("{key}-{ix}"), &bold(text), md, names, heading, env)
+        }
+        Block::Rule => roostr_ui::Separator::horizontal().color(t.border).build(t),
+        Block::Quote(ls) => {
+            let quote = MdTheme {
+                ink: t.muted,
+                tint: md.tint,
+                mention_names: Vec::new(),
+            };
+            col()
+                .border_sides([0.0, 0.0, 0.0, 2.0], t.accent)
+                .px(10.)
+                .py(2.)
+                .child(lines(key, ix, ls, &quote, names, style, env))
+        }
+        Block::Code { lang, code } => {
+            let mono = ty::mono(12.5).lh(12.5 * 1.5);
+            let mut boxed = col()
+                .fill(t.hover)
+                .border(1.0, t.border)
+                .radius(radius::MD)
+                .px(10.)
+                .py(8.);
+            if !lang.is_empty() {
+                boxed = boxed.child(
+                    text(lang.to_uppercase())
+                        .font(ty::ui(10.).family(rune::Family::Mono))
+                        .color(t.muted)
+                        .mb(4.),
+                );
+            }
+            // The box is the theme's, not the bubble's: its text too, or a tinted
+            // bubble's dark ink vanishes on a dark theme's box.
+            boxed.child(
+                col().key(format!("{key}-{ix}-code")).scroll_x().child(
+                    text(code.clone())
+                        .key(format!("{key}-{ix}-code-text"))
+                        .font(mono)
+                        .color(t.fg)
+                        .selectable(true),
+                ),
+            )
+        }
+        Block::List { ordered, items } => {
+            let tasky = items.iter().any(|i| i.check.is_some());
+            let rows = items.iter().enumerate().map(|(i, item)| {
+                let key = format!("{key}-{ix}-li{i}");
+                let mut built = build_line(&item.text, md, names, env);
+                if tasky {
+                    let done = item.check == Some(TaskCheck::Done);
+                    let mut r = row().items_start().gap(7.);
+                    if item.check.is_some() {
+                        r = r.child(
+                            roostr_ui::checkbox_display(format!("{key}-check"), done)
+                                .small()
+                                .build(t)
+                                .mt(3.),
+                        );
+                    }
+                    let text = if done {
+                        // `.done { opacity: .6; text-decoration: line-through }`.
+                        built.strikes = vec![(0, built.text.len(), None)];
+                        line_el(key, built, style, md.ink).opacity(0.6)
+                    } else {
+                        line_el(key, built, style, md.ink)
+                    };
+                    r.child(col().shrink().child(text))
+                } else {
+                    let line = line_el(key, built, style, md.ink);
+                    let marker = if *ordered {
+                        format!("{}.", i + 1)
+                    } else {
+                        "•".into()
+                    };
+                    row()
+                        .child(
+                            row()
+                                .w(20.)
+                                .pr(6.)
+                                .justify_end()
+                                .child(text(marker).font(style).color(md.ink)),
+                        )
+                        .child(col().shrink().child(line))
+                }
+            });
+            let mut list = col().children(rows);
+            if tasky {
+                list = list.pl(2.);
+            }
+            list
+        }
+        Block::Table(table) => {
+            let n = table.head.len().max(1);
+            let head_border = roostr_ui::color::mix(t.border, t.fg, 0.5);
+            let cell_style = ty::ui(13.).lh(13. * 1.35);
+            let rows = table.rows.len();
+            let cell = |key: String, inline: &Inline, align: Align, head: bool, last: bool| {
+                let theme_for = MdTheme {
+                    ink: if head { t.muted } else { md.ink },
+                    tint: md.tint,
+                    mention_names: Vec::new(),
+                };
+                let style = if head {
+                    TextStyle {
+                        weight: ty::SEMIBOLD,
+                        ..cell_style
+                    }
+                } else {
+                    cell_style
+                };
+                let mut line = render_line(
+                    key,
+                    &if head { bold(inline) } else { inline.clone() },
+                    &theme_for,
+                    names,
+                    style,
+                    env,
+                );
+                let mut c = col().px(8.).py(4.);
+                if !last {
+                    c = c.border_sides(
+                        [0.0, 0.0, 1.0, 0.0],
+                        if head { head_border } else { t.border },
+                    );
+                }
+                match align {
+                    Align::Right => {
+                        line = line.align(rune::Align::End);
+                        c = c.items_end();
+                    }
+                    Align::Center => {
+                        line = line.align(rune::Align::Center);
+                        c = c.items_center();
+                    }
+                    _ => {}
+                }
+                c.child(line)
+            };
+            let mut grid = el_grid(n);
+            for (c, h) in table.head.iter().enumerate() {
+                grid = grid.child(cell(
+                    format!("{key}-{ix}-h{c}"),
+                    h,
+                    table.aligns.get(c).copied().unwrap_or_default(),
+                    true,
+                    false,
+                ));
+            }
+            for (r, cells) in table.rows.iter().enumerate() {
+                for (c, value) in cells.iter().enumerate() {
+                    grid = grid.child(cell(
+                        format!("{key}-{ix}-{r}-{c}"),
+                        value,
+                        table.aligns.get(c).copied().unwrap_or_default(),
+                        false,
+                        r + 1 == rows,
+                    ));
+                }
+            }
+            col()
+                .key(format!("{key}-{ix}-table"))
+                .w_full()
+                .scroll_x()
+                .child(grid)
+        }
+    }
+}
+
+/// `n` equal columns sharing the width (`grid-template-columns: repeat(n, 1fr)`).
+fn el_grid(n: usize) -> El {
+    rune::el().w_full().equal_columns(n)
+}
+
+/// A message body: parsed markdown laid out with the chat's `.md` styles. `origin`
+/// (object id, name) leads the body as that object's tag, the same pill an object link in the
+/// text gets. `key` scopes the lines' keys.
 pub(crate) fn render_markdown(
-    id: impl Into<ElementId>,
+    key: &str,
     src: &str,
     origin: Option<(&str, &str)>,
     md: &MdTheme,
-    order: u64,
-    cx: &App,
-) -> AnyElement {
-    let id: ElementId = id.into();
-    let key = format!("{id:?}");
+    env: &MdEnv,
+) -> El {
     let mut names = md.mention_names.clone();
     names.sort_by_key(|(n, _)| std::cmp::Reverse(n.len()));
     let mut blocks = parse(src);
@@ -768,8 +527,8 @@ pub(crate) fn render_markdown(
             _ => blocks.insert(0, Block::Paragraph(vec![tag])),
         }
     }
-    let order = Cell::new(order);
-    let mut out = div().flex().flex_col().min_w_0();
+    let style = ty::ui(14.).lh(14. * 1.45);
+    let mut out = col().shrink();
     let mut prev_bottom = 0.;
     let count = blocks.len();
     for (ix, block) in blocks.iter().enumerate() {
@@ -782,13 +541,13 @@ pub(crate) fn render_markdown(
             bottom
         };
         prev_bottom = bottom;
-        let mut el = div()
-            .mt(px(gap))
-            .child(render_block(&key, ix, block, md, &names, &order, cx));
+        let mut el = col()
+            .mt(gap)
+            .child(render_block(key, ix, block, md, &names, style, env));
         if ix + 1 == count {
-            el = el.mb(px(bottom));
+            el = el.mb(bottom);
         }
         out = out.child(el);
     }
-    out.into_any_element()
+    out
 }

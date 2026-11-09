@@ -4,41 +4,11 @@
 
 use std::rc::Rc;
 
-use gpui_kit::component::list::ListItem;
-use gpui_kit::component::{Sizable as _, h_flex};
-use gpui_kit::prelude::FluentBuilder as _;
-use gpui_kit::*;
-use roostr_core::ui::{checkbox_display, section_label};
-use roostr_core::{Store, theme};
+use roostr_core::State;
+use roostr_ui::{ListItem, Theme, checkbox_display, radius, section_label, ty};
+use rune::{El, ScrollSpec, col, el, row, text};
 
 use crate::widgets::{empty_note, note};
-
-type ToggleFn = Rc<dyn Fn(&str, &mut Window, &mut App)>;
-
-/// The type list with checks; `on_toggle` gets the type object id.
-#[derive(IntoElement)]
-pub(crate) struct TypeLimitPicker {
-    id: ElementId,
-    selected: Vec<String>,
-    space: String,
-    on_toggle: ToggleFn,
-}
-
-impl TypeLimitPicker {
-    pub(crate) fn new(
-        id: impl Into<ElementId>,
-        selected: Vec<String>,
-        space: String,
-        on_toggle: impl Fn(&str, &mut Window, &mut App) + 'static,
-    ) -> Self {
-        Self {
-            id: id.into(),
-            selected,
-            space,
-            on_toggle: Rc::new(on_toggle),
-        }
-    }
-}
 
 /// `selected` with `id` toggled.
 pub(crate) fn toggled(selected: &[String], id: &str) -> Vec<String> {
@@ -49,95 +19,121 @@ pub(crate) fn toggled(selected: &[String], id: &str) -> Vec<String> {
     }
 }
 
-impl RenderOnce for TypeLimitPicker {
-    fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
-        let store = Store::global(cx).read(cx);
-        // Bundled types carry no space stamp; they belong to every space.
-        let types: Vec<_> = store
-            .types
-            .iter()
-            .filter(|t| t.space.is_empty() || t.space == self.space)
-            .cloned()
-            .collect();
-        let note_text = if self.selected.is_empty() {
-            "Any object can be linked."
+/// The type list with checks, keyed `key` (rows `limit-<type id>`); `on_toggle` gets the
+/// type object id.
+pub(crate) fn type_limit_picker(
+    s: &State,
+    t: &Theme,
+    key: &str,
+    selected: &[String],
+    space_id: &str,
+    on_toggle: Rc<dyn Fn(&mut State, &str)>,
+) -> El {
+    // Bundled types carry no space stamp; they belong to every space.
+    let types: Vec<_> = s
+        .store
+        .types
+        .iter()
+        .filter(|ty| ty.space.is_empty() || ty.space == space_id)
+        .collect();
+    let note_text = if selected.is_empty() {
+        "Any object can be linked."
+    } else {
+        "Only these types can be linked."
+    };
+    let mut list = col().items_stretch();
+    for ty in &types {
+        let on = selected.contains(&ty.id);
+        let id = ty.id.clone();
+        let toggle = on_toggle.clone();
+        let icon = if ty.icon.is_empty() {
+            "▣".to_string()
         } else {
-            "Only these types can be linked."
+            ty.icon.clone()
         };
-        let mut list = div()
-            .id(self.id)
-            .flex()
-            .flex_col()
-            .max_h(px(148.))
-            .overflow_y_scroll();
-        for t in &types {
-            let on = self.selected.contains(&t.id);
-            let id = t.id.clone();
-            let toggle = self.on_toggle.clone();
-            list = list.child(
-                ListItem::new(SharedString::from(format!("limit-{}", t.id)))
-                    .px(px(8.))
-                    .py(px(6.))
-                    .rounded(theme::radius::sm())
-                    .text_size(px(13.))
-                    .cursor_pointer()
-                    .when(on, |d| d.bg(theme::hl_light()))
-                    .on_click(move |_, window, cx| toggle(&id, window, cx))
-                    .child(
-                        h_flex()
-                            .gap(px(8.))
-                            .child(div().flex_none().w(px(18.)).text_center().child(
-                                if t.icon.is_empty() {
-                                    "▣".to_string()
-                                } else {
-                                    t.icon.clone()
-                                },
-                            ))
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .overflow_hidden()
-                                    .whitespace_nowrap()
-                                    .text_ellipsis()
-                                    .child(if t.name.is_empty() {
-                                        t.key.clone()
-                                    } else {
-                                        t.name.clone()
-                                    }),
-                            )
-                            .child(
-                                checkbox_display(
-                                    SharedString::from(format!("limit-chk-{}", t.id)),
-                                    on,
-                                )
-                                .small(),
-                            ),
-                    ),
-            );
-        }
-        if types.is_empty() {
-            list = list.child(
-                empty_note("This space has no types yet.")
-                    .px(px(6.))
-                    .pt(px(2.))
-                    .pb(px(4.))
-                    .text_size(px(11.)),
-            );
-        }
-        div()
-            .flex()
-            .flex_col()
-            .gap(px(2.))
-            .min_w_0()
+        let name = if ty.name.is_empty() {
+            ty.key.clone()
+        } else {
+            ty.name.clone()
+        };
+        let item = ListItem::new(format!("limit-{}", ty.id))
+            .px(8.0)
+            .py(6.0)
+            .radius(radius::SM)
+            .text_size(13.0)
+            .pointer()
+            .on_press(move |s: &mut State| toggle(s, &id))
             .child(
-                div()
-                    .px(px(6.))
-                    .pt(px(6.))
-                    .pb(px(2.))
-                    .child(section_label("Limit object types")),
+                row()
+                    .grow(1.0)
+                    .shrink()
+                    .min_w(0.0)
+                    .center_y()
+                    .gap(8.0)
+                    .child(
+                        el().w(18.0)
+                            .center()
+                            .child(text(icon).font(ty::ui(13.0)).color(t.fg)),
+                    )
+                    .child(
+                        text(name)
+                            .font(ty::ui(13.0))
+                            .color(t.fg)
+                            .truncate()
+                            .grow(1.0)
+                            .shrink()
+                            .min_w(0.0),
+                    )
+                    .child(
+                        checkbox_display(format!("limit-chk-{}", ty.id), on)
+                            .small()
+                            .build(t),
+                    ),
             )
-            .child(list)
-            .child(note(note_text, 11.).px(px(6.)).pt(px(2.)).pb(px(4.)))
+            .build(t);
+        list = list.child(if on { item.fill(t.hl_light) } else { item });
+    }
+    if types.is_empty() {
+        list = list.child(el().px(6.0).pt(2.0).pb(4.0).child(empty_note(
+            t,
+            "This space has no types yet.",
+            11.0,
+        )));
+    }
+    col()
+        .key(key.to_string())
+        .gap(2.0)
+        .min_w(0.0)
+        .items_stretch()
+        .child(
+            el().px(6.0)
+                .pt(6.0)
+                .pb(2.0)
+                .child(section_label(t, "Limit object types")),
+        )
+        .child(
+            col()
+                .key("limit")
+                .max_h(148.0)
+                .min_h(0.0)
+                .shrink()
+                .scroll(ScrollSpec {
+                    stick_bottom: false,
+                })
+                .items_stretch()
+                .child(list),
+        )
+        .child(el().px(6.0).pt(2.0).pb(4.0).child(note(t, note_text, 11.0)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::toggled;
+
+    #[test]
+    fn toggled_adds_and_removes() {
+        let a = vec!["t1".to_string()];
+        assert_eq!(toggled(&a, "t2"), vec!["t1", "t2"]);
+        assert_eq!(toggled(&a, "t1"), Vec::<String>::new());
     }
 }

@@ -1,6 +1,9 @@
-//! Website pages shown inside the app window: the landing (`/`), the guide
-//! (`/guide`), the privacy policy (`/privacy`) and the space join request
-//! landing (`/j#r2.<blob>`), ported from `src/routes/{+page,guide,privacy,j}`.
+//! Website pages shown inside the app window: the landing (`/`), the guide (`/guide`), the
+//! privacy policy (`/privacy`) and the space join request landing (`/j#r2.<blob>`), ported
+//! from `src/routes/{+page,guide,privacy,j}`.
+//!
+//! [`register`] once at startup, [`view`] draws the page a [`SitePage`] route shows, and
+//! [`on_key`] scrolls the scrolled pages from the keyboard as a browser does.
 
 mod assets;
 mod doc;
@@ -10,146 +13,158 @@ mod landing;
 mod privacy;
 mod text;
 
-use gpui_kit::*;
-use roostr_core::nav::SitePage;
+use std::cell::Cell;
+use std::rc::Rc;
 
-actions!(
-    site,
-    [
-        ScrollUp, ScrollDown, PageUp, PageDown, ScrollHome, ScrollEnd
-    ]
-);
+use roostr_core::State;
+use roostr_core::nav::{NavEvent, Route, SitePage};
+use roostr_ui::ScrollArea;
+use rune::{Cx, El, Key, KeyEvent, ScrollPos, Tx};
 
-const CONTEXT: &str = "SitePage";
+/// The scroll viewport of the guide and privacy pages.
+const DOC_SCROLL: &str = "site-doc-scroll";
+/// The scroll viewport of the join page.
+const JOIN_SCROLL: &str = "site-join-scroll";
 
-/// Static instances of the bundled variable Inter, subset to the landing's
-/// characters. GPUI picks faces by weight and cannot set variation axes, so
-/// without these every weight renders as the default (400, `opsz` 14):
-/// - family "Inter" at the landing's other weights (`opsz` 14, its small text);
-/// - families "Inter Lede 15".."Inter Lede 19": the 450-weight lede at the
-///   optical size Chrome gives its viewport-scaled font size.
-static INTER_INSTANCES: [&[u8]; 9] = [
-    include_bytes!("../assets/fonts/Inter-500.ttf"),
-    include_bytes!("../assets/fonts/Inter-550.ttf"),
-    include_bytes!("../assets/fonts/Inter-650.ttf"),
-    include_bytes!("../assets/fonts/Inter-750.ttf"),
-    include_bytes!("../assets/fonts/InterLede-15.ttf"),
-    include_bytes!("../assets/fonts/InterLede-16.ttf"),
-    include_bytes!("../assets/fonts/InterLede-17.ttf"),
-    include_bytes!("../assets/fonts/InterLede-18.ttf"),
-    include_bytes!("../assets/fonts/InterLede-19.ttf"),
-];
+/// Up and Down scroll by this much (a browser's arrow step).
+const LINE: f32 = 40.0;
+/// Page Up and Page Down scroll by this share of the viewport (Chrome's 87.5%).
+const PAGE: f32 = 0.875;
 
-/// Set once [`init`] has run.
-struct Initialized;
+/// Where the shown scrolled site page is, as its viewport last reported it.
+#[derive(Default)]
+struct SiteScroll(Rc<Cell<ScrollPos>>);
 
-impl Global for Initialized {}
-
-/// Register the landing's font weights and browser-style keyboard scrolling
-/// on the scrolled site pages, once: a browser tab that opens on a website
-/// page calls this before its vault (and `roostr_app::init`) starts. Call
-/// after `theme::init`.
-pub fn init(cx: &mut App) {
-    if cx.has_global::<Initialized>() {
-        return;
-    }
-    cx.set_global(Initialized);
-    let fonts = INTER_INSTANCES
-        .iter()
-        .map(|bytes| std::borrow::Cow::Borrowed(*bytes))
-        .collect();
-    if let Err(error) = cx.text_system().add_fonts(fonts) {
-        log::warn!("could not load the landing's Inter weights: {error:#}");
-    }
-    cx.bind_keys([
-        KeyBinding::new("up", ScrollUp, Some(CONTEXT)),
-        KeyBinding::new("down", ScrollDown, Some(CONTEXT)),
-        KeyBinding::new("pageup", PageUp, Some(CONTEXT)),
-        KeyBinding::new("alt-up", PageUp, Some(CONTEXT)),
-        KeyBinding::new("shift-space", PageUp, Some(CONTEXT)),
-        KeyBinding::new("pagedown", PageDown, Some(CONTEXT)),
-        KeyBinding::new("alt-down", PageDown, Some(CONTEXT)),
-        KeyBinding::new("space", PageDown, Some(CONTEXT)),
-        KeyBinding::new("home", ScrollHome, Some(CONTEXT)),
-        KeyBinding::new("end", ScrollEnd, Some(CONTEXT)),
-        // Command-Up/Down, as macOS scrolls a page. In a browser Command is
-        // GPUI's `secondary` key on a Mac (vendor/gpui-pre-web).
-        #[cfg(not(target_family = "wasm"))]
-        KeyBinding::new("cmd-up", ScrollHome, Some(CONTEXT)),
-        #[cfg(not(target_family = "wasm"))]
-        KeyBinding::new("cmd-down", ScrollEnd, Some(CONTEXT)),
-        #[cfg(target_family = "wasm")]
-        roostr_core::ui::secondary_binding("secondary-up", ScrollHome, Some(CONTEXT), cx),
-        #[cfg(target_family = "wasm")]
-        roostr_core::ui::secondary_binding("secondary-down", ScrollEnd, Some(CONTEXT), cx),
-    ]);
+/// Set up the site pages' state once at startup (replaces GPUI's `init(cx)`): the keyboard
+/// scroll position, the landing hero and join page slots, and a navigation listener that stops
+/// the hero animation once the landing is left.
+pub fn register(s: &mut State) {
+    s.slot::<SiteScroll>();
+    s.slot::<assets::Hero>();
+    s.slot::<join::JoinPages>();
+    s.on_nav(left_landing);
 }
 
-/// One website page (`Route::Site`), filling its parent and owning its scroll.
-pub struct SiteView {
-    body: AnyView,
+fn left_landing(s: &mut State, event: &NavEvent) {
+    if *event == NavEvent::Navigated && *s.nav.route() != Route::Site(SitePage::Landing) {
+        assets::stop_hero(s);
+    }
 }
 
-impl SiteView {
-    /// Build the view for `page`.
-    pub fn new(page: SitePage, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let body: AnyView = match page {
-            SitePage::Landing => cx.new(|_| landing::LandingPage::new()).into(),
-            SitePage::Guide => cx
-                .new(|cx| doc::DocPage::new(guide::BLOCKS, guide::style(), window, cx))
-                .into(),
-            SitePage::Privacy => cx
-                .new(|cx| doc::DocPage::new(privacy::BLOCKS, privacy::style(), window, cx))
-                .into(),
-            SitePage::Join(blob) => cx.new(|cx| join::JoinPage::new(&blob, window, cx)).into(),
+/// One website page, filling its parent and owning its scroll (replaces `SiteView`).
+pub fn view(s: &State, cx: &mut Cx<State>, page: &SitePage) -> El {
+    match page {
+        SitePage::Landing => landing::view(s, cx),
+        SitePage::Guide => doc::view(s, guide::BLOCKS, &guide::style()),
+        SitePage::Privacy => doc::view(s, privacy::BLOCKS, &privacy::style()),
+        SitePage::Join(blob) => join::view(s, cx, blob),
+    }
+}
+
+/// Browser-style keyboard scrolling of the site page `s.nav.route()` shows: Up/Down a line,
+/// Page Up/Page Down, Space/Shift-Space and Option-Up/Option-Down a page, Home/End and
+/// Command-Up/Command-Down (Ctrl off macOS) to the ends. The scrolled pages call it while focus
+/// is inside them; a window showing a site page calls it from its `on_key` so the keys work
+/// with nothing focused. True when it took the key.
+pub fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
+    let key = match s.nav.route() {
+        Route::Site(SitePage::Guide | SitePage::Privacy) => DOC_SCROLL,
+        Route::Site(SitePage::Join(_)) => JOIN_SCROLL,
+        _ => return false,
+    };
+    let Some(pos) = s.get::<SiteScroll>().map(|p| p.0.get()) else {
+        return false;
+    };
+    let Some(y) = scroll_target(ev, pos) else {
+        return false;
+    };
+    tx.scroll_to_y(key, y);
+    true
+}
+
+/// Where `ev` scrolls a viewport at `pos`, if it is one of the scroll keys.
+fn scroll_target(ev: &KeyEvent, pos: ScrollPos) -> Option<f32> {
+    let m = ev.mods;
+    let plain = !(m.shift || m.cmd || m.alt || m.ctrl || m.logo);
+    let alt_only = m.alt && !(m.shift || m.cmd || m.ctrl || m.logo);
+    let cmd_only = m.cmd && !(m.shift || m.alt);
+    let shift_only = m.shift && !(m.cmd || m.alt || m.ctrl || m.logo);
+    let page = pos.viewport[1] * PAGE;
+    let dy = match &ev.key {
+        Key::Up if plain => -LINE,
+        Key::Down if plain => LINE,
+        Key::PageUp if plain => -page,
+        Key::PageDown if plain => page,
+        Key::Up if alt_only => -page,
+        Key::Down if alt_only => page,
+        Key::Text(t) if t == " " && shift_only => -page,
+        Key::Text(t) if t == " " && plain => page,
+        Key::Home if plain => f32::NEG_INFINITY,
+        Key::End if plain => f32::INFINITY,
+        Key::Up if cmd_only => f32::NEG_INFINITY,
+        Key::Down if cmd_only => f32::INFINITY,
+        _ => return None,
+    };
+    Some((pos.offset[1] + dy).clamp(0.0, pos.max[1].max(0.0)))
+}
+
+/// A scrolled page's viewport reports where it is to [`on_key`].
+fn track_scroll(s: &State, area: ScrollArea) -> ScrollArea {
+    match s.get::<SiteScroll>() {
+        Some(SiteScroll(pos)) => {
+            let pos = pos.clone();
+            area.on_scroll_offset(move |at| pos.set(at))
+        }
+        None => area,
+    }
+}
+
+/// A scrolled page's root: takes focus on a click inside it and routes the scroll keys.
+fn scroll_root(root: El) -> El {
+    root.focusable(true)
+        .no_focus_ring()
+        .on_key(|s: &mut State, ev: &KeyEvent, tx: &mut Tx| on_key(s, ev, tx))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rune::Mods;
+
+    fn key(key: Key, mods: Mods) -> KeyEvent {
+        KeyEvent { key, mods }
+    }
+
+    #[test]
+    fn scroll_keys_step_like_a_browser() {
+        let mut pos = ScrollPos::default();
+        pos.offset = [0.0, 100.0];
+        pos.max = [0.0, 1000.0];
+        pos.viewport = [800.0, 400.0];
+        let none = Mods::default();
+        let alt = Mods { alt: true, ..none };
+        let shift = Mods {
+            shift: true,
+            ..none
         };
-        Self { body }
+        let cmd = Mods {
+            cmd: true,
+            logo: true,
+            ..none
+        };
+        let at = |k, m| scroll_target(&key(k, m), pos);
+        assert_eq!(at(Key::Down, none), Some(140.0));
+        assert_eq!(at(Key::Up, none), Some(60.0));
+        assert_eq!(at(Key::PageDown, none), Some(450.0));
+        assert_eq!(at(Key::PageUp, none), Some(0.0));
+        assert_eq!(at(Key::Down, alt), Some(450.0));
+        assert_eq!(at(Key::Text(" ".into()), none), Some(450.0));
+        assert_eq!(at(Key::Text(" ".into()), shift), Some(0.0));
+        assert_eq!(at(Key::End, none), Some(1000.0));
+        assert_eq!(at(Key::Home, none), Some(0.0));
+        assert_eq!(at(Key::Down, cmd), Some(1000.0));
+        assert_eq!(at(Key::Up, cmd), Some(0.0));
+        assert_eq!(at(Key::Text("a".into()), none), None);
+        assert_eq!(at(Key::Down, shift), None);
     }
-}
-
-impl Render for SiteView {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        div().size_full().child(self.body.clone())
-    }
-}
-
-/// Wire the keyboard scroll actions and click-to-focus onto a page root.
-fn scroll_keys<T: 'static>(
-    root: Stateful<Div>,
-    focus: &FocusHandle,
-    cx: &mut Context<T>,
-    handle: fn(&T) -> &ScrollHandle,
-) -> Stateful<Div> {
-    let page = move |this: &T| f32::from(handle(this).bounds().size.height) * 0.875;
-    let focus_on_click = focus.clone();
-    root.key_context(CONTEXT)
-        .track_focus(focus)
-        .on_action(cx.listener(move |this, _: &ScrollUp, _, cx| scroll_by(handle(this), -40., cx)))
-        .on_action(cx.listener(move |this, _: &ScrollDown, _, cx| scroll_by(handle(this), 40., cx)))
-        .on_action(
-            cx.listener(move |this, _: &PageUp, _, cx| scroll_by(handle(this), -page(this), cx)),
-        )
-        .on_action(
-            cx.listener(move |this, _: &PageDown, _, cx| scroll_by(handle(this), page(this), cx)),
-        )
-        .on_action(cx.listener(move |this, _: &ScrollHome, _, cx| {
-            scroll_by(handle(this), f32::NEG_INFINITY, cx)
-        }))
-        .on_action(
-            cx.listener(move |this, _: &ScrollEnd, _, cx| {
-                scroll_by(handle(this), f32::INFINITY, cx)
-            }),
-        )
-        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
-            window.focus(&focus_on_click, cx)
-        })
-}
-
-/// Scroll down by `dy` (up when negative), within the content.
-fn scroll_by<T: 'static>(handle: &ScrollHandle, dy: f32, cx: &mut Context<T>) {
-    let offset = handle.offset();
-    let max = f32::from(handle.max_offset().y);
-    let y = (-f32::from(offset.y) + dy).clamp(0., max.max(0.));
-    handle.set_offset(point(offset.x, px(-y)));
-    cx.notify();
 }

@@ -8,31 +8,28 @@
 //! the same actions in its ⋯ menu.
 #![cfg(not(target_family = "wasm"))]
 
-use std::cell::RefCell;
+mod support;
+
 use std::collections::HashMap;
 use std::io::{Read as _, Write as _};
 use std::net::TcpListener;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::Duration;
 
 use futures::channel::mpsc;
-use gpui::{
-    ClipboardItem, Image, ImageFormat, Modifiers, MouseButton, Task, TestAppContext,
-    VisualTestContext,
-};
-use gpui_kit::{point, px, size};
 use parking_lot::Mutex;
 use roostr_core::blossom;
 use roostr_core::create::AddFile;
-use roostr_core::io::{BoxFuture, BoxStream};
-use roostr_core::nav::{Route, navigate};
+use roostr_core::nav::Route;
 use roostr_core::types::{
     Fields, Object, ObjectSummary, QueryResult, QueryRow, RelationDef, Settings, Space, Value,
 };
-use roostr_core::{Backend, BackendEvent, JsonMap};
-use roostr_shell::Workspace;
+use roostr_core::{Backend, BackendEvent, JsonMap, State};
+use roostr_rt::{BoxFuture, BoxStream, Task, boxed, boxed_stream};
+use rune::Key;
+use rune::clipboard::{ClipboardContent, ClipboardImage};
 use serde_json::{Value as Json, json};
+use support::App;
 
 const PAGE: &str = "page-1";
 const CREDENTIAL: &str = "openai-sp-1";
@@ -49,7 +46,7 @@ struct Vault {
 }
 
 fn ready<T: Send + 'static>(value: T) -> BoxFuture<T> {
-    Box::pin(std::future::ready(value))
+    boxed(std::future::ready(value))
 }
 
 fn object(id: &str, type_key: &str, fields: Fields) -> Object {
@@ -144,7 +141,10 @@ impl Vault {
     }
 }
 
-impl Backend for Vault {
+/// The store's handle on a shared [`Vault`].
+struct Handle(Arc<Vault>);
+
+impl Backend for Handle {
     fn describe(&self) -> String {
         "a page with covers".into()
     }
@@ -166,7 +166,8 @@ impl Backend for Vault {
     }
     fn object(&self, id: &str) -> BoxFuture<anyhow::Result<Object>> {
         ready(
-            self.objects
+            self.0
+                .objects
                 .lock()
                 .get(id)
                 .cloned()
@@ -186,6 +187,7 @@ impl Backend for Vault {
     }
     fn query(&self, body: &Json) -> BoxFuture<anyhow::Result<QueryResult>> {
         let records: Vec<QueryRow> = self
+            .0
             .objects
             .lock()
             .values()
@@ -212,23 +214,26 @@ impl Backend for Vault {
                 .to_string()
         };
         let (id, key) = (text("object_id"), text("key"));
-        if action != "vanish" && !self.objects.lock().contains_key(&id) {
+        if action != "vanish" && !self.0.objects.lock().contains_key(&id) {
             return ready(Ok(JsonMap::new()));
         }
         match action {
             "set_field" => {
                 let value: Value = serde_json::from_value(params["value"].clone()).unwrap();
-                self.edit(&id, |f| {
+                self.0.edit(&id, |f| {
                     f.insert(key, value);
                 });
             }
-            "delete_field" => self.edit(&id, |f| {
+            "delete_field" => self.0.edit(&id, |f| {
                 f.remove(&key);
             }),
             "vanish" => {}
             _ => return ready(Ok(JsonMap::new())),
         }
-        self.log.lock().push((action.into(), Json::Object(params)));
+        self.0
+            .log
+            .lock()
+            .push((action.into(), Json::Object(params)));
         ready(Ok(JsonMap::new()))
     }
     fn serving(&self, _: &[String]) -> BoxFuture<anyhow::Result<JsonMap>> {
@@ -238,9 +243,9 @@ impl Backend for Vault {
         ready(Ok(JsonMap::new()))
     }
     fn events(&self) -> BoxStream<anyhow::Result<BackendEvent>> {
-        match self.events.lock().take() {
-            Some(rx) => Box::pin(rx),
-            None => Box::pin(futures::stream::pending()),
+        match self.0.events.lock().take() {
+            Some(rx) => boxed_stream(rx),
+            None => boxed_stream(futures::stream::pending()),
         }
     }
 }
@@ -271,65 +276,26 @@ fn serve(blob: Vec<u8>) -> String {
     format!("http://{address}")
 }
 
-fn settle(cx: &mut VisualTestContext) {
-    cx.run_until_parked();
-    cx.executor().advance_clock(Duration::from_secs(2));
-    cx.update(|window, _| window.refresh());
-    cx.run_until_parked();
-}
-
-fn shown(cx: &mut VisualTestContext, selector: &'static str) -> bool {
-    cx.debug_bounds(selector).is_some()
-}
-
-fn tap(cx: &mut VisualTestContext, selector: &'static str) {
-    let at = cx
-        .debug_bounds(selector)
-        .unwrap_or_else(|| panic!("{selector} is not on screen"))
-        .center();
-    cx.simulate_click(at, Modifiers::none());
-    settle(cx);
-}
-
-fn hover(cx: &mut VisualTestContext, selector: &'static str) {
-    let at = cx
-        .debug_bounds(selector)
-        .unwrap_or_else(|| panic!("{selector} is not on screen"))
-        .center();
-    cx.simulate_mouse_move(at, None, Modifiers::none());
-    settle(cx);
-}
+/// Uploads that reached the app's file adder: `(name, mime, space)`.
+#[derive(Default)]
+struct Uploads(Vec<(String, String, String)>);
 
 /// The app on the page in a `width` x `height` window, its uploads recorded.
-fn open<'a>(
-    cx: &'a mut TestAppContext,
-    backend: Arc<Vault>,
-    width: f32,
-    height: f32,
-) -> (
-    &'a mut VisualTestContext,
-    Rc<RefCell<Vec<(String, String, String)>>>,
-) {
-    let uploads: Rc<RefCell<Vec<(String, String, String)>>> = Rc::default();
-    cx.update(|cx| {
-        gpui_kit::init(cx);
-        roostr_core::init(backend, None, cx);
-        roostr_app::init(cx);
+fn open(backend: &Arc<Vault>, width: f32, height: f32) -> (App, rune::clipboard::MemoryClipboard) {
+    let mut app = App::open_with(Arc::new(Handle(backend.clone())), width, height, |s| {
         // The upload itself (harness or Blossom) is the files' own business:
         // record what reaches it and answer with the File it made.
-        let seen = uploads.clone();
-        cx.set_global(AddFile(Rc::new(move |name, mime, _bytes, space, _cx| {
-            seen.borrow_mut().push((name, mime, space));
-            Task::ready(Ok("file-1".to_string()))
-        })));
+        s.add_file = Some(AddFile(Rc::new(
+            |name, mime, _bytes, space, s: &mut State| {
+                s.slot::<Uploads>().0.push((name, mime, space));
+                Task::ready(Ok("file-1".to_string()))
+            },
+        )));
     });
-    let (_workspace, cx) =
-        cx.add_window_view(|window, cx| Workspace::new(roostr_app::pages(), window, cx));
-    cx.simulate_resize(size(px(width), px(height)));
-    settle(cx);
-    cx.update(|_, cx| navigate(Route::Object(PAGE.into()), cx));
-    settle(cx);
-    (cx, uploads)
+    let clipboard = rune::clipboard::memory();
+    app.rt.use_clipboard(&clipboard);
+    app.navigate(Route::Object(PAGE.into()));
+    (app, clipboard)
 }
 
 fn set(key: &str, value: Json) -> (String, Json, Json) {
@@ -348,7 +314,7 @@ fn generation(entries: Json) -> Value {
 fn answer(
     backend: &Vault,
     tx: &mpsc::UnboundedSender<anyhow::Result<BackendEvent>>,
-    cx: &mut VisualTestContext,
+    app: &mut App,
     entries: Json,
 ) {
     backend.edit(PAGE, |f| {
@@ -357,7 +323,7 @@ fn answer(
     });
     tx.unbounded_send(Ok(BackendEvent::Committed(PAGE.into())))
         .unwrap();
-    settle(cx);
+    app.settle();
 }
 
 /// The pending `cover_request`'s prompt.
@@ -371,39 +337,32 @@ fn asked(backend: &Vault) -> Option<String> {
     Some(entries["prompt"].as_str().unwrap_or_default().to_string())
 }
 
-#[gpui::test]
-fn covers_on_desktop_and_phone(desktop: &mut TestAppContext, phone: &mut TestAppContext) {
-    let ui_state = tempfile::tempdir().unwrap();
-    // SAFETY: this test binary's only test, before either app starts.
-    unsafe { std::env::set_var("ROOSTR_UI_STATE", ui_state.path().join("ui-state.json")) };
-    on_a_desktop_page(desktop);
-    in_a_phones_more_menu(phone);
+fn center(r: [f32; 4]) -> (f32, f32) {
+    (r[0] + r[2] / 2., r[1] + r[3] / 2.)
 }
 
-fn on_a_desktop_page(cx: &mut TestAppContext) {
+#[test]
+fn covers_on_a_desktop_page() {
     let blob = blossom::encrypt_blob(PNG, &BLOB_KEY).unwrap();
     let server = serve(blob.clone());
     let backend = Arc::new(Vault::new(&server, &blob));
     let (tx, rx) = mpsc::unbounded();
     *backend.events.lock() = Some(rx);
-    let (cx, uploads) = open(cx, backend.clone(), 1280., 1000.);
+    let (mut app, clipboard) = open(&backend, 1280., 1000.);
 
     // No cover: hovering the icon and title offers Add cover.
-    assert!(!shown(cx, "object-cover") && !shown(cx, "cover-add"));
-    hover(cx, "object-title");
-    assert!(shown(cx, "cover-add"));
-    tap(cx, "cover-add");
-    assert!(shown(cx, "cover-chooser") && shown(cx, "cover-pick"));
+    assert!(!app.shown("object-cover") && !app.shown("cover-add"));
+    app.hover("object-title");
+    assert!(app.shown("cover-add"));
+    app.tap("cover-add");
+    assert!(app.shown("cover-chooser") && app.shown("cover-pick"));
 
     // Paste an image: it is added the usual way, then becomes the cover.
-    cx.update(|_, cx| {
-        cx.write_to_clipboard(ClipboardItem::new_image(&Image::from_bytes(
-            ImageFormat::Png,
-            PNG.to_vec(),
-        )))
-    });
-    tap(cx, "cover-paste");
-    let added = uploads.borrow().clone();
+    clipboard.set_content(
+        ClipboardContent::new("").with_image(ClipboardImage::from_png(PNG).expect("a PNG")),
+    );
+    app.tap("cover-paste");
+    let added = app.state().slot::<Uploads>().0.clone();
     assert_eq!(added.len(), 1);
     assert_eq!(
         (added[0].1.as_str(), added[0].2.as_str()),
@@ -419,93 +378,95 @@ fn on_a_desktop_page(cx: &mut TestAppContext) {
             set("cover_y", json!({ "floatValue": 0.5 })),
         ]
     );
-    assert!(!shown(cx, "cover-chooser"));
+    assert!(!app.shown("cover-chooser"));
 
     // The banner spans the page above the title; the icon overlaps its bottom edge.
-    let banner = cx.debug_bounds("object-cover").expect("the cover");
-    let title = cx.debug_bounds("object-title").unwrap();
-    let icon = cx.debug_bounds("object-icon").unwrap();
-    assert_eq!(banner.size.height, px(200.));
-    assert!(banner.bottom() <= title.top(), "{banner:?} above {title:?}");
-    assert!(icon.top() < banner.bottom() && banner.bottom() < icon.bottom());
-    assert!(banner.size.width > title.size.width);
+    let banner = app.rect("object-cover").expect("the cover");
+    let title = app.rect("object-title").unwrap();
+    let icon = app.rect("object-icon").unwrap();
+    assert_eq!(banner[3], 200.);
+    let bottom = banner[1] + banner[3];
+    assert!(bottom <= title[1], "{banner:?} above {title:?}");
+    assert!(icon[1] < bottom && bottom < icon[1] + icon[3]);
+    assert!(banner[2] > title[2]);
 
     // Hovering the cover shows one Cover button (as Anytype); its menu holds
     // the rest. Reposition drags the focus.
-    hover(cx, "object-cover");
-    assert!(shown(cx, "cover-change"));
-    assert!(!shown(cx, "cover-reposition") && !shown(cx, "cover-remove"));
-    tap(cx, "cover-change");
-    assert!(shown(cx, "cover-chooser") && shown(cx, "cover-reposition") && shown(cx, "cover-remove"));
+    app.hover("object-cover");
+    assert!(app.shown("cover-change"));
+    assert!(!app.shown("cover-reposition") && !app.shown("cover-remove"));
+    app.tap("cover-change");
+    assert!(
+        app.shown("cover-chooser") && app.shown("cover-reposition") && app.shown("cover-remove")
+    );
     // The menu floats under the button, centred on it; pressing the button
     // again closes it (not close-then-reopen), and once more opens it.
-    let button = cx.debug_bounds("cover-change").unwrap();
-    let menu = cx.debug_bounds("cover-chooser").unwrap();
-    assert!(menu.top() >= button.bottom() && menu.top() - button.bottom() < px(12.), "{menu:?} under {button:?}");
-    assert!(menu.left() <= button.left() && menu.right() >= button.right(), "{menu:?} spans {button:?}");
-    tap(cx, "cover-change");
-    assert!(!shown(cx, "cover-chooser"), "a second press closes it");
-    tap(cx, "cover-change");
-    assert!(shown(cx, "cover-chooser"));
-    tap(cx, "cover-reposition");
-    assert!(!shown(cx, "cover-chooser"));
-    assert!(shown(cx, "cover-save") && !shown(cx, "cover-remove"));
-    let from = banner.center();
-    let to = point(from.x, from.y - px(60.));
-    cx.simulate_mouse_down(from, MouseButton::Left, Modifiers::none());
-    cx.simulate_mouse_move(to, MouseButton::Left, Modifiers::none());
-    cx.simulate_mouse_up(to, MouseButton::Left, Modifiers::none());
-    settle(cx);
+    let button = app.rect("cover-change").unwrap();
+    let menu = app.rect("cover-chooser").unwrap();
+    let below = menu[1] - (button[1] + button[3]);
+    assert!((0. ..12.).contains(&below), "{menu:?} under {button:?}");
+    assert!(
+        menu[0] <= button[0] && menu[0] + menu[2] >= button[0] + button[2],
+        "{menu:?} spans {button:?}"
+    );
+    app.tap("cover-change");
+    assert!(!app.shown("cover-chooser"), "a second press closes it");
+    app.hover("object-cover");
+    app.tap("cover-change");
+    assert!(app.shown("cover-chooser"));
+    app.tap("cover-reposition");
+    assert!(!app.shown("cover-chooser"));
+    assert!(app.shown("cover-save") && !app.shown("cover-remove"));
+    let from = center(banner);
+    app.drag(from, (from.0, from.1 - 60.));
     assert!(
         backend.take_log().is_empty(),
         "nothing saved while dragging"
     );
-    tap(cx, "cover-save");
+    app.tap("cover-save");
     let log = backend.take_log();
     assert_eq!(log.len(), 1);
     assert_eq!(log[0].1, json!("cover_y"));
     let y = log[0].2["floatValue"].as_f64().unwrap();
-    // A square image under a wide banner: dragging up 60px shows more of its bottom.
-    let overflow = f64::from(f32::from(banner.size.width)) - 200.;
+    // A square image under a wide banner: dragging up 60pt shows more of its bottom.
+    let overflow = f64::from(banner[2]) - 200.;
     assert!((y - (0.5 + 60. / overflow)).abs() < 1e-3, "{y}");
-    assert!(!shown(cx, "cover-save"));
+    assert!(!app.shown("cover-save"));
 
     // Remove, from the Cover menu, deletes both fields.
-    hover(cx, "object-cover");
-    tap(cx, "cover-change");
-    tap(cx, "cover-remove");
+    app.hover("object-cover");
+    app.tap("cover-change");
+    app.tap("cover-remove");
     assert_eq!(
         backend.take_log(),
         vec![deleted("cover"), deleted("cover_y")]
     );
-    assert!(!shown(cx, "object-cover"));
+    assert!(!app.shown("object-cover"));
 
     // Generate, from Add cover: a prompt box; nothing is asked until it has words.
-    hover(cx, "object-title");
-    tap(cx, "cover-add");
+    app.hover("object-title");
+    app.tap("cover-add");
     // The cover menu's Generate tab.
-    tap(cx, "cover-chooser-generate");
-    assert!(shown(cx, "cover-chooser") && shown(cx, "cover-prompt"));
-    tap(cx, "cover-prompt-generate");
+    app.tap("cover-chooser-generate");
+    assert!(app.shown("cover-chooser") && app.shown("cover-prompt"));
+    app.tap("cover-prompt-generate");
     assert_eq!(asked(&backend), None, "an empty prompt asks nothing");
-    cx.simulate_input("A misty pine forest");
-    settle(cx);
+    app.type_text("A misty pine forest");
     // Enter sends it: the box closes and the banner spins while it paints.
-    cx.simulate_keystrokes("enter");
-    settle(cx);
+    app.key(Key::Enter);
     assert_eq!(asked(&backend).as_deref(), Some("A misty pine forest"));
-    assert!(!shown(cx, "cover-prompt"));
-    assert!(shown(cx, "object-cover") && shown(cx, "cover-generating"));
+    assert!(!app.shown("cover-prompt"));
+    assert!(app.shown("object-cover") && app.shown("cover-generating"));
     answer(
         &backend,
         &tx,
-        cx,
+        &mut app,
         json!({
             "at": { "intValue": 1 },
             "status": { "stringValue": "painting" }, "credential": { "stringValue": CREDENTIAL },
         }),
     );
-    assert!(shown(cx, "cover-generating"));
+    assert!(app.shown("cover-generating"));
 
     // Done: the computer makes the image the cover and ends the run; the spinner goes.
     backend.edit(PAGE, |f| {
@@ -514,81 +475,81 @@ fn on_a_desktop_page(cx: &mut TestAppContext) {
     });
     tx.unbounded_send(Ok(BackendEvent::Committed(PAGE.into())))
         .unwrap();
-    settle(cx);
-    assert!(shown(cx, "object-cover") && !shown(cx, "cover-generating"));
+    app.settle();
+    assert!(app.shown("object-cover") && !app.shown("cover-generating"));
     backend.take_log();
 
     // A failure says why, with the way to the credential when the key is the trouble.
-    hover(cx, "object-cover");
-    tap(cx, "cover-change");
-    tap(cx, "cover-chooser-generate");
-    cx.simulate_input("A red barn");
-    settle(cx);
-    tap(cx, "cover-prompt-generate");
+    app.hover("object-cover");
+    app.tap("cover-change");
+    app.tap("cover-chooser-generate");
+    app.type_text("A red barn");
+    app.tap("cover-prompt-generate");
     assert_eq!(asked(&backend).as_deref(), Some("A red barn"));
     answer(
         &backend,
         &tx,
-        cx,
+        &mut app,
         json!({
             "at": { "intValue": 2 },
             "status": { "stringValue": "failed" }, "credential": { "stringValue": CREDENTIAL },
             "error": { "stringValue": NEEDS_KEY }, "needs_key": { "boolValue": true },
         }),
     );
-    assert!(!shown(cx, "cover-generating"));
-    assert!(shown(cx, "cover-error") && shown(cx, "cover-open-credential"));
+    assert!(!app.shown("cover-generating"));
+    assert!(app.shown("cover-error") && app.shown("cover-open-credential"));
     backend.take_log();
-    tap(cx, "cover-failed-close");
+    app.tap("cover-failed-close");
     assert_eq!(backend.take_log(), vec![deleted("cover_generation")]);
-    assert!(!shown(cx, "cover-failed"));
+    assert!(!app.shown("cover-failed"));
 }
 
-fn in_a_phones_more_menu(cx: &mut TestAppContext) {
+#[test]
+fn covers_in_a_phones_more_menu() {
     let backend = Arc::new(Vault::new("http://127.0.0.1:9", b"unserved"));
-    let (cx, _) = open(cx, backend.clone(), 390., 844.);
+    let (mut app, _) = open(&backend, 390., 844.);
 
     // The ⋯ menu has one cover entry: it opens the cover menu.
-    tap(cx, "m-more");
-    assert!(shown(cx, "more-cover"));
-    tap(cx, "more-cover");
-    assert!(shown(cx, "cover-chooser"));
-    assert!(!shown(cx, "cover-remove"), "nothing to remove yet");
+    app.tap("m-more");
+    assert!(app.shown("more-cover"));
+    app.tap("more-cover");
+    assert!(app.shown("cover-chooser"));
+    assert!(!app.shown("cover-remove"), "nothing to remove yet");
     // A press outside closes it, as a menu.
-    tap(cx, "object-title");
-    assert!(!shown(cx, "cover-chooser"));
+    app.tap("object-title");
+    assert!(!app.shown("cover-chooser"));
 
     // With a cover: the menu adds Reposition and Remove; Reposition shows Save / Cancel.
     backend.edit(PAGE, |f| {
         f.insert("cover".into(), Value::link("file-1", "cover"));
     });
-    cx.update(|_, cx| roostr_core::Store::global(cx).update(cx, |s, cx| s.reload_object(PAGE, cx)));
-    settle(cx);
-    let banner = cx.debug_bounds("object-cover").expect("the cover");
-    assert_eq!(banner.size, size(px(390.), px(140.)));
+    app.state().store.reload_object(PAGE);
+    app.settle();
+    let banner = app.rect("object-cover").expect("the cover");
+    assert_eq!([banner[2], banner[3]], [390., 140.]);
     // No hover on a phone: a tap on the cover opens its menu, another closes it.
-    tap(cx, "object-cover");
-    assert!(shown(cx, "cover-chooser") && shown(cx, "cover-remove"));
-    tap(cx, "object-cover");
-    assert!(!shown(cx, "cover-chooser"), "a second tap closes it");
-    tap(cx, "m-more");
-    tap(cx, "more-cover");
-    tap(cx, "cover-reposition");
-    assert!(shown(cx, "cover-save") && shown(cx, "cover-cancel"));
-    tap(cx, "cover-cancel");
-    tap(cx, "m-more");
-    tap(cx, "more-cover");
-    tap(cx, "cover-remove");
+    app.tap("object-cover");
+    assert!(app.shown("cover-chooser") && app.shown("cover-remove"));
+    app.tap("object-cover");
+    assert!(!app.shown("cover-chooser"), "a second tap closes it");
+    app.tap("m-more");
+    app.tap("more-cover");
+    app.tap("cover-reposition");
+    assert!(app.shown("cover-save") && app.shown("cover-cancel"));
+    app.tap("cover-cancel");
+    app.tap("m-more");
+    app.tap("more-cover");
+    app.tap("cover-remove");
     assert_eq!(
         backend.take_log(),
         vec![deleted("cover"), deleted("cover_y")]
     );
-    tap(cx, "m-more");
-    tap(cx, "more-cover");
-    tap(cx, "cover-chooser-generate");
-    assert!(shown(cx, "cover-prompt"));
+    app.tap("m-more");
+    app.tap("more-cover");
+    app.tap("cover-chooser-generate");
+    assert!(app.shown("cover-prompt"));
     // Choose for me asks with no prompt: the computer picks the idea.
-    tap(cx, "cover-prompt-choose");
+    app.tap("cover-prompt-choose");
     assert_eq!(asked(&backend).as_deref(), Some(""));
-    assert!(shown(cx, "cover-generating"));
+    assert!(app.shown("cover-generating"));
 }
