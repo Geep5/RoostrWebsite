@@ -1,0 +1,16 @@
+# A look-and-feel prototype of Roostr on Rune (github.com/anomalyco/rune), on its
+# own branch and outside the GPUI workspace: a sidebar of spaces and pins, a
+# Notion-style page of blocks, and a query as a table. It reads the local glon
+# daemon (read-only; edits stay in memory) and falls back to sample data.
+[package]
+name = "roostr-rune-proto"
+version = "0.0.1"
+edition = "2024"
+publish = false
+
+[dependencies]
+# Rune is pre-release: pin a `dev` rev (dev is fast-forward only).
+rune = { git = "https://github.com/anomalyco/rune", rev = "757bcb1" }
+rune-kit = { git = "https://github.com/anomalyco/rune", rev = "757bcb1" }
+serde_json = "1"
+ureq = { version = "3", default-features = false, features = ["json"] }
