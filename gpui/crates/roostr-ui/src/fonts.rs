@@ -1,10 +1,11 @@
 //! Fonts for an app's `AppSpec`: `AppSpec { fonts: fonts::FONTS, families: fonts::FAMILIES, .. }`.
 //!
-//! The UI is the system font where there is one, as GPUI's `.SystemUIFont` was: SF on macOS
-//! (Rune's "System Font"), code in Menlo. A browser has no system fonts, so there the UI is the
-//! bundled Inter, code JetBrains Mono, and the symbols those lack (`▨` `◍` `⌕` `☐` `＋` …) come
-//! from the 4 KB Roostr Symbols subset. Archivo Black (landing-page headings) and Inter
-//! (landing-page body) are bundled everywhere, named by [`ARCHIVO_BLACK`] and [`INTER`].
+//! The UI is Intern everywhere (a fully rounded Inter, `fonts/Intern.ttf`, variable weight and
+//! optical size, OFL: `fonts/Intern-OFL.txt`). It covers Latin only, so Inter follows it for
+//! Greek and Cyrillic. Code is Menlo on macOS; elsewhere the bundled JetBrains Mono, with the
+//! symbols those lack (`▨` `◍` `⌕` `☐` `＋` …) from the 4 KB Roostr Symbols subset. Archivo Black
+//! (landing-page headings) and Inter (landing-page body) are bundled everywhere, named by
+//! [`ARCHIVO_BLACK`] and [`INTER`].
 //!
 //! Emoji: on the desktop Rune falls back to the system's colour emoji (Apple Color Emoji on a
 //! Mac). An iPhone app can't read the system's font files, so iOS embeds Twemoji, as the GPUI
@@ -15,6 +16,7 @@
 //! copies `crates/roostr-ui/fonts/TwemojiMozilla.ttf` there.
 
 static INTER_TTF: &[u8] = include_bytes!("../../../../static/fonts/Inter.ttf");
+static INTERN_TTF: &[u8] = include_bytes!("../fonts/Intern.ttf");
 static ARCHIVO_BLACK_TTF: &[u8] = include_bytes!("../../../../static/fonts/ArchivoBlack.ttf");
 #[cfg(not(target_os = "macos"))]
 static MONO_TTF: &[u8] = include_bytes!("../fonts/JetBrainsMono-Regular.ttf");
@@ -25,9 +27,9 @@ static EMOJI_TTF: &[u8] = include_bytes!("../fonts/TwemojiMozilla.ttf");
 
 /// The UI family (CSS family list).
 #[cfg(target_os = "macos")]
-pub const UI: &str = "System Font";
+pub const UI: &str = "Intern, Inter";
 #[cfg(not(target_os = "macos"))]
-pub const UI: &str = "Inter, Roostr Symbols, Twemoji Mozilla";
+pub const UI: &str = "Intern, Inter, Roostr Symbols, Twemoji Mozilla";
 /// Code.
 #[cfg(target_os = "macos")]
 pub const MONO: &str = "Menlo";
@@ -50,11 +52,12 @@ pub mod family {
 
 /// The faces every build registers (`AppSpec::fonts`). They replace Rune's built-in Inter.
 #[cfg(target_os = "macos")]
-pub static FONTS: &[&[u8]] = &[INTER_TTF, ARCHIVO_BLACK_TTF];
+pub static FONTS: &[&[u8]] = &[INTERN_TTF, INTER_TTF, ARCHIVO_BLACK_TTF];
 #[cfg(not(any(target_os = "macos", target_os = "ios")))]
-pub static FONTS: &[&[u8]] = &[INTER_TTF, ARCHIVO_BLACK_TTF, MONO_TTF, SYMBOLS_TTF];
+pub static FONTS: &[&[u8]] = &[INTERN_TTF, INTER_TTF, ARCHIVO_BLACK_TTF, MONO_TTF, SYMBOLS_TTF];
 #[cfg(target_os = "ios")]
-pub static FONTS: &[&[u8]] = &[INTER_TTF, ARCHIVO_BLACK_TTF, MONO_TTF, SYMBOLS_TTF, EMOJI_TTF];
+pub static FONTS: &[&[u8]] =
+    &[INTERN_TTF, INTER_TTF, ARCHIVO_BLACK_TTF, MONO_TTF, SYMBOLS_TTF, EMOJI_TTF];
 
 /// The sans and mono slots (`AppSpec::families`).
 pub const FAMILIES: (&str, &str) = (UI, MONO);

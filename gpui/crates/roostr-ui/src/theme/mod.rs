@@ -350,7 +350,7 @@ pub mod radius {
 }
 
 /// The type scale. Every style is in the UI family (`Family::Sans`, the app's sans slot: the
-/// system font on a Mac, Inter in a browser) at Roostr's normal line height (1.2 × size) unless
+/// bundled Intern, see [`crate::fonts`]) at Roostr's normal line height (1.2 × size) unless
 /// it says otherwise; chain `.medium()`/`.semibold()`/`.bold()`/`.light()` for weights.
 pub mod ty {
     use rune::{Family, TextStyle};

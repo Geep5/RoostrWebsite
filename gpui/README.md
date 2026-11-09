@@ -279,7 +279,10 @@ fetches it with the GPU's start-up, before the first frame
 (`roostr_ui::fonts::EMOJI_FONT_PATH`), and draws every emoji, graph labels
 included, in it. The desktop uses Apple Color Emoji.
 
-Symbols: the browser lays text out only in its bundled fonts (Inter and
+Text: the UI is Intern everywhere (`crates/roostr-ui/fonts/Intern.ttf`, a
+rounded Inter, OFL), with Inter after it for Greek and Cyrillic.
+
+Symbols: the browser lays text out only in its bundled fonts (Intern, Inter and
 JetBrains Mono), so UI symbols they lack (`▨` `◍` `⌕` `☐` `＋` …) come
 from `crates/roostr-ui/fonts/RoostrSymbols.ttf`, a 4 KB subset of Noto Sans
 Math / Symbols / Symbols 2 (OFL; fullwidth `＋` `＠` are its `+` `@` centred
