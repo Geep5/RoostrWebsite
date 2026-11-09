@@ -5,40 +5,42 @@
 //! `cargo run --release` opens it. `-- --snap page.png --size 1200x800` renders headless.
 
 mod data;
-
-use std::borrow::Cow;
+mod table;
 
 use data::{Daemon, Kind, Object, Set, Space};
 use rune::{AppSpec, Chrome, Cx, El, Key, KeyEvent, TextEdit, TextStyle, Tx, col, el, row, text, text_input};
 use rune_kit::shell::{self, PaneState, Sidebar, SidebarRow, SidebarSection, SidebarToggle, SplitView, Toolbar};
-use rune_kit::{Cell, ControlSize, Kit, SortDir, Table, TableColumn, TableState};
+use rune_kit::{ControlSize, Kit};
 
-struct Block {
+pub(crate) struct Block {
     kind: Kind,
     edit: TextEdit,
 }
 
 /// The object in the main pane.
 #[derive(Default)]
-struct Page {
+pub(crate) struct Page {
     id: String,
     icon: String,
     type_name: String,
     title: TextEdit,
     props: Vec<(String, String)>,
     blocks: Vec<Block>,
-    set: Option<Set>,
-    table: TableState,
+    pub(crate) set: Option<Set>,
+    /// A query's source types, by name ("Game publisher").
+    sources: Vec<String>,
+    /// The table's sort: column key ("name" or a property) and ascending.
+    pub sort: Option<(String, bool)>,
 }
 
-struct App {
+pub(crate) struct App {
     sidebar: PaneState,
     daemon: Option<Daemon>,
     spaces: Vec<Space>,
     space: usize,
     /// Objects of the sample data, when there is no daemon.
     samples: Vec<Object>,
-    page: Page,
+    pub(crate) page: Page,
     pins_closed: bool,
 }
 
@@ -71,7 +73,7 @@ fn with(daemon: Option<Daemon>) -> App {
     app
 }
 
-fn open(s: &mut App, id: &str) {
+pub(crate) fn open(s: &mut App, id: &str) {
     let object = match &s.daemon {
         Some(d) => d.object(id),
         None => s.samples.iter().position(|o| o.id == id).map(|i| {
@@ -82,10 +84,12 @@ fn open(s: &mut App, id: &str) {
                 icon: o.icon.clone(),
                 type_name: o.type_name.clone(),
                 props: o.props.clone(),
+                sources: o.sources.clone(),
                 body: o.body.iter().map(|b| data::Block { kind: b.kind, text: b.text.clone() }).collect(),
                 set: o.set.as_ref().map(|set| Set {
-                    columns: set.columns.clone(),
-                    rows: set.rows.iter().map(|r| data::Row { id: r.id.clone(), cells: r.cells.clone() }).collect(),
+                    name_width: set.name_width,
+                    columns: set.columns.iter().map(|c| data::Column { key: c.key.clone(), name: c.name.clone(), icon: c.icon.clone(), width: c.width }).collect(),
+                    rows: set.rows.iter().map(|r| data::Row { id: r.id.clone(), icon: r.icon.clone(), name: r.name.clone(), cells: r.cells.clone() }).collect(),
                 }),
             }
         }),
@@ -95,7 +99,7 @@ fn open(s: &mut App, id: &str) {
     if blocks.is_empty() && o.set.is_none() {
         blocks.push(Block { kind: Kind::Paragraph, edit: TextEdit::new("") });
     }
-    s.page = Page { id: o.id, icon: o.icon, type_name: o.type_name, title: TextEdit::new(o.name), props: o.props, blocks, set: o.set, table: TableState::new() };
+    s.page = Page { id: o.id, icon: o.icon, type_name: o.type_name, title: TextEdit::new(o.name), props: o.props, blocks, set: o.set, sources: o.sources, sort: None };
 }
 
 // ── Blocks ──────────────────────────────────────────────────────
@@ -194,7 +198,7 @@ fn block(s: &App, i: usize, number: usize, k: &Kit) -> El {
 // ── Page ────────────────────────────────────────────────────────
 
 fn chip(label: &str, k: &Kit) -> El {
-    row().px(8.0).py(3.0).radius(6.0).fill(k.c.layer_02).child(text(label.to_owned()).font(k.ty.text_small).color(k.c.text_muted))
+    row().px(10.0).py(4.0).radius(8.0).fill(k.c.layer_02).child(text(label.to_owned()).font(k.ty.ui).color(k.c.text_base))
 }
 
 fn page(s: &App, k: &Kit) -> El {
@@ -211,7 +215,7 @@ fn page(s: &App, k: &Kit) -> El {
     if !p.icon.is_empty() && p.icon.chars().count() <= 8 {
         head = head.child(text(p.icon.clone()).font(TextStyle { size: 44.0, line_height: 54.0, ..k.ty.body }));
     }
-    head = head.child(title).child(row().gap(6.0).child(chip(&type_label(&p.type_name), k)));
+    head = head.child(title).child(chips(s, k));
     if !p.props.is_empty() {
         let props = p.props.iter().fold(col().w_full().gap(2.0).pt(6.0), |list, (name, value)| {
             list.child(
@@ -232,7 +236,7 @@ fn page(s: &App, k: &Kit) -> El {
     });
     let mut column = col().key(format!("page-{}", p.id)).w_full().max_w(if p.set.is_some() { 1100.0 } else { 760.0 }).px(48.0).pt(36.0).pb(120.0).child(head);
     if p.set.is_some() {
-        column = column.child(col().w_full().pt(18.0).h(560.0).child(query_table(s, k)));
+        column = column.child(table::view(s, k));
     }
     if !p.blocks.is_empty() {
         column = column.child(body);
@@ -240,54 +244,31 @@ fn page(s: &App, k: &Kit) -> El {
     col().key("page-scroll").w_full().h_full().scroll(rune::ScrollSpec { stick_bottom: false }).items_center().child(column)
 }
 
+/// The badges under the title: its type, its space, and a query's source types.
+fn chips(s: &App, k: &Kit) -> El {
+    let p = &s.page;
+    let icon = match p.type_name.as_str() {
+        "query" => "🔍",
+        "collection" => "🗂️",
+        _ => "",
+    };
+    let mut bar = row().gap(6.0).child(chip(&format!("{icon} {}", type_label(&p.type_name)).trim().to_string(), k));
+    if let Some(space) = s.spaces.get(s.space) {
+        let icon = if space.icon.chars().count() <= 8 { space.icon.as_str() } else { "" };
+        bar = bar.child(chip(&format!("{icon} {} Space", space.name).trim().to_string(), k));
+    }
+    for source in &p.sources {
+        bar = bar.child(chip(&format!("Object Type: {source}"), k));
+    }
+    bar
+}
+
 fn type_label(t: &str) -> String {
     let mut c = t.chars();
     c.next().map(|f| f.to_uppercase().chain(c).collect::<String>().replace('_', " ")).unwrap_or_else(|| "Object".into())
 }
 
-// ── Query ───────────────────────────────────────────────────────
-
-fn set(s: &App) -> &Set {
-    s.page.set.as_ref().expect("a query page")
-}
-
-fn query_table(s: &App, k: &Kit) -> El {
-    let columns = set(s).columns.clone();
-    let table = columns
-        .iter()
-        .enumerate()
-        .fold(
-            Table::new(|s: &App| &s.page.table, |s: &mut App| &mut s.page.table, |s: &App| set(s).rows.len(), |s: &App, i| Cow::Borrowed(set(s).rows[i].id.as_str())).name("Query"),
-            |t, (n, (key, name))| t.column(TableColumn::new(key.clone(), name.clone()).flex(if n == 0 { 2.0 } else { 1.0 }).min(90.0).sortable()),
-        )
-        .cell(|s: &App, i, col| {
-            let set = set(s);
-            let at = set.columns.iter().position(|(k, _)| k == col).unwrap_or(0);
-            let value = set.rows[i].cells.get(at).cloned().unwrap_or_default();
-            if at == 0 { Cell::text(value) } else { Cell::text(value).muted() }
-        })
-        .on_sort(|s: &mut App, col, dir, _| sort(s, col, dir))
-        .on_open(|s: &mut App, id, _| {
-            let id = id.to_owned();
-            open(s, &id);
-        })
-        .build(s, k)
-        .grow(1.0)
-        .min_h(0.0);
-    let count = text(format!("{} objects", set(s).rows.len())).font(k.ty.text_small).color(k.c.text_faint);
-    col()
-        .w_full()
-        .h_full()
-        .gap(8.0)
-        .child(col().key("query-frame").w_full().grow(1.0).min_h(0.0).radius(k.radius.md).border(1.0, k.c.border_base).clip_rounded(k.radius.md).child(table))
-        .child(count)
-}
-
-fn sort(s: &mut App, col: &str, dir: SortDir) {
-    let Some(set) = s.page.set.as_mut() else { return };
-    let at = set.columns.iter().position(|(k, _)| k == col).unwrap_or(0);
-    set.rows.sort_by(|a, b| dir.apply(rune_kit::natural_cmp(a.cells.get(at).map_or("", |s| s), b.cells.get(at).map_or("", |s| s))));
-}
+// ── Query ── (table.rs)
 
 // ── Shell ───────────────────────────────────────────────────────
 
@@ -423,5 +404,16 @@ mod tests {
         rt.pointer_up(x, y);
         rt.frame(1.0 / 60.0);
         assert_eq!(rt.state.page.set.as_ref().map(|s| s.rows.len()), Some(3));
+        // Sorting by a column puts its rows in order, and again reverses them.
+        let (x, y) = rt.find("th-name").expect("the Name header");
+        rt.pointer_down(x, y);
+        rt.pointer_up(x, y);
+        rt.frame(1.0 / 60.0);
+        let names = |rt: &Runtime<App>| rt.state.page.set.as_ref().unwrap().rows.iter().map(|r| r.name.clone()).collect::<Vec<_>>();
+        assert_eq!(names(&rt), ["Build the page editor", "Pick the UI framework", "Queries as tables"]);
+        rt.pointer_down(x, y);
+        rt.pointer_up(x, y);
+        rt.frame(1.0 / 60.0);
+        assert_eq!(names(&rt), ["Queries as tables", "Pick the UI framework", "Build the page editor"]);
     }
 }
