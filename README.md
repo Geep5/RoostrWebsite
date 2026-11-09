@@ -1,14 +1,15 @@
 # Roostr
 
-Roostr's app and website, in Rust on [GPUI](https://gpui-kit.com). One
-workspace (`gpui/`) builds the desktop app and, compiled to WebAssembly, all of
+Roostr's app and website, in Rust on [Rune](https://github.com/anomalyco/rune)
+(pinned to the `dev` rev `8e3fc8e`). One
+workspace (`gpui/`, named for the framework it used before) builds the desktop app and, compiled to WebAssembly, all of
 roostr.space: the landing (`/`), the guide (`/guide`), the privacy policy
 (`/privacy`), the space join page (`/j#r2.<blob>`) and the workspace
 (`/app`, `/app/object/<id>`, `/app/graph`, `/app/chat/<id>`).
 
 | Path | What |
 |---|---|
-| `gpui/` | The Cargo workspace - crates, `scripts/build-web.sh`, and its own [README](gpui/README.md) (modes, crates, development) |
+| `gpui/` | The Cargo workspace - crates, `scripts/build-web.sh`, and its own [README](gpui/README.md) (modes, architecture, crates, development) |
 | `static/` | The shared Odin engine (`engine.wasm` + `engine-core.json`), the files the site's pages link (`favicon.png`, `logo.png`, `manifest.json`, `robots.txt`), and fonts, images and spelling dictionaries the crates embed |
 | `Dockerfile`, `Caddyfile`, `fly.toml` | The roostr.space image: builds the web app, serves it with Caddy on Fly |
 
@@ -23,9 +24,9 @@ cargo run --release -p roostr -- --replica    # no daemon: this device's own rep
 cargo run --release -p roostr -- /guide       # any site path
 ```
 
-The browser build needs the nightly the `Dockerfile` pins (on wasm, gpui builds
-`parking_lot` with its `nightly` feature; stable fails in `wasm_thread` with
-E0554). Pin it for this folder only, so your default toolchain stays as it is:
+The `Dockerfile` builds the browser app with a pinned nightly, kept from the
+GPUI build, which needed it on wasm. Pin the same toolchain for this folder
+only, so your default toolchain stays as it is:
 
 ```sh
 rustup toolchain install nightly-2026-10-24 --profile minimal --target wasm32-unknown-unknown
@@ -46,7 +47,8 @@ docker build -t roostr-web .
 docker run --rm -p 8080:8080 roostr-web     # http://localhost:8080
 ```
 
-By default a tab is its own replica: the engine, IndexedDB `roostr-replica`,
+The browser app draws into one canvas with Rune's web target (WebGPU, else
+WebGL2). By default a tab is its own replica: the engine, IndexedDB `roostr-replica`,
 and the identity in `localStorage` `roostr-key`. The website pages show on
 their own; "Open Roostr" starts the vault. A tab can pair with the daemon and
 harness on its own computer instead (see the gpui README, "Browser (roostr.space)").
@@ -92,8 +94,7 @@ cargo fmt --all --check
 fly deploy --remote-only
 ```
 
-The image (`Dockerfile`) builds `gpui/web-dist/` with a pinned nightly (on
-wasm, gpui builds `parking_lot` with its `nightly` feature), checks the engine,
+The image (`Dockerfile`) builds `gpui/web-dist/` with a pinned nightly, checks the engine,
 precompresses the large files (brotli and gzip) and serves them with Caddy:
 no-cache everywhere (nothing is content-hashed), 301s from the old `/gpui/`
 preview paths and from `getroostr.fly.dev` / `www.roostr.space` to

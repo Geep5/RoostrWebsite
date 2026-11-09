@@ -1,16 +1,12 @@
-# Roostr for desktop (GPUI)
+# Roostr for desktop and the browser (Rune)
 
-A native port of this repository's Svelte UI — the `/app` workspace and the
-website pages (`/`, `/guide`, `/privacy`, `/j`) — built on
-[GPUI Kit](https://gpui-kit.com) 0.9.1 on
-[GPUI Fast](https://github.com/longbridge/gpui-fast) 0.1.14 (GPUI with
-retained rendering: a frame reuses the views, layout and text that did not
-change). GPUI Kit's `gpui-pre` crates are stand-ins re-exporting it
-(`vendor/compat`). Anything a view's render reads outside entities, globals
-and scroll/list state needs a `cx.notify()` to show a change, and nothing
-should be written while drawing unless it changed - a write in render
-rebuilds its readers every frame. `GPUI_VIEW_RETENTION=0` turns reuse off to
-rule it in or out. It runs in one of two modes, the Svelte app's two:
+A native port of this repository's Svelte UI: the `/app` workspace and the
+website pages (`/`, `/guide`, `/privacy`, `/j`). It is built on
+[Rune](https://github.com/anomalyco/rune), pinned to the `dev` rev `8e3fc8e`
+(`rune` and `rune-kit` in the workspace `Cargo.toml`; Rune is pre-release and
+`dev` only moves forward). The directory keeps its old name, `gpui/`. The
+iPhone app is not part of this workspace on this branch (see iOS below). It
+runs in one of two modes, the Svelte app's two:
 
 - **Daemon** (the desktop default, the web app's local mode): the glon-odin
   daemon owns storage, signing, replay and sync, and this app reads and
@@ -91,7 +87,10 @@ The mode choice is `<config dir>/Roostr/mode` (`localStorage`
 
 | Crate | Ports |
 |---|---|
-| `roostr-core` | Wire types, `Backend` trait + daemon/harness clients, the on-device `Account` (replica identity, profile, join requests), the mode choice, the global `Store` (`data.svelte.ts`), navigation and tabs, UI state, theme tokens, icons, motion presets (`motion`), and the shared `lib/*.ts` helpers |
+| `roostr-core` | The model, with no UI dependency: wire types, `Backend` trait + daemon/harness clients, the on-device `Account` (replica identity, profile, join requests), the mode choice, the app `State` and its `Store` (`data.svelte.ts`), navigation and tabs, UI state, and the shared `lib/*.ts` helpers. Theme, icons and motion moved to `roostr-ui` |
+| `roostr-rt` | The async runtime: `Executor<State>` (`s.rt`) with `spawn`, `background`, `timer`; spawned futures get an `AsyncCx` whose `update`/`read` reach the state |
+| `roostr-ui` | The design system on Rune: theme (dark and light), type and bundled fonts, icons (`Glyph`), motion presets, and the shared components (buttons, inputs, selects, menus, dialogs, tooltips, calendar, colour picker, ...). It does not depend on `roostr-core` |
+| `roostr-host` | Runs `State` in a Rune window: `spec`, `setup` and `poll` (runs `s.poll()`, fetches remote images, wakes at the next timer), and `run_example`, the runner every feature crate's examples use |
 | `roostr-engine` | The shared Odin engine: a static library natively (built from `glonOdin`), the site's `engine.wasm` in the browser |
 | `roostr-replica-store` | The replica's change store: SQLite natively, IndexedDB (`roostr-replica`) in the browser, plus the one-time import of the Svelte app's IndexedDB `roostr` (`svelte_import`) |
 | `roostr-replica` | The daemon-less backend (`engine/backend.ts`, iOS `Backend.swift`): replay, query cache, mutations, shared spaces, identity and device-local storage; `sync/` is the relay sync (`sync.ts`, `SyncEngine.swift`) |
@@ -106,13 +105,34 @@ The mode choice is `<config dir>/Roostr/mode` (`localStorage`
 | `roostr-shell` | Space rail, sidebar, tab strip, header, search, New menu, pinned widgets; at a window 720pt wide or less (a phone in portrait), the mobile shell instead: Spaces list → space home → object, as the web app showed on phones |
 | `roostr-app` | What both front ends run: feature init, the page per route, the object page with its cover (`object_page/cover.rs`: banner, Add/Change cover, Reposition, the generate panel over `roostr_core::cover`'s `cover` / `cover_y` / `cover_request` / `cover_generation` fields) |
 | `roostr` | The desktop app: window, menus |
-| `roostr-web` | roostr.space (wasm): entry point, the website pages before any vault, replica or pairing gate, address-bar routing, `www/` page template and loader |
-| `roostr-ios` | The iPhone/iPad app (a static library the RoostrIOS Xcode host links): UIKit platform, Keychain/UserDefaults storage, reminders, lifecycle and network resume, deep links |
+| `roostr-web` | roostr.space (wasm): entry point, the website pages before any vault, replica or pairing gate, address-bar routing, the WebGL2 colour fix (`gamma_canvas.rs`), `www/` page template and loader |
+| `roostr-ios` | The iPhone/iPad app. Excluded from the workspace on this branch: it still uses GPUI and ships from `main` until Rune has iOS text input |
 
-Data flows one way: views read the `Store` (and re-render on its events);
-mutations go through `roostr_core::api`, and the backend's commit stream
-(the daemon's SSE, or the replica's own commits, relay imports and sync
-status) refreshes what changed.
+## Architecture
+
+- The whole app is one `roostr_core::State`. Rune hands it to handlers as
+  `&mut State` and to views as `&State`.
+- Async work runs on the `roostr-rt` executor kept in `s.rt`:
+  `s.rt.spawn(async move |cx| { .. cx.update(|s| ..) })`. Dropping a `Task`
+  cancels it. Blocking work goes through `s.rt.background(..)`.
+- Events are queued and dispatched by `State::poll`: listeners registered
+  with `on_store` and `on_nav`, and `on_poll` for work that checks state after
+  every poll (for example committing a field that lost focus, since Rune has
+  no blur event).
+- Each feature crate keeps its UI state in a slot (`s.slot::<T>()`), keyed by
+  object id where needed, and registers its listeners in a
+  `register(s: &mut State)` the app calls once.
+- Views are functions `fn(&State, &mut rune::Cx<State>) -> El`. Rune runs the
+  view again after every handler and after any poll that changed something,
+  so there is nothing to invalidate by hand.
+- Views take their look from `roostr-ui` (`roostr_ui::theme(pref, cx)`),
+  never from hard-coded colours.
+- `roostr-host` wires `State` into a Rune window (setup and poll hooks) for
+  the desktop app and the examples.
+
+Data flows one way: views read the `Store`; mutations go through
+`roostr_core::api`, and the backend's commit stream (the daemon's SSE, or the
+replica's own commits, relay imports and sync status) refreshes what changed.
 
 ## Browser (roostr.space)
 
@@ -228,10 +248,20 @@ rustup target add wasm32-unknown-unknown
 scripts/build-web.sh          # → web-dist/, the whole site
 ```
 
+Rune's web target draws the app into one canvas over WebGPU, falling back to
+WebGL2 where a browser has no WebGPU. On WebGL2, Rune leaves the canvas in an
+sRGB format while its runtime still blends in gamma space, so colours come
+out washed out. `roostr-web`'s `GammaCanvas` (`gamma_canvas.rs`) draws such a
+frame into a plain texture and copies it to the canvas decoded to linear
+light, so both paths show the same colours.
+
 The script builds with the `web` profile (size-optimized, fat LTO,
 stripped) and installs the `wasm-bindgen` CLI matching `Cargo.lock` into
 `target/tools/` when the one on `PATH` differs; it first checks
-`../static/engine.wasm` against `engine-core.json`. `web-dist/` has one page
+`../static/engine.wasm` against `engine-core.json`. `wasm-bindgen` also
+writes `snippets/` (Rune's page bridge, JS modules `roostr_web.js` loads),
+which must be served beside it. `scripts/build-web.sh --debug` builds with
+the dev profile, faster to build. `web-dist/` has one page
 per website route (`index.html`, `guide.html`, `privacy.html`, `j.html`) and
 `200.html` for every other path; serve it at the root with `/<path>` answered
 by `<path>`, `<path>.html`, else `200.html` (the Dockerfile and Caddyfile at
@@ -243,40 +273,27 @@ builds `web-dist/` when it is missing or stale and serves it that way on
 `http://127.0.0.1:5190`, with the daemon-mode tag in every page. UI state
 lives in `localStorage` under `roostr-gpui.ui-state`.
 
-Emoji: the build ships Twemoji (`crates/roostr-core/fonts/TwemojiMozilla.ttf`,
+Emoji: the build ships Twemoji (`crates/roostr-ui/fonts/TwemojiMozilla.ttf`,
 a COLR font, CC-BY 4.0 - see its license file) as `web-dist/fonts/`; the app
-fetches it after it starts and draws every emoji, graph labels included, in
-it. Until it arrives, and for emoji newer than it, the browser's own emoji
-font stands in. The desktop uses Apple Color Emoji.
+fetches it with the GPU's start-up, before the first frame
+(`roostr_ui::fonts::EMOJI_FONT_PATH`), and draws every emoji, graph labels
+included, in it. The desktop uses Apple Color Emoji.
 
-Symbols: the browser lays text out only in its bundled fonts, so UI symbols
-Inter, IBM Plex Sans and JetBrains Mono lack (`▨` `◍` `⌕` `☐` `＋` …) come
-from `crates/roostr-core/fonts/RoostrSymbols.ttf`, a 4 KB subset of Noto Sans
+Symbols: the browser lays text out only in its bundled fonts (Inter and
+JetBrains Mono), so UI symbols they lack (`▨` `◍` `⌕` `☐` `＋` …) come
+from `crates/roostr-ui/fonts/RoostrSymbols.ttf`, a 4 KB subset of Noto Sans
 Math / Symbols / Symbols 2 (OFL; fullwidth `＋` `＠` are its `+` `@` centred
-on a full em). `roostr-core`'s `glyph_coverage` test fails on any non-emoji
-character in a source literal no bundled font draws: add it to the subset
+on a full em). `roostr-ui`'s `glyph_coverage` test fails on any non-ASCII
+character in a source literal no bundled web font draws: add it to the subset
 (fontTools) or draw a `Glyph` instead.
 
 Not in the browser yet: anything that opens a file dialog (adding files and
-images, a custom icon or avatar) - GPUI's web platform has no file picker;
+images, a custom icon or avatar), since Rune's web target has no file picker;
 dropping files from the desktop. Exports and file downloads are browser
 downloads; "open" shows a file in a new tab.
 
-GPUI's web platform is `vendor/gpui-fast-web`, gpui-fast-web 0.1.14 patched in
-through `[patch.crates-io]`, its changes marked `roostr:`. Once the last
-finger lifts, the pointer moves off the canvas, so hover (and a `[data-tip]`
-tooltip) ends with the touch instead of staying on the control last tapped.
-In a Mac browser (an iPad's too) Command is the `secondary` key, as on the
-desktop: GPUI Kit binds Control on wasm, so Command and Control trade places
-in keyboard and pointer events there (`keystroke_modifiers`; not the wheel,
-where Control is a trackpad pinch), and GPUI is told such a browser runs on
-no Mac, so it resolves `secondary` as Control too. Command-C, -X, -A, -Z,
--B... act as on the desktop; Command-V stays the browser's paste, whose
-`paste` event hands the text to the focused field without a permission
-prompt. A browser keymap binds `secondary-` (`ui::secondary_binding`, as
-GPUI parses it only by the host), never `cmd-`
-(`cargo test --target wasm32-unknown-unknown -p roostr-web` with
-`wasm-bindgen-test-runner` checks the mapping).
+Keymaps use Rune's `mod` chord (`rune::Chord::parse("mod+k")`): Command on
+macOS, Control elsewhere.
 
 ### Lite loading in the UI
 
@@ -345,157 +362,60 @@ turns it off (`roostr_core::sync_trace`).
 
 ## iOS
 
-`crates/roostr-ios` is the iOS app; the sibling `RoostrIOS` repository is
-its Xcode host (XcodeGen spec, icon, a C `main`) and builds it from this
-workspace - see its README for building, running and what lives where (the
-Swift app's Keychain items, `UserDefaults` relay list and
-`Application Support/Roostr/roostr.sqlite`, so an update keeps the vault).
+The iPhone/iPad app (`crates/roostr-ios`) is excluded from this workspace on
+this branch. It still uses GPUI and keeps shipping from `main` until Rune has
+iOS text input. Its sibling `RoostrIOS` repository (the Xcode host) builds it
+from `main`; see that branch's README for its build steps.
 
-```sh
-rustup target add aarch64-apple-ios-sim aarch64-apple-ios
-CARGO_PROFILE_DEV_DEBUG=line-tables-only cargo build -p roostr-ios --target aarch64-apple-ios-sim
-cargo clippy -p roostr-ios --target aarch64-apple-ios-sim
-```
+## Selectable text
 
-GPUI's UIKit platform is `vendor/gpui-pre-ios`, a vendored gpui-pre-ios
-0.3.12 (patched in through `[patch.crates-io]`, as gpui-pre-platform names
-it on iOS) that gains a document picker for `prompt_for_paths`. It names its window as the active one (the published
-crate's `active_window` was always none, so what acts on the active
-window - an alert, closing a dialog - did nothing). It also takes over a
-window scene UIKit restores with another app's scene delegate: an update
-over the SwiftUI app restores that app's scene session, whose SwiftUI
-`AppSceneDelegate` would show a black screen and crash on backgrounding.
-`vendor/gpui-fast-apple` (patched in for every target through
-`[patch.crates-io]`) is the Metal renderer and text system the iOS platform
-draws with: GPUI Fast's own, which draws its rounded overflow clips (an
-older renderer left their content blank). It changes iOS only: every font
-falls back to the bundled Twemoji (`crates/roostr-core/fonts/TwemojiMozilla.ttf`,
-the web build's emoji), drawn in color. Both mark their changes `roostr:`.
-
-Layout follows the web view the Svelte app ran in: the window content sits
-inside the safe area and above the on-screen keyboard; ≤720pt wide (iPhone
-portrait) is the mobile shell, wider (landscape, iPad) the desktop layout;
-touch shows hover-only controls at rest and long presses lift blocks and
-spaces (`roostr_core::layout`).
-
-Touch scrolling follows WebKit's directional lock, on the phone and in a
-mobile browser alike: a pan keeps, with its fling, to the axis it first moved
-further along, so a swipe down a query scrolls the page and leaves the
-table's columns where they are, and the table (a board's columns, the tab
-strip) scrolls sideways only under a mostly sideways swipe. The wheel and
-the trackpad scroll as in a browser, on the web and the desktop alike: a
-scroller takes only the axes it scrolls on, so a wheel down over the table
-scrolls the page (Shift+wheel scrolls the table sideways), and a trackpad
-gesture runs on a browser's scroll rails - one that moves clearly more along
-one axis (twice as far) scrolls on that axis alone, so a swipe down that
-drifts sideways leaves the table where it is, while a diagonal one moves
-both. The graph canvas alone pans on both axes (`Window::pan_touch_freely`;
-its wheel listener gets the wheel unrailed). This lives in GPUI's core,
-`vendor/gpui-fast` (GPUI Fast 0.1.14 patched in through `[patch.crates-io]`,
-changes marked `roostr:`): its recognizer already locked each pan, but a
-scroller that scrolls on one axis only took the other axis as its own, under
-a swipe, a wheel and a trackpad alike.
-
-Text input follows iOS WebKit too. Focus raises the on-screen keyboard only
-from the person: a tap on a field, focus the tap itself moves (Reply, a
-menu's search box), a field the app focuses under a tap just made (the line
-a tap on an empty page creates), or one input handing focus to the next
-while the keyboard is up (Enter splitting a block). A field the app focuses
-on its own - the chat composer when a page opens - keeps focus without the
-keyboard until it is tapped; with a hardware keyboard attached it takes
-typing straight away. Return is the Enter key: bindings see it first (split
-a block, send a message, confirm a field) and only an unhandled Return types
-a newline. Delete with the caret at the start of a field is the Backspace
-key, as the web view's `deleteContentBackward` was: a to-do, list item or
-heading turns into a paragraph, a paragraph joins the block above. Holding
-delete stops at a block's start, as it did in the web view (UIKit stops
-repeating with no text before the caret); the next press goes on.
-Dismissing the keyboard (swipe down, the iPad's hide key) ends
-editing, as it blurred the field in the web view: the editor then shows a
-remote edit to the block the caret was in, which it leaves alone while that
-block is being edited (BlockNode.svelte's rule, `sync_live_texts`). Once the
-last finger lifts, the pointer leaves the window, so nothing stays hovered
-and no tooltip lingers after a tap. A `[data-tip]` also goes with its
-control, as CSS's `:hover::after` did: a tap that takes the control off
-screen (the back button to the Spaces list) hears no hover end, and the tip
-is dropped once a frame no longer draws the control. The Settings sheet's
-key import field stays above the keyboard as it rises, as WebKit scrolled a
-focused input into view.
-
-The edit menu is UIKit's (`UIEditMenuInteraction`), as it was in the web
-view: a finger held still for half a second on the focused
-field puts the caret under it (or keeps a selection it lands on) and the
-menu opens when it lifts; a tap that leaves the caret where it was, or a
-tap on the selection, toggles it. GPUI never sees that hold, so an input's
-own long press does not run there; holds elsewhere (a block not being
-edited, the edited block's gutter) still lift. Cut, Copy, Paste and Select
-All - and a hardware keyboard's ⌘X ⌘C ⌘V ⌘A - send the key binding the
-desktop gives them (`secondary-v`...), so a paste lands where ⌘V's does: a
-link opens the editor's Paste as menu, copied blocks paste as blocks, and
-an image - every image, when several photos were copied - becomes a File
-block (uploaded to Blossom), ahead of the link Safari copies with it. The
-pasteboard carries a string's metadata, a copied link and images. PNG,
-JPEG, GIF, WebP, BMP, ICO and SVG paste as they are; an image GPUI cannot
-draw - Safari's Copy of a photo puts its HEIC on the pasteboard, which
-UIKit's `hasImages` does not even count - is redrawn upright and pasted as
-JPEG, or PNG when it has transparency (`gpui-pre-ios` `pasted_image`). An
-image's layout follows its EXIF orientation, as GPUI draws it, so the
-sideways-stored JPEG of a portrait photo no longer spills over the blocks
-below. In the browser the editor takes the browser's own paste event the
-same way (images, Paste as, copied blocks), not only its text. The chat
-composer is text only, as the Svelte textarea was. There is no Select
-(word) item, no selection handles and no loupe.
-
-Chat messages are selectable text, as the web view's DOM text was, on every
-platform: a mouse drag selects across lines and messages and ⌘C copies; on a
-touch screen a long press selects a word with gpui-kit's window text
-selection (`gpui_kit::base::TextSelection`), whose handles extend it and
-whose Copy / Select All menu sits over it (drawn by gpui-kit, not UIKit).
+Chat messages are selectable text, as the web view's DOM text was: a mouse
+drag selects across lines and messages and ⌘C copies. Each line is Rune
+selectable text in the conversation's one selection group
+(`roostr-discussion/src/md.rs`).
 
 ## Motion
 
-Transitions run on [gpui-motion](https://github.com/1bye/gpui-motion)
-(`gpui-motion-kit` 0.5.0 over `gpui-ce-motion` 0.4.0) through
-`roostr_core::motion`: presets with the Svelte CSS timings (`HOVER_REVEAL`
-100ms, `FADE` 120, `CONTROL` 150, `HANDLE` 150 on cubic-bezier(.22,1,.36,1),
-`COLUMNS` 160, `SHEET_SNAP` 180, `DISCLOSURE` 200, all CSS `ease` otherwise),
-springs only to settle a released gesture, and keyed element state
-(`use_motion`, `animate`, `progress`, `hover`) for stateless components. Looping
-indicators (sync pulse, typing dots, spinners) stay on gpui's
-`Animation::repeat`. Motion never holds input: menus, dialogs and sheets take
-keys and clicks from their first frame and close at once; nothing animates on
-load or on changes arriving from sync, except a new chat message.
+Transitions use Rune's motion through `roostr_ui::motion`: presets with the
+Svelte CSS timings (`HOVER_REVEAL` 100ms, `FADE` 120, `CONTROL` 150,
+`HANDLE` 150 on cubic-bezier(.22,1,.36,1), `COLUMNS` 160, `SHEET_SNAP` 180,
+`DISCLOSURE` 200, all CSS `ease` otherwise), springs only to settle a
+released gesture, and `THEME_SWITCH` for the colour glide when the theme
+changes. Motion never holds input: menus, dialogs and sheets take keys and
+clicks from their first frame and close at once; nothing animates on load or
+on changes arriving from sync, except a new chat message.
 
 On a touch screen the phone shell's screens slide as a navigation stack
 (`roostr-shell/src/back_swipe.rs`): opening a space, an object or a chat
 slides it in from the right over the screen it came from, and a back button
 slides it off again, the screen beneath riding in from 30% left and
-brightening, both on a 300ms release spring. In the iOS app a pan from the
-left 20pt drags the screen back with the finger (UIKit's interactive pop):
-let go past a third of the width, or flicked right, and it goes back (an
-object to its space home, a space home to the Spaces list), otherwise it
-springs back. The pan is taken in the capture phase ahead of the page's
-scrollers, so a pan starting anywhere else still scrolls tables and moves
-through the editor. The web shell leaves the left edge to the browser's
-own back gesture. Under reduced motion the screens swap at once and a swipe
-goes back on release without following the finger.
+brightening, both on a 300ms release spring. The web shell leaves the left
+edge to the browser's own back gesture.
 
-Each front end follows the OS "reduce motion" setting live
-(`NSWorkspace` on macOS, `UIAccessibility` on iOS, `prefers-reduced-motion`
-in a browser); with it on every transition snaps to its end and the loops
-hold still.
-
-Both crates are vendored (`vendor/gpui-motion-kit`, `vendor/gpui-ce-motion`,
-patched in through `[patch.crates-io]`, changes marked `roostr:`): as
-published their clocks are `std::time::Instant`, which is not gpui's
-`web_time::Instant` on wasm32, so the browser build did not compile.
-`vendor/gpui-motion-kit/UPSTREAM.patch` is the fix for upstream.
+Reduced motion is Rune's (`roostr_ui::motion::reduced(cx)`). It follows the
+OS setting (`prefers-reduced-motion` in a browser): travel snaps and fades
+are short.
 
 ## Develop
 
 Every feature crate has an example that hosts its views against the daemon in
-the environment. Develop against a throwaway vault on its own port, never your
-own: `scripts/seed-test-vault.sh` fills it with sample data covering every view
+the environment, through `roostr_host::run_example`:
+
+```sh
+cargo run -p <crate> --example <name> -- <args> [--snap out.png --size WxH]
+```
+
+The examples are `roostr-editor` `editor`, `roostr-properties` `properties`,
+`roostr-sets` `sets`, `roostr-discussion` `discussion`, `roostr-graph`
+`graph`, `roostr-settings` `settings`, `roostr-shell` `shell`, `roostr-site`
+`site`, and `roostr-ui` `gallery` (every component; `--theme dark` or
+`--theme light`). The window opens once the store's first load lands, so
+`--snap` writes a PNG of real data without showing a window. Rune's
+`--script` drives an example headlessly (clicks, typing, keys) on a virtual
+clock.
+
+Develop against a throwaway vault on its own port, never your own:
+`scripts/seed-test-vault.sh` fills it with sample data covering every view
 (it refuses to run unless `GLON_DATA` is set and is not `~/.glon`, and reruns
 add nothing).
 
@@ -505,8 +425,19 @@ GLON_DATA=/tmp/roostr-test ../../glonOdin/glon-odin serve 7399 &
 export GLON_DATA=/tmp/roostr-test ROOSTR_API=http://127.0.0.1:7399
 scripts/seed-test-vault.sh
 cargo run -p roostr-editor --example editor -- seed-page-showcase
+cargo run -p roostr-editor --example editor -- seed-page-showcase --snap /tmp/editor.png --size 1280x860
 cargo run -p roostr                      # the whole app on the test vault
 ```
+
+Views are tested headlessly with `rune::Runtime`: a test builds a `State`,
+renders the view, presses and types through Rune's virtual pointer and
+keyboard, and moves time with the virtual clock and `Executor::advance` (no
+wall-clock sleeps). See `tests/` in `roostr-properties`, `roostr-sets`,
+`roostr-settings` and `roostr-app`.
+
+The dev profile keeps only line tables for the workspace's own crates
+(`debug = "line-tables-only"`) and no debug info for dependencies, so builds
+and the target dir stay small; backtraces still have file and line.
 
 Checks: `cargo test --workspace`, `cargo clippy --workspace --examples`,
 `cargo fmt --all --check`.
@@ -530,7 +461,26 @@ Platform-driven only; behavior and visuals otherwise follow the Svelte source.
 - Settings → "Disconnect this app" quits instead of unpairing a browser;
   exports are written to `~/Downloads`; `prompt()`/`confirm()` are in-app or
   native dialogs.
-- Graph: CSS blend modes and backdrop blur have no GPUI equivalent; the radial
+- Graph: CSS blend modes and backdrop blur have no equivalent; the radial
   background is stepped.
-- Inline code marks keep the block's font size and mentions use a solid
-  underline (GPUI text runs have no per-run size or dotted underline).
+
+## Differences from the GPUI app
+
+- A light theme exists (Roostr was dark only); dark is value for value.
+- The spelling menu opens on a right-click inside a field with the caret in a
+  misspelled word. Misspellings and lint marks are straight underlines, not
+  squiggles.
+- A link inside block text shows no pointing-hand cursor of its own (Rune
+  has no per-glyph cursor).
+- Rune has no blur event: a field commits what was typed once it loses focus,
+  checked on the next poll; Enter still commits at once.
+- Hover is an overlay over a control's fill: border-colour changes on hover
+  and press fades on text buttons are not reproduced.
+- Tooltips use Rune's help: 500 ms delay, 150 ms fade, no slide; on macOS
+  Rune draws them, not AppKit.
+- Dialogs have no exit animation; kit submenus stay open when another row is
+  hovered; Select and Command lists are not virtualized.
+- Scrollbars are rune-kit's (2 pt edge gap, 24 pt minimum thumb) and follow
+  the system "show scroll bars" setting.
+- Spinners rotate linearly, Progress does not animate value changes, and
+  avatar initials pick a different hue.

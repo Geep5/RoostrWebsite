@@ -1,10 +1,11 @@
 # syntax=docker/dockerfile:1
-# roostr.space - static files only. The app is the Rust/GPUI workspace in
+# roostr.space - static files only. The app is the Rust/Rune workspace in
 # gpui/ compiled to wasm: a serverless browser replica (or a client of the
 # visitor's own daemon). This image builds it and serves the result with an
 # SPA fallback.
 #
-# Nightly: on wasm, gpui-pre-web builds parking_lot with its `nightly` feature.
+# Nightly: kept from the GPUI build, which needed it on wasm. Nothing in the
+# Rune build's lockfile asks for nightly; moving to stable is untested.
 FROM rust:1-bookworm AS build
 ARG RUST_TOOLCHAIN=nightly-2026-10-24
 RUN rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --target wasm32-unknown-unknown \
