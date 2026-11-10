@@ -8,7 +8,10 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use roostr_core::nav::Route;
-use roostr_core::types::{Block, BlockContent, CustomContent, Fields, Object, ObjectSummary, QueryResult, QueryRow, RelationDef, Settings, Space, Value};
+use roostr_core::types::{
+    Block, BlockContent, CustomContent, Fields, Object, ObjectSummary, QueryResult, QueryRow,
+    RelationDef, Settings, Space, Value,
+};
 use roostr_core::{Backend, BackendEvent, JsonMap};
 use roostr_rt::{BoxFuture, BoxStream, boxed, boxed_stream};
 use serde_json::Value as Json;
@@ -27,7 +30,12 @@ fn object(id: &str, type_key: &str, name: &str) -> Object {
     let mut fields = Fields::default();
     fields.insert("name".into(), Value::string(name));
     fields.insert("channel".into(), Value::string(SPACE));
-    Object { id: id.into(), type_key: type_key.into(), fields, ..Object::default() }
+    Object {
+        id: id.into(),
+        type_key: type_key.into(),
+        fields,
+        ..Object::default()
+    }
 }
 
 /// A page whose chat holds one agent message with a markdown link, and the agent.
@@ -36,18 +44,35 @@ fn page() -> Object {
     let meta = BTreeMap::from([
         ("author".to_string(), AGENT.to_string()),
         ("ts".to_string(), "1000".to_string()),
-        ("text".to_string(), format!("Here it is: [the report]({URL})")),
+        (
+            "text".to_string(),
+            format!("Here it is: [the report]({URL})"),
+        ),
     ]);
     p.blocks = vec![
         Block {
             id: "__discussion__".into(),
             children_ids: vec!["m1".into()],
-            content: BlockContent { custom: Some(CustomContent { content_type: "discussion".into(), meta: Some(BTreeMap::new()), data: None }), ..BlockContent::default() },
+            content: BlockContent {
+                custom: Some(CustomContent {
+                    content_type: "discussion".into(),
+                    meta: Some(BTreeMap::new()),
+                    data: None,
+                }),
+                ..BlockContent::default()
+            },
             ..Block::default()
         },
         Block {
             id: "m1".into(),
-            content: BlockContent { custom: Some(CustomContent { content_type: "chat".into(), meta: Some(meta), data: None }), ..BlockContent::default() },
+            content: BlockContent {
+                custom: Some(CustomContent {
+                    content_type: "chat".into(),
+                    meta: Some(meta),
+                    data: None,
+                }),
+                ..BlockContent::default()
+            },
             ..Block::default()
         },
     ];
@@ -63,13 +88,23 @@ impl Backend for Vault {
         "a page with a linked chat message".into()
     }
     fn settings(&self) -> BoxFuture<anyhow::Result<Settings>> {
-        ready(Ok(Settings { has_key: true, ..Settings::default() }))
+        ready(Ok(Settings {
+            has_key: true,
+            ..Settings::default()
+        }))
     }
     fn objects(&self) -> BoxFuture<anyhow::Result<Vec<ObjectSummary>>> {
         ready(Ok(self
             .objects
             .iter()
-            .map(|o| ObjectSummary { id: o.id.clone(), type_key: o.type_key.clone(), name: o.field_str("name").into(), channel_id: SPACE.into(), updated_at: 1_000, ..ObjectSummary::default() })
+            .map(|o| ObjectSummary {
+                id: o.id.clone(),
+                type_key: o.type_key.clone(),
+                name: o.field_str("name").into(),
+                channel_id: SPACE.into(),
+                updated_at: 1_000,
+                ..ObjectSummary::default()
+            })
             .collect()))
     }
     fn object(&self, id: &str) -> BoxFuture<anyhow::Result<Object>> {
@@ -77,7 +112,12 @@ impl Backend for Vault {
         ready(found.ok_or_else(|| anyhow::anyhow!("unknown object {id}")))
     }
     fn channels(&self) -> BoxFuture<anyhow::Result<Vec<Space>>> {
-        ready(Ok(vec![Space { id: SPACE.into(), name: "Personal".into(), created_at: 1, ..Space::default() }]))
+        ready(Ok(vec![Space {
+            id: SPACE.into(),
+            name: "Personal".into(),
+            created_at: 1,
+            ..Space::default()
+        }]))
     }
     fn relations(&self) -> BoxFuture<anyhow::Result<Vec<RelationDef>>> {
         ready(Ok(Vec::new()))
@@ -88,9 +128,18 @@ impl Backend for Vault {
             .objects
             .iter()
             .filter(|o| o.type_key == "agent" && text.contains("\"agent\""))
-            .map(|o| QueryRow { id: o.id.clone(), type_key: o.type_key.clone(), name: Some(o.field_str("name").into()), fields: o.fields.clone(), ..QueryRow::default() })
+            .map(|o| QueryRow {
+                id: o.id.clone(),
+                type_key: o.type_key.clone(),
+                name: Some(o.field_str("name").into()),
+                fields: o.fields.clone(),
+                ..QueryRow::default()
+            })
             .collect();
-        ready(Ok(QueryResult { total: records.len() as u64, records }))
+        ready(Ok(QueryResult {
+            total: records.len() as u64,
+            records,
+        }))
     }
     fn mutate(&self, _: &str, _: JsonMap) -> BoxFuture<anyhow::Result<JsonMap>> {
         ready(Ok(JsonMap::new()))
@@ -108,16 +157,56 @@ impl Backend for Vault {
 
 #[test]
 fn a_link_in_a_chat_message_opens_in_the_browser() {
-    let vault = Vault { objects: vec![page(), object(AGENT, "agent", "Grant Email Bot")] };
+    let vault = Vault {
+        objects: vec![page(), object(AGENT, "agent", "Grant Email Bot")],
+    };
     let mut app = App::open(Arc::new(vault), 1568., 934.);
     app.navigate(Route::Object(PAGE.into()));
     app.settle();
     let link = format!("url:{URL}");
     let (x, y) = app.rt.find(&link).unwrap_or_else(|| {
-        let keys: Vec<String> = app.rt.elements().into_iter().filter_map(|e| e.key).filter(|k| k.contains("msg") || k.contains("md-")).collect();
+        let keys: Vec<String> = app
+            .rt
+            .elements()
+            .into_iter()
+            .filter_map(|e| e.key)
+            .filter(|k| k.contains("msg") || k.contains("md-"))
+            .collect();
         panic!("the link isn't on screen; message keys: {keys:?}")
     });
     app.click_at(x + 4., y + 4.);
     let opened = app.rt.take_url_requests();
     assert_eq!(opened, vec![URL.to_string()], "the click opened nothing");
+}
+
+/// The hover ring around an author's avatar stays inside the avatar. Field
+/// report: it was drawn 2px outside, and the chat list clipped its left side.
+#[test]
+fn an_avatar_hover_ring_stays_inside_the_avatar() {
+    let vault = Vault {
+        objects: vec![page(), object(AGENT, "agent", "Grant Email Bot")],
+    };
+    let mut app = App::open(Arc::new(vault), 1568., 934.);
+    app.navigate(Route::Object(PAGE.into()));
+    app.settle();
+    let all = app.rt.elements();
+    let rect = |suffix: &str| {
+        all.iter()
+            .find(|e| {
+                e.key
+                    .as_deref()
+                    .is_some_and(|k| k.starts_with("avatar-") && k.ends_with(suffix))
+            })
+            .unwrap_or_else(|| panic!("no avatar element ending {suffix:?}"))
+            .rect
+    };
+    let avatar = rect("0");
+    let ring = rect("-ring");
+    assert!(
+        ring[0] >= avatar[0]
+            && ring[1] >= avatar[1]
+            && ring[0] + ring[2] <= avatar[0] + avatar[2]
+            && ring[1] + ring[3] <= avatar[1] + avatar[3],
+        "the ring {ring:?} reaches outside the avatar {avatar:?}"
+    );
 }

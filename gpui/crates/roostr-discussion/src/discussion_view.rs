@@ -946,9 +946,12 @@ fn row_avatar(
     }
     let target = author.to_string();
     let r = avatar_radius(ROW_AVATAR.size);
+    // Inside the avatar, over the picture: a ring outside it was cut off where
+    // the chat list clips its left edge.
     let ring = el()
-        .pin(Some(-2.), Some(-2.), Some(-2.), Some(-2.))
-        .radius(r + 2.)
+        .key(format!("avatar-{ix}-ring"))
+        .pin(Some(0.), Some(0.), Some(0.), Some(0.))
+        .radius(r)
         .border(2., t.accent)
         .group_opacity(0., 1.);
     let wrapped = row()
@@ -958,8 +961,8 @@ fn row_avatar(
         .hover_alone()
         .cursor(rune::Cursor::Pointer)
         .on_press(move |s: &mut State| nav::navigate(Route::Object(target.clone()), s))
-        .child(ring)
-        .child(face);
+        .child(face)
+        .child(ring);
     roostr_ui::tooltip(wrapped, &format!("Open {}", d.who(author, store)))
 }
 
