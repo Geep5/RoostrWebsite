@@ -36,9 +36,7 @@ use crate::project_folder::{open_project_folder, project_folder};
 use crate::repeat_view::{repeat_is_open, repeat_view};
 use crate::suggest::{PropertyPick, PropertySuggest, PropertySuggestState, SuggestEvent};
 use crate::value::{PropertyValue, commit_pending, date_label, number_text, object_ids};
-use crate::widgets::{
-    backdrop, below, enter, icon_text_el, placeholder, pop_shadow, prefix, tip, ui_glyph,
-};
+use crate::widgets::{below, enter, icon_text_el, placeholder, pop_shadow, prefix, tip, ui_glyph};
 
 /// Types that never have an agent of their own (`AGENTLESS_TYPES`).
 const AGENTLESS_TYPES: &[&str] = &[
@@ -1844,10 +1842,6 @@ fn render_row(
             .map_or(300.0, |r| r[2]);
         let mut inner = Vec::new();
         let pop = render_pop(s, cx, t, &mut inner, c, rel, judged, width);
-        let id = oid.clone();
-        backdrop(layer, "pane-backdrop", move |s: &mut State| {
-            finish_editing(s, &id)
-        });
         below(layer, &format!("row-wrap-{key}"), 4.0, pop);
         layer.extend(inner);
     }
@@ -1944,7 +1938,9 @@ fn render_pop(
         .radius(radius::MENU)
         .padding(10.0)
         .box_shadow(pop_shadow())
-        .modal(false, move |s: &mut State| finish_editing(s, &close_id))
+        // A press outside the box (and the menus it opens after it) closes it, as GPUI's
+        // `pane-backdrop` did; a scrim under a modal box would never see the press.
+        .modal(true, move |s: &mut State| finish_editing(s, &close_id))
         .child(head);
     if !c.pane.ask_error.is_empty() && judged.is_some() {
         pop = pop.child(

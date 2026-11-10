@@ -1016,6 +1016,9 @@ pub(crate) fn repeat_view(
         .box_shadow(pop_shadow())
         .child(note(t, "REPEAT", 11.0));
     let mut calendar = None;
+    // The selects' lists anchor to triggers inside the popover, so they go into the layer
+    // after it: an anchored overlay finds only an anchor laid out before it.
+    let mut menus = Vec::new();
     if !has_guests {
         pop = pop.child(note(
             t,
@@ -1044,7 +1047,7 @@ pub(crate) fn repeat_view(
         let (i1, i2) = (id.clone(), id.clone());
         pop = pop.child(fieldrow().child(lbl(t, "Agent")).child(choice_select(
             t,
-            layer,
+            &mut menus,
             "agent-select",
             &me.agent_select,
             agents,
@@ -1107,7 +1110,7 @@ pub(crate) fn repeat_view(
                 .child(el().key("repeat-every").child(interval))
                 .child(choice_select(
                     t,
-                    layer,
+                    &mut menus,
                     "freq-select",
                     &me.freq_select,
                     freqs,
@@ -1516,6 +1519,7 @@ pub(crate) fn repeat_view(
     if let Some(cal) = calendar {
         below(layer, "repeat-anchor", 4.0, cal);
     }
+    layer.extend(menus);
     root
 }
 

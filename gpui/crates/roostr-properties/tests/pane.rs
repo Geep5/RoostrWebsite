@@ -6,7 +6,7 @@ mod support;
 use roostr_core::types::RelationDef;
 use roostr_core::{State, Value};
 use roostr_ui::ThemePref;
-use rune::{Cx, El, Key, col};
+use rune::{Cx, El, Key, col, el, row};
 use serde_json::json;
 use support::{App, SPACE, Vault, object, relation};
 
@@ -260,4 +260,131 @@ fn an_empty_object_relation_opens_its_link_picker() {
     assert!(app.shown("obj-menu"), "the link picker");
     app.until("its candidates", |_| true);
     assert!(app.shown("cand-task-1"), "the space's task is offered");
+}
+
+/// Adding an agent from the Agent row: the pick links it and closes the link picker (GPUI's
+/// `pick_candidate`), the box stays on the new chip, and a press outside closes the box (GPUI's
+/// `pane-backdrop`; the box is modal, so a scrim under it never saw the press).
+#[test]
+fn adding_an_agent_closes_the_picker_and_a_press_outside_the_box() {
+    let mut objects = types();
+    objects.push(object(
+        "t1",
+        "task",
+        &[("name", Value::string("Metalstorm Monthly Update"))],
+    ));
+    let mut app = App::new(Vault::new(objects, vec![agent_relation()]), view);
+    show(&mut app, "t1");
+    app.click("prop-row-agent");
+    app.until("the link picker", |_| true);
+    assert!(app.shown("obj-menu"), "an empty Agent opens its picker");
+    app.until("its candidates", |_| true);
+    app.click("cand-agent-1");
+    app.until("the agent lands", |s| {
+        s.store
+            .object("t1")
+            .is_some_and(|o| o.field("agent").is_some_and(|v| !v.items().is_empty()))
+    });
+    assert!(!app.shown("obj-menu"), "the pick closes the picker");
+    assert!(app.shown("prop-pop"), "the box stays on the new chip");
+    // A press away from the pane.
+    app.rt.pointer_down(1000.0, 800.0);
+    app.rt.pointer_up(1000.0, 800.0);
+    app.step();
+    assert!(!app.shown("prop-pop"), "a press outside closes the box");
+}
+
+/// The pane as the desktop shows it: a Properties column at the right of a 1440×850 window.
+fn right_view(s: &State, cx: &mut Cx<State>) -> El {
+    let t = roostr_ui::theme(ThemePref::Dark, cx);
+    let mut layer = vec![];
+    let id = s.get::<Showing>().map(|x| x.0.clone()).unwrap_or_default();
+    let body = row().w_full().h_full().child(el().grow(1.0)).child(
+        col()
+            .w(320.0)
+            .h_full()
+            .px(14.0)
+            .py(8.0)
+            .child(roostr_properties::properties_pane(
+                s, cx, t, &mut layer, &id,
+            )),
+    );
+    roostr_ui::root(body, layer)
+}
+
+const WINDOW: (f32, f32) = (1440.0, 850.0);
+
+/// A query with agent-1 on its Agent, in [`right_view`], its Repeat editor open.
+fn repeat_editor() -> App {
+    let mut objects = types();
+    objects.push(object(
+        "q1",
+        "query",
+        &[
+            ("name", Value::string("Metalstorm Monthly Update")),
+            (
+                "agent",
+                Value::values(vec![Value::link("agent-1", "agent")]),
+            ),
+        ],
+    ));
+    let mut app = App::sized(
+        Vault::new(objects, vec![agent_relation()]),
+        right_view,
+        WINDOW,
+    );
+    show(&mut app, "q1");
+    app.click("prop-row-__repeat__");
+    assert!(app.shown("repeat-pop"), "the Repeat editor");
+    app
+}
+
+/// Draws until the entrances settle.
+fn settle(app: &mut App) {
+    for _ in 0..40 {
+        app.step();
+    }
+}
+
+fn inside_window(r: [f32; 4]) -> bool {
+    r[0] >= 0.0 && r[1] >= 0.0 && r[0] + r[2] <= WINDOW.0 && r[1] + r[3] <= WINDOW.1
+}
+
+/// The Repeat editor stays inside the window with the pane at its right edge.
+#[test]
+fn the_repeat_editor_stays_inside_the_window() {
+    let mut app = repeat_editor();
+    settle(&mut app);
+    let (pop, _) = app.rt.presented("repeat-pop").expect("the editor");
+    assert!(inside_window(pop), "{pop:?} in {WINDOW:?}");
+}
+
+/// The Every and Agent selects inside the Repeat editor open their lists under their
+/// triggers, not at the window's corner (the lists went into the layer before the editor
+/// they anchor into).
+#[test]
+fn the_repeat_selects_open_under_their_triggers() {
+    let mut app = repeat_editor();
+    for key in ["freq-select", "agent-select"] {
+        app.click(key);
+        settle(&mut app);
+        let menu = format!("{key}-menu");
+        let (list, _) = app.rt.presented(&menu).expect("the open list");
+        let (trigger, _) = app.rt.presented(key).expect("the trigger");
+        let bottom = trigger[1] + trigger[3];
+        assert!(
+            (list[1] - bottom - 6.0).abs() < 1.0,
+            "{key}: list {list:?} 6pt under trigger {trigger:?}"
+        );
+        // Start-aligned with the trigger, or end-aligned when that runs off the window.
+        let (start, end) = (trigger[0], trigger[0] + trigger[2]);
+        assert!(
+            (list[0] - start).abs() < 1.0 || (list[0] + list[2] - end).abs() < 1.0,
+            "{key}: list {list:?} along trigger {trigger:?}"
+        );
+        assert!(inside_window(list), "{key}: {list:?} in {WINDOW:?}");
+        app.key(Key::Escape);
+        assert!(!app.shown(&menu), "{key}: Escape closes the list");
+        assert!(app.shown("repeat-pop"), "{key}: and leaves the editor");
+    }
 }

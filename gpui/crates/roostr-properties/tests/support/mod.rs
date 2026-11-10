@@ -213,6 +213,11 @@ impl App {
     /// The state over `vault` with this crate registered, its first load landed, drawing
     /// `view` in a 1400×900 dark window.
     pub fn new(vault: Vault, view: fn(&State, &mut Cx<State>) -> El) -> App {
+        App::sized(vault, view, (1400.0, 900.0))
+    }
+
+    /// [`App::new`] in a window of `size` points.
+    pub fn sized(vault: Vault, view: fn(&State, &mut Cx<State>) -> El, size: (f32, f32)) -> App {
         static UI_STATE: Once = Once::new();
         UI_STATE.call_once(|| {
             let path = std::env::temp_dir().join(format!(
@@ -230,7 +235,7 @@ impl App {
             let _ = tx.lock().send(());
         }));
         roostr_properties::register(&mut s);
-        let rt = Runtime::new(s, view, (1400.0, 900.0), Env::new(true, 2.0));
+        let rt = Runtime::new(s, view, size, Env::new(true, 2.0));
         let mut app = App { rt, vault, woke };
         app.until("the first load", |s| s.store.loaded);
         app
