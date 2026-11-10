@@ -34,6 +34,7 @@ pub mod invite;
 mod lite;
 mod live;
 mod outbox;
+mod signal;
 mod spaces;
 
 pub use lite::LiteScopes;
@@ -187,6 +188,9 @@ pub trait SyncHost: MaybeSend + MaybeSync + 'static {
     fn on_join_request(&self);
     /// An agent's live progress on a reply arrived (kind 25078, from a writer).
     fn on_live(&self, event: roostr_core::live::LiveEvent);
+    /// A direct-line signal arrived (kind 25079): its payload and the shared
+    /// space it counts in (`None` = this account's own).
+    fn on_signal(&self, signal: serde_json::Value, space: Option<String>);
 }
 
 /// A relay event row in the held-events table (sync.ts `RelayEventRow`).
@@ -484,6 +488,16 @@ impl RelaySync {
             .clone()
             .publish(bytes, change_id, object_id, base)
             .await
+    }
+
+    /// Send a direct-line signal payload in `space` (`None` = this account's
+    /// own scope; a hello goes out in every scope).
+    pub async fn publish_signal(
+        &self,
+        payload: serde_json::Value,
+        space: Option<String>,
+    ) -> anyhow::Result<()> {
+        self.inner.publish_signal(payload, space).await
     }
 
     /// Owner duty: publish the relay write-allowlist.

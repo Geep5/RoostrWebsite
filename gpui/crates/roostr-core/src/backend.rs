@@ -32,6 +32,10 @@ pub enum BackendEvent {
     Prepared,
     /// An agent's live progress on a reply ([`crate::live`]).
     Live(LiveEvent),
+    /// A direct-line signal (kind 25079, [`crate::direct`]) heard from the
+    /// relays: its payload and the shared space it travelled in (`None` =
+    /// the account's own scope).
+    Signal { signal: Json, space: Option<String> },
 }
 
 pub trait Backend: MaybeSend + MaybeSync + 'static {
@@ -72,6 +76,16 @@ pub trait Backend: MaybeSend + MaybeSync + 'static {
     fn engine_status(&self) -> Option<BoxFuture<Result<JsonMap>>> {
         None
     }
+    /// Whether this backend carries direct-line signals ([`Self::publish_signal`]
+    /// out, [`BackendEvent::Signal`] in); only then does the app open lines.
+    fn direct_lines(&self) -> bool {
+        false
+    }
+    /// Send one direct-line signal payload in `space` (`None` = the
+    /// account's own scope; a hello goes out in every scope).
+    fn publish_signal(&self, _signal: Json, _space: Option<String>) -> BoxFuture<Result<()>> {
+        Box::pin(async { Err(anyhow::anyhow!("this backend carries no direct lines")) })
+    }
 }
 
 /// The commit stream's SSE framing (`data:` lines, a blank line dispatches),
@@ -100,8 +114,16 @@ impl SseParser {
         if event.get("hello").and_then(Json::as_bool) == Some(true) {
             return Some(BackendEvent::Hello);
         }
-        if event.get("type").and_then(Json::as_str) == Some("live") {
-            return LiveEvent::parse(event.get("live")?).map(BackendEvent::Live);
+        match event.get("type").and_then(Json::as_str) {
+            Some("live") => return LiveEvent::parse(event.get("live")?).map(BackendEvent::Live),
+            Some("signal") => {
+                let space = event.get("space").and_then(Json::as_str);
+                return Some(BackendEvent::Signal {
+                    signal: event.get("signal")?.clone(),
+                    space: space.filter(|s| !s.is_empty()).map(str::to_string),
+                });
+            }
+            _ => {}
         }
         event
             .get("objectId")
@@ -180,5 +202,28 @@ mod tests {
             panic!("not a live event: {events:?}");
         };
         assert_eq!((live.run.as_str(), live.text.as_str()), ("r1", "Looking"));
+    }
+
+    #[test]
+    fn a_signal_frame_yields_its_payload_and_space() {
+        let events = events(concat!(
+            "data: {\"type\":\"signal\",\"origin\":\"relay\",\"signal\":{\"v\":1,\"type\":\"hello\"}}\n\n",
+            "data: {\"type\":\"signal\",\"origin\":\"relay\",\"signal\":{\"v\":1},\"space\":\"sp\"}\n\n",
+            "data: {\"type\":\"signal\",\"origin\":\"relay\"}\n\n",
+        ));
+        assert_eq!(
+            events,
+            vec![
+                BackendEvent::Signal {
+                    signal: serde_json::json!({"v":1,"type":"hello"}),
+                    space: None
+                },
+                BackendEvent::Signal {
+                    signal: serde_json::json!({"v":1}),
+                    space: Some("sp".into())
+                },
+            ],
+            "a frame without its payload is dropped"
+        );
     }
 }

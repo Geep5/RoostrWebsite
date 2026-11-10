@@ -1,0 +1,51 @@
+[package]
+name = "roostr-direct"
+description = "Direct lines: an agent's live progress over a WebRTC data channel from the computer running it to this device, introduced by kind-25079 Nostr signals"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+futures.workspace = true
+log.workspace = true
+roostr-rt.workspace = true
+serde_json.workspace = true
+web-time.workspace = true
+
+# The desktop and the iPhone: str0m (sans-IO WebRTC) on a UDP socket of our
+# own. DTLS: Windows' own CNG/SChannel (nothing to build), elsewhere
+# RustCrypto (its certificate comes from rcgen over aws-lc, built with the
+# system C compiler).
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+async-io = "2"
+
+[target.'cfg(windows)'.dependencies]
+str0m = { version = "0.25", default-features = false, features = ["wincrypto"] }
+
+[target.'cfg(not(any(windows, target_family = "wasm")))'.dependencies]
+str0m = { version = "0.25", default-features = false, features = ["rust-crypto"] }
+
+# The browser's own RTCPeerConnection.
+[target.'cfg(target_family = "wasm")'.dependencies]
+wasm-bindgen.workspace = true
+wasm-bindgen-futures.workspace = true
+js-sys.workspace = true
+gloo-timers = { version = "0.3", features = ["futures"] }
+web-sys = { workspace = true, features = [
+    "MessageEvent",
+    "RtcConfiguration",
+    "RtcDataChannel",
+    "RtcDataChannelEvent",
+    "RtcIceCandidate",
+    "RtcIceCandidateInit",
+    "RtcIceServer",
+    "RtcPeerConnection",
+    "RtcPeerConnectionIceEvent",
+    "RtcPeerConnectionState",
+    "RtcSdpType",
+    "RtcSessionDescription",
+    "RtcSessionDescriptionInit",
+] }
+
+[dev-dependencies]
+parking_lot.workspace = true

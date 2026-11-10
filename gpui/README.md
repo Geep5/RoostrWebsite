@@ -95,6 +95,7 @@ The mode choice is `<config dir>/Roostr/mode` (`localStorage`
 | `roostr-replica-store` | The replica's change store: SQLite natively, IndexedDB (`roostr-replica`) in the browser, plus the one-time import of the Svelte app's IndexedDB `roostr` (`svelte_import`) |
 | `roostr-replica` | The daemon-less backend (`engine/backend.ts`, iOS `Backend.swift`): replay, query cache, mutations, shared spaces, identity and device-local storage; `sync/` is the relay sync (`sync.ts`, `SyncEngine.swift`) |
 | `roostr-nostr` | The replica's Nostr host side (`engine/{keys,negentropy,spacekeys,profile}.ts`, sync.ts' relay and gift-wrap code, the iOS `RoostrSync` equivalents): keys and BIP-340 signing, NIP-01 events, NIP-44, NIP-59, space keyring, NIP-77 negentropy, the relay client (native and browser websockets), NIP-11/Blossom discovery. `cargo test -p roostr-nostr -- --ignored` also checks Roostr's live relay |
+| `roostr-direct` | Direct lines: an agent's live progress over a WebRTC data channel (`roostr-live`) from the computer running it, introduced by kind-25079 signals. The viewer state machine (hello every minute, answer offers addressed to this device, trickle ICE, bye), str0m natively (one UDP socket, STUN for a server-reflexive candidate, no TURN; DTLS over Windows' own crypto there, RustCrypto elsewhere) and `RTCPeerConnection` in the browser |
 | `roostr-properties` | Property values and pickers, properties pane, object meta, type and property pages, repeat, credentials, capabilities, emoji picker |
 | `roostr-editor` | Block editor, slash/block menus, tables, links and mentions, spellcheck, tool-code lint, file blocks and the File page (harness + Blossom) |
 | `roostr-sets` | Query/set/collection/type views: controls, table, kanban, gallery, calendar, row menu |
@@ -345,6 +346,31 @@ the device's own, Remove deletes the record until the device next runs;
 devices unseen for 30 days fold under "Older devices".
 `crates/roostr-replica/tests/devices.rs` runs two replicas of one key end to
 end.
+
+### Direct lines
+
+An agent's live progress (kind 25078, `roostr_core::live`) also travels
+straight from the computer running the agent: the store runs one viewer per
+open vault (`roostr_core::direct`, `roostr-direct`) under this install's id
+(`direct-device` in the UI state: `localStorage` in the browser,
+`ui-state.json` on the desktop). It says hello on start and every minute; a
+harness without a line to this device offers one, the viewer answers, both
+trickle ICE (STUN `stun.l.google.com:19302`, no TURN), and each live event
+arrives on the `roostr-live` data channel, one payload per message. Channel
+messages enter the store as the same `BackendEvent::Live` their relay copy
+would; the chat drops duplicates by (run, seq), so the harness still sends
+the relay copy whenever a viewer has no line. A line introduced in a shared
+space may only speak of that space's objects.
+
+The signals are kind 25079, sealed like the live events: the account's own
+with its self conversation key and no tags, a shared space's with the space
+key and `h` = the space tag; a hello goes out in every scope, everything else
+in the scope its line came in. The replica subscribes and publishes them
+itself (`sync/signal.rs`; signed by this account = its own scope, otherwise
+only from the space's writers); a daemon-backed app hears them as
+`/api/events` `signal` frames and sends them with `signal_publish`.
+`crates/roostr-direct/tests/loopback.rs` runs a line between two native peers
+in one process (`-- --ignored` also over the network with real STUN).
 
 ### Sync tracing
 

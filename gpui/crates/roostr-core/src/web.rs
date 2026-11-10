@@ -533,6 +533,19 @@ impl Backend for WebDaemonBackend {
         Some(self.get("/api/records/status"))
     }
 
+    fn direct_lines(&self) -> bool {
+        true
+    }
+
+    /// `signal_publish`: the store seals it for `space` and sends it out.
+    fn publish_signal(&self, signal: Json, space: Option<String>) -> BoxFuture<Result<()>> {
+        let request = self.mutate(
+            "signal_publish",
+            crate::direct::publish_params(signal, space),
+        );
+        Box::pin(async move { request.await.map(drop) })
+    }
+
     /// A task on the page's event loop reads the streamed body into a
     /// channel; dropping the stream aborts the fetch.
     fn events(&self) -> BoxStream<Result<BackendEvent>> {

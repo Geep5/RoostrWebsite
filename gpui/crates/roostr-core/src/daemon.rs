@@ -242,6 +242,19 @@ impl Backend for DaemonBackend {
         Some(self.run(|c| c.get("/api/records/status")))
     }
 
+    fn direct_lines(&self) -> bool {
+        true
+    }
+
+    /// `signal_publish`: the store seals it for `space` and sends it out.
+    fn publish_signal(&self, signal: Json, space: Option<String>) -> BoxFuture<Result<()>> {
+        let request = self.mutate(
+            "signal_publish",
+            crate::direct::publish_params(signal, space),
+        );
+        Box::pin(async move { request.await.map(drop) })
+    }
+
     /// Blocks while polled, for the life of the connection: the store reads
     /// it through [`roostr_rt::background_stream`], whose thread ends with
     /// the connection or once the receiver is gone.

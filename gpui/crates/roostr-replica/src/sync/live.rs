@@ -4,7 +4,9 @@
 //! One subscription per relay carries this identity's DAG events, every
 //! installed space's `#h` stream (DAG + h-deletions) - in a lite session
 //! only the streams it holds whole, plus each followed object by its `h`
-//! tag - and gift wraps addressed to us. [`roostr_nostr::relay::live`]
+//! tag - gift wraps addressed to us, and from now on agents' live progress
+//! (kind 25078) and direct-line signals (kind 25079, [`super::signal`]).
+//! [`roostr_nostr::relay::live`]
 //! resubscribes after a failure with the backoff (2 s doubling to 60 s),
 //! rebuilding the filters so `since` follows the cursor; a reconnect runs a
 //! catch-up pass (what
@@ -85,6 +87,7 @@ impl Inner {
                 .since(now_s() as u64),
         );
         filters.extend(self.progress_filters());
+        filters.extend(self.signal_filters());
         filters
     }
 
@@ -219,6 +222,8 @@ impl Inner {
                         self.handle_wrap(&event).await;
                     } else if event.kind == kinds::KEYRING {
                         self.merge_keyring_backup(&event);
+                    } else if event.kind == kinds::SIGNAL {
+                        self.handle_signal(&event);
                     } else if event.kind == kinds::LIVE {
                         if let Err(error) = self.handle_live_progress(&event).await {
                             log::debug!("[sync] live progress {}: {error:#}", short_id(&event.id));

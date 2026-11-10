@@ -23,6 +23,10 @@ pub const JOIN_REQUEST_RUMOR: u32 = 24892;
 /// An agent's live progress on a reply (ephemeral: relays forward it, never store it),
 /// sealed and `h`-tagged like the object's [`CHANGE`] events.
 pub const LIVE: u32 = 25078;
+/// A direct-line signal (ephemeral): one step introducing a device to the computer
+/// running an agent, for its live progress over WebRTC. Sealed with the account's
+/// own key (no tags) or a shared space's (`h` = the space tag).
+pub const SIGNAL: u32 = 25079;
 /// NIP-98 HTTP authorization.
 pub const HTTP_AUTH: u32 = 27235;
 /// The relay write-allowlist an owner publishes (`d` = [`ALLOWLIST_D`]).

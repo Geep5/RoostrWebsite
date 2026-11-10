@@ -35,6 +35,8 @@ pub struct TestHost {
     /// object id → space id.
     pub spaces: Mutex<HashMap<String, String>>,
     pub lives: Mutex<Vec<roostr_core::live::LiveEvent>>,
+    /// Direct-line signals: payload and scope.
+    pub signals: Mutex<Vec<(serde_json::Value, Option<String>)>>,
 }
 
 impl SyncHost for TestHost {
@@ -68,6 +70,9 @@ impl SyncHost for TestHost {
     }
     fn on_live(&self, event: roostr_core::live::LiveEvent) {
         self.lives.lock().push(event);
+    }
+    fn on_signal(&self, signal: serde_json::Value, space: Option<String>) {
+        self.signals.lock().push((signal, space));
     }
 }
 

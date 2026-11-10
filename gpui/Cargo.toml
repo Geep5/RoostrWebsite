@@ -26,6 +26,7 @@ roostr-nostr = { path = "crates/roostr-nostr" }
 roostr-engine = { path = "crates/roostr-engine" }
 roostr-replica-store = { path = "crates/roostr-replica-store" }
 roostr-replica = { path = "crates/roostr-replica" }
+roostr-direct = { path = "crates/roostr-direct" }
 # Rune is pre-release: pin a `dev` rev (dev is fast-forward only).
 rune = { git = "https://github.com/anomalyco/rune", rev = "8e3fc8e" }
 rune-kit = { git = "https://github.com/anomalyco/rune", rev = "8e3fc8e" }

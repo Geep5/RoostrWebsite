@@ -115,8 +115,14 @@ impl State {
     /// navigator and the UI state stay.
     pub fn open(&mut self, backend: Arc<dyn Backend>, harness: Option<Arc<Harness>>) {
         let generation = self.store.generation + 1;
+        let device = if backend.direct_lines() {
+            crate::direct::device_id(&mut self.ui)
+        } else {
+            String::new()
+        };
         self.store = Store::new(backend, self.rt.clone());
         self.store.generation = generation;
+        self.store.device = device;
         self.harness = harness;
         self.profile = ProfileCache::default();
         self.lite_requested.clear();

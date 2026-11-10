@@ -45,6 +45,12 @@ impl UiState {
         let path = std::env::var_os("ROOSTR_UI_STATE")
             .map(PathBuf::from)
             .or_else(|| dirs::config_dir().map(|d| d.join("Roostr").join("ui-state.json")));
+        Self::load_from(path)
+    }
+
+    /// Load the state kept at `path` (`None`: nothing is kept).
+    #[cfg(not(target_family = "wasm"))]
+    pub(crate) fn load_from(path: Option<PathBuf>) -> Self {
         let values = path
             .as_ref()
             .and_then(|p| std::fs::read(p).ok())

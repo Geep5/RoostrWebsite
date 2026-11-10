@@ -124,6 +124,12 @@ pub struct Store {
     bootstrap_held: bool,
     refresh_timer: Option<Task<()>>,
     stream: Option<Task<()>>,
+    /// This install's device id for direct lines ([`crate::direct::device_id`]);
+    /// empty: none are opened.
+    pub(crate) device: String,
+    /// The direct-line viewer while the commit stream is followed, and the
+    /// task that hands its channel messages to [`Self::handle_event`].
+    direct: Option<(roostr_direct::Direct, Task<()>)>,
     /// Emitted, not yet handed to the listeners ([`State::poll`]).
     pub(crate) events: Vec<StoreEvent>,
     /// Which [`State::open`] made this store: loads it started that land
@@ -157,6 +163,8 @@ impl Store {
             bootstrap_held: false,
             refresh_timer: None,
             stream: None,
+            device: String::new(),
+            direct: None,
             events: Vec::new(),
             generation: 0,
         }
@@ -191,6 +199,7 @@ impl Store {
                             store.settings = Some(settings);
                             store.refresh_all();
                             store.listen();
+                            store.open_lines();
                         }
                         Err(error) => {
                             store.connection = Connection::Failed(error.to_string());
@@ -230,6 +239,43 @@ impl Store {
         }));
     }
 
+    /// Start this install's direct-line viewer once, when the backend
+    /// carries signals: channel messages enter [`Self::handle_event`] as
+    /// the live events their relay copies would be.
+    fn open_lines(&mut self) {
+        if self.direct.is_some() || self.device.is_empty() || !self.backend.direct_lines() {
+            return;
+        }
+        let (tx, mut rx) = futures::channel::mpsc::unbounded();
+        let direct = crate::direct::start(self.backend.clone(), self.device.clone(), move |d| {
+            let _ = tx.unbounded_send(d);
+        });
+        let task = self.rt.spawn(async move |cx| {
+            while let Some(delivery) = rx.next().await {
+                cx.update(|s| s.store.deliver_direct(delivery));
+            }
+        });
+        self.direct = Some((direct, task));
+    }
+
+    /// A direct line's message: a live event, unless a shared space's line
+    /// speaks of an object outside that space.
+    fn deliver_direct(&mut self, delivery: roostr_direct::Delivery) {
+        let Some(BackendEvent::Live(event)) = crate::direct::channel_event(&delivery.text) else {
+            return;
+        };
+        let object_space = self.summary(&event.object).map(|s| {
+            if s.type_key == "channel" {
+                s.id.as_str()
+            } else {
+                s.channel_id.as_str()
+            }
+        });
+        if crate::direct::line_may_speak(&delivery.space, object_space) {
+            self.handle_event(Ok(BackendEvent::Live(event)));
+        }
+    }
+
     fn handle_event(&mut self, event: Result<BackendEvent, String>) {
         match event {
             Ok(BackendEvent::Hello) => {
@@ -263,6 +309,11 @@ impl Store {
                 self.events.push(StoreEvent::Reconnected);
             }
             Ok(BackendEvent::Live(event)) => self.events.push(StoreEvent::Live(event)),
+            Ok(BackendEvent::Signal { signal, space }) => {
+                if let Some((direct, _)) = &self.direct {
+                    direct.signal(signal, space);
+                }
+            }
             Ok(BackendEvent::Status(mut status)) => {
                 if status.bootstrapped && !self.status.bootstrapped {
                     status.bootstrapped = false;

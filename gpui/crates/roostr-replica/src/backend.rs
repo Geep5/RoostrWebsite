@@ -3346,6 +3346,12 @@ impl SyncHost for Host {
         }
     }
 
+    fn on_signal(&self, signal: Json, space: Option<String>) {
+        if let Some(inner) = self.0.upgrade() {
+            inner.emit(BackendEvent::Signal { signal, space });
+        }
+    }
+
     fn on_space_vanished(&self, space_id: String) {
         let Some(inner) = self.0.upgrade() else {
             return;
@@ -3517,6 +3523,16 @@ impl Backend for ReplicaBackend {
             }
         });
         Box::pin(rx.map(Ok))
+    }
+
+    fn direct_lines(&self) -> bool {
+        true
+    }
+
+    /// Sealed and sent by the relay sync, once the session is up.
+    fn publish_signal(&self, signal: Json, space: Option<String>) -> BoxFuture<Result<()>> {
+        let inner = self.inner.clone();
+        Box::pin(async move { inner.ready().await?.sync.publish_signal(signal, space).await })
     }
 
     #[allow(clippy::arc_with_non_send_sync)]
