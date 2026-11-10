@@ -23,6 +23,8 @@ pub(crate) struct ChatMessage {
     pub text: String,
     pub origin: String,
     pub mailbox: Option<MailboxEntry>,
+    /// The File objects the message shows (its meta `files`, ids joined with ",").
+    pub files: Vec<String>,
 }
 
 fn meta<'a>(block: &'a Block, key: &str) -> &'a str {
@@ -51,6 +53,16 @@ fn meta_origin(block: &Block) -> String {
     } else {
         meta(block, "origin").to_string()
     }
+}
+
+/// `meta.files`: File object ids joined with ",".
+fn meta_files(block: &Block) -> Vec<String> {
+    meta(block, "files")
+        .split(',')
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(str::to_string)
+        .collect()
 }
 
 /// One address per object; prefer its agent over its human-only inbox.
@@ -289,6 +301,7 @@ fn envelope_message(object: &Object, entry: &MailboxEntry) -> ChatMessage {
             m.sender.object_id.clone()
         },
         mailbox: Some(entry.clone()),
+        files: Vec::new(),
     }
 }
 
@@ -300,6 +313,7 @@ fn block_message(block: &Block) -> ChatMessage {
         text: meta(block, "text").to_string(),
         origin: meta_origin(block),
         mailbox: None,
+        files: meta_files(block),
     }
 }
 
@@ -486,6 +500,16 @@ mod tests {
         meta["origin_object"] = "task-7".into();
         let scheduled = discussion_with(vec![post]);
         assert_eq!(chat_messages(&scheduled, DISCUSSION)[0].origin, "task-7");
+    }
+
+    #[test]
+    fn a_message_shows_the_files_its_meta_lists() {
+        let mut post = msg("m1", "human", 100, "");
+        post["content"]["custom"]["meta"]["files"] = "file-1,file-2".into();
+        let with_files = discussion_with(vec![post, msg("m2", "agent", 200, "seen")]);
+        let shown = chat_messages(&with_files, DISCUSSION);
+        assert_eq!(shown[0].files, ["file-1", "file-2"]);
+        assert!(shown[1].files.is_empty());
     }
 
     // ── Many conversations in one object ──

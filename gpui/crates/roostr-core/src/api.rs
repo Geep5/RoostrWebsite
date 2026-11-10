@@ -403,21 +403,23 @@ pub mod settings {
 pub mod chat {
     use super::*;
 
-    /// `thread_id` "" = the human thread. Resolves to the result map (`id`, `threadId`).
+    /// `thread_id` "" = the human thread; `files` the File object ids the message shows
+    /// (it may then have no text). Resolves to the result map (`id`, `threadId`).
     pub fn post(
         object_id: &str,
         text: &str,
         reply_to: &str,
         thread_id: &str,
+        files: &[String],
         s: &mut State,
     ) -> Task<Result<JsonMap>> {
-        mutate(
-            "chat_post",
-            params(
-                json!({ "object_id": object_id, "text": text, "reply_to": reply_to, "thread_id": thread_id }),
-            ),
-            s,
-        )
+        let mut p = params(
+            json!({ "object_id": object_id, "text": text, "reply_to": reply_to, "thread_id": thread_id }),
+        );
+        if !files.is_empty() {
+            p.insert("files".into(), json!(files));
+        }
+        mutate("chat_post", p, s)
     }
 }
 

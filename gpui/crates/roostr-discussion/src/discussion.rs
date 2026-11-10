@@ -20,6 +20,7 @@ use roostr_ui::tags::{TagPaint, object_pill_paint, tint_paint};
 use rune::{KeyEvent, TextEdit};
 use serde::Deserialize;
 
+use crate::attachments::{Attachment, ChatFile};
 use crate::chat::{
     ChatMessage, DISCUSSION, chat_messages, is_legacy_exchange, object_chat_messages,
     reply_recipients, unique_endpoints,
@@ -263,6 +264,10 @@ pub(crate) struct Disc {
     /// A chat line just sent, shown at once (marked "Sending…") until the object carries
     /// the real one or the write fails.
     pub outgoing: Option<ChatMessage>,
+    /// Files pasted or dropped into the composer, going with the next message.
+    pub attachments: Vec<Attachment>,
+    /// The shown messages' Files, by id, as far as they have loaded.
+    pub chat_files: HashMap<String, ChatFile>,
 
     pub tag_options: Option<Vec<ObjectAgentOption>>,
     tag_loading: Option<Task<()>>,
@@ -399,6 +404,8 @@ pub(crate) fn create(s: &mut State, key: String, object_id: String, options: Dis
         retrying: Vec::new(),
         pending_send: None,
         outgoing: None,
+        attachments: Vec::new(),
+        chat_files: HashMap::new(),
         tag_options: None,
         tag_loading: None,
         mention: None,
@@ -543,9 +550,12 @@ impl Disc {
         // The line being sent shows until the object has it (same author and text, written
         // no earlier than it).
         if let Some(out) = &self.outgoing {
-            let landed = messages
-                .iter()
-                .find(|m| m.author == out.author && m.text == out.text && m.ts >= out.ts - 5_000);
+            let landed = messages.iter().find(|m| {
+                m.author == out.author
+                    && m.text == out.text
+                    && m.files == out.files
+                    && m.ts >= out.ts - 5_000
+            });
             if let Some(m) = landed {
                 self.row_ids.insert(m.id.clone(), out.id.clone());
                 self.outgoing = None;
@@ -607,6 +617,7 @@ impl Disc {
             })
             .unwrap_or_else(|| "Exchange".into());
         let previous = std::mem::replace(&mut self.messages, Rc::new(messages));
+        self.load_files(s);
         let at_end = self.at_end;
         self.note_arrival(&previous, at_end, s);
         self.sync_list(s);
@@ -728,6 +739,7 @@ impl Disc {
                     m.ts,
                     &m.text,
                     &m.origin,
+                    &m.files,
                     origins.get(&m.origin),
                     &self.me,
                     self.read_only,
@@ -1533,13 +1545,16 @@ impl Disc {
         self.reply_to.clear();
         self.tagged.clear();
         self.tagged_objects.clear();
+        self.attachments.clear();
         self.set_draft(String::new(), None, s);
     }
 
-    /// Whether the send button does anything now.
+    /// Whether the send button does anything now: there is text or a file, and no file is
+    /// still uploading.
     pub(crate) fn can_send(&self) -> bool {
         !(self.sending
-            || self.draft.trim().is_empty()
+            || self.uploading()
+            || (self.draft.trim().is_empty() && self.attachments.is_empty())
             || (self.is_exchange && self.audience().is_empty()))
     }
 
@@ -1547,9 +1562,11 @@ impl Disc {
         let raw = self.draft.trim().to_string();
         let mentions = self.live_tags(&raw);
         let text = self.link_object_tags(&raw);
+        let files: Vec<String> = self.attachments.iter().map(|a| a.file_id.clone()).collect();
         if self.sending
             || self.read_only
-            || text.is_empty()
+            || self.uploading()
+            || (text.is_empty() && (files.is_empty() || self.is_exchange))
             || (self.is_exchange && self.audience().is_empty() && mentions.is_empty())
         {
             return;
@@ -1646,7 +1663,7 @@ impl Disc {
         } else {
             self.thread_id.clone()
         };
-        let task = roostr_core::api::chat::post(&self.object_id, &text, &reply, &thread, s);
+        let task = roostr_core::api::chat::post(&self.object_id, &text, &reply, &thread, &files, s);
         // Show it now: the write (and an agent's wake) can take a moment.
         self.outgoing = Some(ChatMessage {
             id: format!("sending-{}", uuid::Uuid::new_v4()),
@@ -1655,9 +1672,11 @@ impl Disc {
             text: text.clone(),
             origin: String::new(),
             mailbox: None,
+            files,
         });
         let draft = self.draft.clone();
         let tagged = self.tagged.clone();
+        let attachments = self.attachments.clone();
         self.clear_composer(s);
         self.derive(s);
         let key = self.key.clone();
@@ -1677,8 +1696,9 @@ impl Disc {
                         // Not sent: the line leaves the chat and goes back into the composer
                         // (unless something new was typed there).
                         d.outgoing = None;
-                        if d.draft.is_empty() {
+                        if d.draft.is_empty() && d.attachments.is_empty() {
                             d.tagged = tagged;
+                            d.attachments = attachments;
                             d.set_draft(draft, None, s);
                         }
                         d.derive(s);

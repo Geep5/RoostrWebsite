@@ -440,9 +440,9 @@ fn create_credential(channel_id: String, name: String, s: &mut State) -> Task<Re
     })
 }
 
-/// The MIME type the harness records for a picked file.
+/// The MIME type the harness records for a picked file ("" when unknown).
 #[cfg(not(target_family = "wasm"))]
-fn mime_of(path: &std::path::Path) -> &'static str {
+pub fn mime_of(path: &std::path::Path) -> &'static str {
     let ext = path
         .extension()
         .and_then(|e| e.to_str())
@@ -496,6 +496,12 @@ pub async fn upload_file(
         .to_string())
 }
 
+/// The name a pasted image gets: screenshots arrive with no real name.
+pub fn pasted_name(extension: &str) -> String {
+    let stamp = chrono::Local::now().format("%-m/%-d/%Y, %-I:%M:%S %p");
+    format!("Pasted image {stamp}.{extension}")
+}
+
 /// Why `name` could not be added, as the person should read it (`addFailureText`).
 pub fn add_failure_text(error: &anyhow::Error, name: &str) -> String {
     if harness::is_unreachable(error) {
@@ -521,6 +527,13 @@ fn create_file(_channel_id: String, _s: &mut State) -> Task<Result<String>> {
 pub struct AddFile(
     pub std::rc::Rc<dyn Fn(String, String, Vec<u8>, String, &mut State) -> Task<Result<String>>>,
 );
+
+/// How a File object's bytes load (files.ts `fetchFileBlob`): the editor installs it in
+/// [`State::file_bytes`] (`roostr_editor::files::fetch_file_blob`: Blossom, else this
+/// computer's harness). Called with the File's fields; resolves (bytes, mime).
+#[derive(Clone)]
+#[allow(clippy::type_complexity)]
+pub struct FileBytes(pub std::rc::Rc<dyn Fn(Fields, &State) -> Task<Result<(Vec<u8>, String)>>>);
 
 /// The host's "open a file" dialog, installed by the app in
 /// [`State::pick_file`]: resolves to the chosen file, `None` when cancelled.

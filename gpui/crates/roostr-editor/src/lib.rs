@@ -38,7 +38,7 @@ mod write_queue;
 use std::rc::Rc;
 
 use roostr_core::State;
-use roostr_core::create::AddFile;
+use roostr_core::create::{AddFile, FileBytes};
 
 pub use editor::Editors;
 pub use file_view::{FileViews, close_file, file_view, open_file};
@@ -50,13 +50,21 @@ pub use render::view;
 
 /// Set the editor up for the app: re-read open bodies when the store says
 /// they changed, follow the keyboard between blocks, make picked files into
-/// File objects (`s.add_file`), and start loading the spelling dictionary.
+/// File objects (`s.add_file`) and load File bytes (`s.file_bytes`), and
+/// start loading the spelling dictionary.
 pub fn register(s: &mut State) {
     s.on_store(editor::on_store);
     s.on_poll(keys::on_poll);
     s.add_file = Some(AddFile(Rc::new(|name, mime, bytes, space, s| {
         let upload = upload_file(PickedFile { name, mime, bytes }, space, s);
         s.rt.spawn(async move |_| Ok(upload.await?.id))
+    })));
+    s.file_bytes = Some(FileBytes(Rc::new(|fields, s| {
+        let relays = files::relays(s);
+        let harness = s.harness.clone();
+        s.rt.background(async move {
+            files::fetch_file_blob(&fields, &relays, harness.as_deref()).await
+        })
     })));
     spellcheck::ensure_loaded(s);
 }

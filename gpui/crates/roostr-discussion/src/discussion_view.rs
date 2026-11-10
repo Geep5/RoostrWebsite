@@ -14,11 +14,12 @@ use roostr_ui::tags::tint_paint;
 use roostr_ui::ty::Weights as _;
 use roostr_ui::{
     Alert, AlertVariant, Button, ButtonCustomVariant, Checkbox, DropdownMenu, Glyph, Images,
-    KitSize, Placement, PopupMenu, PopupMenuItem, Tag, Theme, glyph, motion, radius, rems, ty,
+    KitSize, Placement, PopupMenu, PopupMenuItem, Spinner, Tag, Theme, glyph, motion, radius, rems,
+    ty,
 };
 use rune::{
-    Color, Cx, Cycle, El, GrowthSpec, PillStyle, ScrollSpec, Side, Transition, Tx, col, el, memo,
-    row, text, text_input,
+    Color, Cx, Cycle, El, GrowthSpec, PillStyle, ScrollSpec, Side, SurfaceFit, Transition, Tx, col,
+    el, memo, row, text, text_input,
 };
 
 use crate::chat::ChatMessage;
@@ -580,6 +581,7 @@ fn message_rows(d: &Disc, s: &State, t: &Theme) -> Vec<El> {
             t.dark,
             when(m.ts),
             revealing,
+            files_sig(d, images, m),
         );
         // A sent line that landed keeps its placeholder's keys.
         let key_id = d.row_ids.get(&m.id).unwrap_or(&m.id);
@@ -705,13 +707,16 @@ fn message_row(
         space,
         reveal: revealing.then_some(REVEAL),
     };
-    let body = render_markdown(
-        &format!("md-{key_id}"),
-        &m.text,
-        origin.as_deref().map(|name| (m.origin.as_str(), name)),
-        &md_theme,
-        &env,
-    );
+    let body = (!m.text.trim().is_empty() || origin.is_some()).then(|| {
+        render_markdown(
+            &format!("md-{key_id}"),
+            &m.text,
+            origin.as_deref().map(|name| (m.origin.as_str(), name)),
+            &md_theme,
+            &env,
+        )
+    });
+    let files = message_files(d, s, t, images, m, key_id, md_theme.ink);
     let bubble_el = col()
         .key(format!("msg-text-{key_id}"))
         .corners(if own {
@@ -721,10 +726,12 @@ fn message_row(
         })
         .px(12.)
         .py(7.)
+        .gap(6.)
         .fill(if tinted { colors.bg } else { t.hover })
         .shrink()
         .min_w(0.)
-        .child(body);
+        .children(body)
+        .children(files);
 
     // Delivery / processing status: quiet when all is well.
     let status_line = m
@@ -805,6 +812,114 @@ fn message_row(
         r = r.child(row_avatar(d, s, t, images, &m.author, ix));
     }
     r.child(column)
+}
+
+/// The widest a message's image draws; a tall one stops at [`THUMB_MAX_H`].
+const THUMB_W: f32 = 240.;
+const THUMB_MAX_H: f32 = 320.;
+
+/// What message `m`'s Files draw from, hashed into its row's memo version: each one's
+/// loaded state and its decoded image's size.
+fn files_sig(d: &Disc, images: Option<&Images>, m: &ChatMessage) -> u64 {
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    for id in &m.files {
+        let file = d.chat_files.get(id);
+        file.hash(&mut h);
+        file.and_then(|f| f.image.as_deref())
+            .and_then(|uri| images?.image(uri, THUMB_W))
+            .and_then(|image| image.size())
+            .hash(&mut h);
+    }
+    h.finish()
+}
+
+/// Message `m`'s Files in its bubble: an image as its thumbnail (its own shape, [`THUMB_W`]
+/// wide at most), any other File as a chip with its name. Each opens its File.
+#[allow(clippy::too_many_arguments)]
+fn message_files(
+    d: &Disc,
+    s: &State,
+    t: &Theme,
+    images: Option<&Images>,
+    m: &ChatMessage,
+    key_id: &str,
+    ink: Color,
+) -> Option<El> {
+    if m.files.is_empty() {
+        return None;
+    }
+    let tiles = m.files.iter().enumerate().map(|(i, id)| {
+        let file = d.chat_files.get(id);
+        let name = s
+            .store
+            .summary(id)
+            .map(|o| o.name.clone())
+            .filter(|n| !n.is_empty())
+            .or_else(|| file.map(|f| f.name.clone()).filter(|n| !n.is_empty()))
+            .unwrap_or_else(|| "File".into());
+        let image = file
+            .and_then(|f| f.image.as_deref())
+            .and_then(|uri| images?.image(uri, THUMB_W));
+        let chip = |icon: El, label: String| {
+            row()
+                .key(format!("chat-file-{key_id}-{i}"))
+                .items_center()
+                .gap(6.)
+                .max_w(THUMB_W)
+                .px(8.)
+                .py(4.)
+                .radius(6.)
+                .border(1., ink.alpha(0.25))
+                .child(icon)
+                .child(
+                    text(label)
+                        .font(ty::ui(12.).lh(12. * 1.45))
+                        .color(ink)
+                        .truncate()
+                        .shrink(),
+                )
+        };
+        let tile = match (image, file) {
+            (Some(image), _) => {
+                // Its own shape; a pending decode holds a landscape box.
+                let (w, h) = image
+                    .size()
+                    .map_or((THUMB_W, THUMB_W * 0.6), |[w, h]| (w as f32, h as f32));
+                let mut dw = w.min(THUMB_W);
+                let mut dh = dw * h / w.max(1.);
+                if dh > THUMB_MAX_H {
+                    dh = THUMB_MAX_H;
+                    dw = dh * w / h.max(1.);
+                }
+                el().key(format!("chat-image-{key_id}-{i}"))
+                    .size(dw, dh)
+                    .radius(8.)
+                    .pixels_fit(image.pixels(), SurfaceFit::Fit)
+            }
+            (None, Some(f)) if !f.loading && !f.error.is_empty() => col()
+                .gap(2.)
+                .child(chip(glyph(Glyph::FileText, 14.).color(ink), name.clone()))
+                .child(
+                    text(format!("Couldn't load it: {}", f.error))
+                        .font(ty::ui(11.).lh(11. * 1.45))
+                        .color(t.muted)
+                        .wrap(),
+                ),
+            (None, Some(f)) if !f.loading => {
+                chip(glyph(Glyph::FileText, 14.).color(ink), name.clone())
+            }
+            _ => chip(
+                Spinner::new().px(14.).color(ink).build(t),
+                format!("Loading {name}…"),
+            ),
+        };
+        let target = id.clone();
+        tile.role("button")
+            .label(format!("Open {name}"))
+            .cursor(rune::Cursor::Pointer)
+            .on_press(move |s: &mut State| nav::navigate(Route::Object(target.clone()), s))
+    });
+    Some(col().gap(6.).items_start().children(tiles))
 }
 
 /// A row's avatar; an author that is an object opens it on click, with a hover ring and an
@@ -1358,7 +1473,8 @@ fn notice_row(t: &Theme, notice: roostr_core::lite_ui::Notice) -> El {
     r
 }
 
-/// The composer: the field (tags as pills), then the round send button in your colour.
+/// The composer: the files going with the message, the field (tags as pills; an image pasted
+/// or a file dropped becomes such a file), then the round send button in your colour.
 fn composer(d: &Disc, s: &State, cx: &mut Cx<State>, t: &Theme, layer: &mut Vec<El>) -> El {
     let key = d.key.clone();
     let store = &s.store;
@@ -1388,6 +1504,7 @@ fn composer(d: &Disc, s: &State, cx: &mut Cx<State>, t: &Theme, layer: &mut Vec<
     }
     let line = 14. * 1.45;
     let (k_edit, k_change, k_key, k_submit) = (key.clone(), key.clone(), key.clone(), key.clone());
+    let k_paste = key.clone();
     let field = text_input(&d.edit, ty::ui(14.).lh(line))
         .key("composer")
         .w_full()
@@ -1404,6 +1521,12 @@ fn composer(d: &Disc, s: &State, cx: &mut Cx<State>, t: &Theme, layer: &mut Vec<
         .on_input_key(move |s: &mut State, ev: &rune::KeyEvent, _: &mut Tx| {
             with(s, &k_key, |d, s| d.on_key(ev, s)).unwrap_or(false)
         })
+        // An image pasted becomes an attachment; text pastes as it always did.
+        .on_input_paste(
+            move |s: &mut State, content: &rune::ClipboardContent, _: &mut Tx| {
+                with(s, &k_paste, |d, s| d.on_paste(content, s)).unwrap_or(false)
+            },
+        )
         .on_submit(move |s: &mut State, _: &mut Tx| {
             with(s, &k_submit, |d, s| d.send(s));
         });
@@ -1436,12 +1559,13 @@ fn composer(d: &Disc, s: &State, cx: &mut Cx<State>, t: &Theme, layer: &mut Vec<
             });
         })
         .child(glyph(Glyph::KitArrowUp, 16.).color(colors.ink));
-    col()
+    let mut frame = col()
         .key(composer_box_key(&key))
         .fill(t.panel)
         .border(1., t.border)
         .radius(radius::MENU)
         .mt(10.)
+        .children(composer_attachments(d, s, t))
         .child(field)
         .child(
             row()
@@ -1453,7 +1577,99 @@ fn composer(d: &Disc, s: &State, cx: &mut Cx<State>, t: &Theme, layer: &mut Vec<
                 .min_h(48.)
                 .child(el())
                 .child(send),
+        );
+    if d.takes_files() {
+        let k_drop = key.clone();
+        frame = frame.on_drop_files(
+            move |s: &mut State, files: &[std::path::PathBuf], _: &mut Tx| {
+                let files = files.to_vec();
+                with(s, &k_drop, |d, s| d.drop_files(files, s));
+            },
+        );
+    }
+    frame
+}
+
+/// The files going with the next message, above the field: an image as a thumbnail, any
+/// other file by its name; each dimmed under a spinner while it uploads, with a × that takes
+/// it out.
+fn composer_attachments(d: &Disc, s: &State, t: &Theme) -> Option<El> {
+    if d.attachments.is_empty() {
+        return None;
+    }
+    const SIDE: f32 = 56.;
+    let images = s.get::<Images>();
+    let tiles = d.attachments.iter().map(|a| {
+        let image = a
+            .preview
+            .as_deref()
+            .and_then(|uri| images?.image(uri, SIDE));
+        let face = match image {
+            Some(image) => el()
+                .w_full()
+                .h_full()
+                .radius(8.)
+                .pixels_fit(image.pixels(), SurfaceFit::Fill),
+            None => col()
+                .w_full()
+                .h_full()
+                .center()
+                .gap(2.)
+                .px(4.)
+                .child(glyph(Glyph::FileText, 16.).color(t.muted))
+                .child(
+                    text(a.name.clone())
+                        .font(ty::ui(9.).lh(12.))
+                        .color(t.muted)
+                        .truncate(),
+                ),
+        };
+        let mut tile = el()
+            .key(format!("attachment-{}", a.local))
+            .label(a.name.clone())
+            .size(SIDE, SIDE)
+            .radius(8.)
+            .fill(t.hover)
+            .border(1., t.border)
+            .child(face);
+        if a.uploading() {
+            tile = tile.child(
+                row()
+                    .key(format!("attachment-uploading-{}", a.local))
+                    .pin(Some(0.), Some(0.), Some(0.), Some(0.))
+                    .radius(8.)
+                    .fill(t.panel.alpha(0.6))
+                    .center()
+                    .child(Spinner::new().px(16.).color(t.fg).build(t)),
+            );
+        }
+        let (k, local) = (d.key.clone(), a.local.clone());
+        tile.child(
+            row()
+                .key(format!("attachment-remove-{}", a.local))
+                .role("button")
+                .label(format!("Remove {}", a.name))
+                .pin(None, Some(-6.), Some(-6.), None)
+                .size(18., 18.)
+                .radius(9.)
+                .center()
+                .fill(t.panel)
+                .border(1., t.border)
+                .cursor(rune::Cursor::Pointer)
+                .on_press(move |s: &mut State| {
+                    with(s, &k, |d, _| d.remove_attachment(&local));
+                })
+                .child(glyph(Glyph::Close, 10.).color(t.fg)),
         )
+    });
+    Some(
+        row()
+            .flex_wrap()
+            .gaps(8., 8.)
+            .px(10.)
+            .pt(10.)
+            .children(tiles),
+    )
 }
 
 /// An exchange's reply audience: who the next message goes to, a private reply, and whether

@@ -15,7 +15,7 @@ use roostr_rt::{AsyncCx, BoxFuture, BoxStream, Executor, Ran, boxed, boxed_strea
 
 use crate::backend::{Backend, BackendEvent, JsonMap};
 use crate::cover::{CoverAsk, CoverAsks};
-use crate::create::{AddFile, PickFile};
+use crate::create::{AddFile, FileBytes, PickFile};
 use crate::harness::Harness;
 use crate::layout::SyncNow;
 use crate::nav::{NavEvent, Navigator};
@@ -52,6 +52,8 @@ pub struct State {
     pub covers: CoverAsks,
     /// How a picked file becomes a File object; installed by the editor.
     pub add_file: Option<AddFile>,
+    /// How a File object's bytes load; installed by the editor.
+    pub file_bytes: Option<FileBytes>,
     /// The host's file dialog; installed by the app (no picker: no file adds).
     pub pick_file: Option<PickFile>,
     /// The host's "sync now", where it has one (iOS).
@@ -95,6 +97,7 @@ impl State {
             profile: ProfileCache::default(),
             covers: CoverAsks::default(),
             add_file: None,
+            file_bytes: None,
             pick_file: None,
             sync_now: None,
             lite_requested: HashSet::new(),

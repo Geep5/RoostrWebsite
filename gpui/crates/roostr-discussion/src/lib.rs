@@ -5,6 +5,7 @@
 //! [`State`]; each shown discussion and pane keeps its state in this crate's slots, made by
 //! the view that first needs it (see `local://roostr-discussion-api.md`).
 
+mod attachments;
 mod chat;
 mod chat_page;
 mod discussion;

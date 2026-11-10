@@ -158,12 +158,6 @@ pub fn pick_file(s: &mut State) -> Task<Option<PickedFile>> {
     })
 }
 
-/// The name a pasted image gets: screenshots arrive with no real name.
-fn pasted_name(extension: &str) -> String {
-    let stamp = chrono::Local::now().format("%-m/%-d/%Y, %-I:%M:%S %p");
-    format!("Pasted image {stamp}.{extension}")
-}
-
 /// A pasted clipboard image as a file (Rune hands every pasted image over as PNG).
 pub fn pasted_image(image: &rune::ClipboardImage) -> PickedFile {
     pasted_png(image.png().to_vec())
@@ -172,7 +166,7 @@ pub fn pasted_image(image: &rune::ClipboardImage) -> PickedFile {
 /// PNG bytes from the clipboard as a file.
 pub fn pasted_png(bytes: Vec<u8>) -> PickedFile {
     PickedFile {
-        name: pasted_name("png"),
+        name: roostr_core::create::pasted_name("png"),
         mime: "image/png".to_string(),
         bytes,
     }
