@@ -12,7 +12,7 @@ use roostr_core::store::StoreEvent;
 use roostr_core::types::SyncPhase;
 use roostr_core::{Connection, State};
 use roostr_ui::ty::Weights as _;
-use roostr_ui::{Spinner, Theme, motion, outline_button, radius, ty};
+use roostr_ui::{Theme, motion, outline_button, radius, ty};
 use rune::{Anim, Color, Cursor, Curve, Cx, Drag, El, Phase, ScrollSpec, Tx, col, el, row, text};
 
 use crate::shell::{
@@ -520,25 +520,31 @@ fn boot(
             .w_full()
             .justify_center()
             .my(16.)
-            .child(text(line).font(ty::ui(16.)).color(color))
+            .px(24.)
+            .child(text(line).font(ty::ui(16.)).color(color).wrap().shrink())
     };
     match &s.store.connection {
         Connection::Ready => None,
         Connection::Connecting => {
-            let progress = roostr_core::sync_status::boot_progress(&s.store.status);
+            // The loading card the phone's first load uses, centred: a sweeping bar until the
+            // replica knows how far it has to go, then the percentage.
+            let status = &s.store.status;
+            let pct = roostr_core::sync_status::sync_progress(status).and_then(|p| p.pct);
+            let detail = roostr_core::sync_status::boot_progress(status)
+                .unwrap_or_else(|| "Connecting…".to_string());
             Some(
-                frame()
-                    .child(
-                        row()
-                            .w_full()
-                            .items_center()
-                            .justify_center()
-                            .gap(8.)
-                            .my(16.)
-                            .child(Spinner::new().color(t.muted).build(t))
-                            .child(text("Opening your vault…").font(ty::ui(16.)).color(t.fg)),
+                frame().justify_center().items_center().padding(16.).child(
+                    crate::mobile::progress_card(
+                        s,
+                        t,
+                        "boot-progress",
+                        "Opening your vault",
+                        pct,
+                        detail,
                     )
-                    .children(progress.map(|line| status(line, t.muted))),
+                    .w_full()
+                    .max_w(380.),
+                ),
             )
         }
         Connection::Failed(error) => {

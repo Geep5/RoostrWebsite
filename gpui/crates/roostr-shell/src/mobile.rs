@@ -1072,7 +1072,6 @@ fn spaces(s: &State, t: &Theme) -> El {
 /// total isn't known yet) and what has arrived.
 fn loading_card(s: &State, t: &Theme) -> El {
     let status = &s.store.status;
-    let colour = roostr_ui::color::hex(&s.store.chat_color).unwrap_or(t.accent);
     let progress = sync_progress(status);
     let pct = progress.as_ref().and_then(|p| p.pct);
     // The percentage sits in the head, so the line says counts only.
@@ -1085,30 +1084,48 @@ fn loading_card(s: &State, t: &Theme) -> El {
         (None, Some(d)) => d.clone(),
         (None, None) => format!("{} changes imported", count(status.imported)),
     };
+    progress_card(
+        s,
+        t,
+        "m-importing",
+        "Loading your vault",
+        pct,
+        format!("{detail}. Spaces appear as they arrive."),
+    )
+    .mb(12.)
+}
+
+/// A loading card: `title` with the percentage when known, a progress bar in the person's own
+/// colour (sweeping while `pct` is `None`) and a muted `detail` line. The phone's first load
+/// and the boot screen both use it.
+pub(crate) fn progress_card(
+    s: &State,
+    t: &Theme,
+    key: &str,
+    title: &str,
+    pct: Option<u64>,
+    detail: String,
+) -> El {
+    let colour = roostr_ui::color::hex(&s.store.chat_color).unwrap_or(t.accent);
     let head = row()
         .w_full()
         .center_y()
-        .child(
-            text("Loading your vault")
-                .font(ty::ui(14.).semibold())
-                .color(t.fg),
-        )
+        .child(text(title.to_owned()).font(ty::ui(14.).semibold()).color(t.fg))
         .child(spacer())
         .children(pct.map(|pct| {
             text(format!("{pct}%"))
                 .font(ty::ui(13.).medium().features("'tnum' 1"))
                 .color(t.muted)
         }));
-    let bar = roostr_ui::Progress::new("m-importing-bar")
+    let bar = roostr_ui::Progress::new(format!("{key}-bar"))
         .size(roostr_ui::KitSize::Small)
         .color(colour)
         .loading(pct.is_none())
         .value(pct.map_or(0., |pct| pct as f32))
         .build(t);
     col()
-        .key("m-importing")
+        .key(key.to_owned())
         .role("status")
-        .mb(12.)
         .padding(14.)
         .gap(10.)
         .radius(12.)
@@ -1117,7 +1134,7 @@ fn loading_card(s: &State, t: &Theme) -> El {
         .child(head)
         .child(bar)
         .child(
-            text(format!("{detail}. Spaces appear as they arrive."))
+            text(detail)
                 .font(ty::ui(12.).lh(12. * 1.35))
                 .color(t.muted)
                 .wrap(),
