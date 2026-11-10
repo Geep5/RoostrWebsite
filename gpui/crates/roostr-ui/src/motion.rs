@@ -1,5 +1,5 @@
 //! Motion: the Svelte app's CSS timings as Rune curves and springs, plus Roostr's own touches
-//! (press scale, bouncy popups, icon flights, rolling numbers). Every UI crate animates through
+//! (press scale, bouncy popups, rolling numbers). Every UI crate animates through
 //! this module.
 //!
 //! - Tweens match the Svelte CSS (`transition: … 0.15s ease`); CSS `ease` is
@@ -7,12 +7,11 @@
 //! - Springs settle a gesture release ([`release_spring`]) and open popups, dialogs and sheets
 //!   with a slight bounce ([`POP`], [`SHEET_OPEN`]); their exits stay instant.
 //! - Tappable things shrink while held ([`pressable`]).
-//! - An object's icon flies from where it was opened to the page it opens ([`IconFlight`]).
 //! - Changing counts roll their digits ([`rolling_count`], [`rolling_text`]).
 //! - Looping indicators (sync pulse, typing dots, spinners) use `El::looping`.
 //! - Reduced motion is Rune's: spatial travel snaps and opacity, presence and colour take a
-//!   short fade (`REDUCED_FADE`); press scale is off, nothing flies (the icons crossfade in
-//!   place) and rolling digits crossfade. [`reduced`] reports it for code that picks other motion.
+//!   short fade (`REDUCED_FADE`); press scale is off and rolling digits crossfade. [`reduced`]
+//!   reports it for code that picks other motion.
 //! - Motion never gates input: menus, dialogs and sheets take focus and keys at once, and
 //!   anything interactive leaves without an exit animation holding focus.
 //!
@@ -20,7 +19,7 @@
 //! `Tx::motion_curve`) pass [`Tween::anim`]; where it takes a `Spring` (`El::motion`,
 //! `Tx::color_motion`) pass [`Tween::spring`], a zero-bounce spring of the same length.
 
-use rune::{Anim, Color, Curve, Easing, Effect, El, Spring, SpringPair, TextStyle, Transition, Tx};
+use rune::{Anim, Color, Curve, Easing, Effect, El, Spring, SpringPair, TextStyle, Transition};
 use rune_kit::RollingText;
 
 use crate::Theme;
@@ -203,108 +202,6 @@ pub fn rolling_text(
         .build(&t.rk)
 }
 
-/// The matched id (`El::matched`) of an object's icon at one place it shows: `place` names that
-/// spot uniquely in the window and includes the object id (`"tree:<row key>"`,
-/// `"table:<set>:<object>"`), so no two present icons share an id.
-pub fn icon_id(place: &str) -> String {
-    format!("obj-icon:{place}")
-}
-
-/// Shared-element flight of an object's icon from where it was opened (a sidebar row, a
-/// pinned card, a table row, a phone tile) to the header of the page that opens. Keep one in
-/// the app state.
-///
-/// - Every source icon goes through [`IconFlight::source`]; it carries its [`icon_id`] in each
-///   commit, so the runtime knows where it was seen.
-/// - The press that opens the object calls [`IconFlight::launch`] with that id before
-///   navigating. In that commit the source icon remounts under another key without the id (the
-///   matched element leaves) and the page header icon, through [`IconFlight::target`], mounts
-///   with it: Rune flies the icon from the row to the header on its layout spring.
-/// - Only the launched-from source drops the id, and only the target of the launched object
-///   takes it, so one present element holds each id at a time.
-/// - The app calls [`IconFlight::settle`] after each poll. A launch whose page no longer shows
-///   ends there, so its source holds its id again and flies next time. A source a newer launch
-///   replaced gets its id back there too, a commit after the old page left (getting it back in
-///   the same commit would fly the old header's icon back to it).
-/// - Under Reduce Motion nothing flies: the header icon appears in place.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct IconFlight {
-    /// The object launched and the matched id of the icon it flies from.
-    launched: Option<(String, String)>,
-    /// The source of the launch before, kept without its id until [`IconFlight::settle`].
-    retired: Option<String>,
-}
-
-impl IconFlight {
-    /// Nothing launched: what a view reads before any launch (`s.get::<IconFlight>()
-    /// .unwrap_or(&IconFlight::IDLE)`).
-    pub const IDLE: IconFlight = IconFlight {
-        launched: None,
-        retired: None,
-    };
-
-    /// The object `object` is opening from the icon matched as `from` (an [`icon_id`]), in the
-    /// handler whose commit opens its page. The flight draws outside every clip until it lands
-    /// (`Tx::unclipped_flights`): the header sits in the page's scroll viewport, whose clip would
-    /// otherwise hide the icon for the stretch it crosses the sidebar.
-    pub fn launch(&mut self, object: &str, from: String, tx: &mut Tx) {
-        if let Some((_, old)) = self.launched.take()
-            && old != from
-        {
-            self.retired = Some(old);
-        }
-        self.launched = Some((object.to_owned(), from));
-        tx.unclipped_flights();
-    }
-
-    /// After a poll, once the commit of the last launch has been drawn: the retired source
-    /// takes its id back, and the launch ends unless `shown(object)` says its page still shows.
-    /// True when that changed what the views draw.
-    pub fn settle(&mut self, shown: impl Fn(&str) -> bool) -> bool {
-        let mut changed = self.retired.take().is_some();
-        if self.launched.as_ref().is_some_and(|(o, _)| !shown(o)) {
-            self.launched = None;
-            changed = true;
-        }
-        changed
-    }
-
-    /// Whether a launch is under way (its page still shows): commits then may match its
-    /// icon again and should let those flights out of clips too (`Tx::unclipped_flights`).
-    pub fn active(&self) -> bool {
-        self.launched.is_some()
-    }
-
-    /// The matched id `object`'s page header icon takes, if it was launched.
-    pub fn launched(&self, object: &str) -> Option<&str> {
-        self.launched
-            .as_ref()
-            .filter(|(o, _)| o == object)
-            .map(|(_, id)| id.as_str())
-    }
-
-    /// A source icon at `id` ([`icon_id`]): keyed and matched there, or, when its object was
-    /// launched from here (or the launch before was), keyed apart without the id.
-    pub fn source(&self, icon: El, id: &str) -> El {
-        let launched_here = self.launched.as_ref().is_some_and(|(_, from)| from == id)
-            || self.retired.as_deref() == Some(id);
-        if launched_here {
-            icon.key(format!("{id}#launched"))
-        } else {
-            icon.key(id).matched(id)
-        }
-    }
-
-    /// The page header icon of `object`, keyed by `key` (stable for that object). When `object`
-    /// was launched, it takes the source's id, keyed by it so it mounts fresh and flies in.
-    pub fn target(&self, icon: El, object: &str, key: &str) -> El {
-        match self.launched(object) {
-            Some(id) => icon.key(format!("{key}<{id}")).matched(id),
-            None => icon.key(key),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -327,117 +224,5 @@ mod tests {
             other => panic!("{other:?}"),
         }
         assert_eq!(SHEET_SNAP.spring().duration, 0.18);
-    }
-
-    /// A sidebar of one row whose 20 pt icon opens a page with a 40 pt header icon.
-    #[derive(Default)]
-    struct App {
-        flight: IconFlight,
-        open: bool,
-    }
-
-    const FROM: [f32; 4] = [0.0, 0.0, 20.0, 20.0];
-    const TO: [f32; 4] = [100.0, 0.0, 40.0, 40.0];
-
-    fn view(s: &App, _: &mut rune::Cx<App>) -> El {
-        let id = icon_id("tree:x");
-        let icon = |side: f32| rune::el().size(side, side).fill(Color::WHITE).radius(4.0);
-        let sidebar = rune::el()
-            .key("sidebar")
-            .size(100.0, 200.0)
-            .child(s.flight.source(icon(20.0), &id));
-        let mut page = rune::el().key("page").size(200.0, 200.0);
-        if s.open {
-            page = page.child(s.flight.target(icon(40.0), "x", "page-icon"));
-        }
-        rune::row().size(300.0, 200.0).child(sidebar).child(page)
-    }
-
-    fn open(reduced: bool) -> (rune::Runtime<App>, String) {
-        let mut rt = rune::Runtime::new(
-            App::default(),
-            view,
-            (300.0, 200.0),
-            rune::Env::new(true, 1.0),
-        );
-        rt.set_system_reduced_motion(reduced);
-        rt.frame(0.0);
-        let id = icon_id("tree:x");
-        assert_eq!(rt.presented(&id).expect("source").0, FROM);
-        rt.update(|s, tx| {
-            s.flight.launch("x", icon_id("tree:x"), tx);
-            s.open = true;
-        });
-        rt.frame(1.0 / 120.0);
-        (rt, format!("page-icon<{id}"))
-    }
-
-    #[test]
-    fn an_opened_objects_icon_flies_from_its_row_to_the_header() {
-        let (mut rt, target) = open(false);
-        let first = rt.presented(&target).expect("target").0;
-        assert!(
-            (first[0] - FROM[0]).abs() < 8.0 && (first[2] - FROM[2]).abs() < 8.0,
-            "starts where the row icon was: {first:?}"
-        );
-        // The row keeps its icon, under its launched key and without the id.
-        assert!(rt.presented("obj-icon:tree:x#launched").is_some());
-        for _ in 0..240 {
-            rt.frame(1.0 / 120.0);
-        }
-        assert_eq!(rt.presented(&target).expect("target").0, TO);
-    }
-
-    #[test]
-    fn under_reduced_motion_the_header_icon_appears_in_place() {
-        let (rt, target) = open(true);
-        assert_eq!(rt.presented(&target).expect("target").0, TO);
-    }
-
-    #[test]
-    fn only_the_launched_object_takes_the_id() {
-        let mut f = IconFlight::default();
-        f.launch("x", icon_id("tree:x"), &mut Tx::default());
-        assert_eq!(f.launched("x"), Some("obj-icon:tree:x"));
-        assert_eq!(f.launched("y"), None);
-    }
-
-    /// Whether a source icon at `place` holds its id when `f` draws it.
-    fn holds_id(f: &IconFlight, place: &str) -> bool {
-        fn view(s: &(IconFlight, String), _: &mut rune::Cx<(IconFlight, String)>) -> El {
-            s.0.source(rune::el().size(10.0, 10.0), &s.1)
-        }
-        let id = icon_id(place);
-        let mut rt = rune::Runtime::new(
-            (f.clone(), id.clone()),
-            view,
-            (20.0, 20.0),
-            rune::Env::new(true, 1.0),
-        );
-        rt.frame(0.0);
-        rt.presented(&id).is_some()
-    }
-
-    #[test]
-    fn a_replaced_source_gets_its_id_back_a_poll_later() {
-        let mut f = IconFlight::default();
-        f.launch("x", icon_id("tree:x"), &mut Tx::default());
-        f.launch("y", icon_id("tree:y"), &mut Tx::default());
-        // The old page's header leaves in this commit: the old source must not take the id yet.
-        assert!(!holds_id(&f, "tree:x"));
-        assert!(!holds_id(&f, "tree:y"));
-        assert!(f.settle(|o| o == "y"));
-        assert!(holds_id(&f, "tree:x"));
-        assert_eq!(f.launched("y"), Some("obj-icon:tree:y"));
-        assert!(!f.settle(|o| o == "y"), "nothing left to settle");
-    }
-
-    #[test]
-    fn a_launch_ends_when_its_page_goes_so_the_source_flies_again() {
-        let mut f = IconFlight::default();
-        f.launch("x", icon_id("tree:x"), &mut Tx::default());
-        assert!(f.settle(|_| false));
-        assert_eq!(f, IconFlight::IDLE);
-        assert!(holds_id(&f, "tree:x"));
     }
 }

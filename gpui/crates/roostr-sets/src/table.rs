@@ -25,7 +25,7 @@ use roostr_properties::{
 };
 use roostr_rt::Task;
 use roostr_ui::color::{rgb, rgba};
-use roostr_ui::motion::{self, IconFlight};
+use roostr_ui::motion;
 use roostr_ui::overlay::{self, Placement};
 use roostr_ui::tags::badge_colors;
 use roostr_ui::ty::Weights as _;
@@ -690,13 +690,7 @@ fn on_row_press(s: &mut State, id: &str, row: &str, tx: &mut Tx) {
         set_selection(s, id, Vec::new());
         return;
     }
-    s.slot::<IconFlight>().launch(row, row_icon_id(id, row), tx);
     common::open_object(row, s);
-}
-
-/// The matched id of row `row`'s Name icon in table `id` (unique per table instance).
-pub(crate) fn row_icon_id(id: &str, row: &str) -> String {
-    motion::icon_id(&format!("table:{id}:{row}"))
 }
 
 /// The rubber band: a press-and-drag anywhere in the data view below its
@@ -2364,10 +2358,8 @@ fn body_row(
             &r.type_key,
             c.space,
         );
-        let icon = el().child(common::icon(s, &glyph, ty::ui(13.0).weight(550.)));
-        let flight = s.get::<IconFlight>().unwrap_or(&IconFlight::IDLE);
         el().mr(4.0)
-            .child(flight.source(icon, &row_icon_id(id, &r.id)))
+            .child(common::icon(s, &glyph, ty::ui(13.0).weight(550.)))
     };
     // Opaque, so the cells scrolled under it don't show through; the row's
     // selection and hover are painted again on top of that.

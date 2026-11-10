@@ -6,7 +6,6 @@
 use std::collections::HashMap;
 
 use roostr_core::{QueryRow, RelationDef, State, Value, api};
-use roostr_ui::motion::IconFlight;
 use roostr_ui::ty::Weights as _;
 use roostr_ui::{Theme, color::rgb, motion, shadow, ty};
 use rune::{Color, Cursor, Cx, Drag, El, Phase, PointerPress, Transition, Tx, col, el, row, text};
@@ -242,7 +241,7 @@ fn column_at(s: &State, id: &str, x: f32, y: f32) -> Option<Column> {
 /// A press, drag and release on a card: a press released without travel
 /// opens the record; past the threshold the card drags (the column under
 /// the pointer lights up) and a release over another column moves it there.
-fn card_drag(s: &mut State, id: &str, card: &CardRef, d: &Drag, tx: &mut Tx) {
+fn card_drag(s: &mut State, id: &str, card: &CardRef, d: &Drag) {
     let [x, y] = d.window_point();
     match d.phase {
         Phase::Down => {}
@@ -270,8 +269,6 @@ fn card_drag(s: &mut State, id: &str, card: &CardRef, d: &Drag, tx: &mut Tx) {
             if k.drag.take().is_none() {
                 let inside = d.x >= 0. && d.y >= 0. && d.x <= d.w && d.y <= d.h;
                 if !d.cancelled() && inside {
-                    let from = card_icon_id(id, &card.from, &card.id);
-                    s.slot::<IconFlight>().launch(&card.id, from, tx);
                     common::open_object(&card.id, s);
                 }
                 return;
@@ -348,22 +345,7 @@ fn css_named_color(name: &str) -> Option<Color> {
     Some(rgb(value))
 }
 
-/// The matched id of a card's icon: per board, column and object (a tag can
-/// put one object in several columns).
-pub(crate) fn card_icon_id(view: &str, column: &str, object: &str) -> String {
-    motion::icon_id(&format!("kanban:{view}:{column}:{object}"))
-}
-
-/// A card's face; `icon_id` matches its icon for flights (`None` for the drag ghost).
-fn card_body(s: &State, t: &Theme, icon: &str, name: &str, icon_id: Option<&str>) -> El {
-    let glyph = el().child(common::icon(s, icon, ty::ui(13.)));
-    let glyph = match icon_id {
-        Some(id) => s
-            .get::<IconFlight>()
-            .unwrap_or(&IconFlight::IDLE)
-            .source(glyph, id),
-        None => glyph,
-    };
+fn card_body(s: &State, t: &Theme, icon: &str, name: &str) -> El {
     row()
         .center_y()
         .gap(8.)
@@ -373,7 +355,7 @@ fn card_body(s: &State, t: &Theme, icon: &str, name: &str, icon_id: Option<&str>
         .radius(8.)
         .px(10.)
         .py(8.)
-        .child(glyph)
+        .child(common::icon(s, icon, ty::ui(13.)))
         .child(
             text(name.to_string())
                 .font(ty::ui(13.))
@@ -489,15 +471,14 @@ pub(crate) fn view(
                 probe.clone()
             };
             let (drag_view, menu_view, menu_id) = (id.clone(), id.clone(), r.id.clone());
-            let icon_id = card_icon_id(&id, &group.id, &r.id);
             let dragged = k.drag.as_ref().is_some_and(|d| d.card.id == r.id);
-            let mut card_el = card_body(s, t, &card.icon, &card.name, Some(&icon_id))
+            let mut card_el = card_body(s, t, &card.icon, &card.name)
                 .key(key)
                 .cursor(Cursor::Grab)
                 .hover_group()
                 .child(hover_border(8., t.accent))
-                .on_drag(move |s: &mut State, d: &mut Drag, tx: &mut Tx| {
-                    card_drag(s, &drag_view, &card, d, tx)
+                .on_drag(move |s: &mut State, d: &mut Drag, _: &mut Tx| {
+                    card_drag(s, &drag_view, &card, d)
                 })
                 .on_secondary_press(move |s: &mut State, p: PointerPress, _: &mut Tx| {
                     context_menu::open(
@@ -540,7 +521,7 @@ pub(crate) fn view(
     if let Some(drag) = &k.drag {
         // The drag preview: the card at 204px, under the pointer where it was grabbed.
         layer.push(
-            card_body(s, t, &drag.card.icon, &drag.card.name, None)
+            card_body(s, t, &drag.card.icon, &drag.card.name)
                 .w(204.)
                 .opacity(0.9)
                 .box_shadow(shadow::drag())

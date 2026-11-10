@@ -1,13 +1,11 @@
 //! The table's motion, headless: a held row shrinks (not while a cell of it is
-//! edited), its Name icon carries its flight id until the row opens, and the
-//! selection count rolls.
+//! edited) and the selection count rolls.
 #![cfg(not(target_family = "wasm"))]
 
 mod support;
 
 use roostr_core::types::Value;
 use roostr_sets::DataViewKind;
-use roostr_ui::motion::{IconFlight, icon_id};
 use rune::{Mods, PhysicalInput};
 use serde_json::json;
 use support::{App, Vault, object, relation, value};
@@ -114,19 +112,6 @@ fn a_held_row_shrinks_but_not_while_its_cell_is_edited() {
     let (x, y) = centre(&app, "name-e2");
     app.rt.pointer_up(x, y);
     app.step();
-}
-
-#[test]
-fn the_name_icon_carries_its_flight_id_until_its_row_opens() {
-    let mut app = emails();
-    let id = icon_id("table:q1:e0");
-    assert!(app.shown(&id), "the Name icon is keyed by its flight id");
-    app.click("name-e0");
-    let flight = app.s().get::<IconFlight>().cloned().unwrap_or_default();
-    assert_eq!(flight.launched("e0"), Some(id.as_str()), "launched from it");
-    assert!(!app.shown(&id), "the row gives up the id to the header");
-    assert!(app.shown(&format!("{id}#launched")), "and keeps its icon");
-    assert!(app.shown(&icon_id("table:q1:e1")), "other rows keep theirs");
 }
 
 #[test]

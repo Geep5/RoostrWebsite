@@ -18,7 +18,6 @@ use roostr_core::types::{Object, Value, field_str, is_builtin_tool, is_locked_to
 use roostr_core::{ObjectSlot, State, StoreEvent, api, cover::CoverAsk};
 use roostr_discussion::DiscussionOptions;
 use roostr_sets::DataViewKind;
-use roostr_ui::motion::IconFlight;
 use roostr_ui::overlay::anchored;
 use roostr_ui::{
     Button, Glyph, Images, KitSize, Placement, Textarea, TextareaState, Theme, glyph, ty,
@@ -63,10 +62,6 @@ pub(crate) fn pane_flags(object: &Object) -> (bool, bool) {
     let has_pane = has_discussion || t != "chat";
     (has_discussion, has_pane)
 }
-
-/// The key of the page header's icon; a launched [`IconFlight`] keys it
-/// `obj-icon-face<{matched id}` instead, so it mounts fresh and flies in.
-const HEADER_ICON: &str = "obj-icon-face";
 
 /// Every object page the shell shows, by object id.
 #[derive(Default)]
@@ -412,155 +407,6 @@ fn note(key: &str, line: String, mobile: bool, t: &Theme) -> El {
         .child(text(line).font(ty::ui(12.)).color(t.muted).wrap().shrink())
 }
 
-/// The page header's icon: the object's image, its emoji, or its type's
-/// icon dimmed when it has neither.
-fn icon_face(
-    t: &Theme,
-    images: Option<&Images>,
-    mobile: bool,
-    emoji: &str,
-    image: &str,
-    icon: &str,
-) -> El {
-    let frame = row().center();
-    if !image.is_empty() {
-        let size = if mobile { 72. } else { 96. };
-        let mut frame = frame.size(size, size).radius(18.).clip_rounded(18.);
-        if let Some(image) = images.and_then(|i| i.image(image, size)) {
-            frame = frame.pixels_fit(image.pixels(), rune::SurfaceFit::Fill);
-        }
-        frame
-    } else if emoji.is_empty() {
-        let size = if mobile { 56. } else { 80. };
-        frame.size(size, size).opacity(0.5).child(
-            text(icon.to_string())
-                .font(ty::ui(32.).lh(32.))
-                .color(t.muted),
-        )
-    } else {
-        let (size, icon_size) = if mobile { (56., 47.25) } else { (80., 72.) };
-        let shown = match images {
-            Some(images) => roostr_ui::emoji_or_image_icon(icon, icon_size, images),
-            None => roostr_ui::emoji_text(icon, ty::ui(icon_size * 0.9).lh(icon_size)),
-        };
-        frame.size(size, size).child(shown)
-    }
-}
-
-/// `face` keyed as the header icon of `id`'s page. The icon an object was
-/// opened from (a sidebar row, a card, a table row) flies here
-/// ([`IconFlight`]). Only the page of the route the navigation went to
-/// takes the flight: the window shows one such page (the desktop's main
-/// column, the phone's top screen); the parent screen a phone's back-swipe
-/// draws under it never holds the id.
-fn flown(s: &State, id: &str, face: El) -> El {
-    if is_active(s, id) {
-        s.get::<IconFlight>()
-            .unwrap_or(&IconFlight::IDLE)
-            .target(face, id, HEADER_ICON)
-    } else {
-        face.key(HEADER_ICON)
-    }
-}
-
-/// The header icon's place above the title. Under a cover the icon
-/// overlaps its bottom edge.
-fn icon_holder(button: El, mobile: bool, covered: bool, flush: bool) -> El {
-    let holder = col().key("object-icon").items_start().child(button);
-    if mobile {
-        holder
-            .mt(if covered {
-                -cover::ICON_OVERLAP_PHONE
-            } else {
-                8.
-            })
-            .mb(2.)
-            .ml(16.)
-    } else {
-        holder
-            .mt(if covered { -cover::ICON_OVERLAP } else { 16. })
-            .mb(4.)
-            .ml(if flush { 0. } else { 44. })
-    }
-}
-
-/// The header icon's button. Built-in tools show their icon without any
-/// affordance; everything else gets a kit ghost button that toggles the
-/// emoji picker. Its box never shrinks: squeezed (a phone in landscape),
-/// the button's clip cut the emoji in half.
-fn icon_button(t: &Theme, id: &str, content: El, builtin_tool: bool) -> El {
-    if builtin_tool {
-        return el().key("obj-emoji").radius(14.).child(content);
-    }
-    let toggle = id.to_string();
-    Button::new("obj-emoji")
-        .ghost()
-        .size(KitSize::Px(0.))
-        .p(0.)
-        .h_auto()
-        .radius(14.)
-        .child(content)
-        .tooltip("Set icon")
-        .on_press(move |s: &mut State| {
-            if let Some(p) = page_mut(s, &toggle) {
-                p.show_emoji = !p.show_emoji;
-            }
-        })
-        .build(t)
-}
-
-/// While an object opened from an icon loads (its object, or its page
-/// state until the shell's next poll shows it), its header icon already
-/// stands in its place, from the object's summary: the flight starts in
-/// the commit that opens it, as the source icon lets go, and carries on
-/// into the loaded page's icon.
-fn opening(s: &State, t: &Theme, id: &str) -> Option<El> {
-    s.get::<IconFlight>()?.launched(id)?;
-    if !is_active(s, id) {
-        return None;
-    }
-    let store = &s.store;
-    let (emoji, image, type_key) = match store.object(id) {
-        Some(object) => (
-            field_str(&object.fields, "iconEmoji").to_string(),
-            field_str(&object.fields, "iconImage").to_string(),
-            object.type_key.clone(),
-        ),
-        None => {
-            let summary = store.summary(id)?;
-            let icon = summary.icon.clone();
-            if is_image_icon(&icon) {
-                (String::new(), icon, summary.type_key.clone())
-            } else {
-                (icon, String::new(), summary.type_key.clone())
-            }
-        }
-    };
-    // Tasks show a checkbox, not an icon.
-    if store.layout_of(&type_key) == "task" {
-        return None;
-    }
-    let icon = object_icon(store, &emoji, &type_key, s.nav.space());
-    let mobile = roostr_shell::is_mobile(s);
-    let face = flown(
-        s,
-        id,
-        icon_face(t, s.get::<Images>(), mobile, &emoji, &image, &icon),
-    );
-    let builtin = store
-        .object(id)
-        .is_some_and(|object| is_builtin_tool(&object.fields));
-    let button = icon_button(t, id, face, builtin);
-    let head = col()
-        .key("page-head")
-        .child(icon_holder(button, mobile, false, !mobile));
-    let mut article = col();
-    if !mobile {
-        article = article.px(16.);
-    }
-    Some(article.child(head).key("object-page"))
-}
-
 /// The page for `Route::Object(id)`.
 pub(crate) fn view(
     s: &State,
@@ -576,11 +422,6 @@ pub(crate) fn view(
             }
             _ => None,
         };
-        if error.is_none()
-            && let Some(opening) = opening(s, t, id)
-        {
-            return opening;
-        }
         return text(error.unwrap_or_else(|| "Loading…".into()))
             .font(ty::ui(12.))
             .color(t.muted);
@@ -655,8 +496,53 @@ pub(crate) fn view(
         head = head.mt(12.);
     }
     if !task {
-        let content = flown(s, id, icon_face(t, images, mobile, &emoji, &image, &icon));
-        let button = icon_button(t, id, content, builtin_tool);
+        let content = {
+            let frame = row().center();
+            if !image.is_empty() {
+                let size = if mobile { 72. } else { 96. };
+                let mut frame = frame.size(size, size).radius(18.).clip_rounded(18.);
+                if let Some(image) = images.and_then(|i| i.image(&image, size)) {
+                    frame = frame.pixels_fit(image.pixels(), rune::SurfaceFit::Fill);
+                }
+                frame
+            } else if emoji.is_empty() {
+                let size = if mobile { 56. } else { 80. };
+                frame
+                    .size(size, size)
+                    .opacity(0.5)
+                    .child(text(icon.clone()).font(ty::ui(32.).lh(32.)).color(t.muted))
+            } else {
+                let (size, icon_size) = if mobile { (56., 47.25) } else { (80., 72.) };
+                let shown = match images {
+                    Some(images) => roostr_ui::emoji_or_image_icon(&icon, icon_size, images),
+                    None => roostr_ui::emoji_text(&icon, ty::ui(icon_size * 0.9).lh(icon_size)),
+                };
+                frame.size(size, size).child(shown)
+            }
+        };
+        // Built-in tools show their icon without any affordance; everything
+        // else gets a kit ghost button that toggles the emoji picker. Its
+        // box never shrinks: squeezed (a phone in landscape), the button's
+        // clip cut the emoji in half.
+        let button = if builtin_tool {
+            el().key("obj-emoji").radius(14.).child(content)
+        } else {
+            let toggle = id.to_string();
+            Button::new("obj-emoji")
+                .ghost()
+                .size(KitSize::Px(0.))
+                .p(0.)
+                .h_auto()
+                .radius(14.)
+                .child(content)
+                .tooltip("Set icon")
+                .on_press(move |s: &mut State| {
+                    if let Some(p) = page_mut(s, &toggle) {
+                        p.show_emoji = !p.show_emoji;
+                    }
+                })
+                .build(t)
+        };
         if p.show_emoji {
             let (pick, close) = (id.to_string(), id.to_string());
             let picker = roostr_properties::EmojiPicker::new("object-emoji")
@@ -670,7 +556,24 @@ pub(crate) fn view(
                 .build(s, cx, t, layer);
             layer.push(anchored(picker, "object-icon", Placement::BottomStart, 6.));
         }
-        head = head.child(icon_holder(button, mobile, covered, flush));
+        // Under a cover the icon overlaps its bottom edge.
+        let mut holder = col().key("object-icon").items_start().child(button);
+        holder = if mobile {
+            holder
+                .mt(if covered {
+                    -cover::ICON_OVERLAP_PHONE
+                } else {
+                    8.
+                })
+                .mb(2.)
+                .ml(16.)
+        } else {
+            holder
+                .mt(if covered { -cover::ICON_OVERLAP } else { 16. })
+                .mb(4.)
+                .ml(if flush { 0. } else { 44. })
+        };
+        head = head.child(holder);
     }
 
     let size = if mobile { 32. } else { 34. };

@@ -535,10 +535,8 @@ pub(crate) fn widget(
         let mut items: Vec<El> = shown
             .iter()
             .map(|r| {
-                let place = format!("pinned:{id}:{}", r.id);
-                let icon = icon_text(s, &row_icon(r), 15., ty::ui(15.).medium()).color(t.fg);
                 card(t, format!("w-card:{}", r.id), r.id == current_id)
-                    .child(crate::shell::flight_source(s, icon, &place))
+                    .child(icon_text(s, &row_icon(r), 15., ty::ui(15.).medium()).color(t.fg))
                     .child(
                         text(row_name(r))
                             .font(ty::ui(13.).medium())
@@ -547,7 +545,7 @@ pub(crate) fn widget(
                             .shrink()
                             .min_w(0.),
                     )
-                    .on_press_tx(crate::shell::open_from(r.id.clone(), place))
+                    .on_press(open(r.id.clone()))
             })
             .collect();
         if w.rows.len() > GALLERY_LIMIT {
@@ -600,19 +598,21 @@ pub(crate) fn widget(
         .child(el().h(ROW_PITCH * drawn.start as f32));
     for r in &w.rows[drawn.clone()] {
         let current = r.id == current_id;
-        let place = format!("pinned:{id}:{}", r.id);
-        let icon = list_text(t, icon_text(s, &row_icon(r), 11., ty::ui(11.)), current);
         rows = rows.child(
             col().pb(1.).child(
                 line(t, format!("w-row-{}", r.id), current)
-                    .child(crate::shell::flight_source(s, icon, &place))
+                    .child(list_text(
+                        t,
+                        icon_text(s, &row_icon(r), 11., ty::ui(11.)),
+                        current,
+                    ))
                     .child(
                         list_text(t, text(row_name(r)).font(ty::ui(12.)), current)
                             .truncate()
                             .shrink()
                             .min_w(0.),
                     )
-                    .on_press_tx(crate::shell::open_from(r.id.clone(), place)),
+                    .on_press(open(r.id.clone())),
             ),
         );
     }

@@ -14,7 +14,6 @@ use std::collections::HashSet;
 
 use roostr_core::State;
 use roostr_ui::Images;
-use roostr_ui::motion::IconFlight;
 use rune::{AppSpec, Cx, El, Tx, Waker};
 
 #[cfg(not(target_family = "wasm"))]
@@ -39,11 +38,6 @@ pub fn setup(s: &mut State, waker: Waker) {
 pub fn poll(s: &mut State, _clock: f64, tx: &mut Tx) -> bool {
     let ran = s.poll();
     fetch_images(s);
-    // An opened object's icon can be matched again when its page's state lands at a poll (the
-    // stand-in header gives way to the page's): that leg flies outside the page's clip too.
-    if s.get::<IconFlight>().is_some_and(IconFlight::active) {
-        tx.unclipped_flights();
-    }
     if let Some(wait) = ran.next_timer {
         tx.wake_after(wait);
     }

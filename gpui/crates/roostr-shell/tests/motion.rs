@@ -1,6 +1,4 @@
-//! The shell's motion: held sidebar cards and rows shrink, an object opened
-//! from a sidebar row flies its icon to the page's header, a phone space tile
-//! flies to its home's header, and counts roll their digits.
+//! The shell's motion: held sidebar cards and rows shrink and counts roll their digits.
 #![cfg(not(target_family = "wasm"))]
 
 mod common;
@@ -17,9 +15,6 @@ use roostr_core::types::{
 };
 use roostr_core::{Backend, BackendEvent, JsonMap, State};
 use roostr_rt::{BoxFuture, BoxStream};
-use roostr_shell::Pages;
-use roostr_ui::motion::IconFlight;
-use rune::{Color, Cx, El, col, el, text};
 use serde_json::Value as Json;
 
 use common::Harness;
@@ -145,18 +140,6 @@ impl Backend for Shared {
     }
 }
 
-/// An object page with its header icon (`test-page-icon`) taking the icon flight, as the
-/// app's object page does.
-fn icon_page(s: &State, _: &mut Cx<State>, route: &Route, _: &mut Vec<El>) -> El {
-    let mut page = col().key("test-page").w_full().gap(12.);
-    if let Route::Object(id) = route {
-        let flight = s.get::<IconFlight>().unwrap_or(&IconFlight::IDLE);
-        let icon = el().size(40., 40.).fill(Color::WHITE);
-        page = page.child(flight.target(icon, id, "test-page-icon"));
-    }
-    page.child(text("A page of the shell's tests."))
-}
-
 fn vault(rows: Vec<QueryRow>) -> (Arc<Vault>, mpsc::UnboundedSender<Result<BackendEvent>>) {
     let (tx, rx) = mpsc::unbounded();
     let vault = Arc::new(Vault {
@@ -167,11 +150,7 @@ fn vault(rows: Vec<QueryRow>) -> (Arc<Vault>, mpsc::UnboundedSender<Result<Backe
 }
 
 fn harness(vault: &Arc<Vault>, size: (f32, f32)) -> Harness {
-    let pages = Pages {
-        page: icon_page,
-        ..common::test_pages()
-    };
-    let mut h = Harness::with_pages(Arc::new(Shared(vault.clone())), size, pages);
+    let mut h = Harness::new(Arc::new(Shared(vault.clone())), size);
     settle(&mut h);
     h
 }
@@ -256,93 +235,6 @@ fn a_held_card_stays_put_under_reduced_motion() {
     let head = h.rect("widget-head:q-1").expect("the pinned card's head");
     let (held, _) = hold(&mut h, center(head), "widget-head:q-1");
     assert_eq!(held, 1.);
-}
-
-#[test]
-fn an_object_opened_from_a_sidebar_row_flies_its_icon_to_the_page() {
-    let (vault, _tx) = vault(vec![task("t-1", false)]);
-    let mut h = harness(&vault, (1280., 800.));
-    h.update(|s| navigate(Route::Graph { focus: None }, s));
-    let source = "obj-icon:recent:page-2";
-    let from =
-        h.rt.presented(source)
-            .expect("the row's icon carries its id")
-            .0;
-
-    let row = center(h.rect("recent:page-2").expect("the recent row"));
-    h.rt.pointer_move(row[0], row[1]);
-    h.rt.pointer_down(row[0], row[1]);
-    h.rt.frame(1. / 60.);
-    h.rt.pointer_up(row[0], row[1]);
-    h.frame();
-    assert_eq!(
-        h.state()
-            .get::<IconFlight>()
-            .and_then(|f| f.launched("page-2")),
-        Some(source),
-        "the press launched the row's icon"
-    );
-    // The row keeps its icon under another key; the page's header icon holds the id.
-    assert!(h.has(&format!("{source}#launched")));
-    assert!(!h.has(source));
-    let target = format!("test-page-icon<{source}");
-    let first = h.rt.presented(&target).expect("the header icon").0;
-    h.settle();
-    let rest = h.rt.presented(&target).expect("the header icon").0;
-    let dist = |a: [f32; 4], b: [f32; 4]| (a[0] - b[0]).hypot(a[1] - b[1]);
-    assert!(
-        dist(first, from) < dist(rest, from) / 2.,
-        "the header icon starts near the row's icon ({from:?}): {first:?}, rests at {rest:?}"
-    );
-    assert_eq!(rest[2], 40., "and lands at its own size");
-
-    // Opened again from elsewhere, no other icon takes the id, and once the page has gone the
-    // row holds its id again, so opening from it flies once more.
-    h.update(|s| navigate(Route::Object("q-1".into()), s));
-    assert!(!h.has(&target));
-    h.settle();
-    assert!(h.has(source), "the row's icon holds its id again");
-    let row = center(h.rect("recent:page-2").expect("the recent row"));
-    h.rt.pointer_move(row[0], row[1]);
-    h.rt.pointer_down(row[0], row[1]);
-    h.rt.frame(1. / 60.);
-    h.rt.pointer_up(row[0], row[1]);
-    h.frame();
-    let again = h.rt.presented(&target).expect("the header icon").0;
-    assert!(
-        dist(again, from) < dist(rest, from) / 2.,
-        "it flies from the row again: {again:?}"
-    );
-}
-
-#[test]
-fn a_phone_space_tile_flies_to_its_home() {
-    let (vault, _tx) = vault(vec![task("t-1", false)]);
-    let mut h = harness(&vault, (390., 844.));
-    h.update(|s| navigate(Route::Home, s));
-    let source = "obj-icon:m-space:sp-1";
-    let from =
-        h.rt.presented(source)
-            .expect("the space tile carries its id")
-            .0;
-
-    let card = center(h.rect("m-card-sp-1").expect("the space card"));
-    h.rt.pointer_move(card[0], card[1]);
-    h.rt.pointer_down(card[0], card[1]);
-    h.rt.frame(1. / 60.);
-    h.rt.pointer_up(card[0], card[1]);
-    h.frame();
-    assert!(h.has("m-space-home"));
-    let target = format!("m-home-tile<{source}");
-    let first = h.rt.presented(&target).expect("the home's tile").0;
-    h.settle();
-    let rest = h.rt.presented(&target).expect("the home's tile").0;
-    let dist = |a: [f32; 4], b: [f32; 4]| (a[0] - b[0]).hypot(a[1] - b[1]);
-    assert!(
-        dist(first, from) < dist(rest, from) / 2.,
-        "the home's tile starts at the card's ({from:?}): {first:?}, rests at {rest:?}"
-    );
-    assert_eq!(rest[2], 52.);
 }
 
 #[test]

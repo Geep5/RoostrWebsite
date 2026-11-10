@@ -76,7 +76,6 @@ fn on_poll(s: &mut State) -> bool {
     changed |= open_shown_route(s);
     changed |= top_pin_redirect(s);
     changed |= sync_pins(s);
-    changed |= crate::shell::settle_flight(s);
     if !s.nav.space().is_empty()
         && let Some(route) = s.slot::<Shell>().pending_route.take()
     {

@@ -223,7 +223,18 @@ pub fn icon_text(icon: &str, size: f32, style: TextStyle, images: &Images) -> El
 /// `style`'s line height, its ink centred on the line as CoreText's. Other text, and every
 /// icon off macOS (the web's Twemoji is drawn at 1 em in a browser too), is plain `style` text.
 pub fn emoji_text(icon: &str, style: TextStyle) -> El {
-    if !cfg!(target_os = "macos") || !is_color_emoji(icon) {
+    if !cfg!(target_os = "macos") {
+        // The text fonts carry monochrome glyphs for text-default emoji (⚠ ✉ 🏟 ♂, which
+        // become emoji by a trailing U+FE0F), and the fallback took those and dropped the
+        // selector, drawing nothing; an emoji-only icon asks for Twemoji first.
+        let style = if is_color_emoji(icon) {
+            style.family(rune::Family::Named(crate::fonts::EMOJI))
+        } else {
+            style
+        };
+        return text(icon.to_owned()).font(style);
+    }
+    if !is_color_emoji(icon) {
         return text(icon.to_owned()).font(style);
     }
     let (ink, advance) = (emoji_ink(style.size), emoji_advance(style.size));

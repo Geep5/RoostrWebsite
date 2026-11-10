@@ -3,14 +3,13 @@
 
 use std::collections::HashMap;
 
-use roostr_core::nav::{Route, navigate};
+use roostr_core::nav::Route;
 use roostr_core::pane::PaneTab;
 use roostr_core::types::Space;
 use roostr_core::{State, UiState};
 use roostr_rt::Task;
-use roostr_ui::motion::{IconFlight, icon_id};
 use roostr_ui::{Glyph, Images, Theme, glyph, ty};
-use rune::{Cursor, El, TextStyle, Tx, el, row};
+use rune::{Cursor, El, TextStyle, el, row};
 
 use crate::Pages;
 
@@ -226,46 +225,6 @@ pub(crate) fn obj_icon(s: &State, t: &Theme, icon: &str) -> El {
         .justify_center()
         .items_center()
         .child(icon_text(s, icon, 16., ty::ui(16.)).color(t.accent))
-}
-
-/// The app's icon flight (Roostr keeps one in its state; idle before any launch).
-pub(crate) fn flight(s: &State) -> &IconFlight {
-    s.get::<IconFlight>().unwrap_or(&IconFlight::IDLE)
-}
-
-/// An object's icon shown at `place` (see [`icon_id`]: unique in the window, holding the
-/// object id), through the app's [`IconFlight`] so it flies to the page that opens.
-pub(crate) fn flight_source(s: &State, icon: El, place: &str) -> El {
-    flight(s).source(icon, &icon_id(place))
-}
-
-/// Open object `id` from its icon at `place` ([`flight_source`]): the icon flies to the
-/// page's header. Pass it to `on_press_tx`.
-pub(crate) fn open_from(id: String, place: String) -> impl Fn(&mut State, &mut Tx) + 'static {
-    let from = icon_id(&place);
-    move |s: &mut State, tx: &mut Tx| {
-        s.slot::<IconFlight>().launch(&id, from.clone(), tx);
-        navigate(Route::Object(id.clone()), s)
-    }
-}
-
-/// After each poll ([`IconFlight::settle`]): the launch ends once its page no longer shows (the
-/// object's route, or on the phone the space home a tile opened), so its source flies again.
-/// True when that changed what the views draw.
-pub(crate) fn settle_flight(s: &mut State) -> bool {
-    let Some(flight) = s.get::<IconFlight>() else {
-        return false;
-    };
-    if *flight == IconFlight::IDLE {
-        return false;
-    }
-    let route = match s.nav.route() {
-        Route::Object(id) => Some(id.clone()),
-        _ => None,
-    };
-    let home = crate::mobile::shown_space_flight(s);
-    s.slot::<IconFlight>()
-        .settle(|o| route.as_deref() == Some(o) || home.as_deref() == Some(o))
 }
 
 /// A phone sheet rising open from `from_y` points below its place on
