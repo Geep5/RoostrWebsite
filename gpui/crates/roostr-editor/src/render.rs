@@ -1428,7 +1428,7 @@ fn overlays(f: &Frame, s: &State, cx: &mut Cx<State>, layer: &mut Vec<El>) {
     if let Some(menu) = &e.paste_menu {
         let at = caret(cx, &menu.block)
             .map(|c| (c[0], c[1] + c[3] + 6.))
-            .unwrap_or((120., 126.));
+            .unwrap_or_else(|| e.anchor_under(&menu.block));
         let mut m = PopupMenu::new().min_w(160.).item(
             PopupMenuItem::element(text("PASTE AS").font(ty::ui(10.)).color(t.muted).pt(2.))
                 .disabled(true),

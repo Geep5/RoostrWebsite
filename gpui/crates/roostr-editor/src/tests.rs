@@ -546,3 +546,24 @@ fn three_dashes_and_a_space_make_a_divider() {
     );
     assert_eq!(page.blocks.len(), 2, "a fresh line below takes the caret");
 }
+
+#[test]
+fn the_paste_as_menu_opens_under_the_block_pasted_into() {
+    let blocks = (0..6)
+        .map(|n| text_block(&format!("p{n}"), &format!("Line {n}"), Vec::new()))
+        .chain([text_block("p6", "", Vec::new())])
+        .collect();
+    let vault = Vault::new(blocks);
+    let mut rt = open(&vault);
+    click(&mut rt, "text-p6");
+    rt.paste_content(rune::ClipboardContent::new("https://www.twingate.com/"));
+    settle(&mut rt);
+    rt.frame(1. / 60.);
+    let block = rt.presented("block-p6").map(|p| p.0).expect("the block pasted into");
+    let item = rt.presented("paste-link").map(|p| p.0).expect("the Paste as menu is open");
+    assert!(
+        item[1] > block[1] && item[1] < block[1] + block[3] + 140.,
+        "the menu sits under its block: menu item at {item:?}, block at {block:?}"
+    );
+    assert!(item[0] >= block[0] - 1., "and not left of the page: {item:?} vs {block:?}");
+}
