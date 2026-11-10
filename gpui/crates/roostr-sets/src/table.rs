@@ -25,6 +25,7 @@ use roostr_properties::{
 };
 use roostr_rt::Task;
 use roostr_ui::color::{rgb, rgba};
+use roostr_ui::motion::{self, IconFlight};
 use roostr_ui::overlay::{self, Placement};
 use roostr_ui::tags::badge_colors;
 use roostr_ui::ty::Weights as _;
@@ -689,7 +690,13 @@ fn on_row_press(s: &mut State, id: &str, row: &str, tx: &mut Tx) {
         set_selection(s, id, Vec::new());
         return;
     }
+    s.slot::<IconFlight>().launch(row, row_icon_id(id, row), tx);
     common::open_object(row, s);
+}
+
+/// The matched id of row `row`'s Name icon in table `id` (unique per table instance).
+pub(crate) fn row_icon_id(id: &str, row: &str) -> String {
+    motion::icon_id(&format!("table:{id}:{row}"))
 }
 
 /// The rubber band: a press-and-drag anywhere in the data view below its
@@ -1629,6 +1636,10 @@ fn body_cell(
             .hover(th.hl_light)
             .on_press(move |s: &mut State| on_cell_press(s, &id, &record, &k, checkbox));
         cell = with_marquee(cell, c.id);
+        // Held, it shrinks; not while its row has a cell editor open.
+        if !t.cell_edit.as_ref().is_some_and(|(row, _)| *row == r.id) {
+            cell = motion::pressable_row(cell);
+        }
         match fmt {
             "tag" | "status" => {
                 // Inline-block pills on the text baseline grow the CSS line box to ~23px.
@@ -1715,6 +1726,9 @@ fn body_cell(
                 .hover(th.hl_light)
                 .on_press(move |s: &mut State| on_cell_press(s, &id, &record, "serving", false));
             cell = with_marquee(cell, c.id);
+            if !t.cell_edit.as_ref().is_some_and(|(row, _)| *row == r.id) {
+                cell = motion::pressable_row(cell);
+            }
         }
     }
     cell
@@ -2350,8 +2364,10 @@ fn body_row(
             &r.type_key,
             c.space,
         );
+        let icon = el().child(common::icon(s, &glyph, ty::ui(13.0).weight(550.)));
+        let flight = s.get::<IconFlight>().unwrap_or(&IconFlight::IDLE);
         el().mr(4.0)
-            .child(common::icon(s, &glyph, ty::ui(13.0).weight(550.)))
+            .child(flight.source(icon, &row_icon_id(id, &r.id)))
     };
     // Opaque, so the cells scrolled under it don't show through; the row's
     // selection and hover are painted again on top of that.
@@ -2396,7 +2412,14 @@ fn body_row(
                         .shrink(),
                 ),
         );
-    let name_cell = with_marquee(name_cell, id);
+    // Rune scales the element a press lands on, so the row's pressables
+    // (its Name, its cells) each shrink while held; none while the row has a
+    // cell editor open.
+    let editing = t.cell_edit.as_ref().is_some_and(|(row, _)| *row == r.id);
+    let mut name_cell = with_marquee(name_cell, id);
+    if !editing {
+        name_cell = motion::pressable_row(name_cell);
+    }
     let mut line = row()
         .key(format!("row-{}", r.id))
         .hover_group()
@@ -2464,11 +2487,14 @@ fn selection_bar(c: &Ctx, t: &Table) -> El {
         .px(12.0)
         .py(6.0)
         .box_shadow(roostr_ui::shadow::gpui(4.0, 16.0, 0.0, 0.4))
-        .child(
-            text(format!("{} selected", t.selected.len()))
-                .font(ty::ui(13.0))
-                .color(th.fg),
-        );
+        .child(motion::rolling_text(
+            th,
+            format!("{id}/sel-count"),
+            format!("{} selected", t.selected.len()),
+            t.selected.len() as f64,
+            ty::ui(13.0),
+            th.fg,
+        ));
     if deletable > 0 {
         let label = if t.sel_blocked.is_empty() {
             "Delete".to_string()

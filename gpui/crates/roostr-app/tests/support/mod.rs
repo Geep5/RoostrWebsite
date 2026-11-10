@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use parking_lot::Mutex;
 use roostr_core::{Backend, State};
-use rune::{Env, Key, KeyEvent, Mods, Runtime};
+use rune::{Cx, El, Env, Key, KeyEvent, Mods, Runtime};
 
 /// A frame at 60 Hz.
 const FRAME: f64 = 1.0 / 60.0;
@@ -48,6 +48,18 @@ impl App {
         height: f32,
         prepare: impl FnOnce(&mut State),
     ) -> App {
+        Self::open_view(backend, width, height, prepare, roostr_shell::view)
+    }
+
+    /// [`Self::open_with`], the window drawing `view` (the shell's view
+    /// wrapped in a test's own elements).
+    pub fn open_view(
+        backend: Arc<dyn Backend>,
+        width: f32,
+        height: f32,
+        prepare: impl FnOnce(&mut State),
+        view: fn(&State, &mut Cx<State>) -> El,
+    ) -> App {
         scratch_ui_state();
         let mut s = State::new(backend, None);
         let (tx, woke) = channel();
@@ -64,7 +76,7 @@ impl App {
             system_dark: true,
             scale: 2.0,
         };
-        let rt = Runtime::new(s, roostr_shell::view, (width, height), env);
+        let rt = Runtime::new(s, view, (width, height), env);
         let mut app = App { rt, woke };
         app.settle();
         app
@@ -82,9 +94,7 @@ impl App {
         let mut quiet = 0;
         for _ in 0..400 {
             // The window's poll hook, as a running app has it.
-            let updated = self
-                .rt
-                .update_if(|s, tx| roostr_host::poll(s, 0., tx));
+            let updated = self.rt.update_if(|s, tx| roostr_host::poll(s, 0., tx));
             self.rt.frame(FRAME);
             if updated {
                 quiet = 0;

@@ -1,7 +1,8 @@
 //! The object page in the assembled app: its title saves when left (even
 //! with a store refresh landing between the leave and the save), a tap on a
-//! query's title edits it on a phone and on the desktop, and a chat object
-//! opened on a phone shows as the full-screen chat.
+//! query's title edits it on a phone and on the desktop, a chat object
+//! opened on a phone shows as the full-screen chat, and an object opened
+//! from an icon has that icon fly to its header.
 #![cfg(not(target_family = "wasm"))]
 
 mod support;
@@ -10,11 +11,13 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use parking_lot::Mutex;
-use roostr_core::nav::Route;
+use roostr_core::State;
+use roostr_core::nav::{self, Route};
 use roostr_core::types::{Object, ObjectSummary, QueryResult, RelationDef, Settings, Space, Value};
 use roostr_core::{Backend, BackendEvent, JsonMap};
 use roostr_rt::{BoxFuture, BoxStream, boxed, boxed_stream};
-use rune::Key;
+use roostr_ui::motion::{self, IconFlight};
+use rune::{Color, Cx, El, Key, el};
 use serde_json::Value as Json;
 use support::App;
 
@@ -202,7 +205,11 @@ fn a_chat_object_on_a_phone_opens_as_its_chat() {
     let s = app.state();
     s.nav.back(&mut s.ui);
     app.settle();
-    assert_eq!(app.state().nav.route(), &Route::Home, "the chat replaced the object");
+    assert_eq!(
+        app.state().nav.route(),
+        &Route::Home,
+        "the chat replaced the object"
+    );
 
     // An object opens without the sheet a previous one left up.
     app.state().pane.set_sheet(true);
@@ -213,4 +220,101 @@ fn a_chat_object_on_a_phone_opens_as_its_chat() {
     let mut app = open(&vault, CHAT, 1280., 800.);
     assert_eq!(app.state().nav.route(), &Route::Object(CHAT.into()));
     assert!(app.shown("object-page"));
+}
+
+/// Where the stand-in source icon sits: `[x, y, w, h]`.
+const SOURCE: [f32; 4] = [600., 700., 20., 20.];
+
+/// The stand-in source icon's matched id (a row icon showing `PAGE`).
+fn source_id() -> String {
+    motion::icon_id(&format!("test:{PAGE}"))
+}
+
+/// The app's window with a source icon of `PAGE` over it, as a sidebar
+/// row or a card would show one.
+fn with_source(s: &State, cx: &mut Cx<State>) -> El {
+    let flight = s.get::<IconFlight>().unwrap_or(&IconFlight::IDLE);
+    let icon = el()
+        .absolute(SOURCE[0], SOURCE[1])
+        .size(SOURCE[2], SOURCE[3])
+        .fill(Color::WHITE);
+    roostr_shell::view(s, cx).child(flight.source(icon, &source_id()))
+}
+
+/// An object opened from an icon (launched, then navigated to in one
+/// handler) has its page header's icon fly in from that icon's rect to its
+/// place in the header, carrying on as the page finishes opening; under
+/// Reduce Motion it is in place at once.
+#[test]
+fn an_opened_objects_icon_flies_to_the_page_header() {
+    for reduced in [false, true] {
+        let vault = Arc::new(Vault::default());
+        let mut app = App::open_view(
+            Arc::new(Handle(vault.clone())),
+            1280.,
+            800.,
+            |_| {},
+            with_source,
+        );
+        app.navigate(Route::Object(PAGE.into()));
+        let header = app.rect("obj-icon-face").expect("the header icon");
+        app.navigate(Route::Home);
+        app.rt.set_system_reduced_motion(reduced);
+        app.rt.frame(1.0 / 60.0);
+        let source = source_id();
+        assert_eq!(app.rect(&source), Some(SOURCE));
+
+        // The press: launch, then navigate. The page's state opens at the
+        // shell's next poll, so this commit draws the opening page.
+        let from = source.clone();
+        app.rt.update(move |s, tx| {
+            s.slot::<IconFlight>().launch(PAGE, from, tx);
+            nav::navigate(Route::Object(PAGE.into()), s);
+        });
+        app.rt.frame(1.0 / 120.0);
+        let target = format!("obj-icon-face<{source}");
+        let first = app
+            .rt
+            .presented(&target)
+            .expect("the launched header icon")
+            .0;
+        let near = |a: [f32; 4], b: [f32; 4]| (0..4).all(|i| (a[i] - b[i]).abs() < 8.0);
+        if reduced {
+            // In place: the opening page is short, so the column sits a few
+            // points over until the loaded page's scroll bar narrows it.
+            assert!(
+                near(first, header),
+                "reduced motion: in place at once: {first:?}"
+            );
+        } else {
+            assert!(near(first, SOURCE), "starts at the source icon: {first:?}");
+            // The source stays, keyed apart and without the id.
+            assert!(app.rt.presented(&format!("{source}#launched")).is_some());
+        }
+
+        // The page opens (the poll the window runs each frame) as it flies.
+        for _ in 0..3 {
+            step(&mut app);
+        }
+        assert!(app.rt.find("object-title").is_some(), "the page opened");
+        let now = app.rt.presented(&target).expect("the header icon").0;
+        if reduced {
+            assert_eq!(now, header, "reduced motion: stays in place");
+            continue;
+        }
+        assert!(
+            now[1] < first[1] - 1.0 && now[1] > header[1] + 1.0,
+            "still flying from the source to the header {header:?}: {first:?} → {now:?}"
+        );
+        for _ in 0..240 {
+            step(&mut app);
+        }
+        assert_eq!(app.rt.presented(&target).expect("landed").0, header);
+    }
+}
+
+/// One 120 Hz frame after the poll the window runs each frame.
+fn step(app: &mut App) {
+    app.rt.update_if(|s, tx| roostr_host::poll(s, 0., tx));
+    app.rt.frame(1.0 / 120.0);
 }

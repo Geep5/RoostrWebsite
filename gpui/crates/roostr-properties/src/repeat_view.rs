@@ -943,7 +943,7 @@ pub(crate) fn repeat_view(
         None => placeholder(t, "Off"),
     };
     let open_id = id.clone();
-    let trigger = row()
+    let trigger = roostr_ui::motion::pressable_row(row())
         .key("repeat-row")
         .role("button")
         .label("Repeat")

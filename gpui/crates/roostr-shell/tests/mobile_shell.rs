@@ -211,6 +211,8 @@ fn phone_width_runs_the_mobile_shell() {
     // phone shell, only on an object with a pane.
     assert!(!h.has("disc-sheet"));
     h.click("m-pane");
+    // It rises open on a spring (virtual time).
+    h.frames(60);
     assert_eq!(
         h.rect("disc-sheet").expect("the pane sheet"),
         h.rect("m-shell").unwrap()

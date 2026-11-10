@@ -9,7 +9,9 @@ use std::rc::Rc;
 use roostr_core::options::{add_option, delete_option, rename_option, set_option_color};
 use roostr_core::{RelationDef, RelationOption, State};
 use roostr_ui::tags::TAG_COLORS;
-use roostr_ui::{Button, Glyph, Input, InputState, ListItem, TagPill, Theme, glyph, radius, ty};
+use roostr_ui::{
+    Button, Glyph, Input, InputState, ListItem, TagPill, Theme, glyph, motion, radius, ty,
+};
 use rune::{Color, Cursor, El, col, el, row, text};
 
 use crate::widgets::{FieldSkin, Lens, empty_note, field, tip};
@@ -288,7 +290,8 @@ fn edit_panel(
         let (r, oid, lens) = (rel.clone(), opt.id.clone(), hooks.lens.clone());
         let name = c.name;
         palette = palette.child(tip(
-            el().key(name)
+            motion::pressable(el())
+                .key(name)
                 .size(18.0, 18.0)
                 .radius(9.0)
                 .fill(c.hex())

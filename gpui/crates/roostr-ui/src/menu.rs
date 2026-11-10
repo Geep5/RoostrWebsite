@@ -181,7 +181,7 @@ impl MenuItem {
         } else {
             e.focus_highlight(hover_bg)
         };
-        self.acts.apply(e, true)
+        self.acts.apply(crate::motion::pressable(e), true)
     }
 }
 
@@ -516,7 +516,7 @@ fn finish(t: &Theme, e: El, disabled: bool, picks: Vec<Pick>, close: Option<&dyn
     if disabled {
         return e.disabled(true);
     }
-    let mut e = e
+    let mut e = crate::motion::pressable(e)
         .focusable(true)
         .no_focus_ring()
         .hover_group_focus()

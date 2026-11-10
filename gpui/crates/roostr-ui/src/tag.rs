@@ -425,8 +425,10 @@ impl Badge {
 
 /// gpui-kit's `Badge` (a counter, dot or icon on a child) as `CountBadge`: a red (or `color`)
 /// pill with white 10px text at the child's top-right corner (Medium: 3 up, 3 per digit out);
-/// `count` 0 hides it, above `max` (99) shows "99+".
+/// `count` 0 hides it, above `max` (99) shows "99+". A changed count rolls its digits
+/// ([`motion::rolling_text`]); `key` names the badge (unique in the window).
 pub struct CountBadge {
+    key: String,
     child: El,
     count: usize,
     max: usize,
@@ -437,8 +439,9 @@ pub struct CountBadge {
 }
 
 impl CountBadge {
-    pub fn new(child: El) -> Self {
+    pub fn new(key: impl Into<String>, child: El) -> Self {
         CountBadge {
+            key: key.into(),
             child,
             count: 0,
             max: 99,
@@ -502,11 +505,19 @@ impl CountBadge {
                 KitSize::Medium | KitSize::Px(_) => (-3.0, -3.0 * len),
                 _ => (-4.0, -4.0 * len),
             };
+            let number = crate::motion::rolling_text(
+                t,
+                format!("{}-count", self.key),
+                n,
+                self.count.min(self.max + 1) as f64,
+                ty::ui(10.0).lh(10.0),
+                Color::WHITE,
+            );
             Some(
                 pill.pin(None, Some(top), Some(right), None)
                     .padding(rems(0.125))
                     .min_w(rems(0.875))
-                    .child(text(n).font(ty::ui(10.0).lh(10.0)).color(Color::WHITE)),
+                    .child(number),
             )
         } else {
             None

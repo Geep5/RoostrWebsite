@@ -17,10 +17,7 @@
 use std::any::Any;
 use std::rc::Rc;
 
-use rune::{
-    Color, Cursor, Effect, El, Key, KeyEvent, Spring, SpringPair, Transition, Tx, col, el, row,
-    text,
-};
+use rune::{Color, Cursor, El, Key, KeyEvent, Transition, Tx, col, el, row, text};
 
 use crate::KitSize;
 use crate::icons::{Glyph, glyph};
@@ -300,14 +297,14 @@ fn wire<S: 'static>(a: &Access<S>, e: El, act: Act<'_>, on_change: Option<&Rc<dy
     let f = change::<S>(on_change);
     let a = a.clone();
     match act {
-        Act::Toggle => e.on_press(move |s: &mut S| a(s).toggle()),
+        Act::Toggle => motion::pressable(e).on_press(move |s: &mut S| a(s).toggle()),
         Act::Layout => e.on_layout(move |s: &mut S, r: [f32; 4]| {
             let st = a(s);
             if (st.trigger_w - r[2]).abs() > 0.01 {
                 st.trigger_w = r[2];
             }
         }),
-        Act::Pick(i) => e.on_press_tx(move |s: &mut S, tx: &mut Tx| {
+        Act::Pick(i) => motion::pressable(e).on_press_tx(move |s: &mut S, tx: &mut Tx| {
             if let Some(v) = a(s).confirm(Some(i))
                 && let Some(f) = &f
             {
@@ -883,18 +880,11 @@ impl Select {
     }
 }
 
-/// gpui-kit's dropdown entrance (`dropdown_popup`): over 150ms the surface fades in while it
-/// slides the last 8pt down out of the trigger's edge; no exit motion.
+/// gpui-kit's dropdown entrance (`dropdown_popup`): the surface fades in while it slides the
+/// last 8pt down out of the trigger's edge, springing into place on [`motion::POP`] with a
+/// slight bounce; no exit motion.
 fn dropdown_appear() -> Transition {
-    Transition {
-        insertion: Effect {
-            offset: rune::Vec2::new(0.0, -8.0),
-            ..Effect::opacity(0.0)
-        },
-        removal: Effect::IDENTITY,
-        springs: SpringPair::new(motion::CONTROL.spring(), Spring::NONE),
-        ..Transition::identity()
-    }
+    motion::appear(-8.0)
 }
 
 #[cfg(test)]

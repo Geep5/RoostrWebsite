@@ -12,9 +12,9 @@ use std::rc::Rc;
 use rune::{El, Key, Spring, SpringPair, Transition, Tx, col, el, row, text};
 
 use crate::icons::{Glyph, glyph};
-use crate::overlay;
 use crate::theme::ty::Weights as _;
 use crate::theme::{Theme, radius, rems, shadow, ty};
+use crate::{motion, overlay};
 
 /// A modal panel (`roostr_core::ui::modal_frame`): panel fill, 1px border, radius 14, the modal
 /// shadow, `width` wide, clipping its content. Callers add padding and the overlay.
@@ -342,18 +342,35 @@ impl Dialog {
         s
     }
 
+    /// The panel's entrance: it springs into place on [`motion::POP`], a slight bounce (a
+    /// fading one also grows in a touch so the bounce shows); it leaves at once.
     fn transition(&self, top: f32) -> Transition {
-        let (from_y, secs) = match self.entrance {
-            DialogEntrance::SlideDown => (-top, 0.25),
-            DialogEntrance::Fade => (0.0, 0.18),
-            DialogEntrance::FadeSlide => (-rems(0.25), 0.18),
+        let from_y = match self.entrance {
+            DialogEntrance::SlideDown => -top,
+            DialogEntrance::Fade => 0.0,
+            DialogEntrance::FadeSlide => -rems(0.25),
+            DialogEntrance::None => return Transition::none(),
+        };
+        let grow = if matches!(self.entrance, DialogEntrance::SlideDown) {
+            1.0
+        } else {
+            0.96
+        };
+        motion::pop(rune::Effect {
+            offset: rune::Vec2::new(0.0, from_y),
+            ..rune::Effect::scale(grow).combined(rune::Effect::opacity(0.0))
+        })
+    }
+
+    /// The scrim fading in under the panel (no bounce: it only fades), gone at once on close.
+    fn dim_transition(&self) -> Transition {
+        let secs = match self.entrance {
+            DialogEntrance::SlideDown => 0.25,
+            DialogEntrance::Fade | DialogEntrance::FadeSlide => 0.18,
             DialogEntrance::None => return Transition::none(),
         };
         Transition {
-            insertion: rune::Effect {
-                offset: rune::Vec2::new(0.0, from_y),
-                ..rune::Effect::opacity(0.0)
-            },
+            insertion: rune::Effect::opacity(0.0),
             removal: rune::Effect::IDENTITY,
             springs: SpringPair::new(Spring::new(secs, 0.0), Spring::NONE),
             ..Transition::identity()
@@ -368,13 +385,7 @@ impl Dialog {
         let margin = 16.0;
         let top = self.margin_top.unwrap_or(0.0);
         let enter = self.transition(top.max(48.0));
-        let dim_enter = match self.entrance {
-            DialogEntrance::None => Transition::none(),
-            _ => Transition {
-                insertion: rune::Effect::opacity(0.0),
-                ..enter.clone()
-            },
-        };
+        let dim_enter = self.dim_transition();
         if self.overlay {
             layer.push(
                 el().key(format!("{key}-overlay"))

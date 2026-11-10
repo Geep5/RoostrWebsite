@@ -576,9 +576,10 @@ pub(crate) fn cmd_separator(t: &Theme) -> El {
 }
 
 /// A kit command row keyed `key`: padding 7 × 5.25, the inner radius, the
-/// accent fill while highlighted. Callers add the body and handlers.
+/// accent fill while highlighted, shrinking while held as kit menu items do.
+/// Callers add the body and handlers.
 pub(crate) fn cmd_item(t: &Theme, key: String, highlighted: bool) -> El {
-    let r = row()
+    let r = roostr_ui::motion::pressable(row())
         .key(key)
         .role("option")
         .checked(highlighted)

@@ -23,8 +23,7 @@ use roostr_ui::ty::Weights as _;
 use roostr_ui::{Input, InputState, Theme, modal_frame, motion, outline_button, radius, ty};
 use rune::{
     Color, Cursor, Cx, Drag, Effect, El, GesturePhase, Key, KeyEvent, Mods, Phase, ScrollPos,
-    ScrollSpec, Span, Spring, SpringPair, Transition, Tx, Vec2, WheelEvent, col, el, rich, row,
-    text,
+    ScrollSpec, Span, Spring, Tx, WheelEvent, col, el, rich, row, text,
 };
 use serde_json::{Value as Json, json};
 
@@ -39,9 +38,6 @@ const DEBOUNCE: Duration = Duration::from_millis(150);
 const SHEET_CLOSE: f32 = 110.;
 /// A pull starts dragging the sheet past this much travel.
 const SHEET_SLOP: f32 = 10.;
-/// The sheet rises in when opened (Svelte popped it): as long as an iOS sheet's
-/// decelerating 260 ms rise, settling without overshoot.
-const SHEET_ENTER: Spring = Spring::new(0.26, 0.0);
 
 /// The modal's state (a slot), while open and between openings.
 #[derive(Default)]
@@ -692,7 +688,7 @@ fn kind(t: &Theme, label: &str, selected: bool, mobile: bool) -> El {
 /// A result row: the Roostr row (`selected` = accent fill), the pointer highlighting
 /// it (keyboard position `i`), a press opening it.
 fn result_row(t: &Theme, key: String, i: usize, selected: bool, mobile: bool) -> El {
-    let r = row()
+    let r = motion::pressable_row(row())
         .key(key)
         .role("option")
         .checked(selected)
@@ -724,9 +720,10 @@ fn row_text(name: El, sub: Option<El>) -> El {
     c
 }
 
-/// A group's heading: the Roostr section header (11 bold uppercase) with its count,
-/// edge to edge; a rule above every one but the first.
-fn section_header(t: &Theme, first: bool, label: &str, count: Option<usize>) -> El {
+/// A group's heading: the Roostr section header (11 bold uppercase) with its count (rolling
+/// as the results change; keyed `search-count:<count key>`), edge to edge; a rule above every
+/// one but the first.
+fn section_header(t: &Theme, first: bool, label: &str, count: Option<(&str, usize)>) -> El {
     let mut h = row()
         .center_y()
         .gap(8.0)
@@ -743,18 +740,20 @@ fn section_header(t: &Theme, first: bool, label: &str, count: Option<usize>) -> 
     if !first {
         h = h.mt(10.0).border_sides([1.0, 0.0, 0.0, 0.0], t.border);
     }
-    if let Some(n) = count {
+    if let Some((key, n)) = count {
         h = h.child(
             row()
                 .px(7.0)
                 .py(1.0)
                 .radius(999.0)
                 .fill(Color::WHITE.alpha(0.08))
-                .child(
-                    text(n.to_string())
-                        .font(ty::ui(10.5).semibold())
-                        .color(t.muted),
-                ),
+                .child(motion::rolling_count(
+                    t,
+                    format!("search-count:{key}"),
+                    n,
+                    ty::ui(10.5).semibold(),
+                    t.muted,
+                )),
         );
     }
     h
@@ -794,7 +793,7 @@ pub(crate) fn overlay(s: &State, _cx: &mut Cx<State>, t: &Theme, layer: &mut Vec
             .w_full()
             .h_full()
             .fill(t.overlay)
-            .transition(motion::appear(0.0)),
+            .transition(motion::pop(Effect::opacity(0.0))),
     );
     let frame = frame(s, m, t, mobile, vw, vh);
     let frame = overlay::dismissable(frame, "search", close, layer);
@@ -805,17 +804,9 @@ pub(crate) fn overlay(s: &State, _cx: &mut Cx<State>, t: &Theme, layer: &mut Vec
         .h_full()
         .items_center();
     let host = if mobile {
-        // The sheet rises in from below the screen, follows a pull 1:1 and settles back
-        // from a short one (`transition: transform 0.18s ease`).
-        let enter = Transition {
-            insertion: Effect {
-                offset: Vec2::new(0.0, (vh - 56.0).max(0.0)),
-                ..Effect::IDENTITY
-            },
-            removal: Effect::IDENTITY,
-            springs: SpringPair::new(SHEET_ENTER, Spring::NONE),
-            ..Transition::identity()
-        };
+        // The sheet rises in from below the screen, landing with a slight bounce; it follows
+        // a pull 1:1 and settles back from a short one (`transition: transform 0.18s ease`).
+        let enter = crate::shell::sheet_rise((vh - 56.0).max(0.0));
         host.justify_end().child(
             col()
                 .key("search-sheet")
@@ -1066,7 +1057,7 @@ fn chip_row(s: &State, m: &Search, t: &Theme, mobile: bool, q: &str, active: &st
             (t.hover, t.fg)
         };
         let size = if mobile { 14.0 } else { 12.5 };
-        let mut chip = row()
+        let mut chip = motion::pressable(row())
             .key(format!("chip-{key}"))
             .role("button")
             .label(label.clone())
@@ -1083,7 +1074,13 @@ fn chip_row(s: &State, m: &Search, t: &Theme, mobile: bool, q: &str, active: &st
             chip.px(11.0).py(4.0)
         };
         if let Some(n) = count {
-            chip = chip.child(text(n.to_string()).font(ty::ui(size)).color(t.muted));
+            chip = chip.child(motion::rolling_count(
+                t,
+                format!("chip-count:{key}"),
+                n,
+                ty::ui(size),
+                t.muted,
+            ));
         }
         content = content.child(chip.on_press(move |s: &mut State| toggle_chip(s, &key)));
     }
@@ -1160,7 +1157,7 @@ fn result_list(s: &State, m: &Search, t: &Theme, mobile: bool, q: &str, active: 
             t,
             first,
             &label,
-            (!q.is_empty()).then_some(g.rows.len()),
+            (!q.is_empty()).then_some((g.key.as_str(), g.rows.len())),
         ));
         first = false;
         let mut section = rows();

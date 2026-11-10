@@ -341,11 +341,13 @@ pub(crate) fn vrow(t: &Theme, key: &str, active: bool) -> El {
         .focusable(true)
         .no_focus_ring()
         .focus_highlight(t.kit.list_hover);
-    if active {
+    let e = if active {
         e.fill(t.kit.list_active)
     } else {
         e.hover(t.kit.list_hover)
-    }
+    };
+    // A menu row like the kit's: it shrinks while held.
+    roostr_ui::motion::pressable(e)
 }
 
 /// A [`vrow`]'s content: `label` left, `trailer` right.

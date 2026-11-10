@@ -708,15 +708,16 @@ fn chooser(c: &Ctx, has_cover: bool, float: bool) -> Option<El> {
                 );
             if !busy {
                 let pick = id.to_string();
-                zone = zone.cursor(Cursor::Pointer).hover(t.hl_light).on_press_tx(
-                    move |s: &mut State, tx: &mut Tx| {
+                zone = roostr_ui::motion::pressable(zone)
+                    .cursor(Cursor::Pointer)
+                    .hover(t.hl_light)
+                    .on_press_tx(move |s: &mut State, tx: &mut Tx| {
                         if roostr_editor::CAN_PICK_FILES {
                             pick_cover(s, &pick)
                         } else {
                             paste_cover(&pick, tx)
                         }
-                    },
-                );
+                    });
             }
             let mut body = col().gap(16.).padding(16.).child(zone);
             // Without a file dialog (the web) the tile itself pastes.
@@ -734,7 +735,7 @@ fn chooser(c: &Ctx, has_cover: bool, float: bool) -> Option<El> {
                     .child(text("Paste image").font(ty::ui(14.)).color(t.muted));
                 if !busy {
                     let paste = id.to_string();
-                    line = line
+                    line = roostr_ui::motion::pressable_row(line)
                         .cursor(Cursor::Pointer)
                         .hover(t.hl_med)
                         .on_press_tx(move |_: &mut State, tx: &mut Tx| paste_cover(&paste, tx));

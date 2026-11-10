@@ -17,13 +17,13 @@ use roostr_ui::{
     KitSize, Placement, PopupMenu, PopupMenuItem, Tag, Theme, glyph, motion, radius, rems, ty,
 };
 use rune::{
-    Color, Cx, Cycle, Effect, El, PillStyle, ScrollSpec, Side, Spring, SpringPair, Transition, Tx,
-    col, el, memo, row, text, text_input,
+    Color, Cx, Cycle, El, GrowthSpec, PillStyle, ScrollSpec, Side, Transition, Tx, col, el, memo,
+    row, text, text_input,
 };
 
 use crate::chat::ChatMessage;
 use crate::discussion::{
-    AGENT_TOKEN, AgentPresence, Disc, DiscussionOptions, OBJECT_GREEN, OBJECT_TOKEN, Place,
+    AGENT_TOKEN, AgentPresence, Disc, DiscussionOptions, OBJECT_GREEN, OBJECT_TOKEN, Place, REVEAL,
     ScrollAsk, agent_tag_paint, composer_edit, get, instance_key, origin_label, request, with,
 };
 use crate::md::{MdEnv, MdTheme, OBJECT_LINK, URL_LINK, render_markdown};
@@ -158,19 +158,6 @@ fn when(ts: i64) -> String {
         time
     } else {
         format!("{}, {time}", d.format("%b %-d"))
-    }
-}
-
-/// A newly arrived message: opacity 0 → 1 while it rises 6px into place over 160ms.
-fn arrival() -> Transition {
-    Transition {
-        insertion: Effect {
-            offset: rune::Vec2::new(0.0, 6.0),
-            ..Effect::opacity(0.0)
-        },
-        removal: Effect::IDENTITY,
-        springs: SpringPair::new(motion::COLUMNS.spring(), Spring::NONE),
-        ..Transition::identity()
     }
 }
 
@@ -395,15 +382,20 @@ pub(crate) fn view(
         ));
     }
 
-    // Messages.
+    // Messages: a growth stack, so a new message eases its height open (a sent one in one
+    // quick glide, an arriving reply at the streaming pace while its words fade in) and the
+    // rows below or the pinned end follow. Rows replaced wholesale land at once: the stack
+    // takes a new key with each `rows_epoch`.
     let rows = message_rows(d, s, t);
+    let rows_key = format!("chat-rows-{}", d.rows_epoch);
     if d.own_scroller() {
         let vp = path(key, "chat-messages");
         let (k1, k2, k3) = (key.to_string(), key.to_string(), key.to_string());
         let vp_follow = vp.clone();
         let content = col()
-            .key("chat-rows")
+            .key(rows_key)
             .w_full()
+            .growth(GrowthSpec::default())
             .selection_group(true)
             .children(rows)
             .on_layout_tx(move |s: &mut State, _: [f32; 4], tx: &mut Tx| {
@@ -438,7 +430,11 @@ pub(crate) fn view(
     } else {
         // `.discussion.full .messages { flex: 1 }`: the composer sits at the bottom of the
         // 60vh-tall section, not right under the messages.
-        let mut list = col().key("chat-rows").selection_group(true).children(rows);
+        let mut list = col()
+            .key(rows_key)
+            .growth(GrowthSpec::default())
+            .selection_group(true)
+            .children(rows);
         if d.full {
             list = list.grow(1.);
         }
@@ -570,6 +566,10 @@ fn message_rows(d: &Disc, s: &State, t: &Theme) -> Vec<El> {
         let sending = d.outgoing.as_ref().is_some_and(|o| o.id == m.id);
         let retrying: Vec<&String> = d.retrying.iter().filter(|k| k.starts_with(&m.id)).collect();
         let last = ix + 1 == n;
+        // Someone else's reply that just arrived: its words fade in, and its row streams
+        // until they have.
+        let revealing = d.arrived.as_deref() == Some(m.id.as_str());
+        let streaming = revealing && d.arriving;
         let version = (
             d.fingerprints.get(ix).copied().unwrap_or_default(),
             sig,
@@ -579,15 +579,33 @@ fn message_rows(d: &Disc, s: &State, t: &Theme) -> Vec<El> {
             last,
             t.dark,
             when(m.ts),
+            revealing,
         );
-        let row_key = format!("msg-{}", m.id);
+        // A sent line that landed keeps its placeholder's keys.
+        let key_id = d.row_ids.get(&m.id).unwrap_or(&m.id);
+        let row_key = format!("msg-{key_id}");
         let built = memo(row_key.clone(), version, || {
-            message_row(d, s, t, ix, m, &space, images, &mention_names)
+            message_row(
+                d,
+                s,
+                t,
+                ix,
+                m,
+                key_id,
+                revealing,
+                &space,
+                images,
+                &mention_names,
+            )
         });
-        let built = if d.arrived.as_deref() == Some(m.id.as_str()) {
-            built.transition(arrival())
-        } else {
+        // Every other row arrives whole (a sent line, history): one quick glide open, and a
+        // fade, which is all Reduce Motion keeps.
+        let built = if streaming {
+            built.streaming(true)
+        } else if revealing {
             built
+        } else {
+            built.arrives_whole().transition(Transition::opacity())
         };
         let built = if last && d.own_scroller() {
             // A reply taller than the pane opens at its first line, not its last.
@@ -623,6 +641,8 @@ fn on_link(s: &mut State, id: &str, tx: &mut Tx) {
     }
 }
 
+/// Message `m`'s row; `key_id` scopes its element keys (the message's id, or the placeholder
+/// a sent line landed in) and `revealing` fades its words in.
 #[allow(clippy::too_many_arguments)]
 fn message_row(
     d: &Disc,
@@ -630,6 +650,8 @@ fn message_row(
     t: &Theme,
     ix: usize,
     m: &ChatMessage,
+    key_id: &str,
+    revealing: bool,
     space: &str,
     images: Option<&Images>,
     mention_names: &[(String, String)],
@@ -688,16 +710,21 @@ fn message_row(
     };
     // The object it came from leads the body as that object's tag; a deleted one, none.
     let origin = origin_label(&m.origin, &d.object_id, store);
-    let env = MdEnv { t, store, space };
+    let env = MdEnv {
+        t,
+        store,
+        space,
+        reveal: revealing.then_some(REVEAL),
+    };
     let body = render_markdown(
-        &format!("md-{}", m.id),
+        &format!("md-{key_id}"),
         &m.text,
         origin.as_deref().map(|name| (m.origin.as_str(), name)),
         &md_theme,
         &env,
     );
     let bubble_el = col()
-        .key(format!("msg-text-{}", m.id))
+        .key(format!("msg-text-{key_id}"))
         .corners(if own {
             [16., 16., 5., 16.]
         } else {

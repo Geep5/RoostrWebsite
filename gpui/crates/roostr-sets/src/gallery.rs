@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use roostr_core::dates::{DateStyle, show_date_with};
 use roostr_core::{QueryRow, RelationDef, State, api};
 use roostr_properties::{CredentialCell, credential_cell_badge, reconnect_target};
+use roostr_ui::motion::{self, IconFlight};
 use roostr_ui::tags::badge_colors;
 use roostr_ui::ty::Weights as _;
 use roostr_ui::{Theme, glyph, ty};
@@ -242,6 +243,13 @@ fn card(
     visible: &[&RelationDef],
 ) -> El {
     let (open_id, menu_id) = (r.id.clone(), r.id.clone());
+    let icon_id = card_icon_id(view, &r.id);
+    let open_from = icon_id.clone();
+    let flight = s.get::<IconFlight>().unwrap_or(&IconFlight::IDLE);
+    let icon = flight.source(
+        el().child(common::icon(s, &common::row_icon(s, r), ty::ui(14.))),
+        &icon_id,
+    );
     let menu_view = view.to_string();
     let name = common::row_name(r);
     let mut card = col()
@@ -258,7 +266,11 @@ fn card(
         .cursor(Cursor::Pointer)
         .hover_group()
         .child(hover_border(12., t.accent))
-        .on_press(move |s: &mut State| common::open_object(&open_id, s))
+        .on_press_tx(move |s: &mut State, tx: &mut Tx| {
+            s.slot::<IconFlight>()
+                .launch(&open_id, open_from.clone(), tx);
+            common::open_object(&open_id, s)
+        })
         .on_secondary_press(move |s: &mut State, p: PointerPress, _: &mut Tx| {
             context_menu::open(
                 s,
@@ -270,18 +282,13 @@ fn card(
             )
         })
         .child(
-            row()
-                .center_y()
-                .gap(8.)
-                .self_stretch()
-                .child(common::icon(s, &common::row_icon(s, r), ty::ui(14.)))
-                .child(
-                    text(name.clone())
-                        .font(ty::ui(14.).semibold())
-                        .color(t.fg)
-                        .truncate()
-                        .shrink(),
-                ),
+            row().center_y().gap(8.).self_stretch().child(icon).child(
+                text(name.clone())
+                    .font(ty::ui(14.).semibold())
+                    .color(t.fg)
+                    .truncate()
+                    .shrink(),
+            ),
         );
     for rel in visible {
         let value = cell_text(r, rel);
@@ -345,5 +352,10 @@ fn card(
             }
         }
     }
-    card
+    motion::pressable(card)
+}
+
+/// The matched id of a gallery card's icon in view `view`.
+pub(crate) fn card_icon_id(view: &str, object: &str) -> String {
+    motion::icon_id(&format!("gallery:{view}:{object}"))
 }

@@ -46,8 +46,6 @@ const DESK_TIMEOUT: Duration = Duration::from_secs(15);
 /// Follow a Claude sign-in this often until it finishes.
 const PLAN_POLL: Duration = Duration::from_millis(2000);
 const FLASH: Duration = Duration::from_millis(1500);
-/// The mobile sheet rising into place on open (a soft `ease`).
-const SHEET_ENTER: roostr_ui::motion::Tween = roostr_ui::motion::Tween::ease(260);
 const BUILD_STAMP: &str = env!("ROOSTR_BUILD_STAMP");
 /// A pull on the phone sheet past this closes it.
 const SHEET_CLOSE: f32 = 110.0;
@@ -1814,10 +1812,18 @@ fn mode_line(s: &State, me: &Settings, t: &Theme) -> El {
         SyncPhase::Live | SyncPhase::Backfill => ("Syncing…".to_string(), t.orange),
         SyncPhase::Idle => ("Not connected to a relay".to_string(), t.muted),
     };
+    // The pending count rolls as changes go out.
     let pending = status.pending.filter(|n| *n > 0).map(|n| {
-        format!(
-            " · {n} change{} not sent yet",
-            if n == 1 { "" } else { "s" }
+        roostr_ui::motion::rolling_text(
+            t,
+            "settings-pending",
+            format!(
+                " · {n} change{} not sent yet",
+                if n == 1 { "" } else { "s" }
+            ),
+            n as f64,
+            ty::ui(13.0),
+            state_color,
         )
     });
     row()
@@ -1827,12 +1833,20 @@ fn mode_line(s: &State, me: &Settings, t: &Theme) -> El {
         .flex_wrap()
         .child(pill(format!("{mode} mode"), mode_color))
         .child(
-            text(format!("{state}{}", pending.unwrap_or_default()))
-                .font(ty::ui(13.0))
-                .color(state_color)
-                .wrap()
+            row()
+                .center_y()
+                .flex_wrap()
                 .grow(1.0)
-                .min_w(0.0),
+                .min_w(0.0)
+                .child(
+                    text(state)
+                        .font(ty::ui(13.0))
+                        .color(state_color)
+                        .wrap()
+                        .shrink()
+                        .min_w(0.0),
+                )
+                .children(pending),
         )
 }
 
@@ -2653,10 +2667,7 @@ pub fn settings_modal(s: &State, cx: &mut Cx<State>, t: &Theme, layer: &mut Vec<
                 .w_full()
                 .h_full()
                 .fill(t.kit.overlay)
-                .transition(Transition {
-                    insertion: Effect::opacity(0.0),
-                    ..dialog_enter()
-                }),
+                .transition(scrim_enter()),
         );
         let surface = col()
             .key("settings")
@@ -2732,7 +2743,7 @@ pub fn settings_modal(s: &State, cx: &mut Cx<State>, t: &Theme, layer: &mut Vec<
                 ..Effect::IDENTITY
             },
             removal: Effect::opacity(0.0),
-            springs: SpringPair::new(SHEET_ENTER.spring(), Spring::NONE),
+            springs: SpringPair::new(roostr_ui::motion::SHEET_OPEN, Spring::NONE),
             ..Transition::identity()
         });
     let sheet = if me.sheet_drag {
@@ -2761,13 +2772,19 @@ pub fn settings_modal(s: &State, cx: &mut Cx<State>, t: &Theme, layer: &mut Vec<
     layer.extend(overlay);
 }
 
-/// The dialog's entrance: down from above while fading in, over 250ms.
+/// The dialog's entrance: down from above while fading in, landing on
+/// [`roostr_ui::motion::POP`] with a slight bounce; it leaves at once.
 fn dialog_enter() -> Transition {
+    roostr_ui::motion::pop(Effect {
+        offset: rune::Vec2::new(0.0, -48.0),
+        ..Effect::opacity(0.0)
+    })
+}
+
+/// The dialog's scrim: only fades in (250ms, no bounce); gone at once.
+fn scrim_enter() -> Transition {
     Transition {
-        insertion: Effect {
-            offset: rune::Vec2::new(0.0, -48.0),
-            ..Effect::opacity(0.0)
-        },
+        insertion: Effect::opacity(0.0),
         removal: Effect::IDENTITY,
         springs: SpringPair::new(Spring::new(0.25, 0.0), Spring::NONE),
         ..Transition::identity()

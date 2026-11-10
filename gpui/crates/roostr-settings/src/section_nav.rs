@@ -154,7 +154,7 @@ pub(crate) fn panel(t: &Theme, titles: &[&'static str], active: usize) -> El {
         .gap(2.0)
         .children(titles.iter().enumerate().map(|(ix, title)| {
             let current = ix == active;
-            let mut entry = row()
+            let mut entry = motion::pressable_row(row())
                 .key(format!("settings-nav-{}", slug(title)))
                 .role("button")
                 .label(*title)
@@ -197,7 +197,7 @@ pub(crate) fn chips(t: &Theme, titles: &[&'static str], active: usize) -> El {
                 .pb(10.0)
                 .children(titles.iter().enumerate().map(|(ix, title)| {
                     let current = ix == active;
-                    let mut chip = row()
+                    let mut chip = motion::pressable(row())
                         .key(chip_key(title))
                         .role("button")
                         .label(*title)

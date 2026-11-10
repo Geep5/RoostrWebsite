@@ -853,6 +853,10 @@ impl Button {
             e = e.label(l);
         }
         e = e.disabled(self.disabled);
+        // Roostr's buttons shrink a touch while held (rune-kit's follow AppKit and don't).
+        if interactive {
+            e = crate::motion::pressable(e);
+        }
         if self.loading && !self.disabled {
             e = e.layer_opacity(0.8);
         }

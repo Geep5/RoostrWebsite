@@ -967,7 +967,7 @@ fn reveal_group(e: El) -> El {
 /// chip's top-right corner and revealed by the chip's hover; its glyph turns
 /// red while it is hovered.
 fn chip_rm(t: &Theme, key: String, label: String, on_press: impl Fn(&mut State) + 'static) -> El {
-    let button = row()
+    let button = motion::pressable(row())
         .key(key)
         .role("button")
         .label(label.clone())
@@ -1246,7 +1246,7 @@ pub fn properties_pane(
         let exclude: Vec<String> = shown.iter().map(|r| r.key.clone()).collect();
         let id = object.id.clone();
         root = root.child(
-            row()
+            motion::pressable_row(row())
                 .key("add-prop")
                 .role("button")
                 .label("Add property")
@@ -1548,6 +1548,7 @@ fn render_row(
             )
             .cursor(Cursor::Pointer)
             .on_press(open_object(id));
+            let chip_el = motion::pressable(chip_el);
             let mut wrap =
                 reveal_group(row().key(format!("cred-{id}")).shrink()).child(tip(chip_el, title));
             if editable {
@@ -1602,7 +1603,8 @@ fn render_row(
             );
             // The chip opens the agent; the row around it edits the list.
             if a.is_some() {
-                chip_el = chip_el.cursor(Cursor::Pointer).on_press(open_object(id));
+                chip_el =
+                    motion::pressable(chip_el.cursor(Cursor::Pointer).on_press(open_object(id)));
             }
             let mut wrap =
                 reveal_group(row().key(format!("agent-{id}")).shrink()).child(tip(chip_el, title));
@@ -1663,6 +1665,7 @@ fn render_row(
             )
             .cursor(Cursor::Pointer)
             .on_press(open_object(id));
+            let chip_el = motion::pressable(chip_el);
             let mut wrap =
                 reveal_group(row().key(format!("{key}-{id}")).shrink()).child(tip(chip_el, title));
             if editable {
@@ -1710,9 +1713,11 @@ fn render_row(
                     name.as_str()
                 }
             );
-            let chip_el = chip(t, format!("objchip-{id}"), t.fg, true, lead, name)
-                .cursor(Cursor::Pointer)
-                .on_press(open_object(id));
+            let chip_el = motion::pressable(
+                chip(t, format!("objchip-{id}"), t.fg, true, lead, name)
+                    .cursor(Cursor::Pointer)
+                    .on_press(open_object(id)),
+            );
             let mut wrap = reveal_group(row().key(format!("obj-{id}")).shrink()).child(chip_el);
             if editable {
                 wrap = wrap.child(chip_rm(t, format!("rm-{id}"), rm_label, remover(id)));
@@ -1815,11 +1820,15 @@ fn render_row(
             .hover(t.hover)
             .cursor(Cursor::Pointer)
             .on_press(move |s: &mut State| toggle_edit(s, &id, &k, &tk));
+        // A press opens the row's editor; the row being edited stays still.
+        if !editing {
+            line = motion::pressable_row(line);
+        }
     }
     let mut wrap = reveal_group(col().key(format!("row-wrap-{key}"))).child(line);
     if row_removable && editable {
         let (id, k) = (oid.clone(), key.clone());
-        let button = row()
+        let button = motion::pressable(row())
             .key(format!("row-rm-{key}"))
             .role("button")
             .label("Remove property")
@@ -1853,7 +1862,7 @@ fn render_row(
 
 /// A popover action: muted 11px text that tints to `hover` while hovered.
 fn pop_action(t: &Theme, key: &str, label: String, hover: Color) -> El {
-    row()
+    motion::pressable(row())
         .key(key.to_string())
         .role("button")
         .label(label.clone())

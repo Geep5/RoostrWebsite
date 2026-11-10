@@ -151,6 +151,20 @@ pub(crate) struct TagQuery {
 const PRESENCE_POLL: Duration = Duration::from_millis(2500);
 /// How long a sent @-mention shows its agent typing without a reply.
 const EXPECT_REPLY: Duration = Duration::from_secs(10 * 60);
+
+/// How an arriving reply's words fade in (`El::reveal`).
+pub(crate) const REVEAL: f32 = rune::edge::WORD_FADE.word_fade;
+
+/// How long `text` takes to reveal: its words start one after another, 20 ms apart down to
+/// 5.5 ms as the backlog reaches 24 (as Rune staggers them), each fading over [`REVEAL`],
+/// with the growth spring's time on top for the row to land.
+fn reveal_time(text: &str) -> Duration {
+    let words = text.split_whitespace().count() as f32;
+    let k = (words / 24.0).min(1.0);
+    let stagger = 0.020 + (0.0055 - 0.020) * k;
+    Duration::from_secs_f32(words * stagger + REVEAL + rune::GROWTH.duration)
+}
+
 pub(crate) const AGENT_TOKEN: &str = "agent:";
 pub(crate) const OBJECT_TOKEN: &str = "object:";
 
@@ -202,8 +216,21 @@ pub(crate) struct Disc {
     /// The `object:thread` whose messages are shown (an arrival needs a thread already on
     /// screen).
     arrival_key: String,
-    /// Someone else's message that just arrived at the end: it fades in.
+    /// Someone else's message that just arrived at the end: its words fade in
+    /// (`El::reveal`).
     pub arrived: Option<String>,
+    /// `arrived` is still revealing: its row streams in the message list's growth stack
+    /// until [`reveal_time`] has passed.
+    pub arriving: bool,
+    arrive_timer: Option<Task<()>>,
+    /// The placeholder id (`sending-…`) each landed message replaced, by real id: its row
+    /// keeps the placeholder's element keys, so landing neither closes one row nor grows
+    /// another.
+    pub row_ids: HashMap<String, String>,
+    /// Bumped when the shown rows are replaced wholesale (another thread, a first load of
+    /// several messages): the message list's growth stack takes a new key, so they land
+    /// at once rather than growing in.
+    pub rows_epoch: u64,
     seen_count: usize,
     focused_once: bool,
     seeded: bool,
@@ -346,6 +373,10 @@ pub(crate) fn create(s: &mut State, key: String, object_id: String, options: Dis
         landed_on: String::new(),
         arrival_key: String::new(),
         arrived: None,
+        arriving: false,
+        arrive_timer: None,
+        row_ids: HashMap::new(),
+        rows_epoch: 0,
         seen_count: 0,
         focused_once: false,
         seeded: false,
@@ -514,8 +545,9 @@ impl Disc {
         if let Some(out) = &self.outgoing {
             let landed = messages
                 .iter()
-                .any(|m| m.author == out.author && m.text == out.text && m.ts >= out.ts - 5_000);
-            if landed {
+                .find(|m| m.author == out.author && m.text == out.text && m.ts >= out.ts - 5_000);
+            if let Some(m) = landed {
+                self.row_ids.insert(m.id.clone(), out.id.clone());
                 self.outgoing = None;
             } else {
                 messages.push(out.clone());
@@ -576,7 +608,7 @@ impl Disc {
             .unwrap_or_else(|| "Exchange".into());
         let previous = std::mem::replace(&mut self.messages, Rc::new(messages));
         let at_end = self.at_end;
-        self.note_arrival(&previous, at_end);
+        self.note_arrival(&previous, at_end, s);
         self.sync_list(s);
         self.follow_new_messages(at_end);
         self.update_polling(s);
@@ -631,12 +663,16 @@ impl Disc {
         self.messages.iter().find(|m| m.id == id)
     }
 
-    /// Someone else's message arriving at the end of the thread on screen fades in. The
-    /// thread's first load, history and your own sent messages don't, nor anything arriving
-    /// while you read further up.
-    fn note_arrival(&mut self, previous: &[ChatMessage], at_end: bool) {
+    /// Someone else's message arriving at the end of the thread on screen streams in: its
+    /// row grows on the growth stack's streaming pace while its words fade in, then lands.
+    /// The thread's first load, history and your own sent messages don't, nor anything
+    /// arriving while you read further up. Rows replaced wholesale bump [`Disc::rows_epoch`].
+    fn note_arrival(&mut self, previous: &[ChatMessage], at_end: bool, s: &mut State) {
         let key = format!("{}:{}", self.object_id, self.thread_id);
         let shown = std::mem::replace(&mut self.arrival_key, key.clone()) == key;
+        if !shown || (previous.is_empty() && self.messages.len() > 1) {
+            self.rows_epoch += 1;
+        }
         let Some(last) = self.messages.last() else {
             return;
         };
@@ -647,7 +683,20 @@ impl Disc {
             && !previous.is_empty()
             && !previous.iter().any(|m| m.id == last.id)
         {
-            self.arrived = Some(last.id.clone());
+            let (id, wait) = (last.id.clone(), reveal_time(&last.text));
+            self.arrived = Some(id.clone());
+            self.arriving = true;
+            let key = self.key.clone();
+            self.arrive_timer = Some(s.rt.spawn(async move |cx| {
+                cx.timer(wait).await;
+                cx.update(|s| {
+                    with(s, &key, |d, _| {
+                        if d.arrived.as_deref() == Some(id.as_str()) {
+                            d.arriving = false;
+                        }
+                    })
+                });
+            }));
         }
     }
 

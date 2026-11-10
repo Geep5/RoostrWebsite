@@ -7,6 +7,7 @@
 
 mod agent_chat_tag;
 mod chat_agents_live;
+mod chat_growth;
 mod chat_pane;
 mod chat_rows;
 mod mention_typed;
@@ -306,14 +307,28 @@ impl Harness {
                 Err(_) => break,
             }
         }
-        // Motion lands.
-        for _ in 0..30 {
+        // Motion lands: a second and a half, as a long message rewrapping much taller glides
+        // its growth row open for longer than the spring's own 0.32 s.
+        for _ in 0..90 {
             self.frame();
         }
     }
 
     pub fn frame(&mut self) {
         self.rt.frame(1.0 / 60.0);
+    }
+
+    /// Frames until `ready` holds, waiting for background work between them, and no motion
+    /// frames past it: what just mounted is caught at the start of its animation.
+    pub fn frames_until(&mut self, what: &str, ready: impl Fn(&Harness) -> bool) {
+        for _ in 0..200 {
+            self.frame();
+            if ready(self) {
+                return;
+            }
+            let _ = self.wakes.recv_timeout(Duration::from_millis(50));
+        }
+        panic!("{what} never happened");
     }
 
     /// Moves the executor's clock (timers) forward, then settles.

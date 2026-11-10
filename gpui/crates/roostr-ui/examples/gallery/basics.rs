@@ -469,17 +469,17 @@ fn tags(t: &Theme) -> El {
             row()
                 .gap(20.0)
                 .child(
-                    CountBadge::new(icon_button("cb-1", Glyph::Inbox).build(t))
+                    CountBadge::new("cb-1-badge", icon_button("cb-1", Glyph::Inbox).build(t))
                         .count(3)
                         .build(t),
                 )
                 .child(
-                    CountBadge::new(icon_button("cb-2", Glyph::Inbox).build(t))
+                    CountBadge::new("cb-2-badge", icon_button("cb-2", Glyph::Inbox).build(t))
                         .count(120)
                         .build(t),
                 )
                 .child(
-                    CountBadge::new(icon_button("cb-3", Glyph::Inbox).build(t))
+                    CountBadge::new("cb-3-badge", icon_button("cb-3", Glyph::Inbox).build(t))
                         .dot()
                         .build(t),
                 ),

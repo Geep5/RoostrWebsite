@@ -7,7 +7,6 @@
 //! reload it ([`register`]), and the sidebar / space home draw [`widget`]
 //! inside their own card.
 
-use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::sync::Arc;
@@ -23,7 +22,7 @@ use roostr_rt::Task;
 use roostr_ui::color::mix_srgb;
 use roostr_ui::ty::{self, Weights as _};
 use roostr_ui::{ShimmerText, Skeleton, Theme, motion, radius};
-use rune::{Cursor, Cx, Edge, El, SpringPair, TextStyle, Transition, col, el, row, text};
+use rune::{Cursor, Cx, El, TextStyle, col, el, row, text};
 use serde_json::{Value as Json, json};
 
 use crate::shell::{fill, hover_fg, icon_text};
@@ -32,8 +31,6 @@ use crate::shell::{fill, hover_fg, icon_text};
 const LIST_FETCH: usize = 500;
 const GALLERY_LIMIT: usize = 8;
 const DOW: [&str; 7] = ["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"];
-/// A kanban group's count rolling to a new value.
-const COUNT: motion::Tween = motion::Tween::ease(250);
 /// A list widget's row: the 24px line and the 1px below it.
 const ROW_PITCH: f32 = 25.;
 /// How far past the window a list draws rows, in window heights each way.
@@ -538,8 +535,10 @@ pub(crate) fn widget(
         let mut items: Vec<El> = shown
             .iter()
             .map(|r| {
+                let place = format!("pinned:{id}:{}", r.id);
+                let icon = icon_text(s, &row_icon(r), 15., ty::ui(15.).medium()).color(t.fg);
                 card(t, format!("w-card:{}", r.id), r.id == current_id)
-                    .child(icon_text(s, &row_icon(r), 15., ty::ui(15.).medium()).color(t.fg))
+                    .child(crate::shell::flight_source(s, icon, &place))
                     .child(
                         text(row_name(r))
                             .font(ty::ui(13.).medium())
@@ -548,7 +547,7 @@ pub(crate) fn widget(
                             .shrink()
                             .min_w(0.),
                     )
-                    .on_press(open(r.id.clone()))
+                    .on_press_tx(crate::shell::open_from(r.id.clone(), place))
             })
             .collect();
         if w.rows.len() > GALLERY_LIMIT {
@@ -601,21 +600,19 @@ pub(crate) fn widget(
         .child(el().h(ROW_PITCH * drawn.start as f32));
     for r in &w.rows[drawn.clone()] {
         let current = r.id == current_id;
+        let place = format!("pinned:{id}:{}", r.id);
+        let icon = list_text(t, icon_text(s, &row_icon(r), 11., ty::ui(11.)), current);
         rows = rows.child(
             col().pb(1.).child(
                 line(t, format!("w-row-{}", r.id), current)
-                    .child(list_text(
-                        t,
-                        icon_text(s, &row_icon(r), 11., ty::ui(11.)),
-                        current,
-                    ))
+                    .child(crate::shell::flight_source(s, icon, &place))
                     .child(
                         list_text(t, text(row_name(r)).font(ty::ui(12.)), current)
                             .truncate()
                             .shrink()
                             .min_w(0.),
                     )
-                    .on_press(open(r.id.clone())),
+                    .on_press_tx(crate::shell::open_from(r.id.clone(), place)),
             ),
         );
     }
@@ -643,7 +640,7 @@ fn line(t: &Theme, key: String, current: bool) -> El {
     if current {
         e = e.fill(t.hl_med);
     }
-    e
+    motion::pressable_row(e)
 }
 
 /// Text in a [`line`]: muted, fg while the line is hovered or current.
@@ -739,69 +736,17 @@ fn kanban(
                         .shrink()
                         .min_w(0.),
                 )
-                .child(rolling_count(t, format!("w-group-n:{id}:{gid}"), count))
+                .child(motion::rolling_count(
+                    t,
+                    format!("w-group-n:{id}:{gid}"),
+                    count,
+                    ty::ui(11.),
+                    t.muted,
+                ))
                 .on_press(open(id.to_string())),
         );
     }
     body
-}
-
-thread_local! {
-    /// Each kanban count's last value and whether its last change fell (the
-    /// way its digits roll), by count key.
-    static COUNTS: RefCell<HashMap<String, (usize, bool)>> = RefCell::new(HashMap::new());
-}
-
-/// A kanban group's count (11px, muted, fg under the line's pointer) whose
-/// changed digits roll to the new value over [`COUNT`]: up as it rises, down
-/// as it falls; unchanged digits hold by decimal place. The first build shows
-/// it as is.
-fn rolling_count(t: &Theme, key: String, n: usize) -> El {
-    let falling = COUNTS.with_borrow_mut(|counts| {
-        if counts.len() > 512 && !counts.contains_key(&key) {
-            counts.clear();
-        }
-        let last = counts.entry(key.clone()).or_insert((n, false));
-        if last.0 != n {
-            *last = (n, n < last.0);
-        }
-        last.1
-    });
-    let font: TextStyle = ty::ui(11.);
-    let spring = COUNT.spring();
-    let push = Transition::push(if falling { Edge::Top } else { Edge::Bottom })
-        .springs(SpringPair::new(spring, spring));
-    // Moving digits are masked: soft clip edges in padding that negative
-    // margins take back out of layout, so resting digits are never faded.
-    let edge = (font.line_px() * 0.12).max(1.);
-    let side = (font.size * 0.3).max(2.);
-    let digits = n.to_string();
-    let len = digits.len();
-    let mut e = row()
-        .key(key)
-        .role("text")
-        .label(digits.clone())
-        .h(font.line_px() + 2. * edge)
-        .px(side)
-        .py(edge)
-        .ml(-side)
-        .mr(-side)
-        .mt(-edge)
-        .mb(-edge)
-        .motion(spring)
-        .width_leads()
-        .clip_fade(side, edge, side, edge)
-        .child_exit(push);
-    for (i, d) in digits.chars().enumerate() {
-        e = e.child(
-            hover_fg(text(d.to_string()).font(font), t)
-                .key(format!("{}:{d}", len - 1 - i))
-                .motion(spring)
-                .a11y_hidden()
-                .transition(push),
-        );
-    }
-    e
 }
 
 /// A mini month: title (opens the set) with ‹ › month steps over the
@@ -874,7 +819,7 @@ fn calendar(t: &Theme, id: &str, rows: &[QueryRow], date_key: &str, month_off: i
         grid = grid.child(week);
     }
     let nav_btn = |key: &'static str, glyph: &'static str, delta: i32| {
-        fill(key, rune::Color::TRANSPARENT)
+        motion::pressable(fill(key, rune::Color::TRANSPARENT))
             .px(5.)
             .py(2.)
             .role("button")
@@ -900,7 +845,7 @@ fn calendar(t: &Theme, id: &str, rows: &[QueryRow], date_key: &str, month_off: i
                 .pb(6.)
                 .pl(6.)
                 .child(
-                    fill("w-cal-title", rune::Color::TRANSPARENT)
+                    motion::pressable(fill("w-cal-title", rune::Color::TRANSPARENT))
                         .role("button")
                         .child(text(label).font(title_font).color(t.fg))
                         .child(text(year.to_string()).font(title_font).color(t.fg).ml(4.))
@@ -949,7 +894,7 @@ fn card(t: &Theme, key: String, current: bool) -> El {
                 .inert(),
         );
     }
-    e
+    motion::pressable(e)
 }
 
 /// The rows of an `n`-row list whose first row's top is at window y `top`

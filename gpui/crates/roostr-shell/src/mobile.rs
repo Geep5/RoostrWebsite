@@ -21,6 +21,7 @@ use roostr_core::objects::{is_image_icon, object_icon, type_glyph};
 use roostr_core::relations::{format_glyph, is_reserved_key, space_relations};
 use roostr_core::sync_status::{count, sync_progress, sync_tip};
 use roostr_core::types::{ObjectSummary, RelationDef, Space, SyncPhase};
+use roostr_ui::motion::{IconFlight, icon_id};
 use roostr_ui::ty::Weights as _;
 use roostr_ui::{CountBadge, Glyph, ProgressCircle, Theme, checkbox, glyph, motion, shadow, ty};
 use rune::{
@@ -31,7 +32,10 @@ use web_time::Instant;
 
 use crate::PanePart;
 use crate::back_swipe::{self, BackSwipe, Phase, Screen, Track};
-use crate::shell::{self, current_space, emoji_or_image, fill, fill_glyph, icon_text, or_untitled};
+use crate::shell::{
+    self, current_space, emoji_or_image, fill, fill_glyph, flight_source, icon_text, open_from,
+    or_untitled,
+};
 use crate::{list_motion, pin_collapse, pinned};
 
 /// The web app's `__BUILD_STAMP__` (see `build.rs`).
@@ -492,6 +496,7 @@ pub(crate) fn view(s: &State, cx: &mut Cx<State>, t: &Theme, layer: &mut Vec<El>
                 .pin(Some(0.), Some(0.), Some(0.), Some(0.))
                 .fill(t.bg)
                 .clip_rounded(0.)
+                .transition(shell::sheet_rise(crate::window_height(s)))
                 .child((pages.pane)(s, cx, id, PanePart::Sheet, layer)),
         );
     }
@@ -629,9 +634,9 @@ fn page(s: &State, cx: &mut Cx<State>, route: &Route, layer: &mut Vec<El>) -> El
 }
 
 /// A phone control on the panel: panel fill, 1px border, fg text, a
-/// `--hover` fill while pressed. Callers size and round it.
+/// `--hover` fill and a shrink while pressed. Callers size and round it.
 fn panel_button(t: &Theme, key: &str) -> El {
-    row()
+    motion::pressable(row())
         .key(key)
         .role("button")
         .center()
@@ -701,7 +706,7 @@ fn m_obj(s: &State, t: &Theme, icon: Option<String>, name: String) -> El {
 /// `.m-chev`: the ⌄ of a collapsible card or section, turned over while open
 /// (`transition: transform 0.12s`).
 fn m_chev(t: &Theme, key: String, open: bool) -> El {
-    fill(key, Color::TRANSPARENT)
+    motion::pressable(fill(key, Color::TRANSPARENT))
         .role("button")
         .label("Fold")
         .px(14.)
@@ -717,7 +722,7 @@ fn m_chev(t: &Theme, key: String, open: bool) -> El {
 /// `.m-row`: a row of a space-home section as a kit list row (its lead
 /// icon or checkbox, the name, a trailing `mark`), `--hover` while pressed.
 fn m_row(t: &Theme, key: String, lead: El, name: String, mark: Option<El>) -> El {
-    row()
+    motion::pressable_row(row())
         .key(key)
         .role("button")
         .label(name.clone())
@@ -869,7 +874,7 @@ fn object(
             glyph(Glyph::Pane, 18.).color(t.fg),
         )
         .on_press(|s: &mut State| s.pane.set_sheet(true));
-        CountBadge::new(button)
+        CountBadge::new("m-pane-badge", button)
             .count(s.pane.count)
             .max(99)
             .color(t.accent)
@@ -955,15 +960,22 @@ fn m_sync(s: &State, t: &Theme) -> El {
     }
     button = button.child(dot);
     if let Some(p) = &progress {
-        let label = match pct {
-            Some(pct) => format!("{pct}%"),
-            None => count(p.received),
+        let (label, value) = match pct {
+            Some(pct) => (format!("{pct}%"), pct as f64),
+            None => (count(p.received), p.received as f64),
         };
         button = button.child(
             row()
                 .pin(Some(0.), None, Some(0.), Some(1.))
                 .justify_center()
-                .child(text(label).font(ty::ui(8.).lh(8.)).color(t.muted)),
+                .child(motion::rolling_text(
+                    t,
+                    "m-sync-label",
+                    label,
+                    value,
+                    ty::ui(8.).lh(8.),
+                    t.muted,
+                )),
         );
     }
     button = if s.sync_now.is_some() {
@@ -1019,10 +1031,10 @@ fn spaces(s: &State, t: &Theme) -> El {
         vec![col().w_full().gap(10.).pb(12.).children(cards)],
     );
 
-    let importing = (!status.bootstrapped && status.phase != SyncPhase::Idle)
-        .then(|| loading_card(s, t));
+    let importing =
+        (!status.bootstrapped && status.phase != SyncPhase::Idle).then(|| loading_card(s, t));
 
-    let avatar = fill("m-avatar", Color::TRANSPARENT)
+    let avatar = motion::pressable(fill("m-avatar", Color::TRANSPARENT))
         .role("button")
         .label("Settings")
         .size(36., 36.)
@@ -1110,12 +1122,21 @@ pub(crate) fn progress_card(
     let head = row()
         .w_full()
         .center_y()
-        .child(text(title.to_owned()).font(ty::ui(14.).semibold()).color(t.fg))
+        .child(
+            text(title.to_owned())
+                .font(ty::ui(14.).semibold())
+                .color(t.fg),
+        )
         .child(spacer())
         .children(pct.map(|pct| {
-            text(format!("{pct}%"))
-                .font(ty::ui(13.).medium().features("'tnum' 1"))
-                .color(t.muted)
+            motion::rolling_text(
+                t,
+                format!("{key}-pct"),
+                format!("{pct}%"),
+                pct as f64,
+                ty::ui(13.).medium().features("'tnum' 1"),
+                t.muted,
+            )
         }));
     let bar = roostr_ui::Progress::new(format!("{key}-bar"))
         .size(roostr_ui::KitSize::Small)
@@ -1142,7 +1163,8 @@ pub(crate) fn progress_card(
 }
 
 /// A space card: tile, name, the latest object and when it changed. Tapped
-/// it opens the space's home; held it lifts for a reorder.
+/// it opens the space's home (its tile flies to the home's header); held it
+/// lifts for a reorder.
 fn space_card(
     s: &State,
     t: &Theme,
@@ -1153,6 +1175,12 @@ fn space_card(
 ) -> El {
     let id = space.id.clone();
     let lifted = lift == Some(id.as_str());
+    // Shrinks while held still; a press that lifted the card or scrolls the list doesn't.
+    let moved = s
+        .get::<Mobile>()
+        .and_then(|m| m.press.as_ref())
+        .is_some_and(|p| p.id == id && !matches!(p.mode, PressMode::Pending));
+    let place = format!("m-space:{id}");
     let mut names = col().grow(1.).shrink().min_w(0.).gap(2.).child(
         text(space.name.clone())
             .font(ty::ui(16.).semibold())
@@ -1185,10 +1213,17 @@ fn space_card(
         .padding(14.)
         .min_h(64.)
         .cursor(Cursor::Pointer)
-        .child(space_tile(s, t, space, 44., 10., 22.))
+        .child(flight_source(
+            s,
+            space_tile(s, t, space, 44., 10., 22.),
+            &place,
+        ))
         .child(names);
     if lifted {
         card = card.box_shadow(shadow::drag());
+    }
+    if !lifted && !moved {
+        card = motion::pressable(card);
     }
     if let Some(latest) = latest {
         card = card.child(
@@ -1217,15 +1252,34 @@ fn space_card(
         tx.live_only();
     })
     .on_drag(move |s: &mut State, d: &mut Drag, tx: &mut Tx| card_drag(s, &drag_id, d, tx))
-    .on_press(move |s: &mut State| {
+    .on_press_tx(move |s: &mut State, tx: &mut Tx| {
         let m = s.slot::<Mobile>();
         // A completed lift (or a scroll) is never navigation.
         if std::mem::take(&mut m.swallow_press) || m.lift.is_some() {
             return;
         }
+        // The tile flies to the space home's header ([`space_flight`]).
+        s.slot::<IconFlight>()
+            .launch(&space_flight(&id), icon_id(&place), tx);
         s.nav.use_space(&id, &mut s.ui);
         s.slot::<Mobile>().space_open = true;
     })
+}
+
+/// The object a space's tile flight launches: the space home's header tile is its target.
+/// Not the bare space id, whose own page (Space settings) may open over the home while the
+/// home still holds the tile.
+fn space_flight(space: &str) -> String {
+    format!("space:{space}")
+}
+
+/// The space-tile flight whose target (the space home's header tile) shows now: the open
+/// space's home on the phone, also while a page is pushed over it.
+pub(crate) fn shown_space_flight(s: &State) -> Option<String> {
+    if !crate::is_mobile(s) || !s.get::<Mobile>().is_some_and(|m| m.space_open) {
+        return None;
+    }
+    current_space(s).map(|space| space_flight(&space.id))
 }
 
 /// A press on a space card: held still it lifts the card (moving the finger
@@ -1362,7 +1416,7 @@ fn m_section(
             row()
                 .items_center()
                 .child(
-                    row()
+                    motion::pressable_row(row())
                         .key(format!("m-section-label-{key}"))
                         .role("button")
                         .grow(1.)
@@ -1396,7 +1450,7 @@ fn m_section(
 
 /// `.m-section-add`: a 44px ＋ target.
 fn m_section_add(t: &Theme, key: &str, label: &str) -> El {
-    fill(key, Color::TRANSPARENT)
+    motion::pressable(fill(key, Color::TRANSPARENT))
         .role("button")
         .label(label)
         .size(44., 44.)
@@ -1460,29 +1514,36 @@ fn space_home(
         .into_iter()
         .take(6)
         .map(|o| {
-            let lead = if s.store.layout_of(&o.type_key) == "task" {
+            let place = format!("m-row:recent:{}", o.id);
+            let (lead, flies) = if s.store.layout_of(&o.type_key) == "task" {
                 let id = o.id.clone();
-                checkbox(format!("m-row-check-{}", o.id), o.done == Some(true))
+                let check = checkbox(format!("m-row-check-{}", o.id), o.done == Some(true))
                     .on_change(move |s: &mut State, done| crate::sidebar::set_done(s, &id, done))
                     .build(t)
-                    .mr(6.)
+                    .mr(6.);
+                // No icon to fly.
+                (check, false)
             } else {
                 let icon = if o.icon.is_empty() {
                     type_glyph(&s.store, &o.type_key, &active)
                 } else {
                     o.icon.clone()
                 };
-                shell::obj_icon(s, t, &icon)
+                (flight_source(s, shell::obj_icon(s, t, &icon), &place), true)
             };
             let id = o.id.clone();
-            m_row(
+            let line = m_row(
                 t,
                 format!("m-recent-{}", o.id),
                 lead,
                 or_untitled(&o.name),
                 None,
-            )
-            .on_press(move |s: &mut State| navigate(Route::Object(id.clone()), s))
+            );
+            if flies {
+                line.on_press_tx(open_from(id, place))
+            } else {
+                line.on_press(move |s: &mut State| navigate(Route::Object(id.clone()), s))
+            }
         })
         .collect();
     column.push(m_section(
@@ -1511,18 +1572,18 @@ fn space_home(
             } else {
                 ty.name.clone()
             };
-            let id = ty.id.clone();
+            let place = format!("m-row:types:{}", ty.id);
             let mark = ty
                 .builtin
                 .then(|| shell::builtin_mark(t, format!("m-type-lock-{}", ty.id)));
             m_row(
                 t,
                 format!("m-type-{}", ty.id),
-                shell::obj_icon(s, t, &icon),
+                flight_source(s, shell::obj_icon(s, t, &icon), &place),
                 name,
                 mark,
             )
-            .on_press(move |s: &mut State| navigate(Route::Object(id.clone()), s))
+            .on_press_tx(open_from(ty.id.clone(), place))
         })
         .collect();
     let add_type = m_section_add(t, "m-new-type", "New type").on_press(crate::sidebar::new_type);
@@ -1560,7 +1621,7 @@ fn space_home(
             } else {
                 r.name.clone()
             };
-            let id = r.id.clone();
+            let place = format!("m-row:props:{}", r.id);
             let mark = s
                 .store
                 .builtin_ids
@@ -1569,11 +1630,11 @@ fn space_home(
             m_row(
                 t,
                 format!("m-prop-{}", r.id),
-                shell::obj_icon(s, t, &icon),
+                flight_source(s, shell::obj_icon(s, t, &icon), &place),
                 name,
                 mark,
             )
-            .on_press(move |s: &mut State| navigate(Route::Object(id.clone()), s))
+            .on_press_tx(open_from(r.id.clone(), place))
         })
         .collect();
     // The New property suggest anchors under it.
@@ -1623,7 +1684,11 @@ fn space_home(
                         .pt(8.)
                         .px(4.)
                         .pb(16.)
-                        .child(space_tile(s, t, current, 52., 12., 26.))
+                        .child(shell::flight(s).target(
+                            space_tile(s, t, current, 52., 12., 26.),
+                            &space_flight(&current.id),
+                            "m-home-tile",
+                        ))
                         .child(
                             col()
                                 .min_w(0.)
@@ -1714,7 +1779,11 @@ fn pinned_card(
             .pb(10.)
             .child(pinned::widget(s, cx, t, &id, width, layer))
     });
-    let open_id = id.clone();
+    let place = format!("m-pin:{id}");
+    let icon = row()
+        .w(22.)
+        .center()
+        .child(icon_text(s, &icon, 16., ty::ui(16.).lh(16.)).color(t.accent));
     let flip_id = id.clone();
     col()
         .key(format!("m-wcard-box-{id}"))
@@ -1729,7 +1798,7 @@ fn pinned_card(
                 .w_full()
                 .items_center()
                 .child(
-                    fill(format!("m-wcard-{id}"), Color::TRANSPARENT)
+                    motion::pressable_row(fill(format!("m-wcard-{id}"), Color::TRANSPARENT))
                         .role("button")
                         .label(name.clone())
                         .grow(1.)
@@ -1740,11 +1809,7 @@ fn pinned_card(
                         .pr(6.)
                         .pb(12.)
                         .pl(16.)
-                        .child(
-                            row().w(22.).center().child(
-                                icon_text(s, &icon, 16., ty::ui(16.).lh(16.)).color(t.accent),
-                            ),
-                        )
+                        .child(flight_source(s, icon, &place))
                         .child(
                             text(name)
                                 .font(ty::ui(15.).semibold())
@@ -1753,7 +1818,7 @@ fn pinned_card(
                                 .shrink()
                                 .grow(1.),
                         )
-                        .on_press(move |s: &mut State| navigate(Route::Object(open_id.clone()), s)),
+                        .on_press_tx(open_from(id.clone(), place)),
                 )
                 .child(
                     m_chev(t, format!("m-wcard-chev-{id}"), !collapsed)

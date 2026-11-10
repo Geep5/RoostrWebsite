@@ -1613,32 +1613,33 @@ fn menu_row(t: &Theme, oid: &str, index: usize, it: Item, lit: bool, sub: Option
 
     let act = it.act.clone();
     let (press_oid, hover_oid) = (oid.to_string(), oid.to_string());
-    r.on_press_tx(move |s: &mut State, tx: &mut Tx| {
-        let act = act.clone();
-        with_editor(s, &press_oid, |e, s| e.block_menu_activate(act, s, tx));
-    })
-    .on_hover_change(move |s: &mut State, inside: bool, _: &mut Tx| {
-        if !inside {
-            return;
-        }
-        with_editor(s, &hover_oid, |e, s| {
-            if let Some(open) = e.block_menu.as_mut() {
-                open.menu.highlight = Some(index);
+    roostr_ui::motion::pressable(r)
+        .on_press_tx(move |s: &mut State, tx: &mut Tx| {
+            let act = act.clone();
+            with_editor(s, &press_oid, |e, s| e.block_menu_activate(act, s, tx));
+        })
+        .on_hover_change(move |s: &mut State, inside: bool, _: &mut Tx| {
+            if !inside {
+                return;
             }
-            match hover_sub {
-                Some(kind) => e.block_menu_hover_sub(kind, s),
-                None => {
-                    // Rows of the flat list don't touch flyouts (there are none).
-                    if e.block_menu
-                        .as_ref()
-                        .is_some_and(|o| o.menu.filter.text.trim().is_empty())
-                    {
-                        e.block_menu_hover_plain(s);
+            with_editor(s, &hover_oid, |e, s| {
+                if let Some(open) = e.block_menu.as_mut() {
+                    open.menu.highlight = Some(index);
+                }
+                match hover_sub {
+                    Some(kind) => e.block_menu_hover_sub(kind, s),
+                    None => {
+                        // Rows of the flat list don't touch flyouts (there are none).
+                        if e.block_menu
+                            .as_ref()
+                            .is_some_and(|o| o.menu.filter.text.trim().is_empty())
+                        {
+                            e.block_menu_hover_plain(s);
+                        }
                     }
                 }
-            }
-        });
-    })
+            });
+        })
 }
 
 /// One flyout choice: the kit menu row around Roostr's 13px row, the check
@@ -1669,7 +1670,7 @@ fn fly_item(
         r = r.child(glyph(Glyph::Check, rems(0.75)).color(t.kit.foreground));
     }
     let oid = oid.to_string();
-    r.on_press_tx(move |s: &mut State, tx: &mut Tx| {
+    roostr_ui::motion::pressable(r).on_press_tx(move |s: &mut State, tx: &mut Tx| {
         let fired = Fired::Action(action.clone());
         with_editor(s, &oid, |e, s| e.block_menu_fire(fired, s, tx));
     })

@@ -312,7 +312,15 @@ impl<S: 'static> Btn<S> {
             b = roostr_ui::tooltip(b, tip);
         }
         match self.on_press.filter(|_| !disabled) {
-            Some(f) => b.focusable(true).on_press_tx(move |s: &mut S, tx| f(s, tx)),
+            // Shrinks while held: a full-width button as a row does.
+            Some(f) => {
+                let b = if self.full_width {
+                    motion::pressable_row(b)
+                } else {
+                    motion::pressable(b)
+                };
+                b.focusable(true).on_press_tx(move |s: &mut S, tx| f(s, tx))
+            }
             None => b,
         }
     }

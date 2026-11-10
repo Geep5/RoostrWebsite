@@ -1026,7 +1026,7 @@ fn filter_panel(
                     let color = config::option_color(relations, &f.key, &opt);
                     let current = f.value.clone();
                     let (view, o) = (id.clone(), opt.clone());
-                    let mut tag = row()
+                    let mut tag = motion::pressable(row())
                         .key(format!("{id}/ftag-{i}-{opt}"))
                         .role("button")
                         .checked(on)
@@ -1311,7 +1311,7 @@ fn object_values(
             list = list.child(
                 // `.item`: 32px, 6px 16px (18px left), the hover a rounded
                 // fill inset 8px from the menu's edges.
-                row()
+                motion::pressable(row())
                     .key(selector)
                     .role("button")
                     .label(name)
@@ -1911,12 +1911,12 @@ pub(crate) fn view(
     }
     let (search_view, filter_view, sort_view) = (id.clone(), id.clone(), id.clone());
     bar = bar
-        .child(
+        .child(motion::pressable(
             cbtn(t, format!("{id}/dv-search"), Glyph::DvSearch, c.search_open)
                 .on_press(move |s: &mut State, _: bool| toggle_search(s, &search_view))
                 .build(t),
-        )
-        .child(
+        ))
+        .child(motion::pressable(
             cbtn(
                 t,
                 format!("{id}/dv-filter"),
@@ -1925,8 +1925,8 @@ pub(crate) fn view(
             )
             .on_press(move |s: &mut State, _: bool| toggle_panel(s, &filter_view, Panel::Filter))
             .build(t),
-        )
-        .child(
+        ))
+        .child(motion::pressable(
             cbtn(
                 t,
                 format!("{id}/dv-sort"),
@@ -1935,11 +1935,11 @@ pub(crate) fn view(
             )
             .on_press(move |s: &mut State, _: bool| toggle_panel(s, &sort_view, Panel::Sort))
             .build(t),
-        );
+        ));
 
     // View settings: layout tiles, then the layout's property row.
     let settings_view = id.clone();
-    bar = bar.child(
+    bar = bar.child(motion::pressable(
         cbtn(
             t,
             format!("{id}/dv-settings"),
@@ -1954,7 +1954,7 @@ pub(crate) fn view(
             }
         })
         .build(t),
-    );
+    ));
     if c.settings_open {
         // The layout tiles: one kit toggle each, the current one checked.
         let mut tiles = row().key(format!("{id}/layouts")).w_full().gap(4.0);
@@ -1968,7 +1968,7 @@ pub(crate) fn view(
                 name = name.group_color(t.kit.accent_foreground);
             }
             let view = id.clone();
-            let mut tile = col()
+            let mut tile = motion::pressable(col())
                 .key(format!("{id}/layout-{layout}"))
                 .role("button")
                 .checked(active)

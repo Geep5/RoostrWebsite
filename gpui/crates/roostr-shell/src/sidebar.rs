@@ -12,8 +12,8 @@ use rune::{Color, Cursor, Cx, El, col, el, row, text};
 
 use crate::drag::{self, Axis};
 use crate::shell::{
-    Shell, builtin_mark, current_space, fill, fill_glyph, hover_fg, icon_text, obj_icon,
-    open_object_id, or_untitled, space_id,
+    Shell, builtin_mark, current_space, fill, fill_glyph, flight_source, hover_fg, icon_text,
+    obj_icon, open_from, open_object_id, or_untitled, space_id,
 };
 use crate::{list_motion, pin_collapse};
 
@@ -139,12 +139,14 @@ fn space_head(s: &State, t: &Theme, current: &Space) -> El {
                 .min_w(0.),
         )
         .on_press(open(current.id.clone()));
+    let head = motion::pressable(head);
     let search = fill("head-search", t.hl_med)
         .size(30., 30.)
         .radius(radius::MD)
         .label("Search")
         .child(fill_glyph(t, Glyph::Search, 17.))
         .on_press(crate::search::open);
+    let search = motion::pressable(search);
     let create = fill("create-btn", t.hover)
         .h(30.)
         .px(7.)
@@ -155,6 +157,7 @@ fn space_head(s: &State, t: &Theme, current: &Space) -> El {
         .child(fill_glyph(t, Glyph::Compose, 15.))
         .child(fill_glyph(t, Glyph::ChevronDown, 11.))
         .on_press(crate::create_menu::toggle);
+    let create = motion::pressable(create);
     row()
         .key("space-head-row")
         .w_full()
@@ -212,6 +215,8 @@ fn pinned_card(
                 .group_opacity(0.6, 1.0),
         )
         .on_press(move |s: &mut State| pin_collapse::toggle(s, &flip));
+    let arrow = motion::pressable(arrow);
+    let place = format!("pin-head:{id}");
     let mut head = fill(format!("widget-head:{id}"), t.hl_med)
         .grow(1.)
         .min_w(0.)
@@ -222,7 +227,7 @@ fn pinned_card(
         .justify_start()
         .gap(6.)
         .label(name.clone())
-        .child(obj_icon(s, t, &icon))
+        .child(flight_source(s, obj_icon(s, t, &icon), &place))
         .child(
             text(name.clone())
                 .font(ty::ui(14.).semibold().lh(22.))
@@ -231,10 +236,11 @@ fn pinned_card(
                 .shrink()
                 .min_w(0.),
         )
-        .on_press(open(id.to_string()));
+        .on_press_tx(open_from(id.to_string(), place));
     if is_current {
         head = head.fill(t.hl_med);
     }
+    let head = motion::pressable_row(head);
     let boxed = col()
         .key(format!("widget-box:{id}"))
         .w_full()
@@ -251,8 +257,11 @@ fn pinned_card(
             body,
         ));
     let mut card = col().key(format!("widget:{id}")).w_full().child(boxed);
+    // A held card shrinks; the one being dragged doesn't (its ghost follows the pointer).
     if drag::dragging(s, "widgets") == Some(id) {
         card = card.opacity(0.4);
+    } else {
+        card = motion::pressable(card);
     }
     if let Some(bottom) = drag::over(s, "widgets", id) {
         let edge = if bottom {
@@ -368,6 +377,7 @@ fn section(
                 .group_color(t.fg),
         )
         .on_press(move |s: &mut State| flip_section(s, key));
+    let name = motion::pressable(name);
     col()
         .key(format!("section-wrap:{key}"))
         .w_full()
@@ -396,7 +406,7 @@ fn section_add(t: &Theme, key: &'static str, tip: &'static str) -> El {
         .radius(radius::XS)
         .label(tip)
         .child(hover_fg(glyph(Glyph::Plus, 12.), t).group_opacity(0.5, 1.0));
-    roostr_ui::tooltip(button, tip)
+    roostr_ui::tooltip(motion::pressable(button), tip)
 }
 
 /// A sidebar row (`.item`, gpui-kit's SidebarMenuItem held to Roostr's h26,
@@ -440,7 +450,7 @@ fn item_row(
     if current {
         r = r.fill(t.kit.sidebar_accent);
     }
-    r
+    motion::pressable_row(r)
 }
 
 /// `.none`: the empty-section note, a muted 12 pt line.
@@ -463,25 +473,33 @@ fn recent(s: &State, t: &Theme, sh: &Shell, current: &Space, open_id: Option<&st
         })
         .take(8)
         .map(|r| {
-            let lead = if store.layout_of(&r.type_key) == "task" {
+            let place = format!("recent:{}", r.id);
+            let (lead, press) = if store.layout_of(&r.type_key) == "task" {
                 let id = r.id.clone();
-                roostr_ui::checkbox(format!("row-check:{}", r.id), r.done == Some(true))
-                    .size(KitSize::Medium)
-                    .on_change(move |s: &mut State, done: bool| set_done(s, &id, done))
-                    .build(t)
-                    .mr(6.)
+                let check =
+                    roostr_ui::checkbox(format!("row-check:{}", r.id), r.done == Some(true))
+                        .size(KitSize::Medium)
+                        .on_change(move |s: &mut State, done: bool| set_done(s, &id, done))
+                        .build(t)
+                        .mr(6.);
+                // No icon to fly.
+                (check, None)
             } else {
-                obj_icon(s, t, &object_icon(store, &r.icon, &r.type_key, active))
+                let icon = obj_icon(s, t, &object_icon(store, &r.icon, &r.type_key, active));
+                (flight_source(s, icon, &place), Some(place))
             };
-            item_row(
+            let line = item_row(
                 t,
                 format!("recent:{}", r.id),
                 or_untitled(&r.name),
                 open_id == Some(r.id.as_str()),
                 lead,
                 None,
-            )
-            .on_press(open(r.id.clone()))
+            );
+            match press {
+                Some(place) => line.on_press_tx(open_from(r.id.clone(), place)),
+                None => line.on_press(open(r.id.clone())),
+            }
         })
         .collect();
     let rows = if rows.is_empty() {
@@ -515,15 +533,16 @@ fn types(s: &State, t: &Theme, sh: &Shell, open_id: Option<&str>) -> El {
             let suffix = ty
                 .builtin
                 .then(|| builtin_mark(t, format!("type-lock:{}", ty.id)));
+            let place = format!("type:{}", ty.id);
             let r = item_row(
                 t,
                 format!("type:{}", ty.id),
                 name,
                 false,
-                obj_icon(s, t, &icon),
+                flight_source(s, obj_icon(s, t, &icon), &place),
                 suffix,
             )
-            .on_press(open(ty.id.clone()));
+            .on_press_tx(open_from(ty.id.clone(), place));
             if current { r.fill(t.hover) } else { r }
         })
         .collect();
@@ -563,15 +582,16 @@ fn props(s: &State, t: &Theme, sh: &Shell, open_id: Option<&str>) -> El {
                 .builtin_ids
                 .contains(&r.id)
                 .then(|| builtin_mark(t, format!("prop-lock:{}", r.id)));
+            let place = format!("prop:{}", r.id);
             item_row(
                 t,
                 format!("prop:{}", r.id),
                 name,
                 open_id == Some(r.id.as_str()),
-                obj_icon(s, t, &icon),
+                flight_source(s, obj_icon(s, t, &icon), &place),
                 suffix,
             )
-            .on_press(open(r.id.clone()))
+            .on_press_tx(open_from(r.id.clone(), place))
         })
         .collect();
     let rows = if rows.is_empty() {

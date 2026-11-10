@@ -16,7 +16,7 @@ use crate::shell::{Resize, Shell, current_space, fill, hover_fg, icon_text};
 /// muted → fg on an `hl-med` fill; a 52 pt row in a wide rail, else a 44 pt
 /// square.
 fn rail_tile(t: &Theme, key: &'static str, wide: bool) -> El {
-    let tile = fill(key, t.hl_med).radius(10.);
+    let tile = motion::pressable(fill(key, t.hl_med).radius(10.));
     if wide {
         tile.w_full().h(52.).px(8.).justify_start().gap(12.)
     } else {
@@ -149,8 +149,11 @@ pub(crate) fn view(s: &State, _cx: &mut rune::Cx<State>, t: &Theme, sh: &Shell, 
         if !active {
             tile = tile.hover(t.panel);
         }
+        // A held tile shrinks; the one being dragged dims instead (its ghost follows the pointer).
         if dragging.as_deref() == Some(id.as_str()) {
             tile = tile.opacity(0.4);
+        } else {
+            tile = motion::pressable(tile);
         }
         if let Some(after) = drag::over(s, "spaces", &id) {
             let edge = if after {

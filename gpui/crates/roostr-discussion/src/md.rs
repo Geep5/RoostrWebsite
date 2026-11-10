@@ -25,11 +25,23 @@ pub(crate) struct MdTheme {
 }
 
 /// What a message body is laid out against: the theme, the store (object links' icons, agent
-/// tag colours) and the active space.
+/// tag colours), the active space, and whether its words fade in as it arrives.
 pub(crate) struct MdEnv<'a> {
     pub t: &'a Theme,
     pub store: &'a Store,
     pub space: &'a str,
+    /// Every text run reveals appended words over this many seconds (`El::reveal`).
+    pub reveal: Option<f32>,
+}
+
+impl MdEnv<'_> {
+    /// `run` (a text element) revealing its words, when the body does.
+    fn reveal(&self, run: El) -> El {
+        match self.reveal {
+            Some(fade) => run.reveal(fade),
+            None => run,
+        }
+    }
 }
 
 /// A link's id as `on_link` hears it: an object to open here, or a web address.
@@ -241,13 +253,13 @@ fn render_line(
     style: TextStyle,
     env: &MdEnv,
 ) -> El {
-    line_el(key, build_line(inline, md, names, env), style, md.ink)
+    line_el(key, build_line(inline, md, names, env), style, md.ink, env)
 }
 
-fn line_el(key: String, line: Line, style: TextStyle, ink: Color) -> El {
+fn line_el(key: String, line: Line, style: TextStyle, ink: Color, env: &MdEnv) -> El {
     if line.text.is_empty() {
         // An empty line still takes a line's height (`<br>`).
-        return text(" ").key(key).font(style).color(ink);
+        return env.reveal(text(" ").key(key).font(style).color(ink));
     }
     let mut el = rich(line.text, line.spans)
         .key(key)
@@ -259,7 +271,7 @@ fn line_el(key: String, line: Line, style: TextStyle, ink: Color) -> El {
     for (range, id) in line.links {
         el = el.link(rune::Link::new(range, id));
     }
-    el
+    env.reveal(el)
 }
 
 /// CSS vertical margins of one block (top, bottom).
@@ -351,21 +363,25 @@ fn render_block(
                 .py(8.);
             if !lang.is_empty() {
                 boxed = boxed.child(
-                    text(lang.to_uppercase())
-                        .font(ty::ui(10.).family(rune::Family::Mono))
-                        .color(t.muted)
-                        .mb(4.),
+                    env.reveal(
+                        text(lang.to_uppercase())
+                            .font(ty::ui(10.).family(rune::Family::Mono))
+                            .color(t.muted),
+                    )
+                    .mb(4.),
                 );
             }
             // The box is the theme's, not the bubble's: its text too, or a tinted
             // bubble's dark ink vanishes on a dark theme's box.
             boxed.child(
                 col().key(format!("{key}-{ix}-code")).scroll_x().child(
-                    text(code.clone())
-                        .key(format!("{key}-{ix}-code-text"))
-                        .font(mono)
-                        .color(t.fg)
-                        .selectable(true),
+                    env.reveal(
+                        text(code.clone())
+                            .key(format!("{key}-{ix}-code-text"))
+                            .font(mono)
+                            .color(t.fg)
+                            .selectable(true),
+                    ),
                 ),
             )
         }
@@ -388,13 +404,13 @@ fn render_block(
                     let text = if done {
                         // `.done { opacity: .6; text-decoration: line-through }`.
                         built.strikes = vec![(0, built.text.len(), None)];
-                        line_el(key, built, style, md.ink).opacity(0.6)
+                        line_el(key, built, style, md.ink, env).opacity(0.6)
                     } else {
-                        line_el(key, built, style, md.ink)
+                        line_el(key, built, style, md.ink, env)
                     };
                     r.child(col().shrink().child(text))
                 } else {
-                    let line = line_el(key, built, style, md.ink);
+                    let line = line_el(key, built, style, md.ink, env);
                     let marker = if *ordered {
                         format!("{}.", i + 1)
                     } else {
@@ -406,7 +422,7 @@ fn render_block(
                                 .w(20.)
                                 .pr(6.)
                                 .justify_end()
-                                .child(text(marker).font(style).color(md.ink)),
+                                .child(env.reveal(text(marker).font(style).color(md.ink))),
                         )
                         .child(col().shrink().child(line))
                 }

@@ -513,7 +513,7 @@ fn template_card(
     let g = format!("tg-{}", tpl.id);
     let open_id = tpl.id.clone();
     let preview = tip(
-        col()
+        roostr_ui::motion::pressable(col())
             .key("preview")
             .role("button")
             .w_full()

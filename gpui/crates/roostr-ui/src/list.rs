@@ -247,6 +247,7 @@ impl ListItem {
             if self.pointer {
                 e = e.cursor(Cursor::Pointer);
             }
+            e = crate::motion::pressable_row(e);
         }
         e = e.disabled(self.disabled);
         self.acts.apply(e, selectable)

@@ -67,8 +67,9 @@ const CARD_MAX_W: f32 = 420.0 + 42.0;
 /// The small modal card (`.prop-del-modal`) centred over a dim, holding `body`;
 /// `dismiss` runs on a click outside or Escape (`None`: it can't be dismissed now).
 ///
-/// The card (keyed `key`) rises 8 pt into place while it fades in over `FADE`; the dim
-/// (`{key}-dim`) fades in with it. It is modal from its first frame: focus stays inside and
+/// The card (keyed `key`) pops open ([`motion::appear`]: it rises 8 pt and scales up into
+/// place with a slight bounce as it fades in); the dim (`{key}-dim`) only fades in. It is
+/// modal from its first frame: focus stays inside and
 /// Return presses the button marked `El::default_button()`.
 pub(crate) fn small_dialog(
     t: &Theme,
@@ -83,7 +84,7 @@ pub(crate) fn small_dialog(
             .w_full()
             .h_full()
             .fill(t.kit.overlay)
-            .transition(motion::appear(0.0)),
+            .transition(motion::pop(rune::Effect::opacity(0.0))),
     );
     let mut card = col()
         .key(key.to_string())

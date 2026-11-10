@@ -87,7 +87,7 @@ pub(crate) fn view(
                 .min_w(0.),
         )
         .on_press(crate::search::open);
-    let path = roostr_ui::tooltip(path, "Search (⌘K)");
+    let path = roostr_ui::tooltip(roostr_ui::motion::pressable(path), "Search (⌘K)");
 
     let graph_focus = object_id.clone();
     let mut right = row().gap(2.).items_center().child(
@@ -124,12 +124,16 @@ pub(crate) fn view(
             .label("Chat & properties")
             .child(crate::shell::fill_glyph(t, Glyph::Pane, 16.))
             .on_press(move |s: &mut State| s.pane.set_open(primary, true, &mut s.ui));
+        let button = roostr_ui::motion::pressable(button);
         right = right.child(
-            CountBadge::new(roostr_ui::tooltip(button, "Chat & properties"))
-                .count(s.pane.count)
-                .max(99)
-                .color(t.accent)
-                .build(t),
+            CountBadge::new(
+                "pane-badge",
+                roostr_ui::tooltip(button, "Chat & properties"),
+            )
+            .count(s.pane.count)
+            .max(99)
+            .color(t.accent)
+            .build(t),
         );
     }
 

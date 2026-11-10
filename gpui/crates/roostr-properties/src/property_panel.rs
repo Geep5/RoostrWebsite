@@ -10,7 +10,7 @@ use roostr_core::relations::current_space_id;
 use roostr_core::types::field_str;
 use roostr_core::{QueryRow, Route, State, StoreEvent, Value, api, nav};
 use roostr_ui::theme::ty::Weights as _;
-use roostr_ui::{TagPill, Textarea, TextareaState, Theme, radius, ty};
+use roostr_ui::{TagPill, Textarea, TextareaState, Theme, motion, radius, ty};
 use rune::{Color, Cursor, El, col, el, row, text};
 use serde_json::json;
 
@@ -425,15 +425,19 @@ pub fn property_panel(
                         .border(1.0, t.border)
                         .child(text(format.clone()).font(ty::ui(12.0)).color(t.fg)),
                 )
-                .child(
-                    text(if st.loaded {
-                        format!("{n} object{} with a value", if n == 1 { "" } else { "s" })
-                    } else {
-                        "Loading…".into()
-                    })
-                    .font(ty::ui(13.0))
-                    .color(t.muted),
-                ),
+                .child(if st.loaded {
+                    // The count rolls as objects take or drop a value.
+                    motion::rolling_text(
+                        t,
+                        format!("property-count-{object_id}"),
+                        format!("{n} object{} with a value", if n == 1 { "" } else { "s" }),
+                        n as f64,
+                        ty::ui(13.0),
+                        t.muted,
+                    )
+                } else {
+                    text("Loading…").font(ty::ui(13.0)).color(t.muted)
+                }),
         );
     if st.loaded && n == 0 {
         return panel_el

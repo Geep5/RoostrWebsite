@@ -12,8 +12,8 @@ use roostr_core::{Fields, Route, State, StoreEvent, Value, api, lite_ui, nav};
 use roostr_ui::color::brighten;
 use roostr_ui::tags::badge_colors;
 use roostr_ui::ty::Weights as _;
-use roostr_ui::{Button, Glyph, Theme, glyph, radius, ty};
-use rune::{Cursor, El, ScrollSpec, col, el, row, text};
+use roostr_ui::{Button, Glyph, Theme, glyph, motion, radius, ty};
+use rune::{Cursor, El, ScrollSpec, TextStyle, col, el, row, text};
 use serde_json::json;
 
 use crate::suggest::{SuggestEvent, TypeSuggest, TypeSuggestState};
@@ -183,11 +183,22 @@ fn object_space(fields: &Fields, s: &State) -> String {
 
 /// A badge: Roostr's tag look (26px, radius md, medium 13px label after a
 /// 16px lead) with hover brighten, its tooltip and, when `clickable`, a
-/// pointer (the caller adds `on_press`).
+/// pointer and the press shrink (the caller adds `on_press`).
 fn badge(t: &Theme, key: &str, lead: El, label: String, clickable: bool, tooltip: &str) -> El {
+    let label = text(label).font(badge_font()).color(badge_colors(t, "").fg);
+    badge_el(t, key, lead, label, clickable, tooltip)
+}
+
+/// The badge label's type: medium 13px on the badge's 26px line.
+fn badge_font() -> TextStyle {
+    ty::ui(13.0).lh(26.0).medium()
+}
+
+/// [`badge`] around a label already built (a rolling count).
+fn badge_el(t: &Theme, key: &str, lead: El, label: El, clickable: bool, tooltip: &str) -> El {
     let c = badge_colors(t, "");
     let lit = brighten(c.bg, 1.18);
-    let b = row()
+    let mut b = row()
         .key(key.to_string())
         .h(26.0)
         .items_center()
@@ -204,7 +215,10 @@ fn badge(t: &Theme, key: &str, lead: El, label: String, clickable: bool, tooltip
             Cursor::Default
         })
         .child(lead)
-        .child(text(label).font(ty::ui(13.0).lh(26.0).medium()).color(c.fg));
+        .child(label);
+    if clickable {
+        b = motion::pressable(b);
+    }
     tip(b, tooltip)
 }
 
@@ -441,7 +455,8 @@ pub fn object_meta(
                     main
                 } else {
                     let id = object_id.to_string();
-                    main.key(format!("src-{key}"))
+                    motion::pressable(main)
+                        .key(format!("src-{key}"))
                         .cursor(Cursor::Pointer)
                         .on_press(move |s: &mut State| {
                             close(s, &id);
@@ -511,12 +526,21 @@ pub fn object_meta(
     let n = me.backlinks.len();
     if n > 0 {
         let id = object_id.to_string();
+        // The count rolls as backlinks come and go.
+        let label = motion::rolling_text(
+            t,
+            format!("backlinks-count-{object_id}"),
+            format!("{n} backlink{}", if n == 1 { "" } else { "s" }),
+            n as f64,
+            badge_font(),
+            badge_colors(t, "").fg,
+        );
         line = line.child(
-            badge(
+            badge_el(
                 t,
                 "backlinks",
                 badge_glyph(t, Glyph::BadgeLink),
-                format!("{n} backlink{}", if n == 1 { "" } else { "s" }),
+                label,
                 true,
                 "Backlinks",
             )
@@ -533,7 +557,7 @@ pub fn object_meta(
                 let (id, target) = (object_id.to_string(), b.id.clone());
                 let icon = object_icon(store, &b.icon, &b.type_key, &space);
                 body = body.child(
-                    row()
+                    motion::pressable_row(row())
                         .key(format!("bl-{}", b.id))
                         .w_full()
                         .min_w(0.0)
