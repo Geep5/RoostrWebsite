@@ -541,7 +541,9 @@ impl PropertyFlow {
                         .pt(2.0)
                         .child(text(l).font(ty::ui(11.0)).color(t.muted))
                 };
-                let type_row = Button::new("type-row")
+                // Its own key is what the menu anchors to (an anchor names an
+                // element's own key, never a path), so it carries the flow's.
+                let type_row = Button::new(format!("{key}-type-row"))
                     .outline()
                     .h(30.0)
                     .px(8.0)
@@ -608,7 +610,7 @@ impl PropertyFlow {
                     // Hangs under the Type button, above the rest of the form (the
                     // flow's last child); presses on it stay inside the flow.
                     menu = Some(
-                        m.anchored(format!("{key}/type-row"), Side::Bottom, Align::Start, 4.0)
+                        m.anchored(format!("{key}-type-row"), Side::Bottom, Align::Start, 4.0)
                             .transition(motion::appear(-4.0))
                             .instant_changes(),
                     );

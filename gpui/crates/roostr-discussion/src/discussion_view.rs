@@ -26,7 +26,7 @@ use crate::discussion::{
     AGENT_TOKEN, AgentPresence, Disc, DiscussionOptions, OBJECT_GREEN, OBJECT_TOKEN, Place, REVEAL,
     ScrollAsk, agent_tag_paint, composer_edit, get, instance_key, origin_label, request, with,
 };
-use crate::md::{MdEnv, MdTheme, OBJECT_LINK, URL_LINK, render_markdown};
+use crate::md::{MdEnv, MdTheme, render_markdown};
 use crate::threads::ObjectAgentOption;
 
 /// The instance of `object_id`'s discussion shown with `options`, asking for it when it
@@ -630,17 +630,6 @@ fn message_rows(d: &Disc, s: &State, t: &Theme) -> Vec<El> {
     rows
 }
 
-/// Presses on a message's links: an object opens here, a web address in the browser.
-fn on_link(s: &mut State, id: &str, tx: &mut Tx) {
-    if let Some(object) = id.strip_prefix(OBJECT_LINK) {
-        nav::navigate(Route::Object(object.to_string()), s);
-    } else if let Some(url) = id.strip_prefix(URL_LINK) {
-        if let Err(error) = tx.open_url(url) {
-            log::warn!("open {url}: {error:?}");
-        }
-    }
-}
-
 /// Message `m`'s row; `key_id` scopes its element keys (the message's id, or the placeholder
 /// a sent line landed in) and `revealing` fades its words in.
 #[allow(clippy::too_many_arguments)]
@@ -735,7 +724,6 @@ fn message_row(
         .fill(if tinted { colors.bg } else { t.hover })
         .shrink()
         .min_w(0.)
-        .on_link(on_link)
         .child(body);
 
     // Delivery / processing status: quiet when all is well.
@@ -1236,7 +1224,7 @@ fn menu_frame(
 /// The `@` agent menu or the `!` object menu above the composer, into `layer`.
 fn composer_menu(d: &Disc, s: &State, cx: &mut Cx<State>, t: &Theme, layer: &mut Vec<El>) {
     let key = d.key.clone();
-    let anchor = path(&key, "composer-box");
+    let anchor = composer_box_key(&key);
     let width = cx.layout_size(&anchor).map(|[w, _]| w);
     let images = s.get::<Images>();
     let place = |menu: El| {
@@ -1343,6 +1331,14 @@ fn composer_menu(d: &Disc, s: &State, cx: &mut Cx<State>, t: &Theme, layer: &mut
     layer.push(place(menu));
 }
 
+/// The composer box's own key, unique per discussion and without a `/`: an
+/// anchored overlay finds its anchor by the element's own key, never by a
+/// path - `<discussion>/composer-box` matched nothing, and the `@` menu
+/// opened at the window's top-left corner.
+fn composer_box_key(discussion: &str) -> String {
+    format!("{discussion}-composer-box")
+}
+
 /// How every lite notice draws: wrapping, 12px muted, with its action as an outline button.
 fn notice_row(t: &Theme, notice: roostr_core::lite_ui::Notice) -> El {
     let mut r = row().flex_wrap().center_y().gap(10.).py(6.).child(
@@ -1441,7 +1437,7 @@ fn composer(d: &Disc, s: &State, cx: &mut Cx<State>, t: &Theme, layer: &mut Vec<
         })
         .child(glyph(Glyph::KitArrowUp, 16.).color(colors.ink));
     col()
-        .key("composer-box")
+        .key(composer_box_key(&key))
         .fill(t.panel)
         .border(1., t.border)
         .radius(radius::MENU)

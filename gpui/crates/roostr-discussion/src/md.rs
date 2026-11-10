@@ -5,12 +5,13 @@
 //! the web view's DOM text was: a drag selects across lines and messages, ⌘C
 //! copies.
 
-use roostr_core::Store;
+use roostr_core::nav::{self, Route};
+use roostr_core::{State, Store};
 use roostr_core::markdown::{Align, Block, Inline, Link, Span, TaskCheck, parse};
 use roostr_core::objects::object_icon;
 use roostr_ui::tags::{TagPaint, tint_paint};
 use roostr_ui::{Theme, is_image_icon, radius, ty};
-use rune::{Color, El, TextStyle, col, rich, row, text};
+use rune::{Color, El, TextStyle, Tx, col, rich, row, text};
 
 use crate::discussion::{OBJECT_GREEN, agent_tag_paint};
 
@@ -268,10 +269,26 @@ fn line_el(key: String, line: Line, style: TextStyle, ink: Color, env: &MdEnv) -
         .selectable(true)
         .span_rings(line.rings)
         .strikes(line.strikes);
+    // A text element hears its own links' presses: `on_link` on the bubble
+    // around it is ignored, and a click on an agent's link did nothing.
+    if !line.links.is_empty() {
+        el = el.on_link(on_link);
+    }
     for (range, id) in line.links {
         el = el.link(rune::Link::new(range, id));
     }
     env.reveal(el)
+}
+
+/// Presses on a message's links: an object opens here, a web address in the browser.
+fn on_link(s: &mut State, id: &str, tx: &mut Tx) {
+    if let Some(object) = id.strip_prefix(OBJECT_LINK) {
+        nav::navigate(Route::Object(object.to_string()), s);
+    } else if let Some(url) = id.strip_prefix(URL_LINK) {
+        if let Err(error) = tx.open_url(url) {
+            log::warn!("open {url}: {error:?}");
+        }
+    }
 }
 
 /// CSS vertical margins of one block (top, bottom).
