@@ -1019,34 +1019,8 @@ fn spaces(s: &State, t: &Theme) -> El {
         vec![col().w_full().gap(10.).pb(12.).children(cards)],
     );
 
-    let importing = (!status.bootstrapped && status.phase != SyncPhase::Idle).then(|| {
-        let detail = status
-            .detail
-            .clone()
-            .unwrap_or_else(|| format!("{} changes imported", count(status.imported)));
-        let message = format!("Loading your vault… {detail}. Spaces appear as they arrive.");
-        // The kit's info alert, bare: no padding, border or fill, muted 12px.
-        row()
-            .key("m-importing")
-            .role("alert")
-            .mx(16.)
-            .mb(8.)
-            .gap(6.)
-            .items_start()
-            .child(
-                glyph(Glyph::Info, roostr_ui::rems(0.875))
-                    .color(t.muted)
-                    .mt(2.),
-            )
-            .child(
-                text(message)
-                    .font(ty::ui(12.).lh(12. * 1.35))
-                    .color(t.muted)
-                    .wrap()
-                    .shrink()
-                    .grow(1.),
-            )
-    });
+    let importing = (!status.bootstrapped && status.phase != SyncPhase::Idle)
+        .then(|| loading_card(t, status));
 
     let avatar = fill("m-avatar", Color::TRANSPARENT)
         .role("button")
@@ -1090,6 +1064,60 @@ fn spaces(s: &State, t: &Theme) -> El {
                     .font(ty::ui(10.))
                     .color(t.muted),
             ),
+        )
+}
+
+/// The vault's first load on the Spaces list: a card with "Loading your vault", the percentage,
+/// a progress bar (a sweeping one while the total isn't known yet) and what has arrived.
+fn loading_card(t: &Theme, status: &roostr_core::types::SyncStatus) -> El {
+    let progress = sync_progress(status);
+    let pct = progress.as_ref().and_then(|p| p.pct);
+    // The percentage sits in the head, so the line says counts only.
+    let detail = match (&progress, &status.detail) {
+        (Some(p), _) if p.preparing => roostr_core::sync_status::progress_text(p),
+        (Some(p), _) => match p.expected {
+            Some(total) => format!("{} of {} changes", count(p.received), count(total)),
+            None => format!("{} changes received", count(p.received)),
+        },
+        (None, Some(d)) => d.clone(),
+        (None, None) => format!("{} changes imported", count(status.imported)),
+    };
+    let head = row()
+        .w_full()
+        .center_y()
+        .child(
+            text("Loading your vault")
+                .font(ty::ui(14.).semibold())
+                .color(t.fg),
+        )
+        .child(spacer())
+        .children(pct.map(|pct| {
+            text(format!("{pct}%"))
+                .font(ty::ui(13.).medium().features("'tnum' 1"))
+                .color(t.muted)
+        }));
+    let bar = roostr_ui::Progress::new("m-importing-bar")
+        .size(roostr_ui::KitSize::Small)
+        .color(t.accent)
+        .loading(pct.is_none())
+        .value(pct.map_or(0., |pct| pct as f32))
+        .build(t);
+    col()
+        .key("m-importing")
+        .role("status")
+        .mb(12.)
+        .padding(14.)
+        .gap(10.)
+        .radius(12.)
+        .fill(t.panel)
+        .border(1., t.border)
+        .child(head)
+        .child(bar)
+        .child(
+            text(format!("{detail}. Spaces appear as they arrive."))
+                .font(ty::ui(12.).lh(12. * 1.35))
+                .color(t.muted)
+                .wrap(),
         )
 }
 
