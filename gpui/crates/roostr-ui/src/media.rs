@@ -224,15 +224,13 @@ pub fn icon_text(icon: &str, size: f32, style: TextStyle, images: &Images) -> El
 /// icon off macOS (the web's Twemoji is drawn at 1 em in a browser too), is plain `style` text.
 pub fn emoji_text(icon: &str, style: TextStyle) -> El {
     if !cfg!(target_os = "macos") {
-        // The text fonts carry monochrome glyphs for text-default emoji (⚠ ✉ 🏟 ♂, which
-        // become emoji by a trailing U+FE0F), and the fallback took those and dropped the
-        // selector, drawing nothing; an emoji-only icon asks for Twemoji first.
-        let style = if is_color_emoji(icon) {
-            style.family(rune::Family::Named(crate::fonts::EMOJI))
-        } else {
-            style
-        };
-        return text(icon.to_owned()).font(style);
+        // Emoji-only icons ask for Twemoji first: the text fonts carry monochrome glyphs for
+        // text-default emoji (⚠ ✉ 🏟).
+        if !is_color_emoji(icon) {
+            return text(icon.to_owned()).font(style);
+        }
+        let style = style.family(rune::Family::Named(crate::fonts::EMOJI));
+        return text(twemoji_form(icon)).font(style);
     }
     if !is_color_emoji(icon) {
         return text(icon.to_owned()).font(style);
@@ -254,6 +252,30 @@ pub fn emoji_text(icon: &str, style: TextStyle) -> El {
             line_height: line,
             ..style
         }))
+}
+
+/// `icon` as the iPhone's Twemoji can draw it. Rune sends any grapheme with `U+FE0F` to the
+/// system's colour emoji font, and an iPhone app can't draw Apple's (its emoji are stored in a
+/// format Rune doesn't decode), so `🏟️` drew nothing. Without the selector Rune keeps the
+/// grapheme in the style's fonts, where Twemoji has the colour glyph. Twemoji has no ligature
+/// for a ZWJ sequence without its selector (`🧙‍♂️` would draw `🧙` then a `♂` tile), so such a
+/// sequence draws its first emoji. Elsewhere the icon is unchanged.
+fn twemoji_form(icon: &str) -> String {
+    if cfg!(target_os = "ios") {
+        without_presentation(icon)
+    } else {
+        icon.to_owned()
+    }
+}
+
+/// `icon` without `U+FE0F`; a ZWJ sequence that carried one, its first emoji (see
+/// [`twemoji_form`]).
+fn without_presentation(icon: &str) -> String {
+    if !icon.contains('\u{FE0F}') {
+        return icon.to_owned();
+    }
+    let first = icon.split('\u{200D}').next().unwrap_or(icon);
+    first.chars().filter(|&c| c != '\u{FE0F}').collect()
 }
 
 /// The ink size of a colour emoji in macOS text of `size` (see [`emoji_text`]).
@@ -377,6 +399,15 @@ mod tests {
         assert!(images.take_wanted().is_empty());
         assert!(images.image("data:image/png;base64,AAAA", 16.0).is_some());
         assert!(images.image("data:text/plain,hi", 16.0).is_none());
+    }
+
+    #[test]
+    fn emoji_lose_the_presentation_selector_and_selector_sequences_keep_their_first() {
+        assert_eq!(without_presentation("\u{1F3DF}\u{FE0F}"), "\u{1F3DF}");
+        assert_eq!(without_presentation("\u{26A0}\u{FE0F}"), "\u{26A0}");
+        assert_eq!(without_presentation("\u{1F9D9}\u{200D}\u{2642}\u{FE0F}"), "\u{1F9D9}");
+        assert_eq!(without_presentation("\u{1F929}"), "\u{1F929}");
+        assert_eq!(without_presentation("\u{1F468}\u{200D}\u{1F4BB}"), "\u{1F468}\u{200D}\u{1F4BB}");
     }
 
     #[test]
