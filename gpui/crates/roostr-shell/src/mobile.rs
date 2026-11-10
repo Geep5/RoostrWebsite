@@ -1020,7 +1020,7 @@ fn spaces(s: &State, t: &Theme) -> El {
     );
 
     let importing = (!status.bootstrapped && status.phase != SyncPhase::Idle)
-        .then(|| loading_card(t, status));
+        .then(|| loading_card(s, t));
 
     let avatar = fill("m-avatar", Color::TRANSPARENT)
         .role("button")
@@ -1068,8 +1068,11 @@ fn spaces(s: &State, t: &Theme) -> El {
 }
 
 /// The vault's first load on the Spaces list: a card with "Loading your vault", the percentage,
-/// a progress bar (a sweeping one while the total isn't known yet) and what has arrived.
-fn loading_card(t: &Theme, status: &roostr_core::types::SyncStatus) -> El {
+/// a progress bar in the person's own colour (Settings → Chat color; a sweeping bar while the
+/// total isn't known yet) and what has arrived.
+fn loading_card(s: &State, t: &Theme) -> El {
+    let status = &s.store.status;
+    let colour = roostr_ui::color::hex(&s.store.chat_color).unwrap_or(t.accent);
     let progress = sync_progress(status);
     let pct = progress.as_ref().and_then(|p| p.pct);
     // The percentage sits in the head, so the line says counts only.
@@ -1098,7 +1101,7 @@ fn loading_card(t: &Theme, status: &roostr_core::types::SyncStatus) -> El {
         }));
     let bar = roostr_ui::Progress::new("m-importing-bar")
         .size(roostr_ui::KitSize::Small)
-        .color(t.accent)
+        .color(colour)
         .loading(pct.is_none())
         .value(pct.map_or(0., |pct| pct as f32))
         .build(t);
