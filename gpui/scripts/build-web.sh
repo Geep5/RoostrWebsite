@@ -87,8 +87,8 @@ page() {
   PAGE_HEAD=$2 awk '/<!-- page head/ { print ENVIRON["PAGE_HEAD"]; next } { print }' "$TEMPLATE" >"$OUT/$1"
 }
 page index.html '    <meta property="og:image" content="/logo.png" />
-    <meta name="description" content="Roostr is a workspace where people and AI agents run things together. Each space is one part of your life, with its own people, records, logins and agents that work on a schedule on your own computers. End-to-end encrypted, open source." />
-    <title>Roostr — your team, human and not</title>'
+    <meta name="description" content="Roostr is the workspace people and AI agents share. Give every agent a job, a schedule and its own logins, model and prompt, and see everything it does in the same tables, boards and calendars your team uses. End-to-end encrypted, open source, running on your own computers." />
+    <title>Roostr — the workspace people and agents share</title>'
 page guide.html '    <meta name="description" content="How Roostr works: objects, spaces, agents, repeating work, scores and logins - with best practices and step-by-step setups." />
     <title>Guide — Roostr</title>'
 page privacy.html '    <meta name="description" content="What Roostr stores, where it goes, and who can see it." />

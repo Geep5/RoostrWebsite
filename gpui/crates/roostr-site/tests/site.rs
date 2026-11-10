@@ -73,8 +73,8 @@ fn page(rt: &Runtime<State>) -> Route {
 fn landing_links_go_to_the_guide_and_the_app() {
     let mut rt = runtime(SitePage::Landing, (1440., 864.));
     assert_eq!(
-        by_text(&rt, "YOUR TEAM,").text.as_deref(),
-        Some("YOUR TEAM,")
+        by_text(&rt, "THE WORKSPACE").text.as_deref(),
+        Some("THE WORKSPACE")
     );
     let guide = by_text(&rt, "Guide");
     press(&mut rt, &guide);
@@ -89,11 +89,11 @@ fn landing_links_go_to_the_guide_and_the_app() {
 #[test]
 fn a_phone_landing_sets_the_headline_on_two_lines() {
     let rt = runtime(SitePage::Landing, (390., 844.));
-    by_text(&rt, "HUMAN AND NOT.");
+    by_text(&rt, "AGENTS SHARE.");
     assert!(
         rt.elements()
             .iter()
-            .all(|e| e.text.as_deref() != Some("HUMAN"))
+            .all(|e| e.text.as_deref() != Some("PEOPLE AND AGENTS"))
     );
     // Too narrow for the GitHub label: the mark alone.
     assert!(

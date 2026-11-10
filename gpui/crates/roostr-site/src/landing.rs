@@ -37,10 +37,10 @@ fn clamp(min: f32, value: f32, max: f32) -> f32 {
     value.max(min).min(max)
 }
 
-/// Inter at `size` and `weight`, the page's `line-height: 1.55`.
+/// The UI font (Intern, Inter after it) at `size` and `weight`, the page's `line-height: 1.55`.
 fn inter(size: f32, weight: f32) -> TextStyle {
     TextStyle::new(size, weight)
-        .family(family::INTER)
+        .family(rune::Family::Sans)
         .lh(size * 1.55)
 }
 
@@ -200,7 +200,7 @@ fn header(s: &State, m: &Metrics) -> El {
             .pb(2.)
             .px(9.)
             .child(
-                spaced(family::INTER, 11., 1.5)
+                spaced(rune::Family::Sans, 11., 1.5)
                     .weight(750.)
                     .line_height(11. * 1.4)
                     .run("ALPHA", Some(paper()))
@@ -253,9 +253,22 @@ fn header(s: &State, m: &Metrics) -> El {
 
 /// The headline, lede and actions, in a column `width` wide.
 fn hero_copy(s: &State, m: &Metrics, width: f32) -> El {
+    let lines: &[(&str, bool)] = if m.narrow {
+        &[("THE WORKSPACE", false), ("PEOPLE AND", false), ("AGENTS SHARE", true)]
+    } else {
+        &[("THE WORKSPACE", false), ("PEOPLE AND AGENTS", false), ("SHARE", true)]
+    };
+    // The widest line must fit the column: measure it in Archivo Black at 100pt (plus the
+    // red period's room) and cap the size so it spans at most the column width.
+    let probe = TextStyle::new(100., 400.).family(family::ARCHIVO_BLACK);
+    let widest = lines
+        .iter()
+        .map(|(line, _)| rune::text::measure(&format!("{line}."), &[], probe, None).0)
+        .fold(1., f32::max);
+    let fit = width / widest * 100. * 0.97;
     let (h1_size, lede_size, lede_lh) = if m.narrow {
         (
-            clamp(28., m.vw(10.).min(m.vh(6.)), 60.),
+            clamp(24., m.vw(10.).min(m.vh(6.)), 60.).min(fit),
             if m.short {
                 13.
             } else {
@@ -265,7 +278,7 @@ fn hero_copy(s: &State, m: &Metrics, width: f32) -> El {
         )
     } else {
         (
-            clamp(36., m.vw(6.8).min(m.vh(9.)).min(m.vh(21.6) - 96.), 96.),
+            clamp(36., m.vw(6.8).min(m.vh(9.)).min(m.vh(21.6) - 96.), 96.).min(fit),
             clamp(15., m.vh(2.1), 19.),
             1.55,
         )
@@ -279,29 +292,19 @@ fn hero_copy(s: &State, m: &Metrics, width: f32) -> El {
         }
         l.build(Theme::dark())
     };
-    let lines = if m.narrow {
-        vec![h1_line("YOUR TEAM,", false), h1_line("HUMAN AND NOT", true)]
-    } else {
-        vec![
-            h1_line("YOUR TEAM,", false),
-            h1_line("HUMAN", false),
-            h1_line("AND NOT", true),
-        ]
-    };
+    let lines: Vec<El> = lines.iter().map(|(line, dot)| h1_line(line, *dot)).collect();
     // The headline says "people + agents" now: no eyebrow above it.
     let mut copy = col().child(col().mb(clamp(10., m.vh(2.4), 24.)).children(lines));
     if m.lede {
         let lede = TextStyle::new(lede_size, 450.)
-            .family(family::INTER)
+            .family(rune::Family::Sans)
             .lh(lede_size * lede_lh);
         // `.lede { max-width: 46ch }`: ch is the advance of "0" in the lede's font (46 of
         // them measured as one line, as text widths round up to whole points).
         let (max_width, _) = rune::text::measure(&"0".repeat(46), &[], lede, None);
         copy = copy.child(
             text(
-                "Run your company, your household or a side project with agents that work like teammates. \
-                 Each has a job, a schedule and its own logins, and works on your real records, \
-                 like emails, people and tasks, right where you can see and fix what it did.",
+                "Agents get jobs, schedules and logins. You see everything they do, in a place built for you.",
             )
             .font(lede)
             .color(ink())
@@ -446,7 +449,7 @@ fn features(m: &Metrics, inner_width: f32) -> El {
                 text(body)
                     .font(
                         TextStyle::new(p_size, 400.)
-                            .family(family::INTER)
+                            .family(rune::Family::Sans)
                             .lh(p_size * p_lh),
                     )
                     .color(ink())
@@ -480,20 +483,20 @@ fn features(m: &Metrics, inner_width: f32) -> El {
         feature(
             0,
             "01",
-            "One space per world",
-            "A space holds one part of your life, with its own people, types, logins and agents. Share it with the people in it; everything is encrypted end to end.",
+            "Agents with jobs",
+            "Give each agent a role, a schedule, a model, a system prompt and only the logins it needs. It triages the inbox, chases leads and does the books, on your own computers.",
         ),
         feature(
             1,
             "02",
-            "Agents with jobs",
-            "Give an agent a role, a schedule and the logins it needs. It triages the inbox, updates the site, chases leads, and every change it makes is an object you can open.",
+            "Run them like a team",
+            "See every agent's status, errors, last run and goals in one place. Everything it touches is a real record you can open, check and fix. Start with one agent, then add ten.",
         ),
         feature(
             2,
             "03",
-            "Everything is an object",
-            "Emails, texts, people, files and bookmarks come in as linked objects. Any set becomes a table, board or calendar, and agents and people work on the same ones.",
+            "One space per world",
+            "Your company, your household, a side project. Each space has its own people, agents, logins and records, shared with the people in it and encrypted end to end.",
         ),
     ];
     let container = if m.narrow { col() } else { row() };
