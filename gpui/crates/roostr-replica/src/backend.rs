@@ -3340,6 +3340,12 @@ impl SyncHost for Host {
     /// it opens the space page; nothing is pushed.
     fn on_join_request(&self) {}
 
+    fn on_live(&self, event: roostr_core::live::LiveEvent) {
+        if let Some(inner) = self.0.upgrade() {
+            inner.emit(BackendEvent::Live(event));
+        }
+    }
+
     fn on_space_vanished(&self, space_id: String) {
         let Some(inner) = self.0.upgrade() else {
             return;

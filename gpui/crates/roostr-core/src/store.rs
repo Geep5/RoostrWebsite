@@ -89,6 +89,8 @@ pub enum StoreEvent {
     Reconnected,
     /// Collections (spaces, summaries, relations, types, agents, prefs) were refreshed.
     Refreshed,
+    /// An agent's live progress on a reply ([`crate::live`]); nothing is cached.
+    Live(crate::live::LiveEvent),
 }
 
 pub struct Store {
@@ -260,6 +262,7 @@ impl Store {
                 self.refresh_all();
                 self.events.push(StoreEvent::Reconnected);
             }
+            Ok(BackendEvent::Live(event)) => self.events.push(StoreEvent::Live(event)),
             Ok(BackendEvent::Status(mut status)) => {
                 if status.bootstrapped && !self.status.bootstrapped {
                     status.bootstrapped = false;

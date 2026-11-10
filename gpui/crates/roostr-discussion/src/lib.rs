@@ -12,6 +12,7 @@ mod discussion;
 mod discussion_view;
 mod drafts;
 mod drawer;
+mod live;
 mod md;
 #[cfg(test)]
 mod tests;

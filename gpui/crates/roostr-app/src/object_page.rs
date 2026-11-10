@@ -120,12 +120,16 @@ fn ids(s: &mut State) -> Vec<String> {
 }
 
 fn on_store(s: &mut State, event: &StoreEvent) {
+    if matches!(event, StoreEvent::Live(_)) {
+        return;
+    }
     for id in ids(s) {
         // A load that failed (not synced yet) retries when the replica learns more.
         let failed = matches!(s.store.object_slot(&id), Some(ObjectSlot::Failed(_)));
         let retry = match event {
             StoreEvent::Committed(committed) => *committed == id,
             StoreEvent::Refreshed | StoreEvent::Reconnected => true,
+            StoreEvent::Live(_) => false,
         };
         if failed && retry {
             s.store.reload_object(&id);

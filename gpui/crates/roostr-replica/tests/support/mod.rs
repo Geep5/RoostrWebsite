@@ -34,6 +34,7 @@ pub struct TestHost {
     pub passes: Mutex<Vec<(bool, bool)>>,
     /// object id → space id.
     pub spaces: Mutex<HashMap<String, String>>,
+    pub lives: Mutex<Vec<roostr_core::live::LiveEvent>>,
 }
 
 impl SyncHost for TestHost {
@@ -64,6 +65,9 @@ impl SyncHost for TestHost {
     }
     fn on_join_request(&self) {
         *self.join_requests.lock() += 1;
+    }
+    fn on_live(&self, event: roostr_core::live::LiveEvent) {
+        self.lives.lock().push(event);
     }
 }
 

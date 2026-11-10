@@ -11,6 +11,7 @@ use anyhow::Result;
 use serde_json::{Map, Value as Json};
 
 use crate::account::Account;
+use crate::live::LiveEvent;
 use crate::types::{Object, ObjectSummary, QueryResult, RelationDef, Settings, Space, SyncStatus};
 use roostr_rt::{BoxFuture, BoxStream, MaybeSend, MaybeSync};
 
@@ -29,6 +30,8 @@ pub enum BackendEvent {
     /// ([`SyncStatus::preparing`]): reads see the whole vault now, so
     /// anything shown may have been partial.
     Prepared,
+    /// An agent's live progress on a reply ([`crate::live`]).
+    Live(LiveEvent),
 }
 
 pub trait Backend: MaybeSend + MaybeSync + 'static {
@@ -97,6 +100,9 @@ impl SseParser {
         if event.get("hello").and_then(Json::as_bool) == Some(true) {
             return Some(BackendEvent::Hello);
         }
+        if event.get("type").and_then(Json::as_str) == Some("live") {
+            return LiveEvent::parse(event.get("live")?).map(BackendEvent::Live);
+        }
         event
             .get("objectId")
             .and_then(Json::as_str)
@@ -159,5 +165,20 @@ mod tests {
             ),
             vec![BackendEvent::Committed("doc-é".into())]
         );
+    }
+
+    #[test]
+    fn a_live_frame_yields_its_progress_event() {
+        let events = events(concat!(
+            "data: {\"type\":\"live\",\"origin\":\"local\",\"live\":{\"v\":1,\"run\":\"r1\",",
+            "\"agent\":\"a\",\"object\":\"o\",\"thread\":\"__discussion__\",\"seq\":0,",
+            "\"kind\":\"thinking\",\"text\":\"Looking\",\"ts\":5}}\n\n",
+            "data: {\"type\":\"live\",\"live\":{\"v\":9}}\n\n",
+        ));
+        assert_eq!(events.len(), 1, "a bad payload is dropped: {events:?}");
+        let BackendEvent::Live(live) = &events[0] else {
+            panic!("not a live event: {events:?}");
+        };
+        assert_eq!((live.run.as_str(), live.text.as_str()), ("r1", "Looking"));
     }
 }

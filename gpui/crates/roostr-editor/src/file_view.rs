@@ -187,7 +187,7 @@ fn on_store(s: &mut State, event: &StoreEvent) {
             .get::<FileViews>()
             .map(|v| v.map.keys().cloned().collect())
             .unwrap_or_default(),
-        StoreEvent::Refreshed => Vec::new(),
+        StoreEvent::Refreshed | StoreEvent::Live(_) => Vec::new(),
     };
     for id in ids {
         reload_object(s, &id);

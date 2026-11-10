@@ -17,12 +17,14 @@ use anyhow::Context;
 use futures::StreamExt;
 use futures::channel::mpsc::UnboundedReceiver;
 use futures::future::{AbortHandle, Abortable};
+use roostr_engine::RelayEvent;
 use roostr_nostr::nip59::WRAP_LOOKBACK_S;
 use roostr_nostr::relay::{LiveItem, live, query_many};
 use roostr_nostr::{Event, Filter, kinds};
 
 use super::{
-    BASE_HASH_BATCH, Inner, PAGE_TIMEOUT, WATCHDOG_PERIOD, describe_event, now_s, short, short_id,
+    BASE_HASH_BATCH, Inner, PAGE_TIMEOUT, WATCHDOG_PERIOD, describe_event, now_ms, now_s, short,
+    short_id,
 };
 
 /// Remembered live event ids (relays deliver the same event each).
@@ -82,6 +84,36 @@ impl Inner {
                 .tag('d', [kinds::KEYRING_D.to_string()])
                 .since(now_s() as u64),
         );
+        filters.extend(self.progress_filters());
+        filters
+    }
+
+    /// Agents' live progress (kind [`kinds::LIVE`], ephemeral) on the streams this session
+    /// follows, from now: this identity's own and its spaces' (or, lite, each followed
+    /// object's).
+    fn progress_filters(&self) -> Vec<Filter> {
+        let now = now_s() as u64;
+        let (personal, tags) = self.whole_streams();
+        let mut filters = Vec::new();
+        if personal {
+            filters.push(
+                Filter::new()
+                    .kinds([kinds::LIVE])
+                    .authors([self.pk.clone()])
+                    .since(now),
+            );
+        }
+        if !tags.is_empty() {
+            filters.push(Filter::new().kinds([kinds::LIVE]).tag('h', tags).since(now));
+        }
+        for chunk in self.followed_tags().chunks(BASE_HASH_BATCH) {
+            filters.push(
+                Filter::new()
+                    .kinds([kinds::LIVE])
+                    .tag('h', chunk.iter().cloned())
+                    .since(now),
+            );
+        }
         filters
     }
 
@@ -187,6 +219,10 @@ impl Inner {
                         self.handle_wrap(&event).await;
                     } else if event.kind == kinds::KEYRING {
                         self.merge_keyring_backup(&event);
+                    } else if event.kind == kinds::LIVE {
+                        if let Err(error) = self.handle_live_progress(&event).await {
+                            log::debug!("[sync] live progress {}: {error:#}", short_id(&event.id));
+                        }
                     } else {
                         let (id, kind) = (event.id.clone(), event.kind);
                         if let Err(error) = self.handle_live_event(event).await {
@@ -231,6 +267,46 @@ impl Inner {
                 self.emit_live_status();
             }
         });
+    }
+
+    /// An agent's live progress event: the engine opens it (nothing is imported, the
+    /// cursor stays) and the backend hears it, unless a shared space's event was signed
+    /// by someone who may not write there.
+    async fn handle_live_progress(&self, event: &Event) -> anyhow::Result<()> {
+        self.ensure_session().await?;
+        if !self.session_open() {
+            return Ok(());
+        }
+        let r = self
+            .engine
+            .ingest(
+                &RelayEvent {
+                    pubkey: event.pubkey.clone(),
+                    created_at: event.created_at as i64,
+                    kind: event.kind as u16,
+                    tags: event.tags.clone(),
+                    content: event.content.clone(),
+                },
+                now_ms(),
+            )
+            .await?;
+        let Some(payload) = r.live else {
+            return Ok(());
+        };
+        if let Some(p) = &r.provenance {
+            let st = self.state.lock();
+            let writes = st.shared.get(&p.space_id).is_some_and(|sp| {
+                sp.writers.contains(&p.signer)
+                    || sp.info.owner.as_deref().unwrap_or(&self.pk) == p.signer
+            });
+            if !writes {
+                return Ok(());
+            }
+        }
+        if let Some(live) = roostr_core::live::LiveEvent::parse(&payload) {
+            self.host.on_live(live);
+        }
+        Ok(())
     }
 
     pub(super) async fn handle_live_event(self: &Arc<Self>, event: Event) -> anyhow::Result<()> {

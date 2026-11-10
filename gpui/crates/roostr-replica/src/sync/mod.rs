@@ -185,6 +185,8 @@ pub trait SyncHost: MaybeSend + MaybeSync + 'static {
     /// A join request for a space this identity administers was recorded
     /// ([`invite::list_join_requests`]).
     fn on_join_request(&self);
+    /// An agent's live progress on a reply arrived (kind 25078, from a writer).
+    fn on_live(&self, event: roostr_core::live::LiveEvent);
 }
 
 /// A relay event row in the held-events table (sync.ts `RelayEventRow`).

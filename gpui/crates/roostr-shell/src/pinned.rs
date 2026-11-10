@@ -74,6 +74,7 @@ fn on_store(s: &mut State, event: &StoreEvent) {
             .filter(|id| match event {
                 StoreEvent::Committed(oid) => oid == *id,
                 StoreEvent::Refreshed | StoreEvent::Reconnected => true,
+                StoreEvent::Live(_) => false,
             })
             .cloned()
             .collect(),

@@ -14,8 +14,8 @@ use roostr_ui::tags::tint_paint;
 use roostr_ui::ty::Weights as _;
 use roostr_ui::{
     Alert, AlertVariant, Button, ButtonCustomVariant, Checkbox, DropdownMenu, Glyph, Images,
-    KitSize, Placement, PopupMenu, PopupMenuItem, Spinner, Tag, Theme, glyph, motion, radius, rems,
-    ty,
+    KitSize, Placement, PopupMenu, PopupMenuItem, ScrollArea, ScrollbarMode, Spinner, Tag, Theme,
+    glyph, motion, radius, rems, ty,
 };
 use rune::{
     Color, Cx, Cycle, El, GrowthSpec, PillStyle, ScrollSpec, Side, SurfaceFit, Transition, Tx, col,
@@ -27,6 +27,7 @@ use crate::discussion::{
     AGENT_TOKEN, AgentPresence, Disc, DiscussionOptions, OBJECT_GREEN, OBJECT_TOKEN, Place, REVEAL,
     ScrollAsk, agent_tag_paint, composer_edit, get, instance_key, origin_label, request, with,
 };
+use crate::live::{Entry, LiveRuns, Run, Thought, clock, now_ms};
 use crate::md::{MdEnv, MdTheme, render_markdown};
 use crate::threads::ObjectAgentOption;
 
@@ -582,6 +583,7 @@ fn message_rows(d: &Disc, s: &State, t: &Theme) -> Vec<El> {
             when(m.ts),
             revealing,
             files_sig(d, images, m),
+            d.thought_open.contains(&m.id),
         );
         // A sent line that landed keeps its placeholder's keys.
         let key_id = d.row_ids.get(&m.id).unwrap_or(&m.id);
@@ -628,7 +630,7 @@ fn message_rows(d: &Disc, s: &State, t: &Theme) -> Vec<El> {
         };
         rows.push(built);
     }
-    rows.push(footer(d, t, images));
+    rows.push(footer(d, s, t, images));
     rows
 }
 
@@ -717,6 +719,11 @@ fn message_row(
         )
     });
     let files = message_files(d, s, t, images, m, key_id, md_theme.ink);
+    // An agent's record of the work behind the reply, folded to one line above it.
+    let thought = m
+        .thought
+        .as_ref()
+        .map(|thought| thought_record(d, t, m, key_id, thought));
     let bubble_el = col()
         .key(format!("msg-text-{key_id}"))
         .corners(if own {
@@ -794,6 +801,7 @@ fn message_row(
         .w_frac(0.78)
         .min_w(0.)
         .child(meta)
+        .children(thought)
         .child(content)
         .children(status_line);
     column = if own {
@@ -812,6 +820,132 @@ fn message_row(
         r = r.child(row_avatar(d, s, t, images, &m.author, ix));
     }
     r.child(column)
+}
+
+/// The progress text's line height: the box shows [`PROGRESS_LINES`] of them.
+const PROGRESS_LINE: f32 = 16.5;
+const PROGRESS_LINES: f32 = 6.;
+
+/// An agent's thinking and tool steps in a box of a fixed height with its own scroll bar,
+/// under `header`; `live` follows the newest line unless the reader scrolled up.
+fn progress_box(
+    t: &Theme,
+    key: String,
+    header: Option<String>,
+    entries: &[Entry],
+    live: bool,
+) -> El {
+    let font = ty::ui(11.).lh(PROGRESS_LINE);
+    let lines = entries.iter().filter_map(|entry| match entry {
+        Entry::Thinking(prose) => {
+            let prose = prose.trim();
+            (!prose.is_empty()).then(|| text(prose.to_string()).font(font).color(t.muted).wrap())
+        }
+        Entry::Step(step) => Some(
+            row()
+                .gap(4.)
+                .items_start()
+                .child(roostr_ui::emoji_text("🔧", font))
+                .child(
+                    text(step.clone())
+                        .font(ty::mono(11.).lh(PROGRESS_LINE))
+                        .color(t.muted)
+                        .wrap()
+                        .shrink(),
+                ),
+        ),
+    });
+    let content = col().w_full().gap(4.).pr(14.).children(lines);
+    let area = ScrollArea::vertical(format!("{key}-scroll"), content)
+        .h(PROGRESS_LINE * PROGRESS_LINES)
+        .w_full()
+        .mode(ScrollbarMode::Always);
+    let area = if live { area.stick_bottom() } else { area };
+    col()
+        .key(key)
+        .w_full()
+        .gap(4.)
+        .px(10.)
+        .py(6.)
+        .radius(8.)
+        .border(1., t.border)
+        .children(header.map(|h| {
+            text(h)
+                .font(ty::ui(11.).medium().lh(PROGRESS_LINE))
+                .color(t.muted)
+        }))
+        .child(area.build(t))
+}
+
+/// A reply's "Thought for 1m 20s · 6 steps ▸" line; a click opens its record below it.
+fn thought_record(d: &Disc, t: &Theme, m: &ChatMessage, key_id: &str, thought: &Thought) -> El {
+    let open = d.thought_open.contains(&m.id);
+    let label = format!("{} {}", thought.summary(), if open { "▾" } else { "▸" });
+    let id = m.id.clone();
+    let toggle = row()
+        .key(format!("thought-{key_id}"))
+        .cursor(rune::Cursor::Pointer)
+        .py(2.)
+        .child(
+            text(label)
+                .font(ty::ui(11.).lh(PROGRESS_LINE))
+                .color(t.muted),
+        )
+        .on_press(act(&d.key, move |d, _| {
+            if !d.thought_open.remove(&id) {
+                d.thought_open.insert(id.clone());
+            }
+        }));
+    let mut record = col().w_full().items_start().gap(4.).pb(4.).child(toggle);
+    if open {
+        record = record.child(progress_box(
+            t,
+            format!("thought-box-{key_id}"),
+            None,
+            &thought.entries,
+            false,
+        ));
+    }
+    record
+}
+
+/// An agent at work: its name, then its run's thinking and steps live under a running clock.
+fn live_row(d: &Disc, s: &State, t: &Theme, images: Option<&Images>, run: &Run) -> El {
+    let store = &s.store;
+    let elapsed = clock(now_ms() - run.started);
+    row()
+        .key(format!("live-{}", run.id))
+        .w_full()
+        .items_start()
+        .gap(8.)
+        .pt(2.)
+        .pb(6.)
+        .child(avatar(
+            t,
+            images,
+            &d.avatar_emoji(&run.agent, store),
+            d.initials(&run.agent, store),
+            &run.agent,
+            ROW_AVATAR,
+        ))
+        .child(
+            col()
+                .w_frac(0.78)
+                .min_w(0.)
+                .gap(4.)
+                .child(
+                    text(d.who(&run.agent, store))
+                        .font(ty::ui(12.).medium().lh(12. * 1.618))
+                        .color(t.muted),
+                )
+                .child(progress_box(
+                    t,
+                    format!("live-box-{}", run.id),
+                    Some(format!("Thinking… {elapsed}")),
+                    &run.entries,
+                    true,
+                )),
+        )
 }
 
 /// The widest a message's image draws; a tall one stops at [`THUMB_MAX_H`].
@@ -1092,17 +1226,25 @@ fn status(
     None
 }
 
-/// The trailing row: empty note, the agent composing, or its problem.
-fn footer(d: &Disc, t: &Theme, images: Option<&Images>) -> El {
+/// The trailing row: empty note, each agent's live progress or typing dots, or its problem.
+fn footer(d: &Disc, s: &State, t: &Theme, images: Option<&Images>) -> El {
     let n = d.messages.len();
     let mut f = col().key("chat-footer").pb(4.);
-    let working: Option<AgentPresence> = d.agent_working().cloned();
-    let problem = if working.is_none() {
+    let runs: Vec<&Run> = s
+        .get::<LiveRuns>()
+        .map(|r| r.shown(&d.object_id, &d.thread_id).collect())
+        .unwrap_or_default();
+    // An agent whose run shows live needs no typing dots.
+    let working: Option<AgentPresence> = d
+        .agent_working()
+        .filter(|p| !runs.iter().any(|r| r.agent == p.id))
+        .cloned();
+    let problem = if working.is_none() && runs.is_empty() {
         d.agent_error().cloned()
     } else {
         None
     };
-    if n == 0 || working.is_some() || problem.is_some() {
+    if n == 0 || working.is_some() || !runs.is_empty() || problem.is_some() {
         f = f.pt(if n == 0 { 4. } else { 14. });
     }
     if n == 0 {
@@ -1113,6 +1255,9 @@ fn footer(d: &Disc, t: &Theme, images: Option<&Images>) -> El {
                 .color(t.muted)
                 .my(13.),
         );
+    }
+    for run in &runs {
+        f = f.child(live_row(d, s, t, images, run));
     }
     if let Some(agent) = &working {
         let typing = row()

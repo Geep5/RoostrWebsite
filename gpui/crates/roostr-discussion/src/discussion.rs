@@ -26,6 +26,7 @@ use crate::chat::{
     reply_recipients, unique_endpoints,
 };
 use crate::drafts::{load_draft, save_draft};
+use crate::live::LiveRuns;
 use crate::threads::{ObjectAgentOption, endpoint_name, load_object_agents, seed_tags};
 
 /// The green that object links and `!object` tags are tinted with.
@@ -288,6 +289,8 @@ pub(crate) struct Disc {
     expect_timer: Option<Task<()>>,
     pub presence_error: String,
     poll: Option<Task<()>>,
+    /// The replies whose progress record is open (by message id).
+    pub thought_open: HashSet<String>,
 }
 
 /// Runs `f` on instance `key` with the state: the instance leaves its slot meanwhile, so `f`
@@ -421,6 +424,7 @@ pub(crate) fn create(s: &mut State, key: String, object_id: String, options: Dis
         expect_timer: None,
         presence_error: String::new(),
         poll: None,
+        thought_open: HashSet::new(),
     };
     s.slot::<Discussions>().map.insert(key.clone(), d);
     with(s, &key, |d, s| {
@@ -462,9 +466,14 @@ pub(crate) fn poll_all(s: &mut State) -> bool {
     changed
 }
 
-/// `StoreEvent::Refreshed` in lite mode: the agent list is what this device holds; a refresh
-/// (the space finished loading) lists them again.
+/// `StoreEvent::Live`: an agent's progress joins its run. `StoreEvent::Refreshed` in lite
+/// mode: the agent list is what this device holds; a refresh (the space finished loading)
+/// lists them again.
 pub(crate) fn on_store(s: &mut State, event: &StoreEvent) {
+    if let StoreEvent::Live(live) = event {
+        crate::live::on_event(s, live);
+        return;
+    }
     if !matches!(event, StoreEvent::Refreshed) || roostr_core::lite::status(s).is_none() {
         return;
     }
@@ -617,6 +626,9 @@ impl Disc {
             })
             .unwrap_or_else(|| "Exchange".into());
         let previous = std::mem::replace(&mut self.messages, Rc::new(messages));
+        // A reply that landed ends the run that wrote it.
+        s.slot::<LiveRuns>()
+            .end_replied(&self.object_id, &self.messages);
         self.load_files(s);
         let at_end = self.at_end;
         self.note_arrival(&previous, at_end, s);
@@ -741,6 +753,7 @@ impl Disc {
                     &m.origin,
                     &m.files,
                     origins.get(&m.origin),
+                    &m.thought,
                     &self.me,
                     self.read_only,
                     self.is_exchange,
@@ -1673,6 +1686,7 @@ impl Disc {
             origin: String::new(),
             mailbox: None,
             files,
+            thought: None,
         });
         let draft = self.draft.clone();
         let tagged = self.tagged.clone();

@@ -349,7 +349,7 @@ pub(crate) fn on_store(s: &mut State, event: &StoreEvent) {
     let reload = match event {
         StoreEvent::Committed(id) => id.starts_with(DEVICE_ID_PREFIX),
         StoreEvent::Reconnected => true,
-        StoreEvent::Refreshed => false,
+        StoreEvent::Refreshed | StoreEvent::Live(_) => false,
     };
     if reload && settings_open(s) {
         load_devices(s);

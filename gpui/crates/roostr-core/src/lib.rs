@@ -23,6 +23,7 @@ pub mod io;
 pub mod layout;
 pub mod lite;
 pub mod lite_ui;
+pub mod live;
 pub mod markdown;
 pub mod mode;
 pub mod nav;

@@ -76,6 +76,7 @@ pub struct ScrollArea {
     key: String,
     content: El,
     horizontal: bool,
+    stick_bottom: bool,
     mode: Option<ScrollbarMode>,
     size: Vec<Box<dyn FnOnce(El) -> El>>,
 }
@@ -87,6 +88,7 @@ impl ScrollArea {
             key: key.into(),
             content,
             horizontal: false,
+            stick_bottom: false,
             mode: None,
             size: Vec::new(),
         }
@@ -101,6 +103,12 @@ impl ScrollArea {
     /// When the bar shows (default: [`ScrollbarMode::system`], as gpui-kit's theme).
     pub fn mode(mut self, mode: ScrollbarMode) -> Self {
         self.mode = Some(mode);
+        self
+    }
+    /// Follows the end as content grows, while scrolled to it ([`ScrollSpec::stick_bottom`]):
+    /// a live log.
+    pub fn stick_bottom(mut self) -> Self {
+        self.stick_bottom = true;
         self
     }
     pub fn h(mut self, h: f32) -> Self {
@@ -138,7 +146,7 @@ impl ScrollArea {
             col()
                 .key(self.key)
                 .scroll(ScrollSpec {
-                    stick_bottom: false,
+                    stick_bottom: self.stick_bottom,
                 })
                 .child(self.content)
         };

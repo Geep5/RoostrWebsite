@@ -230,7 +230,7 @@ fn on_store(s: &mut State, event: &StoreEvent) {
                     *id == v.id || v.active.as_ref().is_some_and(|a| a.shows(id))
                 }
                 StoreEvent::Reconnected => true,
-                StoreEvent::Refreshed => false,
+                StoreEvent::Refreshed | StoreEvent::Live(_) => false,
             })
             .map(|v| v.id.clone())
             .collect()

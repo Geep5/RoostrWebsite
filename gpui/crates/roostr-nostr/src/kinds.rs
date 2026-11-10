@@ -20,6 +20,9 @@ pub const BLOSSOM_AUTH: u32 = 24242;
 pub const SPACE_INVITE_RUMOR: u32 = 24891;
 /// Gift-wrapped rumor asking a space owner to join.
 pub const JOIN_REQUEST_RUMOR: u32 = 24892;
+/// An agent's live progress on a reply (ephemeral: relays forward it, never store it),
+/// sealed and `h`-tagged like the object's [`CHANGE`] events.
+pub const LIVE: u32 = 25078;
 /// NIP-98 HTTP authorization.
 pub const HTTP_AUTH: u32 = 27235;
 /// The relay write-allowlist an owner publishes (`d` = [`ALLOWLIST_D`]).

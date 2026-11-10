@@ -399,7 +399,10 @@ fn on_nav(s: &mut State, _: &NavEvent) {
     reconcile(s);
 }
 
-fn on_store(s: &mut State, _: &StoreEvent) {
+fn on_store(s: &mut State, event: &StoreEvent) {
+    if matches!(event, StoreEvent::Live(_)) {
+        return;
+    }
     let keys: Vec<PageKey> = graphs(s).pages.keys().cloned().collect();
     for key in keys {
         sync(s, &key);

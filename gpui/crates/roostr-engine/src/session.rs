@@ -96,6 +96,13 @@ pub struct IngestResult {
     /// space is gone for every member.
     #[serde(default)]
     pub space_vanished: Option<String>,
+    /// A kind-25078 live progress event, normalized (`roostr_core::live`): nothing to
+    /// import, the cursor unchanged.
+    #[serde(default)]
+    pub live: Option<serde_json::Value>,
+    /// A shared-space live event's space and signer: drop it unless the signer writes there.
+    #[serde(default)]
+    pub provenance: Option<SharedProvenance>,
 }
 
 /// One decrypted relay payload: a change (1078), a checkpoint (1079) or a base (31078 + 1080 parts).

@@ -82,9 +82,7 @@ impl App {
         let mut quiet = 0;
         for _ in 0..400 {
             // The window's poll hook, as a running app has it.
-            let updated = self
-                .rt
-                .update_if(|s, tx| roostr_host::poll(s, 0., tx));
+            let updated = self.rt.update_if(|s, tx| roostr_host::poll(s, 0., tx));
             self.rt.frame(FRAME);
             if updated {
                 quiet = 0;

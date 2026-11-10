@@ -12,6 +12,8 @@ use std::collections::{HashMap, HashSet};
 
 use roostr_core::{AgentEndpoint, AgentMessage, Block, MailboxEntry, MessageDelivery, Object};
 
+use crate::live::Thought;
+
 /// The human thread every object has.
 pub(crate) const DISCUSSION: &str = "__discussion__";
 
@@ -25,6 +27,8 @@ pub(crate) struct ChatMessage {
     pub mailbox: Option<MailboxEntry>,
     /// The File objects the message shows (its meta `files`, ids joined with ",").
     pub files: Vec<String>,
+    /// An agent reply's record of the work behind it (meta `thinking` / `thought_ms`).
+    pub thought: Option<Thought>,
 }
 
 fn meta<'a>(block: &'a Block, key: &str) -> &'a str {
@@ -302,6 +306,7 @@ fn envelope_message(object: &Object, entry: &MailboxEntry) -> ChatMessage {
         },
         mailbox: Some(entry.clone()),
         files: Vec::new(),
+        thought: None,
     }
 }
 
@@ -314,6 +319,7 @@ fn block_message(block: &Block) -> ChatMessage {
         origin: meta_origin(block),
         mailbox: None,
         files: meta_files(block),
+        thought: Thought::from_meta(meta(block, "thinking"), meta(block, "thought_ms")),
     }
 }
 
@@ -395,10 +401,12 @@ pub(crate) fn object_chat_messages(object: &Object) -> Vec<ChatMessage> {
             }
             let message = block_message(block);
             if echoes(&enveloped, &message) {
+                keep_thought(&mut out, message);
                 continue;
             }
             if let Some(authors) = authors {
                 if !authors.contains(message.author.as_str()) || echoes(&in_discussion, &message) {
+                    keep_thought(&mut out, message);
                     continue;
                 }
             } else {
@@ -410,6 +418,23 @@ pub(crate) fn object_chat_messages(object: &Object) -> Vec<ChatMessage> {
     }
     out.sort_by(|a, b| a.ts.cmp(&b.ts).then_with(|| a.id.cmp(&b.id)));
     out
+}
+
+/// A line not shown because another copy of it is (the reply envelope, the discussion's
+/// line): the copy shown takes its progress record when it has none.
+fn keep_thought(shown: &mut [ChatMessage], hidden: ChatMessage) {
+    let Some(thought) = hidden.thought else {
+        return;
+    };
+    let copy = shown.iter_mut().find(|m| {
+        m.thought.is_none()
+            && m.author == hidden.author
+            && m.text == hidden.text
+            && (m.ts - hidden.ts).abs() <= 20_000
+    });
+    if let Some(copy) = copy {
+        copy.thought = Some(thought);
+    }
 }
 
 #[cfg(test)]
@@ -685,6 +710,37 @@ mod tests {
             ..written
         });
         assert_eq!(ids(&shown), [reply_id.as_str(), "p2"]);
+    }
+
+    #[test]
+    fn a_reply_envelope_shows_the_progress_record_its_plain_copy_keeps() {
+        let answer = "median is $29";
+        let reply_id = format!("reply:q:{AGENT}");
+        let reply = envelope(&reply_id, 1_790_193_115_461, |m| {
+            m.sender = home_agent();
+            m.recipients = vec![home()];
+            m.author = AGENT.into();
+            m.text = answer.into();
+        });
+        let mut line = msg("d1", AGENT, 1_790_193_115_460, answer);
+        let meta = &mut line["content"]["custom"]["meta"];
+        meta["thinking"] = r#"[{"kind":"step","text":"shell_exec: ls","ts":1}]"#.into();
+        meta["thought_ms"] = "4000".into();
+        let written = object(serde_json::json!({
+            "id": "obj", "typeKey": "note", "fields": {},
+            "blocks": [root(DISCUSSION, &["d1"]), line],
+            "conversations": [{ "id": DISCUSSION, "kind": "human" }],
+        }));
+        let shown = object_chat_messages(&Object {
+            mailbox: Some(vec![reply]),
+            ..written
+        });
+        assert_eq!(ids(&shown), [reply_id.as_str()]);
+        let thought = shown[0]
+            .thought
+            .as_ref()
+            .expect("the envelope takes the record");
+        assert_eq!(thought.summary(), "Thought for 4s · 1 step");
     }
 
     #[test]
