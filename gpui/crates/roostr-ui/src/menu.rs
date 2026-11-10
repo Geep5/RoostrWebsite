@@ -350,6 +350,24 @@ impl PopupMenuItem {
         }
     }
 
+    /// How wide this row's text needs the menu to be (row padding, the leading
+    /// icon column, the label, a shortcut or a submenu's chevron); 0 for rows
+    /// drawing their own element.
+    fn natural_w(&self, left: bool) -> f32 {
+        let font = ty::ui(rems(0.875));
+        let width = |s: &str, style| rune::text::measure(s, &[], style, None).0;
+        let lead = if left { rems(0.75) + rems(0.25) } else { 0.0 };
+        let label = match &self.body {
+            Body::Item { label, shortcut, .. } => {
+                width(label, font) + shortcut.as_deref().map_or(0.0, |s| rems(0.75) + width(s, ty::ui(rems(0.75))))
+            }
+            Body::Submenu { label, .. } => width(label, font) + rems(0.5) + rems(0.75),
+            Body::Label(l) => width(l, font),
+            _ => return 0.0,
+        };
+        rems(0.5) * 2.0 + lead + label
+    }
+
     fn build(
         self,
         t: &Theme,
@@ -587,13 +605,19 @@ impl PopupMenu {
     fn surface(self, t: &Theme, key: &str, close: Option<&dyn Any>, layer: &mut Vec<El>) -> El {
         let left = self.items.iter().any(PopupMenuItem::left_icon);
         let n = self.items.len();
+        // An anchored menu doesn't grow to its rows on its own: it stays at its
+        // minimum, and a long label ran past its edge. So its minimum is its
+        // widest row's text, within the menu's maximum.
+        let max_w = self.max_w.unwrap_or(rems(31.25));
+        let natural = self.items.iter().map(|i| i.natural_w(left)).fold(0.0, f32::max) + rems(0.25) * 2.0;
+        let min_w = self.min_w.unwrap_or(rems(8.0)).max(natural).min(max_w);
         let mut rows = col()
             .key("items")
             .items_stretch()
             .padding(rems(0.25))
             .gap(rems(0.125))
-            .min_w(self.min_w.unwrap_or(rems(8.0)))
-            .max_w(self.max_w.unwrap_or(rems(31.25)));
+            .min_w(min_w)
+            .max_w(max_w);
         for (i, item) in self.items.into_iter().enumerate() {
             // The kit drops a trailing separator.
             if i + 1 == n && matches!(item.body, Body::Separator) {
@@ -963,5 +987,42 @@ mod tests {
         press(&mut rt, "ctx-item1-sub-item0");
         assert_eq!(rt.state.picked, vec!["note"]);
         assert!(rt.state.point.is_none());
+    }
+
+    /// A submenu is as wide as its longest row. Field report: "Add to
+    /// collection" listed "🚧 Needs Attention" past the submenu's right edge.
+    #[test]
+    fn a_submenu_is_as_wide_as_its_longest_row() {
+        const LONG: &str = "🚧 Needs Attention for the whole quarter";
+        fn long_view(_: &S, _: &mut rune::Cx<S>) -> El {
+            let t = Theme::dark();
+            let mut layer = Vec::new();
+            let sub = PopupMenu::new()
+                .item(PopupMenuItem::new("Inox"))
+                .item(PopupMenuItem::new(LONG));
+            let menu = PopupMenu::new()
+                .min_w(234.0)
+                .item(PopupMenuItem::submenu("Add to collection", sub, true))
+                .panel(&t, "m", &mut layer);
+            crate::root(col().child(menu), layer)
+        }
+        let mut rt = Runtime::new(S::default(), long_view, (1200.0, 600.0), Env { system_dark: true, scale: 2.0 });
+        rt.frame(0.0);
+        rt.frame(1.0 / 60.0);
+        let all = rt.elements();
+        let surface = all
+            .iter()
+            .find(|e| e.key.as_deref() == Some("m-item0-sub-menu"))
+            .unwrap_or_else(|| panic!("no submenu; keys: {:?}", all.iter().filter_map(|e| e.key.clone()).collect::<Vec<_>>()))
+            .rect;
+        let label = all.iter().find(|e| e.text.as_deref() == Some(LONG)).expect("the long row's text").rect;
+        assert!(
+            label[0] + label[2] <= surface[0] + surface[2],
+            "the text [{}..{}] runs past the submenu [{}..{}]",
+            label[0],
+            label[0] + label[2],
+            surface[0],
+            surface[0] + surface[2]
+        );
     }
 }
