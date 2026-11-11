@@ -520,19 +520,20 @@ pub(crate) fn widget(
     }
     if view_type == "gallery" {
         let shown: Vec<&QueryRow> = w.rows.iter().take(GALLERY_LIMIT).collect();
-        // Two columns only while every card's content fits half the width
-        // (the grid's 8 pt right padding off the body's column).
+        // As many columns (up to three) as leave every card's content room
+        // (the grid's 8 pt right padding off the body's column, 8 pt gaps).
         let inner = width - 8.;
-        let half = (inner - 8.) / 2.;
-        let fits = shown.iter().all(|r| {
-            let need = 2.
-                + 24.
-                + icon_width(&row_icon(r), ty::ui(15.).medium())
-                + 8.
-                + text_width(&row_name(r), ty::ui(13.).medium());
-            need <= half + 0.5
-        });
-        let cols = if fits { 2 } else { 1 };
+        let needs: Vec<f32> = shown
+            .iter()
+            .map(|r| {
+                2. + 24.
+                    + icon_width(&row_icon(r), ty::ui(15.).medium())
+                    + 8.
+                    + text_width(&row_name(r), ty::ui(13.).medium())
+            })
+            .collect();
+        // Never more columns than cards: two cards share the width, not two thirds of it.
+        let cols = gallery_columns(inner, &needs).min(shown.len().max(1));
         let mut items: Vec<El> = shown
             .iter()
             .map(|r| {
@@ -862,6 +863,18 @@ fn calendar(t: &Theme, id: &str, rows: &[QueryRow], date_key: &str, month_off: i
         .child(grid)
 }
 
+/// The pinned gallery's columns: three, two or one, the most that give every card (`needs`,
+/// its content's width) room in `inner` points with 8 pt gaps.
+fn gallery_columns(inner: f32, needs: &[f32]) -> usize {
+    (1..=3)
+        .rev()
+        .find(|&n| {
+            let each = (inner - 8. * (n - 1) as f32) / n as f32;
+            needs.iter().all(|need| *need <= each + 0.5)
+        })
+        .unwrap_or(1)
+}
+
 /// A gallery card: icon and name on `hl-light` in a 1px border that
 /// strengthens under the pointer (`hl-med` and a stronger border while
 /// current). Callers add the content and the press.
@@ -926,6 +939,17 @@ fn icon_width(icon: &str, font: TextStyle) -> f32 {
 
 #[cfg(test)]
 mod tests {
+    use super::gallery_columns;
+
+    #[test]
+    fn the_gallery_takes_the_most_columns_its_cards_fit() {
+        // 400 pt: thirds are 128, halves 196.
+        assert_eq!(gallery_columns(400., &[120., 100.]), 3);
+        assert_eq!(gallery_columns(400., &[120., 150.]), 2);
+        assert_eq!(gallery_columns(400., &[120., 250.]), 1);
+        assert_eq!(gallery_columns(400., &[]), 3);
+    }
+
     use super::*;
 
     #[test]
