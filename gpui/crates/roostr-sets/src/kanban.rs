@@ -131,6 +131,7 @@ pub(crate) fn load(s: &mut State, id: &str) {
                 && k.generation == generation
             {
                 k.rows = res.records;
+                k.input.order(&mut k.rows);
                 k.cards_slide =
                     std::mem::take(&mut k.slide_next) && k.rows.len() <= SLIDE_MAX_CARDS;
             }

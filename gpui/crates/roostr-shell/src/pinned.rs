@@ -16,8 +16,8 @@ use roostr_core::filters::{engine_filters_of, space_filter_of};
 use roostr_core::nav::{Route, navigate};
 use roostr_core::objects::object_icon;
 use roostr_core::relations::{object_space_id, space_relations};
-use roostr_core::types::{Object, QueryRow, RelationDef, field_str};
-use roostr_core::{State, StoreEvent, api, lite_ui};
+use roostr_core::types::{Object, QueryRow, RelationDef, Value, field_str};
+use roostr_core::{State, StoreEvent, api, collection, lite_ui};
 use roostr_rt::Task;
 use roostr_ui::color::mix_srgb;
 use roostr_ui::ty::{self, Weights as _};
@@ -25,6 +25,7 @@ use roostr_ui::{ShimmerText, Skeleton, Theme, motion, radius};
 use rune::{Cursor, Cx, El, TextStyle, col, el, row, text};
 use serde_json::{Value as Json, json};
 
+use crate::drag::{self, Axis};
 use crate::shell::{fill, hover_fg, icon_text};
 
 /// Rows a list widget fetches: all of them, short of a query matching thousands.
@@ -167,7 +168,10 @@ fn load(s: &mut State, id: &str) {
                 return;
             };
             match rows {
-                Some(rows) => {
+                Some(mut rows) => {
+                    if let Some(members) = manual_order(&object) {
+                        collection::sort_by_members(&mut rows, &members);
+                    }
                     w.obj = Some(object);
                     w.rows = rows;
                 }
@@ -229,15 +233,20 @@ fn space_rels(s: &State, o: &Object) -> Vec<RelationDef> {
 
 /// A collection's member ids.
 fn members(o: &Object) -> Vec<String> {
-    o.field("collectionIds")
-        .map(|v| {
-            v.items()
-                .iter()
-                .filter_map(|i| i.string_value.clone())
-                .filter(|s| !s.is_empty())
-                .collect()
+    collection::members(&o.fields)
+}
+
+/// A collection in its own order (no view sorts): its member ids, which its
+/// items show in and drag to reorder.
+fn manual_order(o: &Object) -> Option<Vec<String>> {
+    let sorted = o.field("viewSorts").is_some_and(|v| {
+        v.items().iter().any(|i| {
+            i.entries()
+                .and_then(|e| e.get("key").and_then(|k| k.as_str()).map(|k| !k.is_empty()))
+                .unwrap_or(false)
         })
-        .unwrap_or_default()
+    });
+    (o.type_key == "collection" && !sorted).then(|| members(o))
 }
 
 /// What a non-set object links to (the tree widget's rows).
@@ -446,7 +455,7 @@ pub(crate) fn widget(
     t: &Theme,
     id: &str,
     width: f32,
-    _layer: &mut Vec<El>,
+    layer: &mut Vec<El>,
 ) -> El {
     let Some(w) = s.get::<Pinned>().and_then(|p| p.widgets.get(id)) else {
         return el();
@@ -534,10 +543,13 @@ pub(crate) fn widget(
             .collect();
         // Never more columns than cards: two cards share the width, not two thirds of it.
         let cols = gallery_columns(inner, &needs).min(shown.len().max(1));
-        let mut items: Vec<El> = shown
+        let drag_list = manual_order(&obj).map(|_| items_list(id));
+        let list = drag_list.as_deref();
+        item_ghost(s, t, id, list, &w.rows, layer);
+        let mut items: Vec<(Option<String>, El)> = shown
             .iter()
             .map(|r| {
-                card(t, format!("w-card:{}", r.id), r.id == current_id)
+                let card = card(t, format!("w-card:{}", r.id), r.id == current_id)
                     .child(icon_text(s, &row_icon(r), 15., ty::ui(15.).medium()).color(t.fg))
                     .child(
                         text(row_name(r))
@@ -546,12 +558,13 @@ pub(crate) fn widget(
                             .truncate()
                             .shrink()
                             .min_w(0.),
-                    )
-                    .on_press(open(r.id.clone()))
+                    );
+                (Some(r.id.clone()), item(s, card, id, &r.id, list, Axis::X))
             })
             .collect();
         if w.rows.len() > GALLERY_LIMIT {
-            items.push(
+            items.push((
+                None,
                 card(t, "w-card-more".into(), false)
                     .justify_center()
                     .border_dash(2., 1.)
@@ -562,7 +575,7 @@ pub(crate) fn widget(
                             .truncate(),
                     )
                     .on_press(open(id.to_string())),
-            );
+            ));
         }
         let mut grid = col().gap(8.).pt(4.).pr(8.).pb(6.);
         let mut items = items.into_iter().peekable();
@@ -570,7 +583,14 @@ pub(crate) fn widget(
             let mut line = row().gap(8.);
             for _ in 0..cols {
                 line = line.child(match items.next() {
-                    Some(item) => row().grow(1.).min_w(0.).child(item),
+                    Some((row_id, item)) => {
+                        let mut cell = row().grow(1.).min_w(0.).child(item);
+                        if let Some(mark) = row_id.and_then(|r| drop_line(s, t, list, &r, Axis::X))
+                        {
+                            cell = cell.child(mark);
+                        }
+                        cell
+                    }
                     None => el().grow(1.),
                 });
             }
@@ -595,31 +615,153 @@ pub(crate) fn widget(
     } else {
         0..n
     };
+    let drag_list = manual_order(&obj).map(|_| items_list(id));
+    let list = drag_list.as_deref();
+    item_ghost(s, t, id, list, &w.rows, layer);
     let mut rows = col()
         .key(list_key)
         .child(el().h(ROW_PITCH * drawn.start as f32));
     for r in &w.rows[drawn.clone()] {
         let current = r.id == current_id;
-        rows = rows.child(
-            col().pb(1.).child(
-                line(t, format!("w-row-{}", r.id), current)
-                    .child(list_text(
-                        t,
-                        icon_text(s, &row_icon(r), 11., ty::ui(11.)),
-                        current,
-                    ))
-                    .child(
-                        list_text(t, text(row_name(r)).font(ty::ui(12.)), current)
-                            .truncate()
-                            .shrink()
-                            .min_w(0.),
-                    )
-                    .on_press(open(r.id.clone())),
-            ),
-        );
+        let row_line = line(t, format!("w-row-{}", r.id), current)
+            .child(list_text(
+                t,
+                icon_text(s, &row_icon(r), 11., ty::ui(11.)),
+                current,
+            ))
+            .child(
+                list_text(t, text(row_name(r)).font(ty::ui(12.)), current)
+                    .truncate()
+                    .shrink()
+                    .min_w(0.),
+            );
+        let mut cell = col()
+            .pb(1.)
+            .child(item(s, row_line, id, &r.id, list, Axis::Y));
+        if let Some(mark) = drop_line(s, t, list, &r.id, Axis::Y) {
+            cell = cell.child(mark);
+        }
+        rows = rows.child(cell);
     }
     rows = rows.child(el().h(ROW_PITCH * (n - drawn.end) as f32));
     body.child(rows)
+}
+
+/// The drag list of pin `pin`'s items.
+fn items_list(pin: &str) -> String {
+    format!("pin-items:{pin}")
+}
+
+/// Item `item` of pin `pin` (`el`, its row or card) opens on a press. In a
+/// collection in its own order (`list`, its items' drag list) it also drags -
+/// on the phone after a long press - to reorder the members; the dragged one fades.
+fn item(s: &State, el: El, pin: &str, item: &str, list: Option<&str>, axis: Axis) -> El {
+    let Some(list) = list else {
+        return el.on_press(open(item.to_string()));
+    };
+    let (open_id, press_list) = (item.to_string(), list.to_string());
+    let mut el = el.on_press(move |s: &mut State| {
+        // A press that lifted the item is never navigation.
+        if drag::take_swallowed_press(s, &press_list) || drag::list(s, &press_list).is_some() {
+            return;
+        }
+        navigate(Route::Object(open_id.clone()), s)
+    });
+    if drag::dragging(s, list) == Some(item) {
+        el = el.opacity(0.4);
+    }
+    let pin = pin.to_string();
+    let drop = move |s: &mut State, dragged: &str, target: &str, after: bool| {
+        reorder(s, &pin, dragged, target, after)
+    };
+    if crate::is_mobile(s) {
+        crate::mobile::held_item(el, list, item, axis, drop)
+    } else {
+        drag::item(el, list, item, axis, drop)
+    }
+}
+
+/// The 2 pt accent line where the item dragged in `list` lands beside `item`:
+/// across the 1 pt gap above or below a row (`Axis::Y`), or down the 8 pt gap
+/// left or right of a gallery card (`Axis::X`). Its cell carries it, outside
+/// the row's clip.
+fn drop_line(s: &State, t: &Theme, list: Option<&str>, item: &str, axis: Axis) -> Option<El> {
+    let after = drag::over(s, list?, item)?;
+    let mark = match (axis, after) {
+        (Axis::Y, false) => el().pin(Some(4.), Some(-1.5), Some(4.), None).h(2.),
+        (Axis::Y, true) => el().pin(Some(4.), None, Some(4.), Some(-0.5)).h(2.),
+        (Axis::X, false) => el().pin(Some(-5.), Some(4.), None, Some(4.)).w(2.),
+        (Axis::X, true) => el().pin(None, Some(4.), Some(-5.), Some(4.)).w(2.),
+    };
+    Some(
+        mark.key(format!("w-drop:{item}"))
+            .radius(1.)
+            .fill(t.accent)
+            .inert(),
+    )
+}
+
+/// The floating copy of the item dragged in `list` (one of `rows`).
+fn item_ghost(
+    s: &State,
+    t: &Theme,
+    pin: &str,
+    list: Option<&str>,
+    rows: &[QueryRow],
+    layer: &mut Vec<El>,
+) {
+    let Some(list) = list else { return };
+    let Some(r) = drag::dragging(s, list).and_then(|d| rows.iter().find(|r| r.id == d)) else {
+        return;
+    };
+    let icon = object_icon(
+        &s.store,
+        field_str(&r.fields, "iconEmoji"),
+        &r.type_key,
+        s.nav.space(),
+    );
+    let ghost = row()
+        .key(format!("w-ghost:{pin}"))
+        .items_center()
+        .gap(6.)
+        .px(8.)
+        .h(28.)
+        .radius(radius::MENU)
+        .fill(t.panel)
+        .border(1., t.border)
+        .opacity(0.8)
+        .child(icon_text(s, &icon, 12., ty::ui(12.)).color(t.fg))
+        .child(
+            text(crate::shell::or_untitled(field_str(&r.fields, "name")))
+                .font(ty::ui(12.).medium())
+                .color(t.fg),
+        );
+    drag::ghost(s, list, ghost, layer);
+}
+
+/// Item `dragged` of collection pin `pin` let go beside `target`: the
+/// widget shows the new order at once and the collection's member list
+/// (`collectionIds`) takes it. A drop in place writes nothing.
+fn reorder(s: &mut State, pin: &str, dragged: &str, target: &str, after: bool) {
+    let Some(w) = s.slot::<Pinned>().widgets.get_mut(pin) else {
+        return;
+    };
+    let Some(next) = w
+        .obj
+        .as_deref()
+        .and_then(manual_order)
+        .and_then(|members| collection::moved(&members, dragged, target, after))
+    else {
+        return;
+    };
+    collection::sort_by_members(&mut w.rows, &next);
+    let value = Value::values(next.iter().map(Value::string).collect());
+    if let Some(obj) = &mut w.obj {
+        Arc::make_mut(obj)
+            .fields
+            .insert("collectionIds".into(), value.clone());
+    }
+    api::note::set_field(pin, "collectionIds", value, s).detach_and_log_err(&s.rt);
 }
 
 /// `.w-line`: a kit list row, 24px, 12px muted (fg under the pointer and

@@ -235,7 +235,7 @@ pub(crate) fn sources(fields: &Fields) -> Vec<String> {
 
 /// `collectionIds` members.
 pub(crate) fn member_ids(fields: &Fields) -> Vec<String> {
-    str_items(fields.get("collectionIds"))
+    roostr_core::collection::members(fields)
 }
 
 pub(crate) fn field_or<'a>(fields: &'a Fields, key: &str, default: &'a str) -> &'a str {

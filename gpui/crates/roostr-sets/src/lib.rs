@@ -114,6 +114,7 @@ impl DataView {
             input: ViewInput {
                 body: None,
                 sorts: Vec::new(),
+                members: None,
                 updated_at: 0,
             },
             picking: false,
@@ -311,9 +312,13 @@ fn sync(s: &mut State, id: &str) -> bool {
 fn apply_input(s: &mut State, id: &str, object: &Object, kind: DataViewKind, search: &str) {
     let relations = common::scoped_relations(s, object);
     let body = common::table_body(s, object, kind, search, &relations);
+    let sorts = config::view_sorts(&object.fields);
+    let members = (kind == DataViewKind::Collection && sorts.is_empty())
+        .then(|| config::member_ids(&object.fields));
     let input = ViewInput {
         body: body.clone(),
-        sorts: config::view_sorts(&object.fields),
+        sorts,
+        members,
         updated_at: object.updated_at,
     };
     let view_type = config::view_type(&object.fields).to_string();

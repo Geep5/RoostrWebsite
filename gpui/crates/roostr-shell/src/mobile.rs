@@ -31,6 +31,7 @@ use web_time::Instant;
 
 use crate::PanePart;
 use crate::back_swipe::{self, BackSwipe, Phase, Screen, Track};
+use crate::drag::{self, Axis};
 use crate::shell::{self, current_space, emoji_or_image, fill, fill_glyph, icon_text, or_untitled};
 use crate::{list_motion, pin_collapse, pinned};
 
@@ -73,6 +74,8 @@ pub(crate) struct Mobile {
     cards: HashMap<String, [f32; 4]>,
     /// A press on a space card in flight.
     press: Option<CardPress>,
+    /// A press on a pinned collection's item in flight.
+    item_press: Option<ItemPress>,
     /// The press that just ended was a lift or a scroll: its release opens nothing.
     swallow_press: bool,
     /// The scroll views pull-to-sync watches, by key.
@@ -188,6 +191,15 @@ enum PressMode {
     Lifted,
     /// Moved before the hold: the drag scrolls the list.
     Scroll(HandScroll),
+}
+
+/// A press on an item of a pinned collection (drag list `list`).
+struct ItemPress {
+    list: String,
+    id: String,
+    mode: PressMode,
+    /// Lifts the item when the hold lasts (dropping it cancels).
+    _hold: roostr_rt::Task<()>,
 }
 
 /// A drag from the left edge.
@@ -1333,6 +1345,103 @@ fn card_drag(s: &mut State, id: &str, d: &mut Drag, tx: &mut Tx) {
                 }
                 PressMode::Scroll(hand) => {
                     s.slot::<Mobile>().swallow_press = true;
+                    hand.end(s, d.cancelled(), now, tx);
+                }
+                PressMode::Pending => {}
+            }
+        }
+    }
+}
+
+/// Make `el` (item `id` of drag list `list`, a pinned collection's) reorder
+/// as a space card does: held still it lifts (the drag list then tracks it,
+/// its ghost and drop line show, and the release runs `drop(s, dragged,
+/// target, after)`); moved first the drag scrolls the space home.
+pub(crate) fn held_item(
+    el: El,
+    list: &str,
+    id: &str,
+    axis: Axis,
+    drop: impl Fn(&mut State, &str, &str, bool) + 'static,
+) -> El {
+    let (layout_list, layout_id) = (list.to_string(), id.to_string());
+    let (list, id) = (list.to_string(), id.to_string());
+    el.on_layout_tx(move |s: &mut State, r, tx: &mut Tx| {
+        drag::place(s, &layout_list, &layout_id, r);
+        tx.live_only();
+    })
+    .on_drag(move |s: &mut State, d: &mut Drag, tx: &mut Tx| {
+        item_drag(s, &list, &id, axis, d, tx, &drop)
+    })
+}
+
+fn item_drag(
+    s: &mut State,
+    list: &str,
+    id: &str,
+    axis: Axis,
+    d: &mut Drag,
+    tx: &mut Tx,
+    drop: &dyn Fn(&mut State, &str, &str, bool),
+) {
+    let now = s.rt.now();
+    match d.phase {
+        DragPhase::Down => {
+            drag::state(s, list).swallow_press = false;
+            let (held_list, held, at) = (list.to_string(), id.to_string(), d.window_point());
+            let timer = s.rt.timer(LONG_PRESS);
+            let hold = s.rt.spawn(async move |cx| {
+                timer.await;
+                cx.update(move |s| {
+                    let lifts = s.slot::<Mobile>().item_press.as_mut().is_some_and(|p| {
+                        let lifts = p.list == held_list
+                            && p.id == held
+                            && matches!(p.mode, PressMode::Pending);
+                        if lifts {
+                            p.mode = PressMode::Lifted;
+                        }
+                        lifts
+                    });
+                    if lifts {
+                        drag::state(s, &held_list).track(&held, axis, at);
+                    }
+                });
+            });
+            s.slot::<Mobile>().item_press = Some(ItemPress {
+                list: list.to_string(),
+                id: id.to_string(),
+                mode: PressMode::Pending,
+                _hold: hold,
+            });
+        }
+        DragPhase::Move => {
+            let Some(mut press) = s.slot::<Mobile>().item_press.take() else {
+                return;
+            };
+            if matches!(press.mode, PressMode::Pending) && d.dx.hypot(d.dy) > SLOP {
+                press.mode = PressMode::Scroll(HandScroll::new(s, "m-cards-col", now));
+            }
+            match &mut press.mode {
+                PressMode::Lifted => drag::state(s, list).track(id, axis, d.window_point()),
+                PressMode::Scroll(hand) => hand.step(s, d.dy, now, tx),
+                PressMode::Pending => {}
+            }
+            s.slot::<Mobile>().item_press = Some(press);
+        }
+        DragPhase::Up => {
+            let Some(press) = s.slot::<Mobile>().item_press.take() else {
+                return;
+            };
+            match press.mode {
+                PressMode::Lifted => {
+                    if let Some((dragged, target, after)) =
+                        drag::state(s, list).finish(d.cancelled())
+                    {
+                        drop(s, &dragged, &target, after);
+                    }
+                }
+                PressMode::Scroll(hand) => {
+                    drag::state(s, list).swallow_press = true;
                     hand.end(s, d.cancelled(), now, tx);
                 }
                 PressMode::Pending => {}

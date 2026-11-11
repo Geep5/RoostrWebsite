@@ -362,8 +362,17 @@ pub(crate) fn load(s: &mut State, id: &str, keep_count: bool) {
     } else {
         vec![json!({"key": "updatedAt", "type": "desc", "emptyPlacement": "end"})]
     };
-    let needs_every_row =
-        serving_sort || repeat_sort || !rules.is_empty() || columns.iter().any(|c| c == "serving");
+    // A collection in its own order: the engine can't sort by it, so every row.
+    let members = t
+        .input
+        .members
+        .clone()
+        .filter(|_| t.override_sort.is_none());
+    let needs_every_row = members.is_some()
+        || serving_sort
+        || repeat_sort
+        || !rules.is_empty()
+        || columns.iter().any(|c| c == "serving");
     let view = id.to_string();
     if !needs_every_row {
         let mut fields: Vec<String> = ROW_FIELDS.iter().map(|s| (*s).to_string()).collect();
@@ -412,6 +421,9 @@ pub(crate) fn load(s: &mut State, id: &str, keep_count: bool) {
                 return;
             }
         };
+        if let Some(members) = &members {
+            roostr_core::collection::sort_by_members(&mut all, members);
+        }
         if repeat_sort {
             // One-off objects last either way.
             all.sort_by(|a, b| {

@@ -7,6 +7,7 @@ pub mod account;
 pub mod api;
 pub mod backend;
 pub mod blossom;
+pub mod collection;
 pub mod color;
 pub mod cover;
 pub mod create;

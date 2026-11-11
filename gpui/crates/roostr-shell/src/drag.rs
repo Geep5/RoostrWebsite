@@ -30,11 +30,51 @@ pub(crate) struct DragList {
     pub(crate) over: Option<(String, bool)>,
     /// The pointer, in window points.
     pub(crate) point: [f32; 2],
+    /// The press that just ended dragged: its release opens nothing.
+    pub(crate) swallow_press: bool,
+}
+
+impl DragList {
+    /// `id` is lifted and the pointer is at window point `p`: mark the item
+    /// under it and the side the drop lands on.
+    pub(crate) fn track(&mut self, id: &str, axis: Axis, p: [f32; 2]) {
+        self.dragging = Some(id.to_string());
+        self.point = p;
+        self.over = self
+            .rects
+            .iter()
+            .filter(|(other, _)| *other != id)
+            .find(|(_, r)| p[0] >= r[0] && p[0] < r[0] + r[2] && p[1] >= r[1] && p[1] < r[1] + r[3])
+            .map(|(other, r)| {
+                let after = match axis {
+                    Axis::X => p[0] > r[0] + r[2] / 2.,
+                    Axis::Y => p[1] > r[1] + r[3] / 2.,
+                };
+                (other.clone(), after)
+            });
+    }
+
+    /// The press let go: the (dragged, target, after) drop, unless `cancelled`
+    /// or it was no drag. A drag swallows the press its release would make.
+    pub(crate) fn finish(&mut self, cancelled: bool) -> Option<(String, String, bool)> {
+        let dragged = self.dragging.take();
+        let over = self.over.take();
+        self.swallow_press = dragged.is_some();
+        match (dragged, over, cancelled) {
+            (Some(dragged), Some((target, after)), false) => Some((dragged, target, after)),
+            _ => None,
+        }
+    }
 }
 
 /// Every reorderable list's drag, by list key.
 #[derive(Default)]
-pub(crate) struct Drags(HashMap<&'static str, DragList>);
+pub(crate) struct Drags(HashMap<String, DragList>);
+
+/// List `list`'s drag state (made on first use).
+pub(crate) fn state<'a>(s: &'a mut State, list: &str) -> &'a mut DragList {
+    s.slot::<Drags>().0.entry(list.to_string()).or_default()
+}
 
 /// List `list`'s drag, if one runs.
 pub(crate) fn list<'a>(s: &'a State, list: &str) -> Option<&'a DragList> {
@@ -58,65 +98,47 @@ pub(crate) fn over(s: &State, l: &str, id: &str) -> Option<bool> {
         .map(|(_, after)| *after)
 }
 
+/// The press on an item of list `l` that just ended was a drag (its release
+/// must not press the item): true once, then cleared.
+pub(crate) fn take_swallowed_press(s: &mut State, l: &str) -> bool {
+    std::mem::take(&mut state(s, l).swallow_press)
+}
+
+/// Record item `id` of list `list`'s window rect `r` as laid out.
+pub(crate) fn place(s: &mut State, list: &str, id: &str, r: [f32; 4]) {
+    state(s, list).rects.insert(id.to_string(), r);
+}
+
 /// Make `el` (item `id` of list `list`) draggable to reorder: `drop(s,
 /// dragged, target, after)` runs when it is let go over another item.
 pub(crate) fn item(
     el: El,
-    list: &'static str,
+    list: impl Into<String>,
     id: &str,
     axis: Axis,
-    drop: fn(&mut State, &str, &str, bool),
+    drop: impl Fn(&mut State, &str, &str, bool) + 'static,
 ) -> El {
+    let list: String = list.into();
+    let layout_list = list.clone();
     let (rect_id, drag_id) = (id.to_string(), id.to_string());
-    el.on_layout(move |s: &mut State, r: [f32; 4]| {
-        s.slot::<Drags>()
-            .0
-            .entry(list)
-            .or_default()
-            .rects
-            .insert(rect_id.clone(), r);
-    })
-    .on_drag(move |s: &mut State, d: &mut Drag, _: &mut Tx| {
-        let drags = s.slot::<Drags>();
-        let l = drags.0.entry(list).or_default();
-        match d.phase {
-            Phase::Down => {}
-            Phase::Move => {
-                if l.dragging.is_none() {
-                    if d.dx.abs().max(d.dy.abs()) < SLOP {
+    el.on_layout(move |s: &mut State, r: [f32; 4]| place(s, &layout_list, &rect_id, r))
+        .on_drag(move |s: &mut State, d: &mut Drag, _: &mut Tx| {
+            let l = state(s, &list);
+            match d.phase {
+                Phase::Down => l.swallow_press = false,
+                Phase::Move => {
+                    if l.dragging.is_none() && d.dx.abs().max(d.dy.abs()) < SLOP {
                         return;
                     }
-                    l.dragging = Some(drag_id.clone());
+                    l.track(&drag_id, axis, d.window_point());
                 }
-                let p = d.window_point();
-                l.point = p;
-                l.over = l
-                    .rects
-                    .iter()
-                    .filter(|(other, _)| **other != drag_id)
-                    .find(|(_, r)| {
-                        p[0] >= r[0] && p[0] < r[0] + r[2] && p[1] >= r[1] && p[1] < r[1] + r[3]
-                    })
-                    .map(|(other, r)| {
-                        let after = match axis {
-                            Axis::X => p[0] > r[0] + r[2] / 2.,
-                            Axis::Y => p[1] > r[1] + r[3] / 2.,
-                        };
-                        (other.clone(), after)
-                    });
-            }
-            Phase::Up => {
-                let dragged = l.dragging.take();
-                let over = l.over.take();
-                if d.cancelled() {
-                    return;
-                }
-                if let (Some(dragged), Some((target, after))) = (dragged, over) {
-                    drop(s, &dragged, &target, after);
+                Phase::Up => {
+                    if let Some((dragged, target, after)) = l.finish(d.cancelled()) {
+                        drop(s, &dragged, &target, after);
+                    }
                 }
             }
-        }
-    })
+        })
 }
 
 /// The ghost of list `list`'s drag: `ghost` placed at the pointer (offset a

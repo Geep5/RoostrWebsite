@@ -81,6 +81,7 @@ pub(crate) fn load(s: &mut State, id: &str) {
                 && g.generation == generation
             {
                 g.rows = res.records;
+                g.input.order(&mut g.rows);
             }
         });
     })
