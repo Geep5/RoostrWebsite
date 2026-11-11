@@ -209,13 +209,17 @@ fn pinned_card(
         .w(16.)
         .h(24.)
         .label("Fold")
-        .child(
-            list_motion::arrow(!collapsed, 7., t.muted)
-                .group_color(t.fg)
-                .group_opacity(0.6, 1.0),
-        )
+        .child({
+            let arrow = list_motion::arrow(!collapsed, 7., t.muted);
+            // Passed over mid-drag, the arrow stays as it rests.
+            if drag::any(s) {
+                arrow.opacity(0.6)
+            } else {
+                arrow.group_color(t.fg).group_opacity(0.6, 1.0)
+            }
+        })
         .on_press(move |s: &mut State| pin_collapse::toggle(s, &flip));
-    let arrow = motion::pressable(arrow);
+    let arrow = if drag::any(s) { arrow } else { motion::pressable(arrow) };
     let mut head = fill(format!("widget-head:{id}"), t.hl_med)
         .grow(1.)
         .min_w(0.)

@@ -84,6 +84,13 @@ pub(crate) fn list<'a>(s: &'a State, list: &str) -> Option<&'a DragList> {
         .filter(|l| l.dragging.is_some())
 }
 
+/// Whether any list's item is being dragged: hover effects under the pointer
+/// stay off meanwhile (a fold arrow passed over doesn't light up).
+pub(crate) fn any(s: &State) -> bool {
+    s.get::<Drags>()
+        .is_some_and(|d| d.0.values().any(|l| l.dragging.is_some()))
+}
+
 /// The item of list `list` being dragged.
 pub(crate) fn dragging<'a>(s: &'a State, l: &str) -> Option<&'a str> {
     list(s, l)?.dragging.as_deref()
