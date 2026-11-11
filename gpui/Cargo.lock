@@ -5107,7 +5107,7 @@ dependencies = [
 [[package]]
 name = "rune"
 version = "0.0.1"
-source = "git+https://github.com/anomalyco/rune?rev=8e3fc8e#8e3fc8e7fb0317be43aecd8f650ab40d28c8fab8"
+source = "git+https://github.com/Geep5/rune?rev=4bf69e2#4bf69e219f3fc8828075941b6126d4d377d27bcc"
 dependencies = [
  "accesskit",
  "accesskit_macos",
@@ -5186,7 +5186,7 @@ dependencies = [
 [[package]]
 name = "rune-highlights"
 version = "0.0.1"
-source = "git+https://github.com/anomalyco/rune?rev=8e3fc8e#8e3fc8e7fb0317be43aecd8f650ab40d28c8fab8"
+source = "git+https://github.com/Geep5/rune?rev=4bf69e2#4bf69e219f3fc8828075941b6126d4d377d27bcc"
 dependencies = [
  "unicode-ident",
  "wasmparser",
@@ -5195,7 +5195,7 @@ dependencies = [
 [[package]]
 name = "rune-kit"
 version = "0.0.1"
-source = "git+https://github.com/anomalyco/rune?rev=8e3fc8e#8e3fc8e7fb0317be43aecd8f650ab40d28c8fab8"
+source = "git+https://github.com/Geep5/rune?rev=4bf69e2#4bf69e219f3fc8828075941b6126d4d377d27bcc"
 dependencies = [
  "rune",
  "rune-highlights",
@@ -5206,12 +5206,12 @@ dependencies = [
 [[package]]
 name = "rune-motion"
 version = "0.1.0"
-source = "git+https://github.com/anomalyco/rune?rev=8e3fc8e#8e3fc8e7fb0317be43aecd8f650ab40d28c8fab8"
+source = "git+https://github.com/Geep5/rune?rev=4bf69e2#4bf69e219f3fc8828075941b6126d4d377d27bcc"
 
 [[package]]
 name = "rune-staging"
 version = "0.0.1"
-source = "git+https://github.com/anomalyco/rune?rev=8e3fc8e#8e3fc8e7fb0317be43aecd8f650ab40d28c8fab8"
+source = "git+https://github.com/Geep5/rune?rev=4bf69e2#4bf69e219f3fc8828075941b6126d4d377d27bcc"
 dependencies = [
  "wgpu",
 ]
@@ -5219,7 +5219,7 @@ dependencies = [
 [[package]]
 name = "rune-taffy"
 version = "0.0.1"
-source = "git+https://github.com/anomalyco/rune?rev=8e3fc8e#8e3fc8e7fb0317be43aecd8f650ab40d28c8fab8"
+source = "git+https://github.com/Geep5/rune?rev=4bf69e2#4bf69e219f3fc8828075941b6126d4d377d27bcc"
 dependencies = [
  "taffy",
 ]

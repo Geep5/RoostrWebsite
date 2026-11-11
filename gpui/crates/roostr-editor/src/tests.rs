@@ -567,3 +567,21 @@ fn the_paste_as_menu_opens_under_the_block_pasted_into() {
     );
     assert!(item[0] >= block[0] - 1., "and not left of the page: {item:?} vs {block:?}");
 }
+
+/// A web link in a page's text opens in the browser when clicked. Field
+/// report: links in a page body did nothing.
+#[test]
+fn a_link_in_page_text_opens_on_click() {
+    const URL: &str = "https://example.com/page-link";
+    let link = Mark { from: 6, to: 13, kind: mark::LINK, param: Some(URL.into()) };
+    let vault = Vault::new(vec![text_block("p0", "Visit example now", vec![link])]);
+    let mut rt = open(&vault);
+    let (x, y) = rt.find(URL).expect("the link is drawn");
+    let (x, y) = (x + 2., y + 2.);
+    rt.pointer_move(x, y);
+    rt.pointer_down(x, y);
+    rt.pointer_up(x, y);
+    rt.state.poll();
+    rt.frame(1. / 60.);
+    assert_eq!(rt.take_url_requests(), vec![URL.to_string()], "the click opened nothing");
+}
