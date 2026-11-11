@@ -120,25 +120,41 @@ pub(crate) fn item(
 ) -> El {
     let list: String = list.into();
     let layout_list = list.clone();
-    let (rect_id, drag_id) = (id.to_string(), id.to_string());
-    el.on_layout(move |s: &mut State, r: [f32; 4]| place(s, &layout_list, &rect_id, r))
-        .on_drag(move |s: &mut State, d: &mut Drag, _: &mut Tx| {
-            let l = state(s, &list);
-            match d.phase {
-                Phase::Down => l.swallow_press = false,
-                Phase::Move => {
-                    if l.dragging.is_none() && d.dx.abs().max(d.dy.abs()) < SLOP {
-                        return;
-                    }
-                    l.track(&drag_id, axis, d.window_point());
+    let rect_id = id.to_string();
+    handle(el, list, id, axis, drop)
+        .on_layout(move |s: &mut State, r: [f32; 4]| place(s, &layout_list, &rect_id, r))
+}
+
+/// Make `el`, a part of item `id` with handlers of its own (a pinned card's
+/// head), start item `id`'s drag too: Rune hands a press to the innermost
+/// element with handlers, so the item's own drag never sees it. Its press
+/// handler must skip a press [`take_swallowed_press`] reports.
+pub(crate) fn handle(
+    el: El,
+    list: impl Into<String>,
+    id: &str,
+    axis: Axis,
+    drop: impl Fn(&mut State, &str, &str, bool) + 'static,
+) -> El {
+    let list: String = list.into();
+    let drag_id = id.to_string();
+    el.on_drag(move |s: &mut State, d: &mut Drag, _: &mut Tx| {
+        let l = state(s, &list);
+        match d.phase {
+            Phase::Down => l.swallow_press = false,
+            Phase::Move => {
+                if l.dragging.is_none() && d.dx.abs().max(d.dy.abs()) < SLOP {
+                    return;
                 }
-                Phase::Up => {
-                    if let Some((dragged, target, after)) = l.finish(d.cancelled()) {
-                        drop(s, &dragged, &target, after);
-                    }
+                l.track(&drag_id, axis, d.window_point());
+            }
+            Phase::Up => {
+                if let Some((dragged, target, after)) = l.finish(d.cancelled()) {
+                    drop(s, &dragged, &target, after);
                 }
             }
-        })
+        }
+    })
 }
 
 /// The ghost of list `list`'s drag: `ghost` placed at the pointer (offset a

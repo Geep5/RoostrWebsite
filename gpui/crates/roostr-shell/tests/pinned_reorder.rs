@@ -434,3 +434,21 @@ fn on_a_phone_a_held_item_lifts_and_reorders() {
         "a lift is a reorder, never navigation"
     );
 }
+
+#[test]
+fn a_pin_dragged_by_its_name_moves_the_pin_and_opens_nothing() {
+    let vault = vault();
+    let mut h = desktop(&vault);
+    let route = h.state().nav.route().clone();
+    let from = center(&h, "widget-head:q-1");
+    let target = h.rect("widget:c-gal").expect("the first pin");
+    let to = [from[0], target[1] + 4.];
+    press_and_move(&mut h, from, to, 8);
+    release(&mut h, to);
+    // The pin's new place is written as its pin order (the fake vault's space keeps its own).
+    assert_eq!(
+        mutations(&vault),
+        [("set_field".to_string(), "q-1".to_string(), "pin_order".to_string())]
+    );
+    assert_eq!(*h.state().nav.route(), route, "the drag opened nothing");
+}

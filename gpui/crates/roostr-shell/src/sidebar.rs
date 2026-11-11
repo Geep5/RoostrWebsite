@@ -235,11 +235,20 @@ fn pinned_card(
                 .shrink()
                 .min_w(0.),
         )
-        .on_press(open(id.to_string()));
+        .on_press({
+            let open = open(id.to_string());
+            move |s: &mut State| {
+                // A drag that began on the head moved the pin; its release opens nothing.
+                if !drag::take_swallowed_press(s, "widgets") {
+                    open(s);
+                }
+            }
+        });
     if is_current {
         head = head.fill(t.hl_med);
     }
-    let head = motion::pressable_row(head);
+    // The head (the pin's name) drags the pin too, not just the card's border.
+    let head = drag::handle(motion::pressable_row(head), "widgets", id, Axis::Y, drop_widget);
     let boxed = col()
         .key(format!("widget-box:{id}"))
         .w_full()
