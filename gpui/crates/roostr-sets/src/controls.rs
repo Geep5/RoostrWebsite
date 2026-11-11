@@ -207,12 +207,13 @@ fn settle_rules(s: &mut State, id: &str, len: usize) {
     }
 }
 
+/// Rule `idx` with a new key, condition (`(condition, quickOption)`) or value.
 fn update_filter(
     s: &mut State,
     id: &str,
     idx: usize,
     key: Option<String>,
-    condition: Option<String>,
+    condition: Option<(String, String)>,
     value: Option<Vec<String>>,
 ) {
     let Some(object) = s.store.object(id) else {
@@ -226,17 +227,25 @@ fn update_filter(
     if let Some(v) = value {
         rule.value = v;
     }
-    if let Some(c) = condition.clone() {
+    if let Some((c, quick)) = condition.clone() {
+        // A day count and a timestamp don't translate: switching between
+        // a relative and an absolute rule starts the value over.
+        if quick != rule.quick_option {
+            rule.value.clear();
+        }
         rule.condition = c;
+        rule.quick_option = quick;
     }
     // Reset condition/value when the key's format changes the catalog.
     if let Some(k) = key {
-        rule.condition = config::conditions_for(&relations, &k)[0].id.to_string();
+        let first = &config::conditions_for(&relations, &k)[0];
+        rule.condition = first.id.to_string();
+        rule.quick_option = first.quick.to_string();
         rule.key = k;
         rule.value.clear();
     }
     // A one-value condition keeps one value.
-    if let Some(c) = condition
+    if let Some((c, _)) = condition
         && !config::multi_value(&c)
         && rule.value.len() > 1
     {
@@ -276,11 +285,20 @@ fn rule_inputs<'a>(s: &'a mut State, id: &str, i: usize) -> &'a mut RuleInputs {
         .or_insert_with(|| RuleInputs::new(first))
 }
 
-/// One-value input: Enter or blur stores what it holds.
+/// One-value input: Enter or blur stores what it holds. A relative-date
+/// rule stores the day count only (its digits).
 fn commit_single(s: &mut State, id: &str, i: usize) {
     let inputs = rule_inputs(s, id, i);
     inputs.single_dirty = false;
-    let text = inputs.single.value().to_string();
+    let mut text = inputs.single.value().to_string();
+    let relative = s.store.object(id).is_some_and(|o| {
+        config::parse_filters(&o.fields)
+            .get(i)
+            .is_some_and(|f| !f.quick_option.is_empty())
+    });
+    if relative {
+        text.retain(|ch| ch.is_ascii_digit());
+    }
     let current = stored_values(s, id, i);
     let next = if text.is_empty() { vec![] } else { vec![text] };
     if next != current {
@@ -1117,13 +1135,20 @@ fn filter_panel(
                 );
                 rule = rule.child(multi);
             } else {
+                let unit = config::condition_of(relations, f).map_or("", |c| c.unit);
                 let fresh = InputState::with_value(f.value.first().cloned().unwrap_or_default());
                 let state = c.rule_inputs.get(&i).map_or(&fresh, |r| &r.single);
                 let (lens, change, submit) = (id.clone(), id.clone(), id.clone());
+                // A day count is a short number; a value is a free field.
+                let (width, placeholder) = if unit.is_empty() {
+                    (160.0, "value")
+                } else {
+                    (64.0, "N")
+                };
                 rule = rule.child(
-                    el().w(160.0).child(
+                    el().w(width).child(
                         Input::new(format!("{id}/fval-{i}"), state)
-                            .placeholder("value")
+                            .placeholder(placeholder)
                             .text_size(13.0)
                             .on_edit(move |s: &mut State| &mut rule_inputs(s, &lens, i).single)
                             .on_change(move |s: &mut State, _: &mut Tx| {
@@ -1135,6 +1160,9 @@ fn filter_panel(
                             .build(t),
                     ),
                 );
+                if !unit.is_empty() {
+                    rule = rule.child(text(unit).font(ty::ui(13.0)).color(t.fg));
+                }
             }
         }
         let all = filters.clone();
@@ -1170,7 +1198,7 @@ fn filter_panel(
             next.push(FilterRule {
                 key: "name".into(),
                 condition: "like".into(),
-                value: vec![],
+                ..FilterRule::default()
             });
             save_filters(s, &view, next);
         },
@@ -1414,10 +1442,8 @@ fn condition_select(
 ) -> El {
     let id = &v.id;
     let conds = config::conditions_for(relations, &f.key);
-    let label = conds
-        .iter()
-        .find(|c| c.id == f.condition)
-        .map_or(f.condition.as_str(), |c| c.label)
+    let label = config::condition_of(relations, f)
+        .map_or(f.condition.as_str(), |c| c.chip)
         .to_string();
     let open = v.controls.cond_open == Some(i);
     let toggle = id.clone();
@@ -1445,17 +1471,19 @@ fn condition_select(
             }
         })
         .build(t);
-    let mut menu = PopupMenu::new().min_w(160.0);
+    // The relative-date rows are long: room for them and their ✓.
+    let wide = conds.iter().any(|c| !c.quick.is_empty());
+    let mut menu = PopupMenu::new().min_w(if wide { 230.0 } else { 160.0 });
     for c in conds {
-        let (view, cond) = (id.clone(), c.id.to_string());
-        menu = menu.item(kit_row(t, c.label, c.id == f.condition).on_press(
-            move |s: &mut State| {
+        let (view, cond) = (id.clone(), (c.id.to_string(), c.quick.to_string()));
+        menu = menu.item(
+            kit_row(t, c.label, c.matches(f)).on_press(move |s: &mut State| {
                 if let Some(c) = controls_mut(s, &view) {
                     c.cond_open = None;
                 }
                 update_filter(s, &view, i, None, Some(cond.clone()), None)
-            },
-        ));
+            }),
+        );
     }
     let close = id.clone();
     DropdownMenu::new(format!("{id}/fcond-menu-{i}"))

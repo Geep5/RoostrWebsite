@@ -5,10 +5,13 @@
 use roostr_core::{Fields, RelationDef, Value};
 
 /// One stored filter rule (`FilterRule`). Values are always strings.
-#[derive(Clone, Debug, PartialEq)]
+/// `quick_option` is the engine's relative-date rule (`numberOfDaysAgo`,
+/// value = the day count); empty for an absolute rule.
+#[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct FilterRule {
     pub key: String,
     pub condition: String,
+    pub quick_option: String,
     pub value: Vec<String>,
 }
 
@@ -65,6 +68,7 @@ pub(crate) fn parse_filters(fields: &Fields) -> Vec<FilterRule> {
         .map(|e| FilterRule {
             key: entry_str(e, "key").unwrap_or("").to_string(),
             condition: entry_str(e, "condition").unwrap_or("equal").to_string(),
+            quick_option: entry_str(e, "quickOption").unwrap_or("").to_string(),
             value: str_items(e.get("value")),
         })
         .collect()
@@ -105,6 +109,9 @@ pub(crate) fn filters_value(rules: &[FilterRule]) -> Value {
                 let mut e = Fields::new();
                 e.insert("key".into(), Value::string(&f.key));
                 e.insert("condition".into(), Value::string(&f.condition));
+                if !f.quick_option.is_empty() {
+                    e.insert("quickOption".into(), Value::string(&f.quick_option));
+                }
                 e.insert(
                     "value".into(),
                     Value::values(f.value.iter().map(Value::string).collect()),
@@ -254,15 +261,53 @@ pub(crate) fn date_key(fields: &Fields) -> &str {
 
 pub(crate) struct ConditionDef {
     pub id: &'static str,
+    /// The engine quick option this condition sets (`""` = none).
+    pub quick: &'static str,
+    /// The menu row's label.
     pub label: &'static str,
+    /// The condition button's label once chosen (the value follows it).
+    pub chip: &'static str,
+    /// Text after the value field (`days ago`).
+    pub unit: &'static str,
     pub needs_value: bool,
+}
+
+impl ConditionDef {
+    /// Is this the condition `f` stores?
+    pub(crate) fn matches(&self, f: &FilterRule) -> bool {
+        self.id == f.condition && self.quick == f.quick_option
+    }
 }
 
 const fn c(id: &'static str, label: &'static str, needs_value: bool) -> ConditionDef {
     ConditionDef {
         id,
+        quick: "",
         label,
+        chip: label,
+        unit: "",
         needs_value,
+    }
+}
+
+/// The engine's relative-date quick option: the value is a day count.
+pub(crate) const DAYS_AGO: &str = "numberOfDaysAgo";
+
+/// A relative-date condition: `less` = before the start of the day N days
+/// ago, `greaterOrEqual` = within the last N days (`quick_option_range`).
+const fn days(
+    id: &'static str,
+    label: &'static str,
+    chip: &'static str,
+    unit: &'static str,
+) -> ConditionDef {
+    ConditionDef {
+        id,
+        quick: DAYS_AGO,
+        label,
+        chip,
+        unit,
+        needs_value: true,
     }
 }
 
@@ -283,6 +328,24 @@ const NUMBER_CONDITIONS: &[ConditionDef] = &[
     c("less", "<", true),
     c("greaterOrEqual", "≥", true),
     c("lessOrEqual", "≤", true),
+    c("empty", "is empty", false),
+    c("notEmpty", "is not empty", false),
+];
+/// Dates (and Created / Updated): the number comparisons plus the relative rules.
+const DATE_CONDITIONS: &[ConditionDef] = &[
+    c("equal", "=", true),
+    c("notEqual", "≠", true),
+    c("greater", ">", true),
+    c("less", "<", true),
+    c("greaterOrEqual", "≥", true),
+    c("lessOrEqual", "≤", true),
+    days("less", "is more than … days ago", "more than", "days ago"),
+    days(
+        "greaterOrEqual",
+        "is within the last … days",
+        "within the last",
+        "days",
+    ),
     c("empty", "is empty", false),
     c("notEmpty", "is not empty", false),
 ];
@@ -351,13 +414,27 @@ pub(crate) fn conditions_for(relations: &[RelationDef], key: &str) -> &'static [
     if key == "repeat" {
         return REPEAT_CONDITIONS;
     }
+    if key == "createdAt" || key == "updatedAt" {
+        return DATE_CONDITIONS;
+    }
     match filter_format(relations, key).as_str() {
-        "number" | "date" => NUMBER_CONDITIONS,
+        "date" => DATE_CONDITIONS,
+        "number" => NUMBER_CONDITIONS,
         "tag" | "status" => SELECT_CONDITIONS,
         "checkbox" => CHECKBOX_CONDITIONS,
         "object" => OBJECT_CONDITIONS,
         _ => TEXT_CONDITIONS,
     }
+}
+
+/// The catalog entry rule `f` stores, if the key's catalog has it.
+pub(crate) fn condition_of(
+    relations: &[RelationDef],
+    f: &FilterRule,
+) -> Option<&'static ConditionDef> {
+    conditions_for(relations, &f.key)
+        .iter()
+        .find(|c| c.matches(f))
 }
 
 pub(crate) fn options_for(relations: &[RelationDef], key: &str) -> Vec<String> {
@@ -378,10 +455,7 @@ pub(crate) fn option_color(relations: &[RelationDef], key: &str, text: &str) -> 
 }
 
 pub(crate) fn needs_value(relations: &[RelationDef], f: &FilterRule) -> bool {
-    conditions_for(relations, &f.key)
-        .iter()
-        .find(|c| c.id == f.condition)
-        .is_none_or(|c| c.needs_value)
+    condition_of(relations, f).is_none_or(|c| c.needs_value)
 }
 
 /// Filterable keys: virtual keys + every non-hidden relation, unique.
@@ -465,14 +539,50 @@ mod tests {
 
     #[test]
     fn filters_round_trip() {
-        let rules = vec![FilterRule {
-            key: "tag".into(),
-            condition: "in".into(),
-            value: vec!["a".into(), "b".into()],
-        }];
+        let rules = vec![
+            FilterRule {
+                key: "tag".into(),
+                condition: "in".into(),
+                value: vec!["a".into(), "b".into()],
+                ..FilterRule::default()
+            },
+            FilterRule {
+                key: "updatedAt".into(),
+                condition: "less".into(),
+                quick_option: DAYS_AGO.into(),
+                value: vec!["30".into()],
+            },
+        ];
         let mut fields = Fields::new();
         fields.insert("viewFilters".into(), filters_value(&rules));
         assert_eq!(parse_filters(&fields), rules);
+    }
+
+    /// Dates offer the relative rules beside the comparisons; plain numbers don't.
+    #[test]
+    fn dates_offer_relative_days() {
+        let rule = FilterRule {
+            key: "updatedAt".into(),
+            condition: "less".into(),
+            quick_option: DAYS_AGO.into(),
+            value: vec!["30".into()],
+        };
+        assert_eq!(condition_of(&[], &rule).map(|c| c.chip), Some("more than"));
+        let absolute = FilterRule {
+            quick_option: String::new(),
+            ..rule
+        };
+        assert_eq!(condition_of(&[], &absolute).map(|c| c.label), Some("<"));
+        let num = RelationDef {
+            key: "n".into(),
+            format: "number".into(),
+            ..RelationDef::default()
+        };
+        assert!(
+            conditions_for(&[num], "n")
+                .iter()
+                .all(|c| c.quick.is_empty())
+        );
     }
 
     #[test]

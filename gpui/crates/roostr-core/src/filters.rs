@@ -73,6 +73,8 @@ pub fn engine_filters_of(fields: &Fields, relations: &[RelationDef]) -> Vec<Json
             continue;
         }
         let condition = entry_str(e, "condition").unwrap_or("equal");
+        // A relative-date rule (`numberOfDaysAgo`): the value is a day count.
+        let quick_option = entry_str(e, "quickOption").filter(|q| !q.is_empty());
         let values: Vec<&str> = e
             .get("value")
             .map(|v| v.items())
@@ -88,7 +90,9 @@ pub fn engine_filters_of(fields: &Fields, relations: &[RelationDef]) -> Vec<Json
                 .find(|r| r.key == key)
                 .map_or("shorttext", |r| r.format.as_str())
         };
-        let value: Option<Json> = if format == "checkbox" {
+        let value: Option<Json> = if quick_option.is_some() {
+            values.first().map(|v| js_number(v))
+        } else if format == "checkbox" {
             Some(json!(true))
         } else if matches!(condition, "in" | "notIn" | "allIn" | "exactIn") {
             Some(json!(values))
@@ -112,6 +116,9 @@ pub fn engine_filters_of(fields: &Fields, relations: &[RelationDef]) -> Vec<Json
         let mut rule = serde_json::Map::new();
         rule.insert("key".into(), json!(key));
         rule.insert("condition".into(), json!(condition));
+        if let Some(q) = quick_option {
+            rule.insert("quickOption".into(), json!(q));
+        }
         if let Some(value) = value {
             rule.insert("value".into(), value);
         }
@@ -141,5 +148,75 @@ pub fn space_filter_of(fields: &Fields, default_space_id: &str) -> Json {
         json!({ "key": "channel", "condition": "in", "value": [owning, ""] })
     } else {
         json!({ "key": "channel", "condition": "equal", "value": owning })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::Value;
+
+    fn view(rule: &[(&str, &str)], value: &[&str]) -> Fields {
+        let mut e = Fields::new();
+        for (k, v) in rule {
+            e.insert((*k).into(), Value::string(*v));
+        }
+        e.insert(
+            "value".into(),
+            Value::values(value.iter().map(|v| Value::string(*v)).collect()),
+        );
+        let mut fields = Fields::new();
+        fields.insert("viewFilters".into(), Value::values(vec![Value::map(e)]));
+        fields.insert("setOf".into(), Value::values(vec![Value::string("note")]));
+        fields
+    }
+
+    /// "Modified more than 30 days ago" reaches the engine as its quick
+    /// option with the day count as a number.
+    #[test]
+    fn relative_dates_pass_quick_option() {
+        let fields = view(
+            &[
+                ("key", "updatedAt"),
+                ("condition", "less"),
+                ("quickOption", "numberOfDaysAgo"),
+            ],
+            &["30"],
+        );
+        assert_eq!(
+            engine_filters_of(&fields, &[]),
+            [
+                json!({"key": "updatedAt", "condition": "less", "quickOption": "numberOfDaysAgo", "value": 30})
+            ]
+        );
+        // A date property too, and no day count yet = no filter.
+        let rel = RelationDef {
+            key: "due".into(),
+            format: "date".into(),
+            ..RelationDef::default()
+        };
+        let fields = view(
+            &[
+                ("key", "due"),
+                ("condition", "greaterOrEqual"),
+                ("quickOption", "numberOfDaysAgo"),
+            ],
+            &["7"],
+        );
+        assert_eq!(
+            engine_filters_of(&fields, std::slice::from_ref(&rel)),
+            [
+                json!({"key": "due", "condition": "greaterOrEqual", "quickOption": "numberOfDaysAgo", "value": 7})
+            ]
+        );
+        let blank = view(
+            &[
+                ("key", "due"),
+                ("condition", "less"),
+                ("quickOption", "numberOfDaysAgo"),
+            ],
+            &[],
+        );
+        assert!(engine_filters_of(&blank, &[rel]).is_empty());
     }
 }
