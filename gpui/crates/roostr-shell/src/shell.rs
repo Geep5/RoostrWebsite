@@ -18,7 +18,8 @@ pub const RAIL_MAX: f32 = 320.;
 pub(crate) const RAIL_WIDE_DEFAULT: f32 = 236.;
 pub const SIDE_DEFAULT: f32 = 220.;
 pub const SIDE_MIN: f32 = 180.;
-pub const SIDE_MAX: f32 = 480.;
+/// Wide enough for a pinned gallery to take three columns of most names.
+pub const SIDE_MAX: f32 = 640.;
 
 /// The drawer tab being rested on.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

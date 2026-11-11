@@ -1114,7 +1114,10 @@ pub(crate) fn progress_card(
     pct: Option<u64>,
     detail: String,
 ) -> El {
-    let colour = roostr_ui::color::hex(&s.store.chat_color).unwrap_or(t.accent);
+    // The person's colour, else Roostr's yellow (the default chat colour).
+    let colour = roostr_ui::color::hex(&s.store.chat_color)
+        .or_else(|| roostr_ui::color::hex(roostr_ui::color::DEFAULT_CHAT_COLOR))
+        .unwrap_or(t.accent);
     let head = row()
         .w_full()
         .center_y()
