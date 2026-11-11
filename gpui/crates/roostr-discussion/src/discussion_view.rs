@@ -334,7 +334,7 @@ pub(crate) fn view(
                 .label(d.member_name(member, &s.store))
                 .text_size(11.)
                 .color(t.fg)
-                .underline(t.fg.alpha(0.4))
+                .plain()
                 .on_press(move |s: &mut State| nav::navigate(Route::Object(target.clone()), s))
                 .build(t)
         });
@@ -683,7 +683,7 @@ fn message_row(
                 .text_size(12.)
                 .weight(ty::SEMIBOLD)
                 .color(t.fg)
-                .underline(t.fg.alpha(0.4))
+                .plain()
                 .on_press(move |s: &mut State| nav::navigate(Route::Object(target.clone()), s))
                 .build(t)
         } else {

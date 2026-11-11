@@ -214,6 +214,7 @@ pub struct Link {
     weight: f32,
     color: Option<Color>,
     underline: Option<Color>,
+    plain: bool,
     acts: Acts,
 }
 
@@ -228,6 +229,7 @@ impl Link {
             weight: ty::NORMAL,
             color: None,
             underline: None,
+            plain: false,
             acts: Acts::default(),
         }
     }
@@ -261,6 +263,11 @@ impl Link {
         self.underline = Some(c);
         self
     }
+    /// No underline: a name that reads as text and only dims under the pointer.
+    pub fn plain(mut self) -> Self {
+        self.plain = true;
+        self
+    }
     pub fn on_press<S: 'static>(mut self, f: impl Fn(&mut S) + 'static) -> Self {
         self.acts.press(f);
         self
@@ -274,11 +281,13 @@ impl Link {
         let ink = self.color.unwrap_or(t.kit.link);
         let line = self.underline.unwrap_or(opacity(ink, 0.5));
         let n = self.label.len();
-        let label = text(self.label.clone())
+        let mut label = text(self.label.clone())
             .font(ty::ui(self.size).weight(self.weight))
             .color(ink)
-            .group_color(opacity(ink, 0.8))
-            .spans(vec![Span::new(0, n).underline(line)]);
+            .group_color(opacity(ink, 0.8));
+        if !self.plain {
+            label = label.spans(vec![Span::new(0, n).underline(line)]);
+        }
         let mut e = row()
             .key(self.key)
             .role("link")
