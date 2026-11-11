@@ -96,6 +96,8 @@ pub(crate) enum Screen {
     Spaces,
     /// A space's home (its id).
     Home(String),
+    /// A space's open tabs (its id), over its home.
+    Tabs(String),
     Object(String),
     Chat(String),
     /// Off the stack (the graph): no swipe, no slide.
@@ -110,6 +112,7 @@ impl Screen {
         match self {
             Screen::Spaces => "m-screen-spaces".into(),
             Screen::Home(id) => format!("m-screen-home-{id}"),
+            Screen::Tabs(id) => format!("m-screen-tabs-{id}"),
             Screen::Object(id) => format!("m-screen-object-{id}"),
             Screen::Chat(id) => format!("m-screen-chat-{id}"),
             Screen::Other => "m-screen-other".into(),

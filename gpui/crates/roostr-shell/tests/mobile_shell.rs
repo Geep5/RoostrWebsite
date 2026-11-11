@@ -15,7 +15,7 @@ use std::time::Duration;
 use anyhow::Result;
 use parking_lot::Mutex;
 use roostr_core::layout::SyncNow;
-use roostr_core::nav::{Route, navigate};
+use roostr_core::nav::{Route, TABS_WRITE_DELAY, navigate, open_tab};
 use roostr_core::types::{Object, ObjectSummary, QueryResult, RelationDef, Settings, Space, Value};
 use roostr_core::{Backend, BackendEvent, JsonMap};
 use roostr_rt::{BoxFuture, BoxStream};
@@ -311,4 +311,73 @@ fn the_search_sheet_pulls_away_by_touch() {
     assert!(h.has("search-modal"), "a short pull snaps back");
     pull(&mut h, inside, &[20., 100.]);
     assert!(!h.has("search-modal"), "a long pull closes it");
+}
+
+#[test]
+fn the_open_tabs_list_shows_opens_and_closes_the_spaces_tabs() {
+    let vault = Arc::new(Vault::default());
+    let mut h = Harness::with_pages(Arc::new(Shared(vault.clone())), (390., 844.), pane_pages());
+    h.update(|s| navigate(Route::Home, s));
+    h.click("m-card-sp-1");
+    // Nothing open yet.
+    h.click("m-tabs");
+    assert!(h.has("m-open-tabs") && h.has("m-tabs-empty"));
+    h.click("m-tabs-back");
+    assert!(h.has("m-space-home") && !h.has("m-open-tabs"));
+
+    // Moving around on a phone leaves the tabs alone.
+    h.click("m-recent-page-1");
+    assert_eq!(route(&h), Route::Object("page-1".into()));
+    let paths = |h: &Harness| -> Vec<String> {
+        h.state()
+            .nav
+            .tabs()
+            .iter()
+            .map(|t| t.route.path())
+            .collect()
+    };
+    assert_eq!(paths(&h), ["/app"]);
+    h.click("m-back");
+    assert!(h.has("m-space-home"));
+
+    // "Open in new tab" adds tabs; the list shows them in order.
+    h.update(|s| {
+        open_tab(Route::Object("page-1".into()), true, s);
+        open_tab(Route::Object("chat-1".into()), true, s);
+    });
+    assert_eq!(route(&h), Route::Home, "opened in the background");
+    let uids: Vec<u64> = h.state().nav.tabs()[1..].iter().map(|t| t.uid).collect();
+    h.click("m-tabs");
+    let (page, chat) = (format!("m-tab-{}", uids[0]), format!("m-tab-{}", uids[1]));
+    assert!(h.has(&page) && h.has(&chat) && !h.has("m-tabs-empty"));
+    assert!(center(&h, &page)[1] < center(&h, &chat)[1]);
+    assert!(h.texts().iter().any(|t| t == "Notes") && h.texts().iter().any(|t| t == "Team chat"));
+
+    // × closes a tab; the list stays.
+    h.click(&format!("m-tab-close-{}", uids[1]));
+    assert!(h.has("m-open-tabs") && h.has(&page) && !h.has(&chat));
+    assert_eq!(paths(&h), ["/app", "/app/object/page-1"]);
+    assert_eq!(route(&h), Route::Home);
+
+    // A tap opens the tab.
+    h.click(&page);
+    assert_eq!(route(&h), Route::Object("page-1".into()));
+    assert!(h.state().nav.in_tab() && !h.has("m-open-tabs"));
+    assert_eq!(h.state().nav.active_index(), 1);
+
+    // The list is the shared one: written after the debounce.
+    let writes = |v: &Vault| {
+        v.mutations
+            .lock()
+            .iter()
+            .filter(|m| *m == "set_field")
+            .count()
+    };
+    let before = writes(&vault);
+    h.advance(TABS_WRITE_DELAY);
+    assert_eq!(writes(&vault), before + 1);
+    assert_eq!(
+        h.state().nav.open_tabs(),
+        [("sp-1".to_string(), paths(&h))].into()
+    );
 }

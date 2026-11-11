@@ -42,9 +42,9 @@ fn poll(s: &mut State) -> bool {
     discussion::poll_all(s) | panes
 }
 
-/// A discussion stays while its object is in some tab.
+/// A discussion stays while its object is in some tab or shows.
 fn on_nav(s: &mut State, event: &NavEvent) {
-    if *event != NavEvent::Navigated {
+    if !matches!(event, NavEvent::Navigated | NavEvent::TabsChanged) {
         return;
     }
     let shown: HashSet<String> = s

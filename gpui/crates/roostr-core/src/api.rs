@@ -257,6 +257,23 @@ pub mod user_prefs {
             Ok(())
         })
     }
+
+    /// Save this person's open tabs: space id -> the tab strip's route paths,
+    /// in order (`open_tabs`, a map of string lists).
+    pub fn set_open_tabs(tabs: &crate::nav::OpenTabs, s: &mut State) -> Task<Result<()>> {
+        let ensure = ensure(s);
+        let set = note::set_field(
+            USER_PREFS_ID,
+            crate::nav::OPEN_TABS_FIELD,
+            crate::nav::open_tabs_value(tabs),
+            s,
+        );
+        s.rt.spawn(async move |_| {
+            ensure.await?;
+            set.await?;
+            Ok(())
+        })
+    }
 }
 
 /// Recurring objects: the engine owns the rule and the occurrence math.

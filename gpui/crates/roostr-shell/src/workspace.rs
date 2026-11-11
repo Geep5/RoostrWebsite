@@ -63,6 +63,9 @@ fn on_nav(s: &mut State, event: &NavEvent) {
                 crate::mobile::space_changed(s);
             }
         }
+        NavEvent::TabsChanged => {
+            close_hidden_pages(s);
+        }
     }
 }
 
@@ -72,6 +75,9 @@ fn on_poll(s: &mut State) -> bool {
     if s.get::<Shell>().is_none() {
         return false;
     }
+    // A phone browses outside the tabs; the desktop in them.
+    let phone = crate::is_mobile(s);
+    s.nav.set_phone(phone, &mut s.ui);
     let mut changed = on_store_changed(s);
     changed |= open_shown_route(s);
     changed |= top_pin_redirect(s);
@@ -225,21 +231,28 @@ fn on_navigated(s: &mut State) {
         s.nav.use_space(&shown, &mut s.ui);
         return;
     }
-    // Pages live while a tab of this space shows their route.
+    close_hidden_pages(s);
+    let shell = s.slot::<Shell>();
+    shell.more = false;
+    shell.shown_route = route.clone();
+    show(s, route);
+    refresh_delete_blocker(s, false);
+}
+
+/// Pages live while a tab of this space or the screen shows their route:
+/// the others close.
+fn close_hidden_pages(s: &mut State) {
+    let shown = s.nav.route().clone();
     let tabs: Vec<Route> = s.nav.tabs().iter().map(|t| t.route.clone()).collect();
     let shell = s.slot::<Shell>();
     let (live, gone): (Vec<Route>, Vec<Route>) = std::mem::take(&mut shell.live)
         .into_iter()
-        .partition(|r| tabs.contains(r));
+        .partition(|r| *r == shown || tabs.contains(r));
     shell.live = live;
-    shell.more = false;
-    shell.shown_route = route.clone();
     let closed = shell.pages.closed;
     for r in &gone {
         closed(s, r);
     }
-    show(s, route);
-    refresh_delete_blocker(s, false);
 }
 
 /// Nothing open (a new tab, the last one closed, a space with no saved

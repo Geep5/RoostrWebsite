@@ -124,6 +124,7 @@ impl State {
         self.store.generation = generation;
         self.store.device = device;
         self.harness = harness;
+        self.nav.vault_opened();
         self.profile = ProfileCache::default();
         self.lite_requested.clear();
         self.store.start();
@@ -184,15 +185,17 @@ impl State {
         self.poll_listeners.push(f);
     }
 
-    /// Rune's poll hook: runs the futures that can move, then hands the
-    /// queued events to their listeners (and runs what those started), then
-    /// runs the [`State::on_poll`] listeners.
+    /// Rune's poll hook: runs the futures that can move, hands the navigator
+    /// what the store learned about the tabs, then hands the queued events
+    /// to their listeners (and runs what those started), then runs the
+    /// [`State::on_poll`] listeners.
     /// `updated` when anything may have changed what the view shows.
     pub fn poll(&mut self) -> Ran {
         let rt = self.rt.clone();
         let mut ran = rt.run(self);
         let mut drained = false;
         for _ in 0..DISPATCH_ROUNDS {
+            crate::nav::sync_tabs(self);
             if !self.dispatch() {
                 drained = true;
                 break;

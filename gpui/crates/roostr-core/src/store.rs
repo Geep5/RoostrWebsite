@@ -21,6 +21,7 @@ use serde_json::{Value as Json, json};
 use crate::State;
 use crate::backend::{Backend, BackendEvent, JsonMap};
 use crate::color::{DEFAULT_CHAT_COLOR, normalize_hex};
+use crate::nav::{OPEN_TABS_FIELD, OpenTabs};
 use crate::types::{
     Object, ObjectSummary, QueryResult, QueryRow, RelationDef, Settings, Space, SyncPhase,
     SyncStatus, field_str,
@@ -110,6 +111,21 @@ pub struct Store {
     pub chat_color: String,
     /// This person's order of the space list (space id -> position).
     pub space_order: HashMap<String, f64>,
+    /// The preferences' `open_tabs` as the last refresh read them (`None`
+    /// inside: the preferences could not be read), until
+    /// [`crate::State::poll`] hands them to the navigator.
+    pub(crate) open_tabs: Option<Option<OpenTabs>>,
+    /// Bumped as a write of the preferences' `open_tabs` starts and ends: a
+    /// refresh that began before is stale on that field.
+    pub(crate) prefs_epoch: u64,
+    /// Ids the collections listed at the last refresh (every object, type,
+    /// property, space and agent).
+    known: HashSet<String>,
+    /// Ids a refresh no longer lists, until the poll checks whether they
+    /// were binned or vanished.
+    pub(crate) missing: Vec<String>,
+    /// Objects a fetch found in the bin, until the poll closes their tabs.
+    pub(crate) binned: Vec<String>,
     /// The first full refresh completed.
     pub loaded: bool,
     objects: HashMap<String, ObjectSlot>,
@@ -154,6 +170,11 @@ impl Store {
             agents: Vec::new(),
             chat_color: DEFAULT_CHAT_COLOR.to_string(),
             space_order: HashMap::new(),
+            open_tabs: None,
+            prefs_epoch: 0,
+            known: HashSet::new(),
+            missing: Vec::new(),
+            binned: Vec::new(),
             loaded: false,
             objects: HashMap::new(),
             in_flight: HashSet::new(),
@@ -367,6 +388,7 @@ impl Store {
         let agents = self.rt.background(fetch_agents(b.clone()));
         let prefs = self.rt.background(read_prefs(b));
         let generation = self.generation;
+        let epoch = self.prefs_epoch;
         self.rt
             .spawn(async move |cx| {
                 let result: Result<_> = async {
@@ -382,13 +404,14 @@ impl Store {
                 .await;
                 cx.update(|s| {
                     if s.store.generation == generation {
-                        s.store.refreshed(result)
+                        s.store.refreshed(result, epoch)
                     }
                 });
             })
             .detach();
     }
 
+    /// A refresh landed; `epoch` is the [`Self::prefs_epoch`] it started at.
     #[allow(clippy::type_complexity)]
     fn refreshed(
         &mut self,
@@ -398,30 +421,38 @@ impl Store {
             Vec<RelationDef>,
             (Vec<TypeDef>, HashSet<String>),
             Vec<AgentRef>,
-            (String, HashMap<String, f64>),
+            Prefs,
         )>,
+        epoch: u64,
     ) {
         self.refresh_running = false;
         match result {
-            Ok((
-                channels,
-                summaries,
-                mut relations,
-                (types, builtin_ids),
-                agents,
-                (chat_color, space_order),
-            )) => {
+            Ok((channels, summaries, mut relations, (types, builtin_ids), agents, prefs)) => {
                 for relation in &mut relations {
                     relation.options.sort_by(|a, b| a.order_id.cmp(&b.order_id));
                 }
+                let known: HashSet<String> = (channels.iter().map(|c| &c.id))
+                    .chain(summaries.iter().map(|o| &o.id))
+                    .chain(relations.iter().map(|r| &r.id))
+                    .chain(types.iter().map(|t| &t.id))
+                    .chain(agents.iter().map(|a| &a.id))
+                    .cloned()
+                    .collect();
+                if self.loaded {
+                    self.missing.extend(self.known.difference(&known).cloned());
+                }
+                self.known = known;
                 self.channels = channels;
                 self.summaries = summaries;
                 self.relations = relations;
                 self.types = types;
                 self.builtin_ids = builtin_ids;
                 self.agents = agents;
-                self.chat_color = chat_color;
-                self.space_order = space_order;
+                self.chat_color = prefs.chat_color;
+                self.space_order = prefs.space_order;
+                if epoch == self.prefs_epoch {
+                    self.open_tabs = Some(prefs.open_tabs);
+                }
                 self.loaded = true;
                 if self.bootstrap_held && !self.refresh_again {
                     self.bootstrap_held = false;
@@ -495,7 +526,12 @@ impl Store {
     fn reloaded(&mut self, id: String, result: Result<Object>) {
         self.in_flight.remove(&id);
         let slot = match result {
-            Ok(object) => ObjectSlot::Ready(Arc::new(object)),
+            Ok(object) => {
+                if object.deleted {
+                    self.binned.push(id.clone());
+                }
+                ObjectSlot::Ready(Arc::new(object))
+            }
             Err(error) => match self.objects.get(&id) {
                 // Keep a good state over a transient failure.
                 Some(ObjectSlot::Ready(object)) => ObjectSlot::Ready(object.clone()),
@@ -731,10 +767,22 @@ async fn fetch_agents(backend: Arc<dyn Backend>) -> Result<Vec<AgentRef>> {
         .collect())
 }
 
-/// `userPrefs.read`: chat color and space order, defaults when absent.
-async fn read_prefs(backend: Arc<dyn Backend>) -> (String, HashMap<String, f64>) {
+/// The preferences a refresh reads ([`read_prefs`]).
+struct Prefs {
+    chat_color: String,
+    space_order: HashMap<String, f64>,
+    open_tabs: Option<OpenTabs>,
+}
+
+/// `userPrefs.read`: chat color, space order and the open tabs, defaults
+/// when absent; `open_tabs` is `None` when the preferences could not be read.
+async fn read_prefs(backend: Arc<dyn Backend>) -> Prefs {
     let Ok(prefs) = backend.object(USER_PREFS_ID).await else {
-        return (DEFAULT_CHAT_COLOR.to_string(), HashMap::new());
+        return Prefs {
+            chat_color: DEFAULT_CHAT_COLOR.to_string(),
+            space_order: HashMap::new(),
+            open_tabs: None,
+        };
     };
     let chat_color = normalize_hex(prefs.field_str("chat_color"))
         .unwrap_or_else(|| DEFAULT_CHAT_COLOR.to_string());
@@ -748,5 +796,15 @@ async fn read_prefs(backend: Arc<dyn Backend>) -> (String, HashMap<String, f64>)
                 .collect()
         })
         .unwrap_or_default();
-    (chat_color, space_order)
+    let open_tabs = Some(
+        prefs
+            .field(OPEN_TABS_FIELD)
+            .map(crate::nav::open_tabs_from)
+            .unwrap_or_default(),
+    );
+    Prefs {
+        chat_color,
+        space_order,
+        open_tabs,
+    }
 }

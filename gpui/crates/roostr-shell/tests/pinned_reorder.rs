@@ -15,6 +15,7 @@ use anyhow::Result;
 use futures::channel::mpsc;
 use parking_lot::Mutex;
 use roostr_core::nav::{Route, navigate};
+use roostr_core::store::USER_PREFS_ID;
 use roostr_core::types::{
     Object, ObjectSummary, QueryResult, QueryRow, RelationDef, Settings, Space, Value,
 };
@@ -144,6 +145,11 @@ impl Backend for Shared {
         }))
     }
     fn mutate(&self, op: &str, params: JsonMap) -> BoxFuture<Result<JsonMap>> {
+        // The person's preferences (the open tabs) are not this test's.
+        let target = params.get("object_id").or_else(|| params.get("id"));
+        if target.and_then(Json::as_str) == Some(USER_PREFS_ID) {
+            return ready(Ok(JsonMap::new()));
+        }
         let object = params["object_id"].as_str().unwrap_or("").to_string();
         let key = params
             .get("key")
@@ -448,7 +454,11 @@ fn a_pin_dragged_by_its_name_moves_the_pin_and_opens_nothing() {
     // The pin's new place is written as its pin order (the fake vault's space keeps its own).
     assert_eq!(
         mutations(&vault),
-        [("set_field".to_string(), "q-1".to_string(), "pin_order".to_string())]
+        [(
+            "set_field".to_string(),
+            "q-1".to_string(),
+            "pin_order".to_string()
+        )]
     );
     assert_eq!(*h.state().nav.route(), route, "the drag opened nothing");
 }

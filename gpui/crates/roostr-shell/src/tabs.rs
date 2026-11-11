@@ -12,14 +12,14 @@ use crate::drag::{self, Axis};
 use crate::shell::{fill, fill_glyph, or_untitled};
 
 /// What a tab shows for its route (`tabInfo`).
-struct TabInfo {
-    icon: String,
-    name: String,
+pub(crate) struct TabInfo {
+    pub(crate) icon: String,
+    pub(crate) name: String,
     /// Task layout: a display-only checkbox, `Some(done)`.
-    task: Option<bool>,
+    pub(crate) task: Option<bool>,
 }
 
-fn tab_info(s: &State, route: &Route) -> TabInfo {
+pub(crate) fn tab_info(s: &State, route: &Route) -> TabInfo {
     let store = &s.store;
     let active = s.nav.space();
     let Route::Object(id) = route else {

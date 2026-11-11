@@ -22,7 +22,9 @@ use roostr_core::relations::{format_glyph, is_reserved_key, space_relations};
 use roostr_core::sync_status::{count, sync_progress, sync_tip};
 use roostr_core::types::{ObjectSummary, RelationDef, Space, SyncPhase};
 use roostr_ui::ty::Weights as _;
-use roostr_ui::{CountBadge, Glyph, ProgressCircle, Theme, checkbox, glyph, motion, shadow, ty};
+use roostr_ui::{
+    CountBadge, Glyph, ProgressCircle, Theme, checkbox, checkbox_display, glyph, motion, shadow, ty,
+};
 use rune::{
     Color, Cursor, Cx, Drag, Effect, El, LoopSpec, Phase as DragPhase, ScrollSpec, Shadow,
     SpringPair, Transition, Tx, col, el, row, spacer, text,
@@ -64,6 +66,8 @@ const fn rubber(over: f32) -> f32 {
 pub(crate) struct Mobile {
     /// A space card was tapped open: its home shows instead of the Spaces list.
     space_open: bool,
+    /// The space's Open tabs list shows over its home.
+    tabs_open: bool,
     /// `mCollapsed`: folded sections of the space home (pinned cards fold on the object).
     collapsed: HashMap<String, bool>,
     /// The space card held up for a reorder (`spaceLiftId`).
@@ -270,6 +274,7 @@ pub(crate) fn space_changed(s: &mut State) {
     }
     // Its home is the pinned cards: nothing opens by itself here (the
     // desktop, with room for a page, opens the top pin instead).
+    s.slot::<Mobile>().tabs_open = false;
     let target = match shell::shell(s).map(|sh| &sh.shown_route) {
         Some(route @ Route::Graph { .. }) => route.clone(),
         _ => Route::Home,
@@ -291,7 +296,11 @@ fn screen(s: &State) -> Screen {
         Route::Graph { .. } | Route::Site(_) => Screen::Other,
         Route::Home => match current_space(s) {
             Some(space) if s.get::<Mobile>().is_some_and(|m| m.space_open) => {
-                Screen::Home(space.id.clone())
+                if s.get::<Mobile>().is_some_and(|m| m.tabs_open) {
+                    Screen::Tabs(space.id.clone())
+                } else {
+                    Screen::Home(space.id.clone())
+                }
             }
             _ => Screen::Spaces,
         },
@@ -317,6 +326,7 @@ fn parent(s: &State, screen: &Screen) -> Option<Screen> {
     match screen {
         Screen::Spaces | Screen::Other => None,
         Screen::Home(_) => Some(Screen::Spaces),
+        Screen::Tabs(id) => Some(Screen::Home(id.clone())),
         Screen::Object(id) => home(id),
         Screen::Chat(id) => {
             let chat_object = s.store.summary(id).is_some_and(|o| o.type_key == "chat");
@@ -379,11 +389,13 @@ fn pop(s: &mut State) {
         Some(Screen::Spaces) => s.slot::<Mobile>().space_open = false,
         Some(Screen::Home(space)) => {
             s.nav.use_space(&space, &mut s.ui);
-            s.slot::<Mobile>().space_open = true;
+            let m = s.slot::<Mobile>();
+            m.space_open = true;
+            m.tabs_open = false;
             navigate(Route::Home, s);
         }
         Some(Screen::Object(id)) => navigate(Route::Object(id), s),
-        Some(Screen::Chat(_) | Screen::Other) | None => {}
+        Some(Screen::Chat(_) | Screen::Tabs(_) | Screen::Other) | None => {}
     }
 }
 
@@ -518,6 +530,7 @@ pub(crate) fn view(s: &State, cx: &mut Cx<State>, t: &Theme, layer: &mut Vec<El>
 fn edge_strip(screen: &Screen, width: f32, reduced: bool) -> El {
     let list = match screen {
         Screen::Home(_) => Some("m-cards-col"),
+        Screen::Tabs(_) => Some("m-tabs-list"),
         Screen::Object(_) => Some("m-main"),
         _ => None,
     };
@@ -619,6 +632,10 @@ fn screen_body(
         Screen::Spaces => spaces(s, t),
         Screen::Home(id) => match s.store.space(id).or_else(|| current_space(s)) {
             Some(space) => space_home(s, cx, t, space, layer, motion),
+            None => spaces(s, t),
+        },
+        Screen::Tabs(id) => match s.store.space(id).or_else(|| current_space(s)) {
+            Some(space) => open_tabs(s, t, space, motion),
             None => spaces(s, t),
         },
         Screen::Object(id) => object(s, cx, t, id, layer, motion),
@@ -1542,7 +1559,8 @@ fn m_section_add(t: &Theme, key: &str, label: &str) -> El {
 
 /// Screen 2: a space's home - its pinned objects as cards, Recently
 /// edited, Types (only creatable here on a phone: the bottom ＋ makes
-/// objects), Properties, and the bottom bar (Search, ＋ New object).
+/// objects), Properties, and the bottom bar (Search, Open tabs, ＋ New
+/// object).
 fn space_home(
     s: &State,
     cx: &mut Cx<State>,
@@ -1810,6 +1828,12 @@ fn space_home(
                                 .on_press(crate::search::open),
                         )
                         .child(roostr_ui::tooltip(
+                            tabs_button(s, t).on_press(move |s: &mut State| {
+                                s.slot::<Mobile>().tabs_open = true;
+                            }),
+                            "Open tabs",
+                        ))
+                        .child(roostr_ui::tooltip(
                             panel_button(t, "m-compose")
                                 .size(46., 46.)
                                 .radius(23.)
@@ -1820,6 +1844,155 @@ fn space_home(
                         )),
                 ),
         )
+}
+
+/// The space's tabs the Open tabs list shows: every tab but a space-home
+/// one (what a strip with nothing open holds), with its index in the strip.
+fn listed_tabs(s: &State) -> Vec<(usize, &roostr_core::nav::Tab)> {
+    s.nav
+        .tabs()
+        .iter()
+        .enumerate()
+        .filter(|(_, tab)| tab.route != Route::Home)
+        .collect()
+}
+
+/// The bottom bar's Open tabs button: a rounded square holding how many
+/// tabs the space has open (the browsers' tab button).
+fn tabs_button(s: &State, t: &Theme) -> El {
+    let count = listed_tabs(s).len();
+    let square = row()
+        .size(20., 20.)
+        .radius(5.)
+        .border(1.5, t.fg)
+        .border_layout()
+        .center()
+        .children((count > 0).then(|| {
+            text(count.to_string())
+                .font(ty::ui(11.).semibold())
+                .color(t.fg)
+        }));
+    panel_button(t, "m-tabs")
+        .size(46., 46.)
+        .radius(23.)
+        .label("Open tabs")
+        .child(square)
+}
+
+/// Open a tab from the Open tabs list: it shows, and the list closes.
+fn open_listed_tab(s: &mut State, index: usize) {
+    s.slot::<Mobile>().tabs_open = false;
+    s.nav.activate(index, &mut s.ui);
+}
+
+/// The Open tabs screen: the space's tabs - the same list every device of
+/// this person shows - as rows (icon and name; a tap opens it, × closes
+/// it everywhere), over the space home.
+fn open_tabs(s: &State, t: &Theme, current: &Space, motion: bool) -> El {
+    let tabs = listed_tabs(s);
+    let body = if tabs.is_empty() {
+        col()
+            .key("m-tabs-empty")
+            .items_center()
+            .gap(6.)
+            .pt(40.)
+            .px(20.)
+            .child(
+                text("No open tabs")
+                    .font(ty::ui(15.).semibold())
+                    .color(t.fg),
+            )
+            .child(
+                text(format!(
+                    "Tabs you open in {} on any device show here.",
+                    or_untitled(&current.name)
+                ))
+                .font(ty::ui(13.))
+                .color(t.muted)
+                .align(rune::Align::Center)
+                .wrap()
+                .w_full(),
+            )
+    } else {
+        let rows = tabs
+            .into_iter()
+            .map(|(index, tab)| tab_row(s, t, index, tab));
+        col()
+            .key("m-tabs-card")
+            .w_full()
+            .fill(t.panel)
+            .border(1., t.border)
+            .border_layout()
+            .radius(10.)
+            .pt(4.)
+            .px(10.)
+            .pb(8.)
+            .children(rows.enumerate().map(|(i, row)| {
+                let cell = col().w_full().child(row);
+                if i > 0 {
+                    cell.border_sides([1., 0., 0., 0.], t.border)
+                        .border_layout()
+                } else {
+                    cell
+                }
+            }))
+    };
+    col()
+        .key("m-open-tabs")
+        .grow(1.)
+        .min_h(0.)
+        .child(
+            m_top(t)
+                .child(
+                    m_btn(t, "m-tabs-back", "Back", back_glyph(t))
+                        .on_press(move |s: &mut State| back(s, motion)),
+                )
+                .child(
+                    row()
+                        .pin(Some(0.), Some(0.), Some(0.), Some(0.))
+                        .center()
+                        .inert()
+                        .child(text("Open tabs").font(ty::ui(16.).semibold()).color(t.fg)),
+                ),
+        )
+        .child(col().grow(1.).min_h(0.).px(14.).child(scroll_view(
+            s,
+            "m-tabs-list",
+            vec![col().key("m-tabs-list-body").w_full().pb(12.).child(body)],
+        )))
+}
+
+/// One row of the Open tabs list: the tab's icon (a task's checkbox) and
+/// name, and × to close it.
+fn tab_row(s: &State, t: &Theme, index: usize, tab: &roostr_core::nav::Tab) -> El {
+    let (lead, name) = match &tab.route {
+        Route::Graph { .. } => (glyph(Glyph::Graph, 15.).color(t.fg), "Graph".to_string()),
+        Route::Object(id) | Route::Chat(id) => {
+            let info = crate::tabs::tab_info(s, &Route::Object(id.clone()));
+            let lead = match info.task {
+                Some(done) => checkbox_display(format!("m-tab-check-{}", tab.uid), done)
+                    .small()
+                    .build(t),
+                None => shell::obj_icon(s, t, &info.icon),
+            };
+            (lead, info.name)
+        }
+        route => {
+            let info = crate::tabs::tab_info(s, route);
+            (shell::obj_icon(s, t, &info.icon), info.name)
+        }
+    };
+    let close = motion::pressable(fill(format!("m-tab-close-{}", tab.uid), Color::TRANSPARENT))
+        .role("button")
+        .label("Close tab")
+        .size(36., 36.)
+        .radius(18.)
+        .center()
+        .child(text("×").font(ty::ui(20.).lh(20.)).color(t.muted))
+        .on_press(move |s: &mut State| s.nav.close(index, &mut s.ui));
+    m_row(t, format!("m-tab-{}", tab.uid), lead, name, Some(close))
+        .py(3.)
+        .on_press(move |s: &mut State| open_listed_tab(s, index))
 }
 
 /// A pinned object's card on the space home: its icon and name (opens it),

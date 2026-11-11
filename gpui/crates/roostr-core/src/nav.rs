@@ -1,22 +1,84 @@
 //! Navigation: routes, the per-space tab strip (`src/lib/tabs.svelte.ts`) and
 //! one global back/forward history (the browser history the web app uses).
 //!
-//! Navigating replaces the active tab's route (browser model); tabs persist
-//! per space in [`UiState`] under `roostr.tabs.spaces`. The navigator is
-//! [`crate::State::nav`]; methods that persist take the state's
-//! [`crate::State::ui`] (`s.nav.back(&mut s.ui)`), and what it emits
+//! Navigating replaces the active tab's route (browser model). Which tabs
+//! each space has, in order, is shared by this person's devices: the strips
+//! live in the private preferences object's [`OPEN_TABS_FIELD`], written
+//! [`TABS_WRITE_DELAY`] after the last change (when they differ from what is
+//! stored) and read back at every refresh, where another device's change
+//! replaces the strip in place. Which tab is selected is this device's own:
+//! it persists, with a copy of the strips, in [`UiState`] under
+//! `roostr.tabs.spaces`. A tab whose object is binned or vanishes closes.
+//!
+//! On a phone ([`Navigator::set_phone`]) moving around does not touch the
+//! tabs: a screen opened from a list shows outside them, and only opening
+//! or closing a tab changes the strip.
+//!
+//! The navigator is [`crate::State::nav`]; methods that persist take the
+//! state's [`crate::State::ui`] (`s.nav.back(&mut s.ui)`), and what it emits
 //! ([`NavEvent`]) reaches the [`crate::State::on_nav`] listeners at the next
 //! [`crate::State::poll`].
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::time::Duration;
 
-use crate::State;
+use roostr_rt::Task;
 use serde::{Deserialize, Serialize};
 
+use crate::State;
+use crate::types::Value;
 use crate::ui_state::UiState;
 
 const TABS_KEY: &str = "roostr.tabs.spaces";
 const ACTIVE_SPACE_KEY: &str = "glon.channel";
+/// The space home's path: a strip of only this tab has nothing open.
+const HOME_PATH: &str = "/app";
+
+/// The preferences field holding the open tabs ([`OpenTabs`]).
+pub const OPEN_TABS_FIELD: &str = "open_tabs";
+/// A change to the tabs is written this long after the last one.
+pub const TABS_WRITE_DELAY: Duration = Duration::from_secs(2);
+
+/// The open tabs this person's devices share: space id -> its strip's route
+/// paths ([`Route::path`]), in order. A space with nothing open has no entry.
+pub type OpenTabs = BTreeMap<String, Vec<String>>;
+
+/// `open_tabs` as the preferences store it: a map of string lists.
+pub fn open_tabs_value(tabs: &OpenTabs) -> Value {
+    Value::map(
+        tabs.iter()
+            .map(|(space, paths)| {
+                let paths = paths.iter().map(Value::string).collect();
+                (space.clone(), Value::values(paths))
+            })
+            .collect(),
+    )
+}
+
+/// The open tabs a stored `open_tabs` holds; strips with nothing open drop out.
+pub fn open_tabs_from(value: &Value) -> OpenTabs {
+    let Some(entries) = value.entries() else {
+        return OpenTabs::new();
+    };
+    entries
+        .iter()
+        .map(|(space, paths)| {
+            let paths: Vec<String> = paths
+                .items()
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect();
+            (space.clone(), paths)
+        })
+        .filter(|(_, paths)| !is_empty_strip(paths))
+        .collect()
+}
+
+/// A strip with nothing open: no tabs, or the one space-home tab.
+fn is_empty_strip(paths: &[String]) -> bool {
+    paths.is_empty() || paths == [HOME_PATH]
+}
 
 /// One screen of the app (`/app/...` routes) or the website (`/`, `/guide`,
 /// `/privacy`, `/j#<blob>`).
@@ -132,7 +194,9 @@ impl Route {
             }
             Self::Graph { .. } => "Graph — Roostr".into(),
             Self::Home | Self::Chat(_) => "Roostr".into(),
-            Self::Site(SitePage::Landing) => "Roostr — the workspace people and agents share".into(),
+            Self::Site(SitePage::Landing) => {
+                "Roostr — the workspace people and agents share".into()
+            }
             Self::Site(SitePage::Guide) => "Guide — Roostr".into(),
             Self::Site(SitePage::Privacy) => "Privacy — Roostr".into(),
             Self::Site(SitePage::Join(_)) => "Join a space — Roostr".into(),
@@ -147,10 +211,21 @@ pub struct Tab {
     pub route: Route,
 }
 
+/// A space's strip as this device keeps it.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
 struct Saved {
+    /// The strip's route paths: this device's copy of the shared list.
     paths: Vec<String>,
+    /// The selected tab (this device's own; never shared).
     active: usize,
+    /// The selected tab's path: the selection by route, where the strip
+    /// changed since.
+    active_path: String,
+    /// `paths` follows the shared list. A strip saved before tabs synced (or
+    /// changed before this launch first read them) merges into the shared
+    /// list once, at the first read.
+    synced: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -159,6 +234,9 @@ pub enum NavEvent {
     Navigated,
     /// The active space changed.
     SpaceChanged,
+    /// The tab strip changed while the visible route stayed (a tab opened in
+    /// the background or closed, another device's change).
+    TabsChanged,
 }
 
 pub struct Navigator {
@@ -170,6 +248,21 @@ pub struct Navigator {
     history: Vec<Route>,
     history_ix: usize,
     next_uid: u64,
+    /// What the preferences hold, as last read or written; `None` until the
+    /// first read of this vault.
+    pub(crate) stored: Option<OpenTabs>,
+    /// A strip changed since the write was last scheduled.
+    pub(crate) changed: bool,
+    /// The debounced write ([`TABS_WRITE_DELAY`]); dropping it cancels.
+    pub(crate) write: Option<Task<()>>,
+    /// Objects found binned or vanished this session: a stale list from
+    /// another device does not bring their tabs back.
+    binned: HashSet<String>,
+    /// The phone shell shows: moving around leaves the tabs alone.
+    phone: bool,
+    /// On a phone, the route shown outside the tabs (a screen opened from a
+    /// list, the space home); `None` while a tab shows.
+    loose: Option<Route>,
     /// Emitted, not yet handed to the listeners ([`State::poll`]).
     pub(crate) events: Vec<NavEvent>,
 }
@@ -191,6 +284,12 @@ impl Navigator {
             history: vec![Route::Home],
             history_ix: 0,
             next_uid: 2,
+            stored: None,
+            changed: false,
+            write: None,
+            binned: HashSet::new(),
+            phone: false,
+            loose: None,
             events: Vec::new(),
         }
     }
@@ -200,8 +299,10 @@ impl Navigator {
         ui.get(ACTIVE_SPACE_KEY)
     }
 
+    /// The route shown: the active tab's, or on a phone the screen opened
+    /// outside the tabs.
     pub fn route(&self) -> &Route {
-        &self.tabs[self.active].route
+        self.loose.as_ref().unwrap_or(&self.tabs[self.active].route)
     }
 
     pub fn tabs(&self) -> &[Tab] {
@@ -210,6 +311,11 @@ impl Navigator {
 
     pub fn active_index(&self) -> usize {
         self.active
+    }
+
+    /// A tab shows (not, on a phone, a screen opened outside the tabs).
+    pub fn in_tab(&self) -> bool {
+        self.loose.is_none()
     }
 
     pub fn space(&self) -> &str {
@@ -229,7 +335,8 @@ impl Navigator {
         self.next_uid
     }
 
-    /// Go to `route` in the active tab (`goto` + `tabs.sync`).
+    /// Go to `route` in the active tab (`goto` + `tabs.sync`); on a phone,
+    /// outside the tabs.
     pub fn navigate(&mut self, route: Route, ui: &mut UiState) {
         if *self.route() == route {
             return;
@@ -241,8 +348,13 @@ impl Navigator {
     }
 
     fn show(&mut self, route: Route, ui: &mut UiState) {
-        self.tabs[self.active].route = route;
-        self.save(ui);
+        self.reopened(&route);
+        if self.phone {
+            self.loose = Some(route);
+        } else {
+            self.tabs[self.active].route = route;
+            self.save(ui);
+        }
         self.events.push(NavEvent::Navigated);
     }
 
@@ -274,6 +386,7 @@ impl Navigator {
 
     /// `tabs.open(path, background)`.
     pub fn open_tab(&mut self, route: Route, background: bool, ui: &mut UiState) {
+        self.reopened(&route);
         let uid = self.uid();
         self.tabs.push(Tab {
             uid,
@@ -281,19 +394,24 @@ impl Navigator {
         });
         if background {
             self.save(ui);
+            self.events.push(NavEvent::TabsChanged);
         } else {
             self.active = self.tabs.len() - 1;
+            self.loose = None;
             self.push_history(route);
             self.save(ui);
             self.events.push(NavEvent::Navigated);
         }
     }
 
+    /// Show tab `index` (on a phone, also when it is the selected tab while
+    /// a screen outside the tabs shows).
     pub fn activate(&mut self, index: usize, ui: &mut UiState) {
-        if index >= self.tabs.len() || index == self.active {
+        if index >= self.tabs.len() || (index == self.active && self.loose.is_none()) {
             return;
         }
         self.active = index;
+        self.loose = None;
         self.push_history(self.route().clone());
         self.save(ui);
         self.events.push(NavEvent::Navigated);
@@ -316,9 +434,16 @@ impl Navigator {
         self.save(ui);
     }
 
+    /// Close tab `index`. The selection moves to its right neighbour, else
+    /// its left; closing the last tab leaves the space home. On a phone the
+    /// screen stays.
     pub fn close(&mut self, index: usize, ui: &mut UiState) {
         if index >= self.tabs.len() {
             return;
+        }
+        let before = self.route().clone();
+        if self.phone && index == self.active && self.loose.is_none() {
+            self.loose = Some(before.clone());
         }
         self.tabs.remove(index);
         if self.tabs.is_empty() {
@@ -328,22 +453,20 @@ impl Navigator {
                 route: Route::Home,
             });
             self.active = 0;
-            self.push_history(Route::Home);
-            self.events.push(NavEvent::Navigated);
         } else if index < self.active {
             self.active -= 1;
         } else if index == self.active {
             self.active = self.active.min(self.tabs.len() - 1);
-            self.push_history(self.route().clone());
-            self.events.push(NavEvent::Navigated);
         }
         self.save(ui);
+        self.strip_changed(before);
     }
 
-    /// Switch to `space`, restoring its saved tab strip (`tabs.use`). When it
-    /// has none, the strip starts at the space home. A workspace page opened
-    /// before any space was picked (a click in the sidebar the shell shows
-    /// meanwhile) stays open, in the restored strip's active tab.
+    /// Switch to `space`, restoring its saved tab strip (`tabs.use`) and
+    /// this device's selection in it. When it has none, the strip starts at
+    /// the space home. A workspace page opened before any space was picked
+    /// (a click in the sidebar the shell shows meanwhile) stays open, in the
+    /// restored strip's active tab.
     pub fn use_space(&mut self, space: &str, ui: &mut UiState) {
         if self.space == space {
             return;
@@ -369,8 +492,12 @@ impl Navigator {
                 route: Route::Home,
             });
         }
-        self.active = saved.active.min(tabs.len() - 1);
+        self.active = tabs
+            .iter()
+            .position(|t| !saved.active_path.is_empty() && t.route.path() == saved.active_path)
+            .unwrap_or(saved.active.min(tabs.len() - 1));
         self.tabs = tabs;
+        self.loose = None;
         if let Some(route) = opened {
             self.tabs[self.active].route = route;
             self.save(ui);
@@ -383,7 +510,213 @@ impl Navigator {
     /// Drop a space's saved strip (space deleted or left).
     pub fn forget(&mut self, space: &str, ui: &mut UiState) {
         if self.saved.remove(space).is_some() {
+            self.changed = true;
             ui.set(TABS_KEY, &self.saved);
+        }
+    }
+
+    /// The phone shell shows (`true`) or the desktop's does. Back on the
+    /// desktop, a screen a phone showed outside the tabs shows in them: in
+    /// the tab showing its route, else in the active tab (the space home
+    /// leaves the active tab as it was).
+    pub fn set_phone(&mut self, phone: bool, ui: &mut UiState) {
+        if self.phone == phone {
+            return;
+        }
+        self.phone = phone;
+        let Some(route) = self.loose.take() else {
+            return;
+        };
+        if let Some(index) = self.tabs.iter().position(|t| t.route == route) {
+            self.active = index;
+        } else if route.is_workspace_page() {
+            self.tabs[self.active].route = route.clone();
+        }
+        self.save(ui);
+        self.strip_changed(route);
+    }
+
+    /// The shared tab lists as this device knows them.
+    pub fn open_tabs(&self) -> OpenTabs {
+        self.saved
+            .iter()
+            .filter(|(_, saved)| saved.synced && !is_empty_strip(&saved.paths))
+            .map(|(space, saved)| (space.clone(), saved.paths.clone()))
+            .collect()
+    }
+
+    /// A new vault opened: its preferences are unread.
+    pub(crate) fn vault_opened(&mut self) {
+        self.stored = None;
+        self.changed = false;
+        self.write = None;
+        self.binned.clear();
+    }
+
+    /// The preferences' open tabs as a refresh read them (`None`: they could
+    /// not be read). The first read merges in, once, the strips this device
+    /// saved before tabs synced; later, another device's change replaces
+    /// the strips in place - except the shown one while a change of this
+    /// device waits for its write.
+    pub(crate) fn landed(&mut self, remote: Option<OpenTabs>, ui: &mut UiState) {
+        let mut remote = match (remote, &self.stored) {
+            (Some(remote), _) => remote,
+            // No preferences yet: nothing is shared so far.
+            (None, None) => OpenTabs::new(),
+            // A failed read changes nothing.
+            (None, Some(_)) => return,
+        };
+        if !self.binned.is_empty() {
+            for paths in remote.values_mut() {
+                paths.retain(|p| !shows_any(p, &self.binned));
+            }
+            remote.retain(|_, paths| !is_empty_strip(paths));
+        }
+        match &self.stored {
+            Some(stored) if *stored == remote => return,
+            Some(_) => {
+                let keep = self.write.is_some().then(|| self.space.clone());
+                let spaces: HashSet<String> =
+                    self.saved.keys().chain(remote.keys()).cloned().collect();
+                for space in spaces {
+                    if keep.as_ref() == Some(&space) {
+                        continue;
+                    }
+                    let paths = remote.get(&space).cloned().unwrap_or_default();
+                    let saved = self.saved.entry(space).or_default();
+                    saved.paths = paths;
+                    saved.synced = true;
+                }
+            }
+            None => {
+                for (space, saved) in &mut self.saved {
+                    let mut paths = remote.get(space).cloned().unwrap_or_default();
+                    if !saved.synced {
+                        for path in &saved.paths {
+                            if path != HOME_PATH && !paths.contains(path) {
+                                paths.push(path.clone());
+                            }
+                        }
+                    }
+                    saved.paths = paths;
+                    saved.synced = true;
+                }
+                for (space, paths) in &remote {
+                    self.saved.entry(space.clone()).or_insert_with(|| Saved {
+                        paths: paths.clone(),
+                        synced: true,
+                        ..Saved::default()
+                    });
+                }
+            }
+        }
+        if self.open_tabs() != remote {
+            self.changed = true;
+        }
+        self.stored = Some(remote);
+        self.restore_strip();
+        ui.set(TABS_KEY, &self.saved);
+    }
+
+    /// Whether a tab of any space shows object `id`.
+    pub(crate) fn has_object_tab(&self, id: &str) -> bool {
+        let ids = HashSet::from([id.to_string()]);
+        self.tabs.iter().any(|t| shows_any(&t.route.path(), &ids))
+            || self
+                .saved
+                .values()
+                .any(|saved| saved.paths.iter().any(|p| shows_any(p, &ids)))
+    }
+
+    /// Objects `ids` were binned or vanished: their tabs close, in every space.
+    pub(crate) fn close_objects(&mut self, ids: &[String], ui: &mut UiState) {
+        let ids: HashSet<String> = ids.iter().cloned().collect();
+        self.binned.extend(ids.iter().cloned());
+        let mut closed = false;
+        for saved in self.saved.values_mut() {
+            let before = saved.paths.len();
+            saved.paths.retain(|p| !shows_any(p, &ids));
+            closed |= saved.paths.len() != before;
+        }
+        if !closed {
+            return;
+        }
+        self.changed = true;
+        self.restore_strip();
+        ui.set(TABS_KEY, &self.saved);
+    }
+
+    /// An object opened again is no longer held closed.
+    fn reopened(&mut self, route: &Route) {
+        if let Route::Object(id) | Route::Chat(id) = route {
+            self.binned.remove(id);
+        }
+    }
+
+    /// Show the active space's saved strip, keeping each tab still in it
+    /// (by route) and the selection: the selected tab, else its nearest
+    /// neighbour still open (right first), else the same place. On a phone
+    /// the screen stays.
+    fn restore_strip(&mut self) {
+        if self.space.is_empty() {
+            return;
+        }
+        let paths: Vec<String> = match self.saved.get(&self.space) {
+            Some(saved) if !saved.paths.is_empty() => saved.paths.clone(),
+            _ => vec![HOME_PATH.to_string()],
+        };
+        let old: Vec<String> = self.tabs.iter().map(|t| t.route.path()).collect();
+        if old == paths {
+            return;
+        }
+        let before = self.route().clone();
+        // Each old tab claims its route's first free place, the selected tab first.
+        let mut slots: Vec<Option<Tab>> = vec![None; paths.len()];
+        let mut kept_at: Vec<Option<usize>> = vec![None; old.len()];
+        let others = (0..old.len()).filter(|i| *i != self.active);
+        for i in std::iter::once(self.active).chain(others) {
+            let free = (0..paths.len()).find(|j| slots[*j].is_none() && paths[*j] == old[i]);
+            if let Some(j) = free {
+                slots[j] = Some(self.tabs[i].clone());
+                kept_at[i] = Some(j);
+            }
+        }
+        let a = self.active;
+        let active = (0..old.len())
+            .flat_map(|d| [a.checked_add(d), a.checked_sub(d)])
+            .flatten()
+            .find_map(|i| kept_at.get(i).copied().flatten())
+            .unwrap_or(a.min(paths.len() - 1));
+        let mut tabs = Vec::with_capacity(paths.len());
+        for (slot, path) in slots.into_iter().zip(&paths) {
+            let tab = match slot {
+                Some(tab) => tab,
+                None => Tab {
+                    uid: self.uid(),
+                    route: Route::parse(path),
+                },
+            };
+            tabs.push(tab);
+        }
+        if self.phone && kept_at[a].is_none() && self.loose.is_none() {
+            self.loose = Some(before.clone());
+        }
+        self.tabs = tabs;
+        self.active = active;
+        if let Some(saved) = self.saved.get_mut(&self.space) {
+            saved.active = active;
+            saved.active_path = self.tabs[active].route.path();
+        }
+        self.strip_changed(before);
+    }
+
+    /// The strip changed; `before` is the route shown until now.
+    fn strip_changed(&mut self, before: Route) {
+        if *self.route() != before {
+            self.push_history(self.route().clone());
+            self.events.push(NavEvent::Navigated);
+        } else {
+            self.events.push(NavEvent::TabsChanged);
         }
     }
 
@@ -396,17 +729,90 @@ impl Navigator {
         self.history_ix = self.history.len() - 1;
     }
 
+    /// Keep the shown strip and its selection. A changed strip is shared
+    /// ([`Self::changed`]); changed before this launch read the shared
+    /// lists, it merges into them at the first read.
     fn save(&mut self, ui: &mut UiState) {
         if self.space.is_empty() {
             return;
         }
-        let saved = Saved {
-            paths: self.tabs.iter().map(|t| t.route.path()).collect(),
-            active: self.active,
-        };
-        self.saved.insert(self.space.clone(), saved);
+        let paths: Vec<String> = self.tabs.iter().map(|t| t.route.path()).collect();
+        let read = self.stored.is_some();
+        let saved = self.saved.entry(self.space.clone()).or_default();
+        if saved.paths != paths {
+            saved.paths = paths;
+            saved.synced = read;
+            self.changed = true;
+        }
+        saved.active = self.active;
+        saved.active_path = self.tabs[self.active].route.path();
         ui.set(TABS_KEY, &self.saved);
     }
+}
+
+/// Whether `path` shows one of the objects `ids` (an object page or its chat).
+fn shows_any(path: &str, ids: &HashSet<String>) -> bool {
+    matches!(Route::parse(path), Route::Object(id) | Route::Chat(id) if ids.contains(&id))
+}
+
+/// Hand the navigator what the store learned - the preferences' open tabs,
+/// objects gone from the collections or found binned - and (re)start the
+/// debounced write of changed strips. [`State::poll`] runs it.
+pub(crate) fn sync_tabs(s: &mut State) {
+    if let Some(remote) = s.store.open_tabs.take() {
+        s.nav.landed(remote, &mut s.ui);
+    }
+    for id in std::mem::take(&mut s.store.missing) {
+        if !s.nav.has_object_tab(&id) {
+            continue;
+        }
+        // Gone from the collections: binned, or vanished for good.
+        let fetch = s.store.fetch_object(&id);
+        s.rt.spawn(async move |cx| {
+            if fetch.await.map_or(true, |object| object.deleted) {
+                cx.update(|s| s.store.binned.push(id));
+            }
+        })
+        .detach();
+    }
+    let binned = std::mem::take(&mut s.store.binned);
+    if !binned.is_empty() {
+        s.nav.close_objects(&binned, &mut s.ui);
+    }
+    if std::mem::take(&mut s.nav.changed) && s.nav.stored.is_some() {
+        // Timed from now, not from when the task first runs.
+        let timer = s.rt.timer(TABS_WRITE_DELAY);
+        s.nav.write = Some(s.rt.spawn(async move |cx| {
+            timer.await;
+            cx.update(write_tabs);
+        }));
+    }
+}
+
+/// Write the shared tab lists, unless the preferences hold them already.
+fn write_tabs(s: &mut State) {
+    s.nav.write = None;
+    let tabs = s.nav.open_tabs();
+    if s.nav.stored.as_ref() == Some(&tabs) {
+        return;
+    }
+    let previous = s.nav.stored.replace(tabs.clone());
+    s.store.prefs_epoch += 1;
+    let task = crate::api::user_prefs::set_open_tabs(&tabs, s);
+    s.rt.spawn(async move |cx| {
+        let result = task.await;
+        cx.update(|s| {
+            s.store.prefs_epoch += 1;
+            if let Err(error) = result {
+                log::warn!("saving the open tabs failed: {error:#}");
+                // The next change writes them again; a read meanwhile keeps the strips.
+                if s.nav.stored.as_ref() == Some(&tabs) {
+                    s.nav.stored = previous;
+                }
+            }
+        });
+    })
+    .detach();
 }
 
 /// Navigate the active tab from anywhere (`goto`).
@@ -502,7 +908,10 @@ mod tests {
     #[test]
     fn titles_match_the_svelte_pages() {
         let site = |page| Route::Site(page).title(None);
-        assert_eq!(site(SitePage::Landing), "Roostr — the workspace people and agents share");
+        assert_eq!(
+            site(SitePage::Landing),
+            "Roostr — the workspace people and agents share"
+        );
         assert_eq!(site(SitePage::Guide), "Guide — Roostr");
         assert_eq!(site(SitePage::Privacy), "Privacy — Roostr");
         assert_eq!(site(SitePage::Join("r2.x".into())), "Join a space — Roostr");

@@ -396,6 +396,21 @@ this branch. It still uses GPUI and keeps shipping from `main` until Rune has
 iOS text input. Its sibling `RoostrIOS` repository (the Xcode host) builds it
 from `main`; see that branch's README for its build steps.
 
+## Open tabs
+
+Which tabs each space has open, in order, is shared by all of a person's
+devices: the private preferences object (`__user_prefs__`) holds them in
+`open_tabs`, a map of space id to the tabs' route paths
+(`{"sp-1": ["/app/object/<id>", "/app/graph"]}`). A change is written 2 s
+after the last one, only when it differs from what is stored; another
+device's change replaces the strip in place, keeping this device's selected
+tab (else its nearest neighbour). The selected tab stays per device, with a
+local copy of the strips, in the UI state (`roostr.tabs.spaces`); the first
+read merges this device's older local tabs in once. Tabs of a binned or
+vanished object close everywhere. On a phone, moving around leaves the tabs
+alone; the space home's tab button opens the Open tabs list (tap opens, ×
+closes). See `roostr_core::nav`.
+
 ## Selectable text
 
 Chat messages are selectable text, as the web view's DOM text was: a mouse
