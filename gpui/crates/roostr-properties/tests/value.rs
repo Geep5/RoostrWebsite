@@ -224,6 +224,10 @@ fn the_link_picker_filters_picks_and_creates() {
     app.until("the picker opens itself", |_| true);
     assert!(app.shown("obj-menu"), "auto_open opens the link picker");
     assert!(app.shown("cand-task-1"), "the space's task is offered");
+    // The search field spans the picker, not just its placeholder.
+    let menu = app.rt.presented("obj-menu").expect("the picker").0;
+    let field = app.rt.presented("object-query").expect("the search field").0;
+    assert!(field[2] >= menu[2] - 60.0, "field {field:?} spans menu {menu:?}");
 
     // An existing task's exact name (any case): offered, no create.
     app.type_text("write DOCS");

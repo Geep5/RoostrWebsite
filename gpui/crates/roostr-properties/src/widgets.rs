@@ -105,8 +105,11 @@ pub(crate) fn field(t: &Theme, input: Input, focused: bool, skin: FieldSkin) -> 
         .px(0.0)
         .py(0.0)
         .h(17.0)
-        .build(t);
-    let base = row().items_center().min_w(0.0).child(input);
+        .build(t)
+        .grow(1.0)
+        .min_w(0.0);
+    // The whole field width is its fill and takes the press, not just the text.
+    let base = row().w_full().items_center().min_w(0.0).child(input);
     match skin {
         FieldSkin::Value => base
             .fill(t.bg)
