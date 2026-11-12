@@ -462,3 +462,30 @@ fn a_pin_dragged_by_its_name_moves_the_pin_and_opens_nothing() {
     );
     assert_eq!(*h.state().nav.route(), route, "the drag opened nothing");
 }
+
+#[test]
+fn a_tab_dropped_on_another_tabs_close_button_lands_beside_it() {
+    let vault = vault();
+    let mut h = desktop(&vault);
+    for id in ["a", "b", "c"] {
+        h.update(|s| roostr_core::nav::open_tab(Route::Object(id.into()), true, s));
+    }
+    settle(&mut h);
+    let order = |h: &Harness| -> Vec<String> {
+        h.state()
+            .nav
+            .tabs()
+            .iter()
+            .filter_map(|t| t.route.object_id().map(str::to_string))
+            .collect()
+    };
+    assert_eq!(order(&h), ["c-gal", "a", "b", "c"]);
+    let uid = |h: &Harness, i: usize| h.state().nav.tabs()[i + 1].uid;
+    let (first, last) = (uid(&h, 0), uid(&h, 2));
+    // Released over the last tab's ×, off every tab label.
+    let from = center(&h, &format!("tab:{first}"));
+    let to = center(&h, &format!("tab-x:{last}"));
+    press_and_move(&mut h, from, to, 10);
+    release(&mut h, to);
+    assert_eq!(order(&h), ["c-gal", "b", "c", "a"]);
+}

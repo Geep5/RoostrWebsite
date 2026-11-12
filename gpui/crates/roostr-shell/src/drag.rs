@@ -40,18 +40,40 @@ impl DragList {
     pub(crate) fn track(&mut self, id: &str, axis: Axis, p: [f32; 2]) {
         self.dragging = Some(id.to_string());
         self.point = p;
-        self.over = self
-            .rects
-            .iter()
-            .filter(|(other, _)| *other != id)
-            .find(|(_, r)| p[0] >= r[0] && p[0] < r[0] + r[2] && p[1] >= r[1] && p[1] < r[1] + r[3])
-            .map(|(other, r)| {
-                let after = match axis {
-                    Axis::X => p[0] > r[0] + r[2] / 2.,
-                    Axis::Y => p[1] > r[1] + r[3] / 2.,
-                };
-                (other.clone(), after)
+        // The item under the pointer, else the nearest along the axis among those level with it
+        // (a tab's label is only part of the tab: the gaps between labels, a tab's × and
+        // padding, must still land somewhere).
+        let inside =
+            |r: &[f32; 4]| p[0] >= r[0] && p[0] < r[0] + r[2] && p[1] >= r[1] && p[1] < r[1] + r[3];
+        let level = |r: &[f32; 4]| match axis {
+            Axis::X => p[1] >= r[1] - 8. && p[1] < r[1] + r[3] + 8.,
+            Axis::Y => p[0] >= r[0] - 8. && p[0] < r[0] + r[2] + 8.,
+        };
+        let distance = |r: &[f32; 4]| match axis {
+            Axis::X => (p[0] - (r[0] + r[2] / 2.)).abs(),
+            Axis::Y => (p[1] - (r[1] + r[3] / 2.)).abs(),
+        };
+        let others = || self.rects.iter().filter(|(other, _)| *other != id);
+        // Over the dragged item itself: no move.
+        let home = self.rects.get(id).is_some_and(|r| inside(r));
+        let hit = others()
+            .find(|(_, r)| inside(r))
+            .filter(|_| !home)
+            .or_else(|| {
+                if home {
+                    return None;
+                }
+                others()
+                    .filter(|(_, r)| level(r))
+                    .min_by(|a, b| distance(a.1).total_cmp(&distance(b.1)))
             });
+        self.over = hit.map(|(other, r)| {
+            let after = match axis {
+                Axis::X => p[0] > r[0] + r[2] / 2.,
+                Axis::Y => p[1] > r[1] + r[3] / 2.,
+            };
+            (other.clone(), after)
+        });
     }
 
     /// The press let go: the (dragged, target, after) drop, unless `cancelled`
