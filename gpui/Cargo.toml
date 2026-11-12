@@ -28,10 +28,10 @@ roostr-replica-store = { path = "crates/roostr-replica-store" }
 roostr-replica = { path = "crates/roostr-replica" }
 roostr-direct = { path = "crates/roostr-direct" }
 # Rune is pre-release: pin a rev. Geep5/rune `roostr/editable-link-click` is upstream `dev`
-# 8e3fc8e plus one fix (a click on a link in a text field opens it); move back to
-# anomalyco/rune once that lands upstream.
-rune = { git = "https://github.com/Geep5/rune", rev = "4bf69e2" }
-rune-kit = { git = "https://github.com/Geep5/rune", rev = "4bf69e2" }
+# 8e3fc8e plus two fixes (a click on a link in a text field opens it; on the web, Backspace
+# at a field's start reaches the app); move back to anomalyco/rune once they land upstream.
+rune = { git = "https://github.com/Geep5/rune", rev = "b3b8b92" }
+rune-kit = { git = "https://github.com/Geep5/rune", rev = "b3b8b92" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"
