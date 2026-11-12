@@ -219,7 +219,8 @@ pub(crate) fn view(s: &State, _cx: &mut Cx<State>, t: &Theme) -> El {
             .key(format!("tab:{uid}"))
             .items_center()
             .gap(7.)
-            .min_w(0.)
+            // Narrower than its title: the title truncates rather than spilling both ways.
+            .shrink()
             .label(info.name.clone())
             .child(lead)
             .child(
