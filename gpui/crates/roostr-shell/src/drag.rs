@@ -1,4 +1,4 @@
-//! Drag-to-reorder for the rail's spaces, the tab strip and the pinned
+//! Drag-to-reorder for the rail's spaces and the pinned
 //! widgets (GPUI's `on_drag` / `on_drag_move` / `on_drop` with a floating
 //! ghost): the dragged item dims, a 2 pt accent line marks where it would
 //! land (before or after the item under the pointer), a ghost follows the

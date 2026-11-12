@@ -277,6 +277,11 @@ pub struct Tab<S> {
     disabled: bool,
     grow: bool,
     on_click: Option<Rc<dyn Fn(&mut S)>>,
+    /// The tab's own key in place of `{bar}-tab{ix}`, so it keeps its identity (and slides)
+    /// when the tabs reorder.
+    key: Option<String>,
+    /// Applied to the tab's finished element (a drag's offset, a lift).
+    wrap: Option<Box<dyn FnOnce(El) -> El>>,
 }
 
 impl<S: 'static> Default for Tab<S> {
@@ -290,6 +295,8 @@ impl<S: 'static> Default for Tab<S> {
             disabled: false,
             grow: false,
             on_click: None,
+            key: None,
+            wrap: None,
         }
     }
 }
@@ -327,6 +334,16 @@ impl<S: 'static> Tab<S> {
     /// `flex_1()`: the tab takes an equal share of the bar's width.
     pub fn flex_1(mut self) -> Self {
         self.grow = true;
+        self
+    }
+    /// Key the tab `key` instead of by its place, so a reorder moves it rather than its content.
+    pub fn key(mut self, key: impl Into<String>) -> Self {
+        self.key = Some(key.into());
+        self
+    }
+    /// Change the tab's finished element (`f` gets it last): an offset, a lift, handlers.
+    pub fn wrap(mut self, f: impl FnOnce(El) -> El + 'static) -> Self {
+        self.wrap = Some(Box::new(f));
         self
     }
     /// The tab's own click, used when the bar has no `on_click`.
@@ -499,9 +516,15 @@ impl<S: 'static> TabBar<S> {
         let sel = self.selected.filter(|&s| s < self.tabs.len());
         // The indicator is placed from where the last layout put the selected tab; until a
         // layout exists the selected tab paints its own active look, as gpui-kit does.
-        let placed = sel.filter(|_| v.has_indicator()).and_then(|s| {
+        let selected_key = sel.map(|s| {
+            self.tabs[s]
+                .key
+                .clone()
+                .unwrap_or_else(|| format!("{k}-tab{s}"))
+        });
+        let placed = sel.filter(|_| v.has_indicator()).and_then(|_| {
             let tabs = rune::memo::layout(&row_key)?;
-            let tab = rune::memo::layout(&format!("{k}-tab{s}"))?;
+            let tab = rune::memo::layout(&selected_key?)?;
             Some((tab[0] - tabs[0], tab[2]))
         });
         let mut tabs = row().key(row_key).center_y().gap(gap);
@@ -695,8 +718,12 @@ impl<S: 'static> TabBar<S> {
         if max_w.is_some() {
             inner = inner.grow(1.0).shrink().min_w(0.0);
         }
+        let key = tab
+            .key
+            .clone()
+            .unwrap_or_else(|| format!("{}-tab{ix}", self.key));
         let mut e = row()
-            .key(format!("{}-tab{ix}", self.key))
+            .key(key.clone())
             .role("tab")
             .checked(selected)
             .center_y()
@@ -737,14 +764,16 @@ impl<S: 'static> TabBar<S> {
                 .focus_selected(selected)
                 .cursor(Cursor::Pointer);
             if let Some(f) = click {
-                let key = format!("{}-tab{ix}", self.key);
                 e = e.on_press_tx(move |s: &mut S, tx: &mut Tx| {
                     tx.scroll_into_view(&key);
                     f(s)
                 });
             }
         }
-        e
+        match tab.wrap {
+            Some(wrap) => wrap(e),
+            None => e,
+        }
     }
 }
 

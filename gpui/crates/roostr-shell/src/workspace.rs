@@ -964,7 +964,6 @@ fn drawer_tab(
 /// search, and the prompt.
 fn overlays(s: &State, cx: &mut Cx<State>, t: &Theme, mobile: bool, layer: &mut Vec<El>) {
     crate::rail::space_ghost(s, t, layer);
-    crate::tabs::tab_ghost(s, t, layer);
     crate::create_menu::overlay(s, cx, t, layer);
     if shell(s).is_some_and(|sh| sh.more) {
         crate::header::more_overlay(s, cx, t, mobile, layer);

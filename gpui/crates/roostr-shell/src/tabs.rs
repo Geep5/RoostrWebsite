@@ -5,10 +5,11 @@
 use roostr_core::State;
 use roostr_core::nav::Route;
 use roostr_core::objects::{object_icon, type_glyph};
-use roostr_ui::{Tab, TabBar, Theme, checkbox_display, radius, ty};
-use rune::{Cursor, Cx, El, PointerButton, Tx, el, row, text};
+use std::collections::HashMap;
 
-use crate::drag::{self, Axis};
+use roostr_ui::{Tab, TabBar, Theme, checkbox_display, radius, shadow, ty};
+use rune::{Anim, Cursor, Cx, Drag, El, Phase, PointerButton, Spring, Tx, el, row, text};
+
 use crate::shell::or_untitled;
 
 /// What a tab shows for its route (`tabInfo`).
@@ -80,18 +81,104 @@ pub(crate) fn tab_info(s: &State, route: &Route) -> TabInfo {
     }
 }
 
-/// A tab dropped next to another: `to` is its place among the others.
-fn drop_tab(s: &mut State, dragged: &str, target: &str, after: bool) {
-    let uids: Vec<String> = s.nav.tabs().iter().map(|t| t.uid.to_string()).collect();
-    let Some(from) = uids.iter().position(|u| u == dragged) else {
+/// Points the pointer travels before a press on a tab becomes a drag.
+const SLOP: f32 = 4.0;
+/// The spring the tabs a drag passes step aside on.
+const STEP_ASIDE: Spring = Spring::new(0.22, 0.0);
+/// The spring tabs move on otherwise (a drop, a tab opening or closing): Rune's reflow.
+const REFLOW: Spring = Spring::new(0.4, 0.0);
+
+/// The tab strip's drag, browser style: the dragged tab follows the pointer along the strip
+/// (held inside it), the tabs it passes step aside, and letting go moves it there.
+#[derive(Default)]
+pub(crate) struct TabDrag {
+    /// Each tab's laid-out window rect, by tab uid (offsets aside).
+    rects: HashMap<u64, [f32; 4]>,
+    /// The tab being dragged, by its index before the drag.
+    from: Option<usize>,
+    /// The place it would land if let go now.
+    to: usize,
+    /// Pointer travel along the strip since the press, held so the tab stays in the strip.
+    delta: f32,
+    /// How far the tabs it passes step aside: its width plus the gap between tabs.
+    pitch: f32,
+    /// The press that just ended dragged: its release doesn't switch tabs.
+    swallow: bool,
+}
+
+impl TabDrag {
+    /// How far tab `index` is shifted along the strip while a drag runs.
+    fn shift(&self, index: usize) -> f32 {
+        let Some(from) = self.from else { return 0. };
+        if index == from {
+            self.delta
+        } else if from < index && index <= self.to {
+            -self.pitch
+        } else if self.to <= index && index < from {
+            self.pitch
+        } else {
+            0.
+        }
+    }
+
+    /// The pointer is `dx` along the strip from the press on tab `index` of `uids`.
+    fn moved(&mut self, uids: &[u64], index: usize, dx: f32) {
+        let rect = |i: usize| self.rects.get(&uids[i]).copied();
+        let (Some(own), Some(first), Some(last)) = (rect(index), rect(0), rect(uids.len() - 1))
+        else {
+            return;
+        };
+        if self.from.is_none() {
+            if dx.abs() < SLOP {
+                return;
+            }
+            let gap = match (rect(0), rect(1)) {
+                (Some(a), Some(b)) => (b[0] - (a[0] + a[2])).max(0.),
+                _ => 0.,
+            };
+            self.from = Some(index);
+            self.pitch = own[2] + gap;
+        }
+        self.delta = dx.clamp(first[0] - own[0], last[0] + last[2] - (own[0] + own[2]));
+        // It lands after every other tab whose middle its own middle has reached.
+        let middle = own[0] + own[2] / 2. + self.delta;
+        self.to = (0..uids.len())
+            .filter(|i| *i != index)
+            .filter_map(|i| rect(i))
+            .filter(|r| r[0] + r[2] / 2. <= middle)
+            .count();
+    }
+}
+
+/// The drag on tab `index` (uid `uid`): lifts past the slop, follows, and moves it on release.
+fn on_tab_drag(s: &mut State, index: usize, d: &Drag) {
+    let uids: Vec<u64> = s.nav.tabs().iter().map(|t| t.uid).collect();
+    if index >= uids.len() {
         return;
-    };
-    let rest: Vec<&String> = uids.iter().filter(|u| *u != dragged).collect();
-    let Some(ix) = rest.iter().position(|u| *u == target) else {
-        return;
-    };
-    let at = ix + usize::from(after);
-    s.nav.move_tab(from, at, &mut s.ui);
+    }
+    match d.phase {
+        Phase::Down => {
+            let drag = s.slot::<TabDrag>();
+            drag.from = None;
+            drag.swallow = false;
+        }
+        Phase::Move => s.slot::<TabDrag>().moved(&uids, index, d.dx),
+        Phase::Up => {
+            let drag = s.slot::<TabDrag>();
+            let Some(from) = drag.from.take() else { return };
+            drag.swallow = true;
+            let to = drag.to;
+            drag.delta = 0.;
+            if !d.cancelled() && to != from {
+                s.nav.move_tab(from, to, &mut s.ui);
+            }
+        }
+    }
+}
+
+/// The press that ended a tab drag: true once, and it doesn't switch tabs.
+fn take_swallowed(s: &mut State) -> bool {
+    std::mem::take(&mut s.slot::<TabDrag>().swallow)
 }
 
 /// gpui-kit's TabBar (default Tab variant: the active tab on the kit's
@@ -107,7 +194,8 @@ pub(crate) fn view(s: &State, _cx: &mut Cx<State>, t: &Theme) -> El {
         .collect();
     let active = s.nav.active_index();
     let count = tabs.len();
-    let dragging = drag::dragging(s, "tabs").map(str::to_string);
+    let drag = s.get::<TabDrag>();
+    let lifted = drag.and_then(|d| d.from);
     let mut bar = TabBar::new("tab-strip")
         .selected_index(active)
         .max_width(220.)
@@ -147,16 +235,17 @@ pub(crate) fn view(s: &State, _cx: &mut Cx<State>, t: &Theme) -> El {
             // Middle-click closes.
             .pointer_buttons([PointerButton::Middle])
             .on_press_tx(move |s: &mut State, tx: &mut Tx| {
+                if take_swallowed(s) {
+                    return;
+                }
                 if tx.button() == PointerButton::Middle {
                     s.nav.close(i, &mut s.ui);
                 } else {
                     s.nav.activate(i, &mut s.ui);
                 }
             });
-        if dragging.as_deref() == Some(uid.to_string().as_str()) {
-            content = content.opacity(0.4);
-        }
-        let content = drag::item(content, "tabs", &uid.to_string(), Axis::X, drop_tab);
+        content =
+            content.on_drag(move |s: &mut State, d: &mut Drag, _: &mut Tx| on_tab_drag(s, i, d));
         // The separator after this tab, hidden beside the active one.
         let mut close = row().items_center().pr(6.).child(
             row()
@@ -183,42 +272,34 @@ pub(crate) fn view(s: &State, _cx: &mut Cx<State>, t: &Theme) -> El {
                     .opacity(if hidden { 0. } else { 1. }),
             );
         }
-        if let Some(after) = drag::over(s, "tabs", &uid.to_string()) {
-            let (left, right) = if after {
-                (None, Some(0.))
-            } else {
-                (Some(0.), None)
-            };
-            close = close.child(
-                el().pin(left, Some(3.), right, Some(3.))
-                    .w(2.)
-                    .radius(2.)
-                    .fill(t.accent),
-            );
-        }
-        bar = bar.child(Tab::new().child(content).suffix(close));
+        let shift = drag.map_or(0., |d| d.shift(i));
+        let lift = lifted == Some(i);
+        let reordering = lifted.is_some();
+        let (fill, edge) = (t.panel, t.border);
+        let tab = Tab::new()
+            .key(format!("tab-slot:{uid}"))
+            .child(content)
+            .suffix(close)
+            .wrap(move |e: El| {
+                let e = e
+                    .on_layout(move |s: &mut State, r: [f32; 4]| {
+                        s.slot::<TabDrag>().rects.insert(uid, r);
+                    })
+                    // Tabs step aside for a drag; a drop, an open or a close reflows them.
+                    .motion(if reordering { STEP_ASIDE } else { REFLOW })
+                    .offset(shift, 0.);
+                if lift {
+                    // It follows the pointer exactly, over its neighbours.
+                    e.raise()
+                        .offset_motion(Anim::INSTANT)
+                        .fill(fill)
+                        .border(1., edge)
+                        .box_shadow(shadow::gpui(4., 12., 0., 0.18))
+                } else {
+                    e
+                }
+            });
+        bar = bar.child(tab);
     }
     bar.build(t)
-}
-
-/// The floating copy of a dragged tab.
-pub(crate) fn tab_ghost(s: &State, t: &Theme, layer: &mut Vec<El>) {
-    let Some(uid) = drag::dragging(s, "tabs") else {
-        return;
-    };
-    let Some(tab) = s.nav.tabs().iter().find(|tab| tab.uid.to_string() == uid) else {
-        return;
-    };
-    let info = tab_info(s, &tab.route);
-    let ghost = row()
-        .items_center()
-        .gap(7.)
-        .h(30.)
-        .px(10.)
-        .radius(radius::TAB)
-        .fill(t.hl_med)
-        .opacity(0.8)
-        .child(text(info.icon).font(ty::ui(13.)))
-        .child(text(info.name).font(ty::ui(13.)).color(t.fg));
-    drag::ghost(s, "tabs", ghost, layer);
 }
