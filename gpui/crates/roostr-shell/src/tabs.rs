@@ -213,6 +213,8 @@ pub(crate) fn view(s: &State, _cx: &mut Cx<State>, t: &Theme) -> El {
                 .build(t),
             None => text(info.icon.clone()).font(ty::ui(13.5)),
         };
+        // A long title truncates; the checkbox or icon keeps its full size.
+        let lead = row().min_w(16.).h(16.).center().child(lead);
         let mut content = row()
             .key(format!("tab:{uid}"))
             .items_center()
@@ -247,7 +249,7 @@ pub(crate) fn view(s: &State, _cx: &mut Cx<State>, t: &Theme) -> El {
         content =
             content.on_drag(move |s: &mut State, d: &mut Drag, _: &mut Tx| on_tab_drag(s, i, d));
         // The separator after this tab, hidden beside the active one.
-        let mut close = row().items_center().pr(6.).child(
+        let mut close = row().items_center().pl(6.).pr(6.).child(
             row()
                 .key(format!("tab-x:{uid}"))
                 .h(17.)
