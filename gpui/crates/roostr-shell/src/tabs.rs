@@ -96,7 +96,8 @@ fn drop_tab(s: &mut State, dragged: &str, target: &str, after: bool) {
 
 /// gpui-kit's TabBar (default Tab variant: the active tab on the kit's
 /// active tab fill, labels ellipsised at 220 pt), with Roostr's drag
-/// reorder, middle-click and × close and separators on each tab.
+/// reorder, middle-click and × close and separators on each tab. More tabs
+/// than fit scroll sideways (wheel, trackpad, Shift+wheel); New tab stays put.
 pub(crate) fn view(s: &State, _cx: &mut Cx<State>, t: &Theme) -> El {
     let tabs: Vec<(u64, Route)> = s
         .nav
@@ -111,6 +112,7 @@ pub(crate) fn view(s: &State, _cx: &mut Cx<State>, t: &Theme) -> El {
         .selected_index(active)
         .max_width(220.)
         .h(40.)
+        .scrollable()
         .px(8.)
         .fill(t.panel)
         .on_click(|s: &mut State, ix: usize| s.nav.activate(ix, &mut s.ui));

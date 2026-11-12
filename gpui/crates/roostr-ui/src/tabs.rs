@@ -576,12 +576,35 @@ impl<S: 'static> TabBar<S> {
             bar = bar.child(p);
         }
         bar = if self.scroll {
+            let scroll_key = format!("{k}-scroll");
+            // Where the tabs are scrolled to and how far they can go, kept current by the
+            // viewport (scrolling draws without re-running the view).
+            let pos = Rc::new(std::cell::Cell::new((0.0_f32, 0.0_f32)));
+            let (seen, wheel_pos) = (pos.clone(), pos);
+            let wheel_key = scroll_key.clone();
             bar.child(
                 row()
-                    .key(format!("{k}-scroll"))
+                    .key(scroll_key)
                     .grow(1.0)
                     .shrink()
                     .scroll_x()
+                    .on_scroll_offset(move |at: rune::ScrollPos| {
+                        seen.set((at.offset[0], at.max[0]))
+                    })
+                    // A mouse wheel turns up and down, which no sideways viewport hears: over
+                    // the tabs it scrolls them, as a browser's tab strip does. Sideways
+                    // trackpad swipes keep the viewport's own scrolling and momentum.
+                    .on_wheel(move |_: &mut S, e: rune::WheelEvent, tx: &mut Tx| {
+                        let (at, max) = wheel_pos.get();
+                        if max <= 0.0 || e.dy.abs() <= e.dx.abs() {
+                            return false;
+                        }
+                        let to = (at - e.dy).clamp(0.0, max);
+                        // Several ticks can land before the next frame reports the move.
+                        wheel_pos.set((to, max));
+                        tx.scroll_to_x(wheel_key.clone(), to);
+                        true
+                    })
                     .child(tabs),
             )
         } else {
