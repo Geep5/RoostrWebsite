@@ -17,6 +17,7 @@ mod pane;
 mod project_folder;
 mod property_panel;
 mod repeat_view;
+mod role;
 mod suggest;
 mod type_limit;
 mod type_panel;

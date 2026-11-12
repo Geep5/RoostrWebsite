@@ -14,6 +14,7 @@ use roostr_ui::{TagPill, Textarea, TextareaState, Theme, motion, radius, ty};
 use rune::{Color, Cursor, El, col, el, row, text};
 use serde_json::json;
 
+use crate::role::{ROLES, role_of_fields};
 use crate::value::number_text;
 use crate::widgets::{empty_note, later, prefix};
 
@@ -412,6 +413,11 @@ pub fn property_panel(
         .px(48.0)
         .items_stretch()
         .child(definition)
+        .child(shows_under(
+            t,
+            object_id,
+            role_of_fields(object.field_str("role"), &key),
+        ))
         .child(
             row()
                 .center_y()
@@ -557,6 +563,51 @@ pub fn property_panel(
     table = table.child(el().h(row_h * (n - last) as f32));
     panel_el = panel_el.child(table);
     panel_el
+}
+
+/// "Shows under": the Properties pane section the property sits in. A press
+/// writes `role` on the relation.
+fn shows_under(t: &Theme, object_id: &str, current: crate::role::Role) -> El {
+    let mut picker = row()
+        .key("pp-role")
+        .role("radiogroup")
+        .label("Shows under")
+        .center_y()
+        .gap(4.0)
+        .mb(4.0)
+        .child(
+            text("Shows under")
+                .font(ty::ui(13.0))
+                .color(t.muted)
+                .mr(6.0),
+        );
+    for role in ROLES {
+        let on = role == current;
+        let id = object_id.to_string();
+        let mut chip = motion::pressable(row())
+            .key(format!("pp-role-{}", role.key()))
+            .role("radio")
+            .label(role.label())
+            .px(8.0)
+            .py(2.0)
+            .radius(radius::SM)
+            .border(1.0, if on { t.accent } else { t.border })
+            .cursor(Cursor::Pointer)
+            .on_press(move |s: &mut State| {
+                let task = api::note::set_field(&id, "role", Value::string(role.key()), s);
+                task.detach_and_log_err(&s.rt);
+            })
+            .child(
+                text(role.label())
+                    .font(ty::ui(12.0))
+                    .color(if on { t.accent } else { t.fg }),
+            );
+        if !on {
+            chip = chip.hover(t.hover);
+        }
+        picker = picker.child(chip);
+    }
+    picker
 }
 
 #[cfg(test)]

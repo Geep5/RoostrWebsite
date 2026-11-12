@@ -475,6 +475,10 @@ pub struct RelationDef {
     pub hidden: bool,
     #[serde(default)]
     pub read_only: bool,
+    /// Where the Properties pane shows it: `who`, `when`, `state`, `setup` or
+    /// `details`. Empty = the built-in place for its key.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub role: String,
     #[serde(default)]
     pub max_count: i64,
     /// Type ids the object picker limits candidates to. Empty = unrestricted.
@@ -884,7 +888,8 @@ pub fn repeat_of(fields: &Fields) -> Option<Repeat> {
         return None;
     }
     let span = ints(e.get("window"));
-    let window = ((freq.is_sub_daily() || after) && span.len() == 2).then(|| [span[0] as u32, span[1] as u32]);
+    let window = ((freq.is_sub_daily() || after) && span.len() == 2)
+        .then(|| [span[0] as u32, span[1] as u32]);
     let last_run = e.get("last_run").and_then(Value::entries).and_then(|run| {
         let at = run.get("at")?.int_value?;
         let s = |k: &str| run.get(k).and_then(|v| v.string_value.clone());
@@ -928,7 +933,13 @@ pub fn repeat_of(fields: &Fields) -> Option<Repeat> {
             .map(|s| {
                 s.items()
                     .iter()
-                    .map(|slot| slot.items().iter().filter_map(|t| t.int_value).map(|t| t as u32).collect())
+                    .map(|slot| {
+                        slot.items()
+                            .iter()
+                            .filter_map(|t| t.int_value)
+                            .map(|t| t as u32)
+                            .collect()
+                    })
                     .collect()
             })
             .unwrap_or_default(),

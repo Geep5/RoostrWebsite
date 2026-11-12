@@ -153,3 +153,42 @@ fn property_panel_saves_definition_on_blur_and_lists_holders() {
             .any(|p| field_text(p, "description").as_deref() == Some("How the day felt"))
     });
 }
+
+/// "Shows under" marks the property's section (its key's built-in place while `role` is
+/// unset) and a press writes `role` on the relation.
+#[test]
+fn property_panel_shows_under_picker_writes_role() {
+    let vault = Vault::new(
+        vec![object(
+            "rel-1",
+            "relation",
+            &[
+                ("name", Value::string("Agent")),
+                ("key", Value::string("agent")),
+                ("format", Value::string("object")),
+            ],
+        )],
+        vec![],
+    );
+    let mut app = App::new(vault, property_view);
+    app.until("the relation object", |s| s.store.object("rel-1").is_some());
+    app.step();
+    for k in ["who", "when", "state", "setup", "details"] {
+        assert!(app.shown(&format!("pp-role-{k}")), "{k} offered");
+    }
+    app.click("pp-role-details");
+    let vault = app.vault.clone();
+    app.until("role written", |_| {
+        vault
+            .calls("set_field")
+            .iter()
+            .any(|p| field_text(p, "role").as_deref() == Some("details"))
+    });
+    assert_eq!(
+        app.vault
+            .field("rel-1", "role")
+            .and_then(|v| v.string_value)
+            .as_deref(),
+        Some("details")
+    );
+}

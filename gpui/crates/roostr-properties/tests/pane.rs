@@ -251,6 +251,8 @@ fn an_empty_object_relation_opens_its_link_picker() {
     let tasks = RelationDef {
         object_types: Some(vec!["type-task".into()]),
         space: Some(SPACE.into()),
+        // A Who row: offered while empty (an empty Details row would wait for a value).
+        role: "who".into(),
         ..relation("rel-tasks", "tasks", "object", "Tasks")
     };
     let mut app = App::new(Vault::new(objects, vec![tasks]), view);
@@ -292,6 +294,146 @@ fn adding_an_agent_closes_the_picker_and_a_press_outside_the_box() {
     app.rt.pointer_up(1000.0, 800.0);
     app.step();
     assert!(!app.shown("prop-pop"), "a press outside closes the box");
+}
+
+/// Every text drawn inside the element keyed `key`.
+fn texts_in(app: &App, key: &str) -> Vec<String> {
+    let all = app.rt.elements();
+    let Some(root) = all.iter().position(|e| e.key.as_deref() == Some(key)) else {
+        return vec![];
+    };
+    let inside = |mut i: usize| loop {
+        if i == root {
+            return true;
+        }
+        match all[i].parent {
+            Some(p) => i = p,
+            None => return false,
+        }
+    };
+    (0..all.len())
+        .filter(|&i| inside(i))
+        .filter_map(|i| all[i].text.clone())
+        .collect()
+}
+
+fn inside(app: &App, row: &str, section: &str) -> bool {
+    let (r, _) = app.rt.presented(row).expect(row);
+    let (s, _) = app.rt.presented(section).expect(section);
+    r[1] >= s[1] && r[1] + r[3] <= s[1] + s[3] + 0.5
+}
+
+/// The pane's sections: Who, When, State, Details in that order under their labels; each
+/// relation sits under its role (a set `role` moves it); unset State/Details rows stay
+/// hidden while Who/When rows are offered empty; an `error` is a red bar above them, not
+/// a row, and its × clears it.
+#[test]
+fn sections_follow_each_property_role_and_the_error_is_a_bar() {
+    let mut objects = types();
+    objects.push(object(
+        "t1",
+        "task",
+        &[
+            ("name", Value::string("Ship it")),
+            ("status", Value::string("opt-doing")),
+            ("customer", Value::string("Acme")),
+            // Unchecked: the title's checkbox says so; no Done row.
+            ("done", Value::bool(false)),
+            ("notes", Value::string("")),
+            ("budget", Value::string("10k")),
+            ("error", Value::string("The agent's model is gone.")),
+        ],
+    ));
+    let relations = vec![
+        agent_relation(),
+        relation("rel-done", "done", "checkbox", "Done"),
+        relation("rel-status", "status", "status", "Status"),
+        relation("rel-due", "due_date", "date", "Due date"),
+        relation("rel-error", "error", "longtext", "Error"),
+        relation("rel-customer", "customer", "shorttext", "Customer"),
+        relation("rel-notes", "notes", "shorttext", "Notes"),
+        RelationDef {
+            role: "who".into(),
+            ..relation("rel-budget", "budget", "shorttext", "Budget")
+        },
+    ];
+    let mut app = App::new(Vault::new(objects, relations), view);
+    *app.vault.on_mutate.lock() = Some(Box::new(|v: &Vault, action, params| {
+        if action == "delete_field" {
+            let id = params["object_id"].as_str().unwrap_or_default();
+            let key = params["key"].as_str().unwrap_or_default();
+            if let Some(o) = v.objects.lock().iter_mut().find(|o| o.id == id) {
+                o.fields.remove(key);
+                o.updated_at += 1;
+            }
+        }
+        None
+    }));
+    show(&mut app, "t1");
+
+    let tops: Vec<f32> = ["who", "when", "state", "details"]
+        .iter()
+        .map(|k| {
+            let key = format!("prop-section-{k}");
+            app.rt.presented(&key).unwrap_or_else(|| panic!("{key}")).0[1]
+        })
+        .collect();
+    assert!(tops.is_sorted(), "Who, When, State, Details: {tops:?}");
+    assert!(!app.shown("prop-section-setup"), "no Setup on a task");
+    for (k, label) in [
+        ("who", "Who"),
+        ("when", "When"),
+        ("state", "State"),
+        ("details", "Details"),
+    ] {
+        let texts = texts_in(&app, &format!("prop-section-{k}"));
+        assert_eq!(texts.first().map(String::as_str), Some(label), "{texts:?}");
+    }
+
+    // Who and When rows are offered empty; unset State rows are not.
+    assert!(inside(&app, "prop-row-agent", "prop-section-who"));
+    assert!(inside(&app, "prop-row-__repeat__", "prop-section-when"));
+    assert!(inside(&app, "prop-row-status", "prop-section-state"));
+    assert!(!app.shown("prop-row-done"), "Done hidden until checked");
+    assert!(!app.shown("prop-row-due_date"), "Due date hidden until set");
+    assert!(!app.shown("prop-row-notes"), "an empty Details row hidden");
+    // Add property still offers them.
+    app.click("add-prop");
+    app.until("the property menu", |_| true);
+    let offered = texts_in(&app, "add-suggest").join("\n");
+    assert!(
+        offered.contains("Done") && offered.contains("Due date"),
+        "{offered}"
+    );
+    app.key(Key::Escape);
+    assert!(inside(&app, "prop-row-customer", "prop-section-details"));
+    // A role set on the relation moves it out of Details.
+    assert!(inside(&app, "prop-row-budget", "prop-section-who"));
+
+    // The error: a bar above Who, not a row.
+    assert!(!app.shown("prop-row-error"), "no Error row");
+    let (bar, _) = app.rt.presented("prop-error-bar").expect("the error bar");
+    assert!(bar[1] < tops[0], "the bar sits above Who");
+    assert!(
+        texts_in(&app, "prop-error-bar")
+            .iter()
+            .any(|t| t == "The agent's model is gone.")
+    );
+    app.click("prop-error-clear");
+    app.until("the error clears", |s| {
+        s.store
+            .object("t1")
+            .is_some_and(|o| !o.fields.contains_key("error"))
+    });
+    assert!(
+        app.vault
+            .calls("delete_field")
+            .iter()
+            .any(|p| p["key"] == "error"),
+        "the × removes the error"
+    );
+    app.step();
+    assert!(!app.shown("prop-error-bar"), "and the bar goes");
 }
 
 /// The pane as the desktop shows it: a Properties column at the right of a 1440×850 window.

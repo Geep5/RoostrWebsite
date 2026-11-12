@@ -3,7 +3,8 @@
 //! (muted), the value on the right. Clicking a row opens its editor in a
 //! popover under the row; checkboxes toggle in place; multi-value rows carry
 //! a hover × per value, single-value rows a hover × that removes the
-//! property. Grouped "How it runs", then "Properties".
+//! property. Sectioned by each property's role: Who, When, State, Setup, Details; an
+//! `error` shows as a red bar above them.
 
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
@@ -34,6 +35,7 @@ use crate::credentials::{
 };
 use crate::project_folder::{open_project_folder, project_folder};
 use crate::repeat_view::{repeat_is_open, repeat_view};
+use crate::role::{ROLES, Role, SETUP_TYPES, role_of};
 use crate::suggest::{PropertyPick, PropertySuggest, PropertySuggestState, SuggestEvent};
 use crate::value::{PropertyValue, commit_pending, date_label, number_text, object_ids};
 use crate::widgets::{below, enter, icon_text_el, placeholder, pop_shadow, prefix, tip, ui_glyph};
@@ -68,7 +70,6 @@ const AGENT_PRIORITY: &[&str] = &[
 ];
 const CREDENTIAL_PROPS: &[(&str, &str, &str, &str)] = &[
     ("status", "Status", "status", ""),
-    ("error", "Error", "longtext", ""),
     ("served_by", "Served by", "object", ""),
     ("account", "Account", "shorttext", "🪪"),
     ("service", "Service", "shorttext", "🧩"),
@@ -79,7 +80,6 @@ const CREDENTIAL_PROPS: &[(&str, &str, &str, &str)] = &[
 ];
 const CAPABILITY_PROPS: &[(&str, &str, &str, &str)] = &[
     ("status", "Status", "status", ""),
-    ("error", "Error", "longtext", ""),
     ("served_by", "Served by", "object", ""),
     ("key", "Key", "shorttext", "🧩"),
     ("checked_at", "Checked", "date", ""),
@@ -88,22 +88,6 @@ const CAPABILITY_PROPS: &[(&str, &str, &str, &str)] = &[
 /// The serving computer's harness writes these on a capability: they show, never edit.
 const OWN_READONLY: &[&str] = &["served_by", "key", "checked_at"];
 const JEV_KEYS: &[&str] = &["jev_answer", "jev_writes"];
-const HOW_KEYS: &[&str] = &[
-    "served_by",
-    "repo_path",
-    "agent",
-    "model",
-    "prompt",
-    "skills",
-    "tools",
-    "credentials",
-    "chat_color",
-    "assignee",
-    "check_first",
-    "repeat_instructions",
-    "error",
-    "capability",
-];
 const SYSTEM_KEYS: &[&str] = &[
     "done",
     "due_date",
@@ -709,7 +693,8 @@ fn shown(
                 return true;
             }
             match k {
-                "error" => object.type_key != "template",
+                // Shown as the bar above the sections, never a row.
+                "error" => false,
                 _ if type_key == "channel" => k == "agent",
                 "keep_all_files" | "autostart" => type_key == "machine" || has(k),
                 // Where its agents work on it: shown once it has an agent.
@@ -742,23 +727,54 @@ fn shown(
     present
 }
 
-/// The "Properties" group: the type's own rows, then the shown rows outside "How it runs",
-/// the system properties first; within a rank they keep the space's relation order (the
-/// backend's list order), as GPUI's pane did.
-fn property_rows(own: &[RelationDef], shown: &[RelationDef]) -> Vec<RelationDef> {
-    let mut props: Vec<RelationDef> = own
-        .iter()
-        .filter(|r| !HOW_KEYS.contains(&r.key.as_str()))
-        .cloned()
-        .collect();
-    let mut rest: Vec<RelationDef> = shown
-        .iter()
-        .filter(|r| !HOW_KEYS.contains(&r.key.as_str()))
-        .cloned()
-        .collect();
-    rest.sort_by_key(|r| prop_rank(&r.key));
-    props.extend(rest);
-    props
+/// Whether `key` holds something to show: a checked box, a non-empty text, list or number.
+fn is_set(fields: &Fields, key: &str) -> bool {
+    match fields.get(key) {
+        None => false,
+        Some(v) => match v.bool_value {
+            Some(b) => b,
+            None => !plain_text(Some(v)).is_empty(),
+        },
+    }
+}
+
+/// The pane's sections in [`ROLES`] order: the type's own rows, then the shown rows, each
+/// under its role (Setup rows sit under Details on types without a Setup section; a
+/// credential's / capability's own rows are its Setup). State and Details rows show only
+/// once set (Add property offers the rest); Who and When keep offering theirs empty. Within
+/// a section the system properties come first; within a rank they keep the space's
+/// relation order (the backend's list order), as GPUI's pane did.
+fn sections(
+    own: &[RelationDef],
+    shown: &[RelationDef],
+    type_key: &str,
+    set: impl Fn(&str) -> bool,
+) -> Vec<(Role, Vec<RelationDef>)> {
+    let setup_here = SETUP_TYPES.contains(&type_key);
+    let place = |r: &RelationDef, own: bool| match role_of(r) {
+        Role::Setup if !setup_here => Role::Details,
+        Role::Details if own && r.role.is_empty() && r.key != "description" => Role::Setup,
+        role => role,
+    };
+    ROLES
+        .into_iter()
+        .map(|role| {
+            let mut rows: Vec<RelationDef> = own
+                .iter()
+                .filter(|r| place(r, true) == role)
+                .cloned()
+                .collect();
+            let only_set = matches!(role, Role::State | Role::Details);
+            let mut rest: Vec<RelationDef> = shown
+                .iter()
+                .filter(|r| place(r, false) == role && (!only_set || set(&r.key)))
+                .cloned()
+                .collect();
+            rest.sort_by_key(|r| prop_rank(&r.key));
+            rows.extend(rest);
+            (role, rows)
+        })
+        .collect()
 }
 
 fn judged(s: &State, object: &Object, key: &str) -> Option<Judged> {
@@ -1125,6 +1141,50 @@ fn skill_help(t: &Theme) -> El {
         )
 }
 
+/// The object's `error` above its sections: red, wrapping, with a × that clears it
+/// (removes the field, as the old Error row's ×) unless the object is locked.
+fn error_bar(t: &Theme, id: &str, error: &str, clearable: bool) -> El {
+    let mut bar = row()
+        .key("prop-error-bar")
+        .role("alert")
+        .items_start()
+        .gap(8.0)
+        .mx(4.0)
+        .mt(6.0)
+        .mb(2.0)
+        .px(10.0)
+        .py(6.0)
+        .radius(radius::SM)
+        .fill(t.red.alpha(0.1))
+        .border(1.0, t.red.alpha(0.35))
+        .child(
+            text(error.to_string())
+                .font(ty::ui(13.0).lh(18.0))
+                .color(t.red)
+                .wrap()
+                .grow(1.0)
+                .shrink()
+                .min_w(0.0),
+        );
+    if clearable {
+        let id = id.to_string();
+        let button = motion::pressable(row())
+            .key("prop-error-clear")
+            .role("button")
+            .label("Clear error")
+            .size(18.0, 18.0)
+            .center()
+            .radius(9.0)
+            .hover(ghost_hover(t))
+            .hover_group()
+            .cursor(Cursor::Pointer)
+            .on_press(move |s: &mut State| remove_prop(s, &id, "error"))
+            .child(glyph(Glyph::Close, 11.0).color(t.red));
+        bar = bar.child(tip(button, "Clear error"));
+    }
+    bar
+}
+
 /// The properties section of `object_id` (the discussion drawer's
 /// Properties column): content only, the host scrolls and pads it.
 pub fn properties_pane(
@@ -1167,50 +1227,58 @@ pub fn properties_pane(
         .filter_map(|r| object.field(&r.key).map(|v| (r.key.clone(), v.clone())))
         .collect();
 
-    // Grouped display: "How it runs", then "Properties".
-    let mut how: Vec<RelationDef> = own
-        .iter()
-        .chain(shown.iter())
-        .filter(|r| HOW_KEYS.contains(&r.key.as_str()))
-        .cloned()
-        .collect();
-    let take = |how: &mut Vec<RelationDef>, k: &str| {
-        how.iter().position(|r| r.key == k).map(|i| how.remove(i))
+    // A row being edited or just added stays while it is still empty.
+    let open = |k: &str| pane.editing.as_deref() == Some(k) || pane.entering.as_deref() == Some(k);
+    let mut sections = sections(&own, &shown, &type_key, |k| {
+        is_set(&object.fields, k) || open(k)
+    });
+    let anywhere = |k: &str| {
+        sections
+            .iter()
+            .any(|(_, rows)| rows.iter().any(|r| r.key == k))
     };
-    let assignee = take(&mut how, "assignee");
-    let check_first = take(&mut how, "check_first");
     // Repeat instructions show the moment Repeat is being set (its editor
     // open), not only once a rule is saved; a space missing the bundled
     // property (not synced yet) still gets the row.
     let editing_repeat = repeat_is_open(s, object_id);
-    let instructions = take(&mut how, "repeat_instructions").or_else(|| {
-        (can_repeat && (editing_repeat || repeat_of(&object.fields).is_some())).then(|| {
-            relations
-                .iter()
-                .find(|r| r.key == "repeat_instructions")
-                .cloned()
-                .unwrap_or_else(|| RelationDef {
-                    key: "repeat_instructions".into(),
-                    name: "Repeat instructions".into(),
-                    format: "longtext".into(),
-                    ..Default::default()
-                })
-        })
+    let fallback_instructions = (!anywhere("repeat_instructions")
+        && can_repeat
+        && (editing_repeat || repeat_of(&object.fields).is_some()))
+    .then(|| {
+        relations
+            .iter()
+            .find(|r| r.key == "repeat_instructions")
+            .cloned()
+            .unwrap_or_else(|| RelationDef {
+                key: "repeat_instructions".into(),
+                name: "Repeat instructions".into(),
+                format: "longtext".into(),
+                ..Default::default()
+            })
     });
-    let error = take(&mut how, "error");
+    // When: Repeat, what each run should do right under it, Check first, then the rest.
+    let when = &mut sections[1].1;
+    let take = |rows: &mut Vec<RelationDef>, k: &str| {
+        rows.iter().position(|r| r.key == k).map(|i| rows.remove(i))
+    };
+    let instructions = take(when, "repeat_instructions").or(fallback_instructions);
+    let check_first = take(when, "check_first");
+    let rest = std::mem::take(when);
     if can_repeat {
-        how.push(RelationDef {
+        when.push(RelationDef {
             key: REPEAT_KEY.into(),
             name: "Repeat".into(),
             ..Default::default()
         });
     }
-    // Repeat instructions sit under Repeat: what each run should do.
-    how.extend(instructions);
-    how.extend(assignee);
-    how.extend(check_first);
-    how.extend(error);
-    let props = property_rows(&own, &shown);
+    when.extend(instructions);
+    when.extend(check_first);
+    when.extend(rest);
+    // Add property offers whatever no row shows (unset State and Details included).
+    let exclude: Vec<String> = sections
+        .iter()
+        .flat_map(|(_, rows)| rows.iter().map(|r| r.key.clone()))
+        .collect();
 
     let ctx = RowCx {
         object: &object,
@@ -1223,17 +1291,25 @@ pub fn properties_pane(
         tag_seeds: &tag_seeds,
     };
     let mut root = col();
-    for (label, rows) in [("How it runs", how), ("Properties", props)] {
+    let error = object.field_str("error");
+    if !error.is_empty() && object.type_key != "template" {
+        root = root.child(error_bar(t, &object.id, error, !locked));
+    }
+    for (role, rows) in sections {
         if rows.is_empty() {
             continue;
         }
-        let mut group = col().pt(4.0).pb(6.0).child(
-            el().px(6.0).pt(6.0).pb(4.0).child(
-                text(label)
-                    .font(ty::ui(12.0).weight(ty::MEDIUM))
-                    .color(t.muted),
-            ),
-        );
+        let mut group = col()
+            .key(format!("prop-section-{}", role.key()))
+            .pt(4.0)
+            .pb(6.0)
+            .child(
+                el().px(6.0).pt(6.0).pb(4.0).child(
+                    text(role.label())
+                        .font(ty::ui(12.0).weight(ty::MEDIUM))
+                        .color(t.muted),
+                ),
+            );
         for rel in rows {
             group = group.child(render_row(s, cx, t, layer, &ctx, &rel));
         }
@@ -1243,7 +1319,6 @@ pub fn properties_pane(
         root = root.child(skill_help(t));
     }
     if !locked {
-        let exclude: Vec<String> = shown.iter().map(|r| r.key.clone()).collect();
         let id = object.id.clone();
         root = root.child(
             motion::pressable_row(row())
@@ -1743,21 +1818,17 @@ fn render_row(
             && v.and_then(Value::as_number)
                 .is_some_and(|ms| ms != 0. && (ms as i64) < now_ms())
             && object.field("done").and_then(|d| d.bool_value) != Some(true);
-        let wrap = key == "error";
         let line = if secret {
             "••••••••".to_string()
         } else {
             shown_text.clone()
         };
-        let mut val = text(line)
-            .color(if wrap || overdue { t.red } else { t.fg })
+        let val = text(line)
+            .color(if overdue { t.red } else { t.fg })
             .min_w(0.0)
-            .shrink();
-        val = if wrap {
-            val.font(ty::ui(13.0).lh(18.0)).py(2.0).wrap()
-        } else {
-            val.font(ty::ui(13.0).lh(22.0)).truncate()
-        };
+            .shrink()
+            .font(ty::ui(13.0).lh(22.0))
+            .truncate();
         value = value.child(val);
     }
     let judged = judged(s, object, &key);
@@ -1925,7 +1996,7 @@ fn render_pop(
         actions = actions.child(tip(remove, "Remove property"));
     }
     // Multi-line text: Enter is a new line, so Done saves and closes.
-    if rel.format == "longtext" || key == "error" {
+    if rel.format == "longtext" {
         let id = oid.clone();
         let done = pop_action(t, "done", "Done".into(), t.accent)
             .on_press(move |s: &mut State| finish_editing(s, &id));
@@ -2056,6 +2127,11 @@ mod tests {
         };
         o.fields.insert("customer".into(), Value::string("x"));
         o.fields.insert("draft_doc".into(), Value::string("x"));
+        o.fields.insert("done".into(), Value::bool(true));
+        o.fields.insert("status".into(), Value::string("x"));
+        o.fields.insert("target_list".into(), Value::string("x"));
+        // Unset: its type includes it, it still waits for a value (Add property offers it).
+        o.fields.insert("invovles".into(), Value::string(""));
         let pane = PaneState {
             view_keys: ["done", "status", "target_list", "invovles"]
                 .map(String::from)
@@ -2063,21 +2139,76 @@ mod tests {
             ..PaneState::default()
         };
         let shown = shown(&pane, &o, "task", &relations, &HashSet::new());
-        let keys: Vec<String> = property_rows(&[], &shown)
-            .into_iter()
-            .map(|r| r.key)
-            .collect();
+        let keys = |role: Role, rel: &[RelationDef]| -> Vec<String> {
+            sections(&[], rel, "task", |k| is_set(&o.fields, k))
+                .into_iter()
+                .find(|(r, _)| *r == role)
+                .map(|(_, rows)| rows.into_iter().map(|r| r.key).collect())
+                .unwrap_or_default()
+        };
+        assert_eq!(keys(Role::State, &shown), ["done", "status"]);
         assert_eq!(
-            keys,
-            [
-                "done",
-                "status",
-                "target_list",
-                "customer",
-                "draft_doc",
-                "invovles"
-            ]
+            keys(Role::Details, &shown),
+            ["target_list", "customer", "draft_doc"]
         );
+        // A role set on the relation moves it: Customer under Who.
+        let moved: Vec<RelationDef> = shown
+            .iter()
+            .cloned()
+            .map(|mut r| {
+                if r.key == "customer" {
+                    r.role = "who".into();
+                }
+                r
+            })
+            .collect();
+        assert_eq!(keys(Role::Who, &moved), ["customer"]);
+        assert_eq!(keys(Role::Details, &moved), ["target_list", "draft_doc"]);
+        // An unchecked Done waits too.
+        let mut unchecked = o.fields.clone();
+        unchecked.insert("done".into(), Value::bool(false));
+        let state: Vec<String> = sections(&[], &shown, "task", |k| is_set(&unchecked, k))
+            .into_iter()
+            .find(|(r, _)| *r == Role::State)
+            .map(|(_, rows)| rows.into_iter().map(|r| r.key).collect())
+            .unwrap_or_default();
+        assert_eq!(state, ["status"]);
+    }
+
+    /// Setup shows on agents, tools, skills, credentials and capabilities; elsewhere its
+    /// rows sit under Details. A credential's own rows are its Setup.
+    #[test]
+    fn setup_rows_only_on_setup_types() {
+        let model = RelationDef {
+            key: "model".into(),
+            ..Default::default()
+        };
+        let roles = |type_key: &str| -> Vec<Role> {
+            sections(&[], std::slice::from_ref(&model), type_key, |_| true)
+                .into_iter()
+                .filter(|(_, rows)| !rows.is_empty())
+                .map(|(r, _)| r)
+                .collect()
+        };
+        assert_eq!(roles("agent"), [Role::Setup]);
+        assert_eq!(roles("task"), [Role::Details]);
+        let o = Object {
+            type_key: "credential".into(),
+            ..Object::default()
+        };
+        let own = own_rows(&o, "credential", &[]);
+        let placed = sections(&own, &[], "credential", |_| false);
+        let under = |role: Role| -> Vec<String> {
+            placed
+                .iter()
+                .find(|(r, _)| *r == role)
+                .map(|(_, rows)| rows.iter().map(|r| r.key.clone()).collect())
+                .unwrap_or_default()
+        };
+        assert_eq!(under(Role::Who), ["served_by"]);
+        assert_eq!(under(Role::State), ["status"]);
+        assert!(under(Role::Setup).contains(&"account".to_string()));
+        assert_eq!(under(Role::Details), ["description"]);
     }
 
     #[test]

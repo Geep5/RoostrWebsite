@@ -367,7 +367,9 @@ fn space_of_state(o: &Json) -> String {
 /// transcripts) passed the cache's memory limit and the vault would not
 /// open; text-only it is ~25 MB.
 fn query_state(o: &Json) -> Json {
-    let Json::Object(map) = o else { return o.clone() };
+    let Json::Object(map) = o else {
+        return o.clone();
+    };
     // Copies only what the cache keeps: transcripts are most of a vault.
     Json::Object(
         map.iter()
@@ -510,7 +512,11 @@ impl ReplicaBackend {
         let legacy = self.inner.kv.get(crate::records::RECORDS_FLAG).as_deref() == Some("0");
         #[cfg(not(target_family = "wasm"))]
         let legacy = legacy || std::env::var("ROOSTR_RECORDS").is_ok_and(|v| v == "0");
-        if legacy { Ok(self) } else { self.with_records(store).await }
+        if legacy {
+            Ok(self)
+        } else {
+            self.with_records(store).await
+        }
     }
 
     /// The desktop replica in `dir` (created): `replica.sqlite` and the
@@ -1421,7 +1427,11 @@ impl Inner {
         let held: HashSet<&str> = all.iter().map(|r| r.object_id.as_str()).collect();
         let gone: Vec<String> = {
             let st = self.state.lock();
-            st.states.keys().filter(|id| !held.contains(id.as_str())).cloned().collect()
+            st.states
+                .keys()
+                .filter(|id| !held.contains(id.as_str()))
+                .cloned()
+                .collect()
         };
         for id in gone {
             self.set_record_state(&id, None);
@@ -1443,7 +1453,11 @@ impl Inner {
                 }
             }
             Some(view) => {
-                if st.states.get(id).is_none_or(|previous| heads(previous) != heads(&view)) {
+                if st
+                    .states
+                    .get(id)
+                    .is_none_or(|previous| heads(previous) != heads(&view))
+                {
                     st.query_upserted.insert(id.to_string());
                 }
                 st.states.insert(id.to_string(), Arc::new(view));
@@ -2576,7 +2590,13 @@ impl Inner {
             let ids: Vec<String> = params
                 .get("object_id")
                 .into_iter()
-                .chain(params.get("object_ids").and_then(Json::as_array).into_iter().flatten())
+                .chain(
+                    params
+                        .get("object_ids")
+                        .and_then(Json::as_array)
+                        .into_iter()
+                        .flatten(),
+                )
                 .filter_map(Json::as_str)
                 .map(str::to_string)
                 .collect();
@@ -2992,6 +3012,7 @@ impl Inner {
                     space: Some(fstr(o, "channel").to_string()),
                     hidden: fbool(o, "hidden"),
                     read_only: fbool(o, "readOnly"),
+                    role: fstr(o, "role").to_string(),
                     max_count: fint(o, "maxCount").unwrap_or(0),
                     object_types: Some(
                         field(o, "object_types")["valuesValue"]["items"]
@@ -3532,7 +3553,14 @@ impl Backend for ReplicaBackend {
     /// Sealed and sent by the relay sync, once the session is up.
     fn publish_signal(&self, signal: Json, space: Option<String>) -> BoxFuture<Result<()>> {
         let inner = self.inner.clone();
-        Box::pin(async move { inner.ready().await?.sync.publish_signal(signal, space).await })
+        Box::pin(async move {
+            inner
+                .ready()
+                .await?
+                .sync
+                .publish_signal(signal, space)
+                .await
+        })
     }
 
     #[allow(clippy::arc_with_non_send_sync)]
