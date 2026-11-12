@@ -351,11 +351,28 @@ impl Navigator {
         self.reopened(&route);
         if self.phone {
             self.loose = Some(route);
+        } else if let Some(open) = self.tab_showing(&route) {
+            // Already open in another tab: go there rather than open it twice.
+            self.active = open;
+            self.save(ui);
         } else {
             self.tabs[self.active].route = route;
             self.save(ui);
         }
         self.events.push(NavEvent::Navigated);
+    }
+
+    /// The tab other than the active one that already shows `route`, for a route that gets
+    /// at most one tab ([`one_tab`]).
+    fn tab_showing(&self, route: &Route) -> Option<usize> {
+        if !one_tab(route) {
+            return None;
+        }
+        self.tabs
+            .iter()
+            .enumerate()
+            .find(|(i, t)| *i != self.active && t.route == *route)
+            .map(|(i, _)| i)
     }
 
     /// Show `route` in the active tab in place of the current route, in
@@ -387,6 +404,15 @@ impl Navigator {
     /// `tabs.open(path, background)`.
     pub fn open_tab(&mut self, route: Route, background: bool, ui: &mut UiState) {
         self.reopened(&route);
+        // Already open: show that tab (a background open has nothing to do).
+        if one_tab(&route)
+            && let Some(open) = self.tabs.iter().position(|t| t.route == route)
+        {
+            if !background {
+                self.activate(open, ui);
+            }
+            return;
+        }
         let uid = self.uid();
         self.tabs.push(Tab {
             uid,
@@ -477,8 +503,9 @@ impl Navigator {
         self.space = space.to_string();
         ui.set(ACTIVE_SPACE_KEY, &space);
         let saved = self.saved.get(space).cloned().unwrap_or_default();
-        let mut tabs: Vec<Tab> = Vec::with_capacity(saved.paths.len());
-        for path in &saved.paths {
+        let paths = unique_paths(&saved.paths);
+        let mut tabs: Vec<Tab> = Vec::with_capacity(paths.len());
+        for path in &paths {
             let uid = self.uid();
             tabs.push(Tab {
                 uid,
@@ -499,7 +526,10 @@ impl Navigator {
         self.tabs = tabs;
         self.loose = None;
         if let Some(route) = opened {
-            self.tabs[self.active].route = route;
+            match self.tab_showing(&route) {
+                Some(open) => self.active = open,
+                None => self.tabs[self.active].route = route,
+            }
             self.save(ui);
         }
         self.push_history(self.route().clone());
@@ -662,7 +692,7 @@ impl Navigator {
             return;
         }
         let paths: Vec<String> = match self.saved.get(&self.space) {
-            Some(saved) if !saved.paths.is_empty() => saved.paths.clone(),
+            Some(saved) if !saved.paths.is_empty() => unique_paths(&saved.paths),
             _ => vec![HOME_PATH.to_string()],
         };
         let old: Vec<String> = self.tabs.iter().map(|t| t.route.path()).collect();
@@ -838,9 +868,80 @@ pub fn top_pin(space: &str, s: &State) -> Option<String> {
         .cloned()
 }
 
+/// `paths` with a repeated page's later tabs dropped (a list saved before tabs were one per
+/// page may repeat one).
+fn unique_paths(paths: &[String]) -> Vec<String> {
+    let mut seen = HashSet::new();
+    paths
+        .iter()
+        .filter(|p| !one_tab(&Route::parse(p)) || seen.insert(p.as_str()))
+        .cloned()
+        .collect()
+}
+
+/// Whether `route` gets at most one tab: an object, a chat or the graph. The space home and
+/// the website pages can repeat (New tab opens a home).
+fn one_tab(route: &Route) -> bool {
+    !matches!(route, Route::Home | Route::Site(_))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A navigator over in-memory UI state (nothing on disk), showing space `sp`.
+    fn navigator() -> (Navigator, crate::UiState) {
+        let mut ui = crate::UiState::load_from(None);
+        let mut nav = Navigator::new(&ui);
+        nav.use_space("sp", &mut ui);
+        (nav, ui)
+    }
+
+    fn routes(nav: &Navigator) -> Vec<String> {
+        nav.tabs().iter().map(|t| t.route.path()).collect()
+    }
+
+    #[test]
+    fn a_page_already_open_in_a_tab_is_shown_there_not_opened_twice() {
+        let (mut nav, mut ui) = navigator();
+        let a = Route::Object("a".into());
+        let b = Route::Object("b".into());
+        nav.navigate(a.clone(), &mut ui);
+        nav.open_tab(b.clone(), false, &mut ui);
+        assert_eq!(routes(&nav), ["/app/object/a", "/app/object/b"]);
+        // Following a link to `a` from `b`'s tab goes to `a`'s tab; `b`'s tab stays `b`.
+        nav.navigate(a.clone(), &mut ui);
+        assert_eq!(routes(&nav), ["/app/object/a", "/app/object/b"]);
+        assert_eq!(nav.active_index(), 0);
+        // Opening `b` in a new tab shows its tab; in the background, nothing changes.
+        nav.open_tab(b.clone(), false, &mut ui);
+        assert_eq!((routes(&nav).len(), nav.active_index()), (2, 1));
+        nav.open_tab(a.clone(), true, &mut ui);
+        assert_eq!((routes(&nav).len(), nav.active_index()), (2, 1));
+        // Back returns to `a`'s tab rather than turning `b`'s tab into a second `a`.
+        nav.back(&mut ui);
+        assert_eq!(routes(&nav), ["/app/object/a", "/app/object/b"]);
+        assert_eq!(nav.active_index(), 0);
+        // The space home can repeat: New tab opens another.
+        nav.open_tab(Route::Home, false, &mut ui);
+        nav.open_tab(Route::Home, false, &mut ui);
+        assert_eq!(routes(&nav).iter().filter(|p| *p == "/app").count(), 2);
+    }
+
+    #[test]
+    fn a_saved_list_with_a_repeated_page_keeps_its_first() {
+        let mut ui = crate::UiState::load_from(None);
+        ui.set(
+            TABS_KEY,
+            &serde_json::json!({ "sp": { "paths": ["/app/object/a", "/app/object/b", "/app/object/a", "/app", "/app"], "active": 2 } }),
+        );
+        let mut nav = Navigator::new(&ui);
+        nav.use_space("sp", &mut ui);
+        assert_eq!(
+            routes(&nav),
+            ["/app/object/a", "/app/object/b", "/app", "/app"]
+        );
+    }
 
     #[test]
     fn routes_round_trip_through_paths() {

@@ -16,8 +16,9 @@ const W: f32 = 900.0;
 fn too_many_tabs_scroll_sideways() {
     let mut h = Harness::new(Arc::new(OnePage), (W, 700.0));
     h.settle();
-    for _ in 0..20 {
-        h.update(|s| roostr_core::nav::open_tab(Route::Object("page-1".into()), false, s));
+    // Twenty different pages: one page opens one tab.
+    for i in 0..20 {
+        h.update(|s| roostr_core::nav::open_tab(Route::Object(format!("page-{i}")), false, s));
     }
     h.settle();
     let tabs = h.keys("tab:");
