@@ -8,7 +8,7 @@ mod object_page;
 use roostr_core::State;
 use roostr_core::nav::Route;
 use roostr_shell::{Pages, PanePart};
-use rune::{Cx, El, KeyEvent, Tx};
+use rune::{Cx, Drag, El, KeyEvent, Tx};
 
 pub use crate::object_page::Pages as ObjectPages;
 
@@ -36,6 +36,15 @@ pub fn pages() -> Pages {
         overlays,
         shown,
         closed,
+        page_drag,
+    }
+}
+
+/// A drag in the empty space around an object page: a query's, collection's
+/// or type's table starts its rubber band there (other pages ignore it).
+fn page_drag(s: &mut State, route: &Route, d: &Drag, tx: &mut Tx) {
+    if let Route::Object(id) = route {
+        roostr_sets::page_drag(s, id, d, tx);
     }
 }
 
@@ -46,14 +55,9 @@ fn page(s: &State, cx: &mut Cx<State>, route: &Route, layer: &mut Vec<El>) -> El
         Route::Home => object_page::home(s, cx, t, layer),
         Route::Object(id) => object_page::view(s, cx, t, layer, id),
         Route::Graph { .. } => roostr_graph::view(s, cx),
-        Route::Chat(id) => roostr_discussion::chat_page(
-            s,
-            cx,
-            t,
-            layer,
-            id,
-            object_page::window_size(s),
-        ),
+        Route::Chat(id) => {
+            roostr_discussion::chat_page(s, cx, t, layer, id, object_page::window_size(s))
+        }
         Route::Site(page) => roostr_site::view(s, cx, page),
     }
 }

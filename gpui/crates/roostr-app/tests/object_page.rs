@@ -11,7 +11,9 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 use roostr_core::nav::Route;
-use roostr_core::types::{Object, ObjectSummary, QueryResult, RelationDef, Settings, Space, Value};
+use roostr_core::types::{
+    Object, ObjectSummary, QueryResult, QueryRow, RelationDef, Settings, Space, Value,
+};
 use roostr_core::{Backend, BackendEvent, JsonMap};
 use roostr_rt::{BoxFuture, BoxStream, boxed, boxed_stream};
 use rune::Key;
@@ -91,8 +93,18 @@ impl Backend for Handle {
     fn relations(&self) -> BoxFuture<anyhow::Result<Vec<RelationDef>>> {
         ready(Ok(Vec::new()))
     }
+    /// Every query finds two pages: the query's table has rows to select.
     fn query(&self, _: &Json) -> BoxFuture<anyhow::Result<QueryResult>> {
-        ready(Ok(QueryResult::default()))
+        let row = |id: &str, name: &str| QueryRow {
+            id: id.into(),
+            type_key: "page".into(),
+            name: Some(name.into()),
+            ..QueryRow::default()
+        };
+        ready(Ok(QueryResult {
+            total: 2,
+            records: vec![row("row-1", "Alpha"), row("row-2", "Beta")],
+        }))
     }
     fn mutate(&self, action: &str, params: JsonMap) -> BoxFuture<anyhow::Result<JsonMap>> {
         if action == "set_field" && params["key"] == "name" {
@@ -202,7 +214,11 @@ fn a_chat_object_on_a_phone_opens_as_its_chat() {
     let s = app.state();
     s.nav.back(&mut s.ui);
     app.settle();
-    assert_eq!(app.state().nav.route(), &Route::Home, "the chat replaced the object");
+    assert_eq!(
+        app.state().nav.route(),
+        &Route::Home,
+        "the chat replaced the object"
+    );
 
     // An object opens without the sheet a previous one left up.
     app.state().pane.set_sheet(true);
@@ -213,4 +229,33 @@ fn a_chat_object_on_a_phone_opens_as_its_chat() {
     let mut app = open(&vault, CHAT, 1280., 800.);
     assert_eq!(app.state().nav.route(), &Route::Object(CHAT.into()));
     assert!(app.shown("object-page"));
+}
+
+/// The rubber band starts in the empty space around a table too: a drag from
+/// the page's right margin, below the rows, up across them selects both.
+/// Field report: it only started on a press inside the table.
+#[test]
+fn a_rubber_band_starts_in_the_empty_space_beside_a_table() {
+    let vault = Arc::new(Vault::default());
+    let mut app = open(&vault, QUERY, 1280., 800.);
+    let path = app.state().nav.route().path();
+    let scroll = app
+        .rect(&format!("main-scroll:{path}"))
+        .expect("the main scroll area is drawn");
+    let page = app.rect("object-page").expect("the page is drawn");
+    let rows = app
+        .rect(&format!("{QUERY}/rows"))
+        .expect("the table's rows are drawn");
+    // Outside the page column, in the scroll area's margin, below the last row.
+    let from = (scroll[0] + scroll[2] - 8., rows[1] + rows[3] + 20.);
+    assert!(
+        from.0 > page[0] + page[2],
+        "the press must be beside the page, not on it"
+    );
+    let to = (rows[0] + 40., rows[1] + 2.);
+    app.drag(from, to);
+    assert!(
+        app.shown(&format!("{QUERY}/sel-bar")),
+        "the drag selected nothing"
+    );
 }

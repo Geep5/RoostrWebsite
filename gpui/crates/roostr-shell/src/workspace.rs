@@ -767,8 +767,8 @@ fn main_column(
                 .items_center()
                 .child(crate::header::view(s, cx, t, wide, layer)),
         )
-        .child(
-            col()
+        .child({
+            let scroll = col()
                 .key(format!("main-scroll:{}", route.path()))
                 .grow(1.)
                 .min_h(0.)
@@ -777,8 +777,16 @@ fn main_column(
                     stick_bottom: false,
                 })
                 .px(32.)
-                .child(body),
-        )
+                .child(body);
+            // On a touch screen a drag scrolls: no page drag there.
+            if roostr_core::layout::is_touch() {
+                scroll
+            } else {
+                let (drag, route) = (pages.page_drag, route.clone());
+                scroll
+                    .on_drag(move |s: &mut State, d: &mut Drag, tx: &mut Tx| drag(s, &route, d, tx))
+            }
+        })
 }
 
 /// A pane column `column` wide (sliding), its 6 pt gap on the right: the

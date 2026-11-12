@@ -22,7 +22,7 @@ use roostr_ui::overlay::anchored;
 use roostr_ui::{
     Button, Glyph, Images, KitSize, Placement, Textarea, TextareaState, Theme, glyph, ty,
 };
-use rune::{Cx, Drag, El, Tx, col, el, row, text};
+use rune::{Cx, El, Tx, col, el, row, text};
 
 /// What the page body shows (decided by the object's type).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -696,18 +696,12 @@ pub(crate) fn view(
         }
     };
     article = article.child(body);
-    let mut page = match banner {
+    let page = match banner {
         Some(banner) => col().child(banner).child(article),
         None => article,
     };
-    // The table's rubber band arms anywhere on the page (web selection provider).
-    if matches!(kind, Kind::Type | Kind::Query | Kind::Collection) && !roostr_sets::touch_screen(cx)
-    {
-        let drag = id.to_string();
-        page = page.on_drag(move |s: &mut State, d: &mut Drag, tx: &mut Tx| {
-            roostr_sets::page_drag(s, &drag, d, tx)
-        });
-    }
+    // The table's rubber band also arms in the empty space around the page:
+    // the shell's main scroll area forwards those drags (`lib.rs` page_drag).
     page.key("object-page")
 }
 

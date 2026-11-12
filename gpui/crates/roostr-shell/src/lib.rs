@@ -74,6 +74,10 @@ pub struct Pages {
     pub shown: fn(&mut State, &Route),
     /// No tab of the active space shows the route any more: drop its page state.
     pub closed: fn(&mut State, &Route),
+    /// A drag that starts anywhere in the main column's scrolling area, the empty
+    /// margins and the space below the page included (a data view's rubber band).
+    /// Interactive parts of the page take their own presses first.
+    pub page_drag: fn(&mut State, &Route, &rune::Drag, &mut Tx),
 }
 
 impl Default for Pages {
@@ -86,6 +90,7 @@ impl Default for Pages {
             overlays: |_, _, _| {},
             shown: |_, _| {},
             closed: |_, _| {},
+            page_drag: |_, _, _, _| {},
         }
     }
 }
