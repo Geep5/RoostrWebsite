@@ -5,11 +5,11 @@
 use roostr_core::State;
 use roostr_core::nav::Route;
 use roostr_core::objects::{object_icon, type_glyph};
-use roostr_ui::{Glyph, Tab, TabBar, Theme, checkbox_display, radius, ty};
+use roostr_ui::{Tab, TabBar, Theme, checkbox_display, radius, ty};
 use rune::{Cursor, Cx, El, PointerButton, Tx, el, row, text};
 
 use crate::drag::{self, Axis};
-use crate::shell::{fill, fill_glyph, or_untitled};
+use crate::shell::or_untitled;
 
 /// What a tab shows for its route (`tabInfo`).
 pub(crate) struct TabInfo {
@@ -97,7 +97,7 @@ fn drop_tab(s: &mut State, dragged: &str, target: &str, after: bool) {
 /// gpui-kit's TabBar (default Tab variant: the active tab on the kit's
 /// active tab fill, labels ellipsised at 220 pt), with Roostr's drag
 /// reorder, middle-click and × close and separators on each tab. More tabs
-/// than fit scroll sideways (wheel, trackpad, Shift+wheel); New tab stays put.
+/// than fit scroll sideways (wheel, trackpad, Shift+wheel).
 pub(crate) fn view(s: &State, _cx: &mut Cx<State>, t: &Theme) -> El {
     let tabs: Vec<(u64, Route)> = s
         .nav
@@ -198,14 +198,7 @@ pub(crate) fn view(s: &State, _cx: &mut Cx<State>, t: &Theme) -> El {
         }
         bar = bar.child(Tab::new().child(content).suffix(close));
     }
-    let new_tab = fill("tab-new", t.hl_med)
-        .size(26., 26.)
-        .ml(4.)
-        .radius(radius::SM)
-        .label("New tab")
-        .child(fill_glyph(t, Glyph::Plus, 14.))
-        .on_press(|s: &mut State| roostr_core::nav::open_tab(Route::Home, false, s));
-    bar.suffix(roostr_ui::tooltip(new_tab, "New tab")).build(t)
+    bar.build(t)
 }
 
 /// The floating copy of a dragged tab.

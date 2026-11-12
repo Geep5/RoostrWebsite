@@ -1,5 +1,5 @@
 //! More tabs than the window is wide: the strip scrolls sideways to the last
-//! one, and New tab stays in the window.
+//! one.
 #![cfg(not(target_family = "wasm"))]
 
 mod common;
@@ -26,11 +26,6 @@ fn too_many_tabs_scroll_sideways() {
     let last = tabs.last().unwrap().clone();
     let first = tabs.first().unwrap().clone();
 
-    let new_tab = h.rect("tab-new").expect("New tab");
-    assert!(
-        new_tab[0] + new_tab[2] <= W,
-        "New tab stays in the window: {new_tab:?}"
-    );
     let strip = h.rect("tab-strip-scroll").expect("the scrolling strip");
     assert!(strip[0] + strip[2] <= W, "the strip ends in the window");
 
