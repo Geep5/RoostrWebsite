@@ -108,6 +108,60 @@ fn a_big_querys_table_draws_only_the_rows_near_the_window() {
     );
 }
 
+#[test]
+fn on_a_phone_a_finger_dragged_up_the_rows_scrolls_and_selects_nothing() {
+    use rune::TouchPhase;
+    let mut objects = vec![
+        object(
+            "type-email",
+            "type",
+            &[
+                ("name", Value::string("Email")),
+                ("key", Value::string("email")),
+            ],
+        ),
+        object(
+            "q1",
+            "query",
+            &[
+                ("name", Value::string("Support Emails")),
+                ("setOf", Value::values(vec![Value::string("email")])),
+            ],
+        ),
+    ];
+    objects.extend((0..40).map(|i| {
+        object(
+            &format!("e{i}"),
+            "email",
+            &[("name", Value::string(format!("Email {i}")))],
+        )
+    }));
+    let vault = Vault::new(objects, Vec::new(), query_rows("email"));
+    let mut app = App::new(vault, "q1", DataViewKind::Query, (390., 844.));
+    app.until_shown("row-e5");
+    let before = app.rect("row-e5").expect("a row");
+    let (x, y) = (before[0] + 60., before[1] + before[3] / 2.);
+    let mut t = 0.0;
+    app.rt.touch(1, TouchPhase::Started, x, y, t);
+    for i in 1..=12 {
+        t += 1.0 / 60.0;
+        app.rt.touch(1, TouchPhase::Moved, x, y - 25. * i as f32, t);
+        app.step();
+    }
+    t += 0.2;
+    app.rt.touch(1, TouchPhase::Ended, x, y - 300., t);
+    for _ in 0..30 {
+        app.step();
+    }
+    let after = app.rect("row-e5").expect("the row");
+    assert!(
+        after[1] < before[1] - 150.,
+        "the page scrolled: {before:?} -> {after:?}"
+    );
+    assert!(!app.shown("q1/marquee"), "no rubber band");
+    assert!(!app.shown("q1/sel-bar"), "nothing selected");
+}
+
 fn wide_vault() -> Vault {
     const ROWS: usize = 3;
     const COLS: usize = 12;

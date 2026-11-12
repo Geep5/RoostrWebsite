@@ -701,7 +701,8 @@ pub(crate) fn view(
         None => article,
     };
     // The table's rubber band arms anywhere on the page (web selection provider).
-    if matches!(kind, Kind::Type | Kind::Query | Kind::Collection) {
+    if matches!(kind, Kind::Type | Kind::Query | Kind::Collection) && !roostr_sets::touch_screen(cx)
+    {
         let drag = id.to_string();
         page = page.on_drag(move |s: &mut State, d: &mut Drag, tx: &mut Tx| {
             roostr_sets::page_drag(s, &drag, d, tx)

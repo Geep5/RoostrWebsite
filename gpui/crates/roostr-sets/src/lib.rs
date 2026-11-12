@@ -708,7 +708,7 @@ pub fn view(
     }
     let escape = id.clone();
     let band = id.clone();
-    col()
+    let view = col()
         .key(format!("{id}/dataview"))
         .w_full()
         .focusable(true)
@@ -719,10 +719,22 @@ pub fn view(
             }
             table::on_view_key(s, &escape, ev, tx)
         })
-        // Anytype's rubber band arms anywhere in the view below its chrome;
-        // interactive parts (buttons, the header, the entry row) take their
-        // own presses first.
-        .on_drag(move |s: &mut State, d: &mut Drag, tx: &mut Tx| table::marquee(s, &band, d, tx))
         .child(chrome)
-        .child(records)
+        .child(records);
+    // Anytype's rubber band arms anywhere in the view below its chrome;
+    // interactive parts (buttons, the header, the entry row) take their own
+    // presses first. Not on a touch screen, where a drag scrolls.
+    if touch_screen(cx) {
+        return view;
+    }
+    view.on_drag(move |s: &mut State, d: &mut Drag, tx: &mut Tx| table::marquee(s, &band, d, tx))
+}
+
+/// A touch screen: the iPhone app, or a phone-width window (a phone's browser). Drags there
+/// scroll, so the rubber band and other press-and-drag selection stay off.
+pub fn touch_screen(cx: &Cx<State>) -> bool {
+    roostr_core::layout::is_touch()
+        || cx
+            .layout_with("kit-root", |r| r[2])
+            .is_some_and(roostr_ui::layout::is_mobile)
 }

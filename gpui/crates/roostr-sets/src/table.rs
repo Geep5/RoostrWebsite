@@ -1641,7 +1641,7 @@ fn body_cell(
             .cursor(Cursor::Pointer)
             .hover(th.hl_light)
             .on_press(move |s: &mut State| on_cell_press(s, &id, &record, &k, checkbox));
-        cell = with_marquee(cell, c.id);
+        cell = with_marquee(cell, c.id, cx);
         // Held, it shrinks; not while its row has a cell editor open.
         if !t.cell_edit.as_ref().is_some_and(|(row, _)| *row == r.id) {
             cell = motion::pressable_row(cell);
@@ -1731,7 +1731,7 @@ fn body_cell(
                 .cursor(Cursor::Pointer)
                 .hover(th.hl_light)
                 .on_press(move |s: &mut State| on_cell_press(s, &id, &record, "serving", false));
-            cell = with_marquee(cell, c.id);
+            cell = with_marquee(cell, c.id, cx);
             if !t.cell_edit.as_ref().is_some_and(|(row, _)| *row == r.id) {
                 cell = motion::pressable_row(cell);
             }
@@ -1740,8 +1740,12 @@ fn body_cell(
     cell
 }
 
-/// The rubber band also arms from the rows' own pressables.
-fn with_marquee(e: El, id: &str) -> El {
+/// The rubber band also arms from the rows' own pressables. Not on a touch screen: an element
+/// that drags takes the finger, so the list under it would never scroll.
+fn with_marquee(e: El, id: &str, cx: &Cx<State>) -> El {
+    if crate::touch_screen(cx) {
+        return e;
+    }
     let id = id.to_string();
     e.on_drag(move |s: &mut State, d: &mut Drag, tx: &mut Tx| marquee(s, &id, d, tx))
 }
@@ -2420,7 +2424,7 @@ fn body_row(
     // (its Name, its cells) each shrink while held; none while the row has a
     // cell editor open.
     let editing = t.cell_edit.as_ref().is_some_and(|(row, _)| *row == r.id);
-    let mut name_cell = with_marquee(name_cell, id);
+    let mut name_cell = with_marquee(name_cell, id, cx);
     if !editing {
         name_cell = motion::pressable_row(name_cell);
     }
@@ -2456,7 +2460,7 @@ fn body_row(
         .on_layout_tx(move |s: &mut State, rect: [f32; 4], tx: &mut Tx| {
             measured(s, &h_id, &h_row, rect[3], tx)
         });
-    with_marquee(line, id)
+    with_marquee(line, id, cx)
 }
 
 /// A drawn row laid out at `h`: kept for the window, the band and the
