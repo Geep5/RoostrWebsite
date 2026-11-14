@@ -307,3 +307,62 @@ fn a_reply_keeps_its_record_folded_and_opens_it_on_click() {
     assert!(record.contains("read_file: README.md"), "{record}");
     assert!(texts_in(&app, "thought-m1").ends_with('▾'));
 }
+
+#[test]
+fn an_open_records_scroll_bar_stays_in_its_box_as_the_chat_scrolls() {
+    let entries: Vec<String> = (0..40)
+        .map(|i| {
+            format!(
+                r#"{{"kind":"thinking","text":"Thought line {i} goes on for a while.","ts":{i}}}"#
+            )
+        })
+        .collect();
+    let meta = BTreeMap::from([
+        ("thinking".to_string(), format!("[{}]", entries.join(","))),
+        ("thought_ms".to_string(), "80000".to_string()),
+    ]);
+    // Enough chat above the reply that the chat itself scrolls.
+    let names: Vec<String> = (0..80).map(|n| format!("e{n}")).collect();
+    let mut lines: Vec<(&str, BTreeMap<String, String>)> = names
+        .iter()
+        .map(|n| (n.as_str(), BTreeMap::new()))
+        .collect();
+    lines.push(("m1", meta));
+    lines.push(("m2", BTreeMap::new()));
+    let (mut app, _tx) = open(page(lines));
+    app.tap("thought-m1");
+    app.settle();
+
+    let thumb = |app: &App| {
+        app.rt
+            .elements()
+            .into_iter()
+            .rev()
+            .find(|e| e.key.as_deref() == Some("thumb"))
+            .expect("the record's scroll bar")
+            .rect
+    };
+    let inside = |app: &App| {
+        let (t, b) = (thumb(app), app.rect("thought-box-m1").expect("the record"));
+        t[1] >= b[1] && t[1] + t[3] <= b[1] + b[3]
+    };
+    // Scrolled to the record's end, then the chat moves under the pointer: the bar moves
+    // with its box, frame by frame, rather than springing after it.
+    let b = app.rect("thought-box-m1").expect("the record");
+    for _ in 0..30 {
+        app.rt.wheel(b[0] + 40., b[1] + b[3] / 2., -60.);
+        app.rt.frame(1.0 / 60.0);
+    }
+    app.settle();
+    assert!(inside(&app), "the bar at the record's end is in its box");
+    for frame in 0..8 {
+        app.rt.wheel(b[0] + 40., b[1] - 200., 60.);
+        app.rt.frame(1.0 / 60.0);
+        assert!(
+            inside(&app),
+            "frame {frame}: the bar {:?} left its box {:?}",
+            thumb(&app),
+            app.rect("thought-box-m1")
+        );
+    }
+}

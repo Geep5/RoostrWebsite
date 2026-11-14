@@ -310,11 +310,14 @@ fn always_bar(t: &Theme, viewport: El, horizontal: bool) -> El {
             el().key("roostr-scroll-bar")
                 .absolute(0.0, 0.0)
                 .live_rect(&bar.strip)
+                // Pinned to its viewport: no spring of its own when a list around it moves.
+                .motion(rune::Spring::NONE)
                 .a11y_hidden()
                 .child(
                     el().key("thumb")
                         .absolute(0.0, 0.0)
                         .live_rect(&bar.thumb)
+                        .motion(rune::Spring::NONE)
                         .radius(THUMB / 2.0)
                         .live_fill(&bar.fill)
                         .on_drag_any(move |d, tx| drag.drag(&key, d, tx))
