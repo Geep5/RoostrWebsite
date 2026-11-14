@@ -548,6 +548,7 @@ fn rich_text(
             .align(align)
             .spans(paints)
             .rich_style(rich)
+            .wrap_anywhere()
             .selectable(true)
             .selection_color(t.mark)
             .on_link(|s: &mut State, url: &str, tx| keys::open_link(s, url, tx));
@@ -577,6 +578,8 @@ fn rich_text(
         .color(look.color)
         .caret(t.fg, t.mark)
         .placeholder(placeholder, t.muted.alpha(0.6))
+        // A word wider than the line (a key, a long link) breaks inside the block's edge.
+        .wrap_anywhere()
         .rich_style(rich)
         .spans(paints)
         .on_edit(move |s: &mut State| edit_of(s, &eo, &ei))

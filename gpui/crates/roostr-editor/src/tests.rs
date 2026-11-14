@@ -668,3 +668,28 @@ fn scrolling_a_long_page_past_an_open_toggle_moves_its_blocks_together() {
         before = now;
     }
 }
+
+#[test]
+fn a_long_unbroken_word_in_a_code_block_wraps_inside_it() {
+    let key = format!(
+        "sk-ant-api03-{}",
+        "DiOCsQyW2ledhy8LFnR0kovMwQWBdIWIVqgNqKvuLdOkkP5fnzmZ67".repeat(4)
+    );
+    let mut code = text_block("code", &key, Vec::new());
+    code.content.text.as_mut().unwrap().style = roostr_core::types::style::CODE;
+    let vault = Vault::new(vec![code]);
+    let rt = open(&vault);
+    let rect = |k: &str| {
+        rt.elements()
+            .into_iter()
+            .find(|e| e.key.as_deref() == Some(k))
+            .unwrap_or_else(|| panic!("{k} is drawn"))
+            .rect
+    };
+    let (row, text) = (rect("block-code"), rect("text-code"));
+    assert!(
+        text[0] + text[2] <= row[0] + row[2] + 0.5,
+        "the key runs past its block: text {text:?} in {row:?}"
+    );
+    assert!(text[3] > 40., "the key wraps onto more lines: {text:?}");
+}
