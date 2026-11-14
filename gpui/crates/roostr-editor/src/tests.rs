@@ -671,10 +671,8 @@ fn scrolling_a_long_page_past_an_open_toggle_moves_its_blocks_together() {
 
 #[test]
 fn a_long_unbroken_word_in_a_code_block_wraps_inside_it() {
-    let key = format!(
-        "sk-ant-api03-{}",
-        "DiOCsQyW2ledhy8LFnR0kovMwQWBdIWIVqgNqKvuLdOkkP5fnzmZ67".repeat(4)
-    );
+    // No hyphen or space to break at: only a break inside the word keeps it in the block.
+    let key = "DiOCsQyW2ledhy8LFnR0kovMwQWBdIWIVqgNqKvuLdOkkP5fnzmZ67".repeat(4);
     let mut code = text_block("code", &key, Vec::new());
     code.content.text.as_mut().unwrap().style = roostr_core::types::style::CODE;
     let vault = Vault::new(vec![code]);
