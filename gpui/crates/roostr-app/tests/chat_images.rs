@@ -322,3 +322,59 @@ fn a_pasted_image_goes_with_the_next_message() {
     assert_eq!(posts[1]["text"], json!(""));
     assert_eq!(posts[1]["files"], json!(["file-9"]));
 }
+
+#[test]
+fn an_image_dragged_onto_the_chat_is_attached_to_the_next_message() {
+    let line = BTreeMap::from([
+        ("author".to_string(), "someone".to_string()),
+        ("ts".to_string(), "1000".to_string()),
+        ("text".to_string(), "Send me the screenshot".to_string()),
+    ]);
+    let vault = Vault::new(vec![page(vec![line])]);
+    let mut app = App::open_with(Arc::new(Handle(vault.clone())), 1568., 934., |s| {
+        s.add_file = Some(AddFile(Rc::new(
+            |name, mime, _bytes, space, s: &mut State| {
+                s.slot::<Uploads>().0.push((name, mime, space));
+                Task::ready(Ok("file-9".to_string()))
+            },
+        )));
+    });
+    app.navigate(Route::Object(PAGE.into()));
+    let dir = std::env::temp_dir().join(format!("roostr-chat-drop-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let photo = dir.join("photo.png");
+    std::fs::write(&photo, PNG).expect("write the image");
+
+    // Over a message, well above the composer: the whole chat outlines as the drop target.
+    app.settle();
+    let message = app.rect("msg-text-m0").expect("the message is drawn");
+    let over = (message[0] + 20., message[1] + message[3] / 2.);
+    app.rt.drag_files(vec![photo.clone()], Some(over));
+    app.settle();
+    let outline = keys(&app).into_iter().find(|k| k.ends_with("/drop-over"));
+    assert!(outline.is_some(), "no drop outline over the chat");
+
+    // Dropped there, it waits above the field and goes with the next message.
+    app.rt.drop_files(vec![photo], Some(over));
+    app.settle();
+    assert!(
+        !keys(&app).iter().any(|k| k.ends_with("/drop-over")),
+        "the outline stays after the drop"
+    );
+    let uploads = app.state().slot::<Uploads>().0.clone();
+    assert_eq!(uploads.len(), 1, "the dropped image was not uploaded");
+    assert_eq!(
+        (uploads[0].0.as_str(), uploads[0].1.as_str()),
+        ("photo.png", "image/png")
+    );
+    assert!(
+        key_starting(&app, "attachment-").is_some(),
+        "no attachment above the field"
+    );
+    app.tap("composer");
+    app.rt.paste("Here");
+    app.key(Key::Enter);
+    let posts = vault.posts();
+    assert_eq!(posts.last().expect("a post")["files"], json!(["file-9"]));
+    std::fs::remove_dir_all(&dir).ok();
+}

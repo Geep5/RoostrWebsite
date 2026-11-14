@@ -268,6 +268,8 @@ pub(crate) struct Disc {
     pub outgoing: Option<ChatMessage>,
     /// Files pasted or dropped into the composer, going with the next message.
     pub attachments: Vec<Attachment>,
+    /// Files dragged from another app are over the chat: it shows where they'll go.
+    pub drop_over: bool,
     /// The shown messages' Files, by id, as far as they have loaded.
     pub chat_files: HashMap<String, ChatFile>,
 
@@ -418,6 +420,7 @@ pub(crate) fn create(s: &mut State, key: String, object_id: String, options: Dis
         pending_send: None,
         outgoing: None,
         attachments: Vec::new(),
+        drop_over: false,
         chat_files: HashMap::new(),
         tag_options: None,
         tag_loading: None,

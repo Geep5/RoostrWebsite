@@ -529,6 +529,7 @@ pub(crate) fn view(
             root = root.child(audience(d, s, t, layer));
         }
         root = root.child(composer(d, s, cx, t, layer));
+        root = file_drop(d, t, root);
     }
     react_bar(d, s, cx, t, layer, window);
     root
@@ -1997,7 +1998,7 @@ fn composer(d: &Disc, s: &State, cx: &mut Cx<State>, t: &Theme, layer: &mut Vec<
             });
         })
         .child(glyph(Glyph::KitArrowUp, 16.).color(colors.ink));
-    let mut frame = col()
+    let frame = col()
         .key(composer_box_key(&key))
         .fill(t.panel)
         .border(1., t.border)
@@ -2016,16 +2017,47 @@ fn composer(d: &Disc, s: &State, cx: &mut Cx<State>, t: &Theme, layer: &mut Vec<
                 .child(el())
                 .child(send),
         );
-    if d.takes_files() {
-        let k_drop = key.clone();
-        frame = frame.on_drop_files(
+    frame
+}
+
+/// Files dropped anywhere on the chat (its messages or its composer) go with the next
+/// message; while a drag is over it, an outline says so.
+fn file_drop(d: &Disc, t: &Theme, root: El) -> El {
+    if !d.takes_files() {
+        return root;
+    }
+    let (k_drop, k_hover) = (d.key.clone(), d.key.clone());
+    let mut root = root
+        .on_drop_files(
             move |s: &mut State, files: &[std::path::PathBuf], _: &mut Tx| {
                 let files = files.to_vec();
-                with(s, &k_drop, |d, s| d.drop_files(files, s));
+                with(s, &k_drop, |d, s| {
+                    d.drop_over = false;
+                    d.drop_files(files, s)
+                });
             },
+        )
+        .on_drop_hover(move |s: &mut State, over: bool, _: &mut Tx| {
+            with(s, &k_hover, |d, _| d.drop_over = over);
+        });
+    if d.drop_over {
+        root = root.child(
+            row()
+                .key(path(&d.key, "drop-over"))
+                .pin(Some(0.), Some(0.), Some(0.), Some(0.))
+                .center()
+                .radius(radius::MENU)
+                .border(2., t.accent)
+                .fill(t.accent.alpha(0.08))
+                .inert()
+                .child(
+                    text("Drop to attach")
+                        .font(ty::ui(14.).semibold())
+                        .color(t.accent),
+                ),
         );
     }
-    frame
+    root
 }
 
 /// The files going with the next message, above the field: an image as a thumbnail, any
