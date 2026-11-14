@@ -430,16 +430,31 @@ impl Navigator {
     }
 
     /// `tabs.open(path, background)`. A page opened in a tab of its own pins that tab to it
-    /// ([`Tab::pinned`]); the space home doesn't.
+    /// ([`Tab::pinned`]); the space home doesn't. A page already open isn't opened twice:
+    /// its tab is pinned and shown, and the page this tab shows (not yet in a tab of its own)
+    /// moves to a new pinned tab beside it, this tab going back to the space home.
     pub fn open_tab(&mut self, route: Route, background: bool, ui: &mut UiState) {
         self.reopened(&route);
         let pinned = one_tab(&route);
-        // Already open: pin and show that tab (a background open only pins it).
         if pinned && let Some(open) = self.tabs.iter().position(|t| t.route == route) {
-            self.tabs[open].pinned = true;
-            if background {
+            let here = open == self.active && self.loose.is_none() && !self.phone;
+            if here && !self.tabs[open].pinned {
+                let uid = self.uid();
+                self.tabs[open].route = Route::Home;
+                self.tabs.insert(
+                    open + 1,
+                    Tab {
+                        uid,
+                        route,
+                        pinned: true,
+                    },
+                );
+                self.active = open + 1;
                 self.save(ui);
+                self.events.push(NavEvent::TabsChanged);
             } else {
+                self.tabs[open].pinned = true;
+                self.save(ui);
                 self.activate(open, ui);
             }
             return;
@@ -960,11 +975,12 @@ mod tests {
         nav.navigate(a.clone(), &mut ui);
         assert_eq!(routes(&nav), ["/app/object/a", "/app/object/b"]);
         assert_eq!(nav.active_index(), 0);
-        // Opening `b` in a new tab shows its tab; in the background, nothing changes.
+        // Opening an open page in a new tab, in the background too, shows its tab.
         nav.open_tab(b.clone(), false, &mut ui);
         assert_eq!((routes(&nav).len(), nav.active_index()), (2, 1));
         nav.open_tab(a.clone(), true, &mut ui);
-        assert_eq!((routes(&nav).len(), nav.active_index()), (2, 1));
+        assert_eq!((routes(&nav).len(), nav.active_index()), (2, 0));
+        nav.activate(1, &mut ui);
         // Back returns to `a`'s tab rather than turning `b`'s tab into a second `a`.
         nav.back(&mut ui);
         assert_eq!(routes(&nav), ["/app/object/a", "/app/object/b"]);
@@ -1027,6 +1043,22 @@ mod tests {
         nav.activate(0, &mut ui);
         nav.replace(Route::Object("c2".into()), &mut ui);
         assert_eq!(routes(&nav)[0], "/app/object/c2");
+    }
+
+    #[test]
+    fn opening_the_page_this_tab_shows_in_a_new_tab_moves_it_to_one() {
+        let (mut nav, mut ui) = navigator();
+        let a = Route::Object("a".into());
+        nav.navigate(a.clone(), &mut ui);
+        nav.open_tab(a.clone(), true, &mut ui);
+        // `a` now has a pinned tab of its own, shown; the tab it was in is the home again.
+        assert_eq!(routes(&nav), ["/app", "/app/object/a"]);
+        assert_eq!(nav.active_index(), 1);
+        assert!(nav.tabs()[1].pinned && !nav.tabs()[0].pinned);
+        assert_eq!(*nav.route(), a);
+        // Again: it's already in a tab of its own, so nothing changes.
+        nav.open_tab(a.clone(), true, &mut ui);
+        assert_eq!(routes(&nav), ["/app", "/app/object/a"]);
     }
 
     #[test]
