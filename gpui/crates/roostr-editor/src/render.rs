@@ -252,24 +252,31 @@ fn windowed_blocks(
             gap += h;
             continue;
         }
+        // Every child keyed: a spacer coming or going around a block must not make Rune
+        // take the block for a new one (it would fade a copy out where it was and lay the
+        // block out afresh, an open toggle's whole subtree with it).
         if gap > 0. {
-            blocks.push(el().h(gap));
+            blocks.push(el().key(format!("gap-before-{id}")).h(gap));
             gap = 0.;
         }
         if let Some(block) = render_block(id, f, s, cx, layer) {
             let (oid, rid) = (f.oid(), id.clone());
-            blocks.push(col().w_full().child(block).on_layout_tx(
-                move |s: &mut State, rect, tx| {
-                    with_editor(s, &oid, |e, _| {
-                        e.block_heights.insert(rid.clone(), rect[3]);
-                    });
-                    tx.live_only();
-                },
-            ));
+            blocks.push(
+                col()
+                    .key(format!("root-{id}"))
+                    .w_full()
+                    .child(block)
+                    .on_layout_tx(move |s: &mut State, rect, tx| {
+                        with_editor(s, &oid, |e, _| {
+                            e.block_heights.insert(rid.clone(), rect[3]);
+                        });
+                        tx.live_only();
+                    }),
+            );
         }
     }
     if gap > 0. {
-        blocks.push(el().h(gap));
+        blocks.push(el().key("gap-end").h(gap));
     }
     blocks
 }

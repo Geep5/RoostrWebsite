@@ -559,13 +559,22 @@ fn the_paste_as_menu_opens_under_the_block_pasted_into() {
     rt.paste_content(rune::ClipboardContent::new("https://www.twingate.com/"));
     settle(&mut rt);
     rt.frame(1. / 60.);
-    let block = rt.presented("block-p6").map(|p| p.0).expect("the block pasted into");
-    let item = rt.presented("paste-link").map(|p| p.0).expect("the Paste as menu is open");
+    let block = rt
+        .presented("block-p6")
+        .map(|p| p.0)
+        .expect("the block pasted into");
+    let item = rt
+        .presented("paste-link")
+        .map(|p| p.0)
+        .expect("the Paste as menu is open");
     assert!(
         item[1] > block[1] && item[1] < block[1] + block[3] + 140.,
         "the menu sits under its block: menu item at {item:?}, block at {block:?}"
     );
-    assert!(item[0] >= block[0] - 1., "and not left of the page: {item:?} vs {block:?}");
+    assert!(
+        item[0] >= block[0] - 1.,
+        "and not left of the page: {item:?} vs {block:?}"
+    );
 }
 
 /// A web link in a page's text opens in the browser when clicked. Field
@@ -573,7 +582,12 @@ fn the_paste_as_menu_opens_under_the_block_pasted_into() {
 #[test]
 fn a_link_in_page_text_opens_on_click() {
     const URL: &str = "https://example.com/page-link";
-    let link = Mark { from: 6, to: 13, kind: mark::LINK, param: Some(URL.into()) };
+    let link = Mark {
+        from: 6,
+        to: 13,
+        kind: mark::LINK,
+        param: Some(URL.into()),
+    };
     let vault = Vault::new(vec![text_block("p0", "Visit example now", vec![link])]);
     let mut rt = open(&vault);
     let (x, y) = rt.find(URL).expect("the link is drawn");
@@ -583,5 +597,74 @@ fn a_link_in_page_text_opens_on_click() {
     rt.pointer_up(x, y);
     rt.state.poll();
     rt.frame(1. / 60.);
-    assert_eq!(rt.take_url_requests(), vec![URL.to_string()], "the click opened nothing");
+    assert_eq!(
+        rt.take_url_requests(),
+        vec![URL.to_string()],
+        "the click opened nothing"
+    );
+}
+
+#[test]
+fn scrolling_a_long_page_past_an_open_toggle_moves_its_blocks_together() {
+    // Ten lines, an open toggle of 120 lines, then 150 more: the page builds only what's near
+    // the window, and spacers stand in for the rest as it scrolls.
+    let mut blocks: Vec<Block> = (0..10)
+        .map(|i| text_block(&format!("p{i}"), &format!("Top {i}"), Vec::new()))
+        .collect();
+    let mut toggle = text_block("tg", "Logins", Vec::new());
+    toggle.content.text.as_mut().unwrap().style = roostr_core::types::style::TOGGLE;
+    toggle.children_ids = (0..120).map(|i| format!("c{i}")).collect();
+    blocks.push(toggle);
+    blocks
+        .extend((0..120).map(|i| text_block(&format!("c{i}"), &format!("Inside {i}"), Vec::new())));
+    blocks
+        .extend((0..150).map(|i| text_block(&format!("q{i}"), &format!("After {i}"), Vec::new())));
+    let vault = Vault::new(blocks);
+    let mut rt = open(&vault);
+    click(&mut rt, "toggle-tg");
+    settle(&mut rt);
+    assert!(
+        crate::toggles::is_toggle_open(PAGE, "tg", &rt.state.ui),
+        "the toggle opened"
+    );
+    for _ in 0..60 {
+        rt.frame(1. / 60.);
+    }
+
+    // Each on-screen block's top, and how many blocks are fading out as copies.
+    let shown = |rt: &Runtime<State>| {
+        let mut tops = std::collections::HashMap::new();
+        let mut ghosts = 0;
+        for e in rt.elements() {
+            let Some(id) = e.key.as_deref().and_then(|k| k.strip_prefix("block-")) else {
+                continue;
+            };
+            if e.exiting {
+                ghosts += 1;
+            } else if (-50.0..750.0).contains(&e.rect[1]) {
+                tops.insert(id.to_string(), e.rect[1]);
+            }
+        }
+        (tops, ghosts)
+    };
+    let (mut before, _) = shown(&rt);
+    for step in 0..200 {
+        rt.pointer_move(700., 400.);
+        rt.wheel(700., 400., -30.);
+        rt.state.poll();
+        rt.frame(1. / 60.);
+        let (now, ghosts) = shown(&rt);
+        assert_eq!(ghosts, 0, "step {step}: blocks fade out as copies");
+        let moved: Vec<f32> = now
+            .iter()
+            .filter_map(|(id, y)| before.get(id).map(|b| y - b))
+            .collect();
+        let spread = moved.iter().copied().fold(f32::MIN, f32::max)
+            - moved.iter().copied().fold(f32::MAX, f32::min);
+        assert!(
+            moved.is_empty() || spread < 0.5,
+            "step {step}: the blocks on screen moved apart ({spread}pt)"
+        );
+        before = now;
+    }
 }
