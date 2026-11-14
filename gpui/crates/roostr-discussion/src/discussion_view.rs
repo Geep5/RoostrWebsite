@@ -109,6 +109,14 @@ fn avatar_color(author: &str) -> Color {
     roostr_ui::color::hsla(hue(author) as f32 / 360., 0.45, 0.35, 1.)
 }
 
+/// An author's name in their colour (their chat colour, else their avatar's hue), lightened
+/// or darkened to read on the theme, so each group's start is easy to spot.
+fn name_color(t: &Theme, base: Color) -> Color {
+    let [h, s, _, _] = roostr_ui::color::to_hsla(base);
+    let l = if t.dark { 0.74 } else { 0.36 };
+    roostr_ui::color::hsla(h, s.max(0.45), l, 1.)
+}
+
 /// An avatar: an image icon (a web address or `data:image/` URL) is its picture; else the
 /// emoji, else the initials on the author's stable hue.
 fn avatar(
@@ -688,20 +696,28 @@ fn message_row(
     .font(ty::ui(11.).lh(11. * 1.618))
     .color(t.muted);
     let name = d.who(&m.author, store);
+    let name_ink = name_color(
+        t,
+        if tinted {
+            colors.bg
+        } else {
+            avatar_color(&m.author)
+        },
+    );
     let name_el = if d.author_links(&m.author, store) {
         let target = m.author.clone();
         roostr_ui::Link::new(format!("author-{ix}"))
             .label(name)
             .text_size(14.)
             .weight(ty::SEMIBOLD)
-            .color(t.fg)
+            .color(name_ink)
             .plain()
             .on_press(move |s: &mut State| nav::navigate(Route::Object(target.clone()), s))
             .build(t)
     } else {
         text(name)
             .font(ty::ui(14.).semibold().lh(14. * 1.4))
-            .color(t.fg)
+            .color(name_ink)
     };
     let meta = (!grouped || sending).then(|| row().items_end().gap(8.).child(name_el).child(time));
 
@@ -816,25 +832,23 @@ fn message_row(
     } else {
         row_avatar(d, s, t, images, &m.author, ix)
     };
-    row()
+    let message = row()
         .w_full()
         .items_start()
         .gap(12.)
         .px(8.)
         .py(2.)
-        .mt(if ix == 0 {
-            2.
-        } else if grouped {
-            0.
-        } else {
-            12.
-        })
         .radius(6.)
         .hover_group()
         .hover(t.hover)
         .child(lead)
         .child(column)
-        .children(actions)
+        .children(actions);
+    // Room above each author's group, outside the row's hover.
+    col()
+        .w_full()
+        .pt(if grouped { 0. } else { 18. })
+        .child(message)
 }
 
 /// The progress text's line height: the box shows [`PROGRESS_LINES`] of them.
