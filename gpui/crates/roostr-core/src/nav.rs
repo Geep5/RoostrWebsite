@@ -33,6 +33,10 @@ const TABS_KEY: &str = "roostr.tabs.spaces";
 const ACTIVE_SPACE_KEY: &str = "glon.channel";
 /// The space home's path: a strip of only this tab has nothing open.
 const HOME_PATH: &str = "/app";
+/// The browsing tab: the strip's first. Going somewhere (a sidebar click, a link, Back) shows
+/// the page there, unless another tab shows it; the other tabs keep the pages they were opened
+/// on ([`Navigator::open_tab`]).
+pub const BROWSING: usize = 0;
 
 /// The preferences field holding the open tabs ([`OpenTabs`]).
 pub const OPEN_TABS_FIELD: &str = "open_tabs";
@@ -209,9 +213,6 @@ pub struct Tab {
     /// Process-local identity (survives reordering).
     pub uid: u64,
     pub route: Route,
-    /// Opened in a tab of its own ([`Navigator::open_tab`]): the tab keeps its page, and going
-    /// somewhere else from it opens a tab beside it.
-    pub pinned: bool,
 }
 
 /// A space's strip as this device keeps it.
@@ -225,8 +226,6 @@ struct Saved {
     /// The selected tab's path: the selection by route, where the strip
     /// changed since.
     active_path: String,
-    /// The paths of the strip's pinned tabs ([`Tab::pinned`]; this device's own).
-    pinned: Vec<String>,
     /// `paths` follows the shared list. A strip saved before tabs synced (or
     /// changed before this launch first read them) merges into the shared
     /// list once, at the first read.
@@ -282,7 +281,6 @@ impl Navigator {
             tabs: vec![Tab {
                 uid: 1,
                 route: Route::Home,
-                pinned: false,
             }],
             active: 0,
             space: String::new(),
@@ -353,8 +351,8 @@ impl Navigator {
         self.show(route, false, ui);
     }
 
-    /// Show `route`: in the tab already showing it, else in the active tab, or, when that tab
-    /// is pinned (and not `in_place`), in a new tab beside it.
+    /// Show `route`: in the tab already showing it, else in the browsing tab ([`BROWSING`]),
+    /// or with `in_place` (a redirect) in the active tab.
     fn show(&mut self, route: Route, in_place: bool, ui: &mut UiState) {
         self.reopened(&route);
         if self.phone {
@@ -370,24 +368,13 @@ impl Navigator {
         self.events.push(NavEvent::Navigated);
     }
 
-    /// Put `route` in the active tab, or, when that tab is pinned to another page (and not
-    /// `in_place`), in a new tab right after it, which becomes the active one.
+    /// Put `route` in the browsing tab and show it there; with `in_place`, in the active tab.
+    /// The other tabs keep their pages.
     fn put(&mut self, route: Route, in_place: bool) {
-        let tab = &mut self.tabs[self.active];
-        if !tab.pinned || in_place || tab.route == route {
-            tab.route = route;
-            return;
+        if !in_place {
+            self.active = BROWSING;
         }
-        let uid = self.uid();
-        self.active += 1;
-        self.tabs.insert(
-            self.active,
-            Tab {
-                uid,
-                route,
-                pinned: false,
-            },
-        );
+        self.tabs[self.active].route = route;
     }
 
     /// The tab other than the active one that already shows `route`, for a route that gets
@@ -429,33 +416,31 @@ impl Navigator {
         }
     }
 
-    /// `tabs.open(path, background)`. A page opened in a tab of its own pins that tab to it
-    /// ([`Tab::pinned`]); the space home doesn't. A page already open isn't opened twice:
-    /// its tab is pinned and shown, and the page this tab shows (not yet in a tab of its own)
-    /// moves to a new pinned tab beside it, this tab going back to the space home.
+    /// `tabs.open(path, background)`: a tab of its own for `route`, at the end of the strip. A
+    /// page already open isn't opened twice: its tab shows, or, when it's the browsing tab's,
+    /// it moves to a tab of its own and the browsing tab goes back to the space home.
     pub fn open_tab(&mut self, route: Route, background: bool, ui: &mut UiState) {
         self.reopened(&route);
-        let pinned = one_tab(&route);
-        if pinned && let Some(open) = self.tabs.iter().position(|t| t.route == route) {
-            let here = open == self.active && self.loose.is_none() && !self.phone;
-            if here && !self.tabs[open].pinned {
-                let uid = self.uid();
-                self.tabs[open].route = Route::Home;
-                self.tabs.insert(
-                    open + 1,
-                    Tab {
-                        uid,
-                        route,
-                        pinned: true,
-                    },
-                );
-                self.active = open + 1;
+        if one_tab(&route)
+            && let Some(open) = self.tabs.iter().position(|t| t.route == route)
+        {
+            if open != BROWSING || self.phone {
+                self.activate(open, ui);
+                return;
+            }
+            let following = self.active == BROWSING && self.loose.is_none() && !self.phone;
+            let uid = self.uid();
+            self.tabs[BROWSING].route = Route::Home;
+            self.tabs.push(Tab { uid, route });
+            if following {
+                self.active = self.tabs.len() - 1;
+                self.save(ui);
+                self.events.push(NavEvent::TabsChanged);
+            } else if background {
                 self.save(ui);
                 self.events.push(NavEvent::TabsChanged);
             } else {
-                self.tabs[open].pinned = true;
-                self.save(ui);
-                self.activate(open, ui);
+                self.activate(self.tabs.len() - 1, ui);
             }
             return;
         }
@@ -463,7 +448,6 @@ impl Navigator {
         self.tabs.push(Tab {
             uid,
             route: route.clone(),
-            pinned,
         });
         if background {
             self.save(ui);
@@ -490,14 +474,15 @@ impl Navigator {
         self.events.push(NavEvent::Navigated);
     }
 
-    /// Reorder: `to` is the index in the list without the moved tab.
+    /// Reorder: `to` is the index in the list without the moved tab. The browsing tab stays
+    /// first.
     pub fn move_tab(&mut self, from: usize, to: usize, ui: &mut UiState) {
-        if from >= self.tabs.len() {
+        if from >= self.tabs.len() || from == BROWSING {
             return;
         }
         let active_uid = self.tabs[self.active].uid;
         let tab = self.tabs.remove(from);
-        let to = to.min(self.tabs.len());
+        let to = to.clamp(BROWSING + 1, self.tabs.len());
         self.tabs.insert(to, tab);
         self.active = self
             .tabs
@@ -508,13 +493,19 @@ impl Navigator {
     }
 
     /// Close tab `index`. The selection moves to its right neighbour, else
-    /// its left; closing the last tab leaves the space home. On a phone the
-    /// screen stays.
+    /// its left; closing the last tab leaves the space home. The browsing tab
+    /// stays, back at the space home. On a phone the screen stays.
     pub fn close(&mut self, index: usize, ui: &mut UiState) {
         if index >= self.tabs.len() {
             return;
         }
         let before = self.route().clone();
+        if index == BROWSING && self.tabs.len() > 1 && !self.phone {
+            self.tabs[BROWSING].route = Route::Home;
+            self.save(ui);
+            self.strip_changed(before);
+            return;
+        }
         if self.phone && index == self.active && self.loose.is_none() {
             self.loose = Some(before.clone());
         }
@@ -524,7 +515,6 @@ impl Navigator {
             self.tabs.push(Tab {
                 uid,
                 route: Route::Home,
-                pinned: false,
             });
             self.active = 0;
         } else if index < self.active {
@@ -558,7 +548,6 @@ impl Navigator {
             tabs.push(Tab {
                 uid,
                 route: Route::parse(path),
-                pinned: saved.pinned.contains(path),
             });
         }
         if tabs.is_empty() {
@@ -566,7 +555,6 @@ impl Navigator {
             tabs.push(Tab {
                 uid,
                 route: Route::Home,
-                pinned: false,
             });
         }
         self.active = tabs
@@ -750,11 +738,6 @@ impl Navigator {
             return;
         }
         let before = self.route().clone();
-        let pinned = self
-            .saved
-            .get(&self.space)
-            .map(|saved| saved.pinned.clone())
-            .unwrap_or_default();
         // Each old tab claims its route's first free place, the selected tab first.
         let mut slots: Vec<Option<Tab>> = vec![None; paths.len()];
         let mut kept_at: Vec<Option<usize>> = vec![None; old.len()];
@@ -779,7 +762,6 @@ impl Navigator {
                 None => Tab {
                     uid: self.uid(),
                     route: Route::parse(path),
-                    pinned: pinned.contains(path),
                 },
             };
             tabs.push(tab);
@@ -832,12 +814,6 @@ impl Navigator {
         }
         saved.active = self.active;
         saved.active_path = self.tabs[self.active].route.path();
-        saved.pinned = self
-            .tabs
-            .iter()
-            .filter(|t| t.pinned)
-            .map(|t| t.route.path())
-            .collect();
         ui.set(TABS_KEY, &self.saved);
     }
 }
@@ -975,12 +951,9 @@ mod tests {
         nav.navigate(a.clone(), &mut ui);
         assert_eq!(routes(&nav), ["/app/object/a", "/app/object/b"]);
         assert_eq!(nav.active_index(), 0);
-        // Opening an open page in a new tab, in the background too, shows its tab.
+        // Opening an open page in a new tab shows its tab.
         nav.open_tab(b.clone(), false, &mut ui);
         assert_eq!((routes(&nav).len(), nav.active_index()), (2, 1));
-        nav.open_tab(a.clone(), true, &mut ui);
-        assert_eq!((routes(&nav).len(), nav.active_index()), (2, 0));
-        nav.activate(1, &mut ui);
         // Back returns to `a`'s tab rather than turning `b`'s tab into a second `a`.
         nav.back(&mut ui);
         assert_eq!(routes(&nav), ["/app/object/a", "/app/object/b"]);
@@ -992,83 +965,63 @@ mod tests {
     }
 
     #[test]
-    fn a_page_opened_in_its_own_tab_stays_there_and_links_from_it_open_beside_it() {
+    fn going_somewhere_shows_it_in_the_browsing_tab_and_the_other_tabs_keep_their_pages() {
         let (mut nav, mut ui) = navigator();
-        let (a, b, c) = (
-            Route::Object("a".into()),
-            Route::Object("b".into()),
-            Route::Object("c".into()),
-        );
-        // The home tab isn't pinned: a link goes there in place.
-        nav.navigate(c.clone(), &mut ui);
+        let obj = |id: &str| Route::Object(id.into());
+        // The browsing tab (first) moves on in place.
+        nav.navigate(obj("c"), &mut ui);
         assert_eq!(routes(&nav), ["/app/object/c"]);
-        // `a` opened in a tab of its own; a link from it opens `b` in a new tab right after it.
-        nav.open_tab(a.clone(), false, &mut ui);
-        nav.navigate(b.clone(), &mut ui);
-        assert_eq!(
-            routes(&nav),
-            ["/app/object/c", "/app/object/a", "/app/object/b"]
-        );
-        assert_eq!(nav.active_index(), 2);
-        // `b`'s tab came from a link, not "open in new tab": it moves on in place.
-        nav.navigate(Route::Graph { focus: None }, &mut ui);
-        assert_eq!(
-            routes(&nav),
-            ["/app/object/c", "/app/object/a", "/app/graph"]
-        );
-        // From `a`'s tab, a page another tab shows switches to that tab; Back from there
-        // returns to `a`'s tab, which still shows `a`.
-        nav.activate(1, &mut ui);
-        nav.navigate(c.clone(), &mut ui);
-        assert_eq!(nav.active_index(), 0);
-        nav.back(&mut ui);
+        // "Respond to PayPal" opened in a tab of its own; from there the sidebar opens `b`:
+        // it shows in the browsing tab, which becomes the active one.
+        nav.open_tab(obj("paypal"), false, &mut ui);
         assert_eq!(nav.active_index(), 1);
-        assert_eq!(
-            routes(&nav),
-            ["/app/object/c", "/app/object/a", "/app/graph"]
-        );
-        // Opening an open page in a new tab pins the tab it's in.
-        nav.open_tab(c.clone(), false, &mut ui);
-        nav.navigate(b.clone(), &mut ui);
-        assert_eq!(
-            routes(&nav),
-            [
-                "/app/object/c",
-                "/app/object/b",
-                "/app/object/a",
-                "/app/graph"
-            ]
-        );
-        // A redirect (`replace`) stays in place even in a pinned tab.
-        nav.activate(0, &mut ui);
-        nav.replace(Route::Object("c2".into()), &mut ui);
-        assert_eq!(routes(&nav)[0], "/app/object/c2");
+        nav.navigate(obj("b"), &mut ui);
+        assert_eq!(routes(&nav), ["/app/object/b", "/app/object/paypal"]);
+        assert_eq!(nav.active_index(), BROWSING);
+        // A page another tab shows switches to that tab, which keeps its page.
+        nav.navigate(obj("paypal"), &mut ui);
+        assert_eq!(nav.active_index(), 1);
+        assert_eq!(routes(&nav), ["/app/object/b", "/app/object/paypal"]);
+        // Back from there goes to the browsing tab's page.
+        nav.back(&mut ui);
+        assert_eq!(nav.active_index(), BROWSING);
+        assert_eq!(routes(&nav), ["/app/object/b", "/app/object/paypal"]);
+        // A redirect (`replace`) stays in the tab it's in.
+        nav.activate(1, &mut ui);
+        nav.replace(obj("paypal2"), &mut ui);
+        assert_eq!(routes(&nav), ["/app/object/b", "/app/object/paypal2"]);
     }
 
     #[test]
-    fn opening_the_page_this_tab_shows_in_a_new_tab_moves_it_to_one() {
+    fn opening_the_browsing_tabs_page_in_a_new_tab_moves_it_to_one() {
         let (mut nav, mut ui) = navigator();
         let a = Route::Object("a".into());
         nav.navigate(a.clone(), &mut ui);
         nav.open_tab(a.clone(), true, &mut ui);
-        // `a` now has a pinned tab of its own, shown; the tab it was in is the home again.
+        // `a` has a tab of its own, shown; the browsing tab is back at the space home.
         assert_eq!(routes(&nav), ["/app", "/app/object/a"]);
         assert_eq!(nav.active_index(), 1);
-        assert!(nav.tabs()[1].pinned && !nav.tabs()[0].pinned);
         assert_eq!(*nav.route(), a);
-        // Again: it's already in a tab of its own, so nothing changes.
+        // Again: it's in a tab of its own already, so nothing changes.
         nav.open_tab(a.clone(), true, &mut ui);
         assert_eq!(routes(&nav), ["/app", "/app/object/a"]);
     }
 
     #[test]
-    fn pinned_tabs_stay_pinned_when_the_space_reopens() {
+    fn the_browsing_tab_stays_first_and_closing_it_only_empties_it() {
         let (mut nav, mut ui) = navigator();
-        nav.open_tab(Route::Object("a".into()), false, &mut ui);
-        let mut again = Navigator::new(&ui);
-        again.use_space("sp", &mut ui);
-        let pinned: Vec<bool> = again.tabs().iter().map(|t| t.pinned).collect();
-        assert_eq!(pinned, [false, true]);
+        nav.navigate(Route::Object("a".into()), &mut ui);
+        nav.open_tab(Route::Object("b".into()), true, &mut ui);
+        nav.open_tab(Route::Object("c".into()), true, &mut ui);
+        // Neither dragged away nor passed.
+        nav.move_tab(0, 2, &mut ui);
+        nav.move_tab(2, 0, &mut ui);
+        assert_eq!(
+            routes(&nav),
+            ["/app/object/a", "/app/object/c", "/app/object/b"]
+        );
+        nav.close(0, &mut ui);
+        assert_eq!(routes(&nav), ["/app", "/app/object/c", "/app/object/b"]);
     }
 
     #[test]

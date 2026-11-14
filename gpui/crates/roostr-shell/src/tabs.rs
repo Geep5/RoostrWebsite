@@ -3,7 +3,7 @@
 //! middle-click close, separators hidden beside the active tab.
 
 use roostr_core::State;
-use roostr_core::nav::Route;
+use roostr_core::nav::{BROWSING, Route};
 use roostr_core::objects::{object_icon, type_glyph};
 use std::collections::HashMap;
 
@@ -124,7 +124,10 @@ impl TabDrag {
     /// The pointer is `dx` along the strip from the press on tab `index` of `uids`.
     fn moved(&mut self, uids: &[u64], index: usize, dx: f32) {
         let rect = |i: usize| self.rects.get(&uids[i]).copied();
-        let (Some(own), Some(first), Some(last)) = (rect(index), rect(0), rect(uids.len() - 1))
+        // The browsing tab stays first: a dragged tab stops after it.
+        let first_movable = (BROWSING + 1).min(uids.len() - 1);
+        let (Some(own), Some(first), Some(last)) =
+            (rect(index), rect(first_movable), rect(uids.len() - 1))
         else {
             return;
         };
@@ -146,14 +149,16 @@ impl TabDrag {
             .filter(|i| *i != index)
             .filter_map(|i| rect(i))
             .filter(|r| r[0] + r[2] / 2. <= middle)
-            .count();
+            .count()
+            .max(BROWSING + 1);
     }
 }
 
 /// The drag on tab `index` (uid `uid`): lifts past the slop, follows, and moves it on release.
 fn on_tab_drag(s: &mut State, index: usize, d: &Drag) {
     let uids: Vec<u64> = s.nav.tabs().iter().map(|t| t.uid).collect();
-    if index >= uids.len() {
+    // The browsing tab doesn't move.
+    if index >= uids.len() || index == BROWSING {
         return;
     }
     match d.phase {

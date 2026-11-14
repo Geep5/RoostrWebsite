@@ -360,14 +360,14 @@ fn reordering_and_closing_tabs_are_written_but_selecting_one_is_not() {
     app.advance(TABS_WRITE_DELAY * 2);
     assert_eq!(vault.writes(), 1, "the selection was written");
 
-    // Reorder: c first.
-    app.s.nav.move_tab(2, 0, &mut app.s.ui);
+    // Reorder: c before b (the browsing tab, a, stays first).
+    app.s.nav.move_tab(2, 1, &mut app.s.ui);
     app.written(2);
-    assert_eq!(vault.stored(), tabs_of("sp-edit", &["c", "a", "b"]));
-    // Close a.
+    assert_eq!(vault.stored(), tabs_of("sp-edit", &["a", "c", "b"]));
+    // Close c.
     app.s.nav.close(1, &mut app.s.ui);
     app.written(3);
-    assert_eq!(vault.stored(), tabs_of("sp-edit", &["c", "b"]));
+    assert_eq!(vault.stored(), tabs_of("sp-edit", &["a", "b"]));
     assert_eq!(app.s.nav.route(), &object("b"), "the selection stayed");
 }
 
