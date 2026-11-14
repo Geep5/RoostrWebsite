@@ -11,6 +11,7 @@ mod chat_growth;
 mod chat_pane;
 mod chat_rows;
 mod mention_typed;
+mod reactions;
 
 use std::sync::mpsc::{Receiver, channel};
 use std::sync::{Arc, LazyLock};
@@ -45,6 +46,8 @@ pub struct Vault {
     pub me: String,
     /// (object id, text) of every chat line posted.
     pub posts: Mutex<Vec<(String, String)>>,
+    /// Every `chat_post`'s params, in order.
+    pub chat_posts: Mutex<Vec<JsonMap>>,
     events: Mutex<Option<mpsc::UnboundedReceiver<anyhow::Result<BackendEvent>>>>,
     sender: mpsc::UnboundedSender<anyhow::Result<BackendEvent>>,
 }
@@ -56,6 +59,7 @@ impl Vault {
             objects: Mutex::new(objects),
             me: me.into(),
             posts: Mutex::new(Vec::new()),
+            chat_posts: Mutex::new(Vec::new()),
             events: Mutex::new(Some(rx)),
             sender,
         })
@@ -157,23 +161,21 @@ impl Backend for Vault {
     fn relations(&self) -> BoxFuture<anyhow::Result<Vec<RelationDef>>> {
         boxed(async { Ok(Vec::new()) })
     }
-    /// The space's agents (`loadObjectAgents`, the store's roster); nothing else is asked.
+    /// Objects of the body's type (the space's agents for `loadObjectAgents` and the store's
+    /// roster, its Reaction objects for the reaction bar); nothing else is asked.
     fn query(&self, body: &Json) -> BoxFuture<anyhow::Result<QueryResult>> {
-        let records: Vec<QueryRow> = if body["type"] == "agent" {
-            self.objects
-                .lock()
-                .iter()
-                .filter(|o| o.type_key == "agent")
-                .map(|o| QueryRow {
-                    id: o.id.clone(),
-                    type_key: "agent".into(),
-                    fields: o.fields.clone(),
-                    ..QueryRow::default()
-                })
-                .collect()
-        } else {
-            Vec::new()
-        };
+        let records: Vec<QueryRow> = self
+            .objects
+            .lock()
+            .iter()
+            .filter(|o| body["type"] == o.type_key.as_str())
+            .map(|o| QueryRow {
+                id: o.id.clone(),
+                type_key: o.type_key.clone(),
+                fields: o.fields.clone(),
+                ..QueryRow::default()
+            })
+            .collect();
         boxed(async move {
             Ok(QueryResult {
                 total: records.len() as _,
@@ -185,6 +187,7 @@ impl Backend for Vault {
         if action == "chat_post" {
             let field = |key: &str| params[key].as_str().unwrap_or_default().to_string();
             self.posts.lock().push((field("object_id"), field("text")));
+            self.chat_posts.lock().push(params.clone());
         }
         boxed(async { Ok(JsonMap::new()) })
     }

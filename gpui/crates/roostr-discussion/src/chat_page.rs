@@ -13,13 +13,13 @@ use roostr_ui::{
 };
 use rune::{Cx, El, col, el, row, text};
 
-use crate::chat::{DISCUSSION, chat_blocks};
+use crate::chat::{DISCUSSION, message_count};
 use crate::discussion::Place;
 use crate::discussion_view::{instance, place_options, view};
 
-/// Chat lines directly under the discussion root (the header's count).
+/// Messages directly under the discussion root (the header's count).
 fn comment_count(object: &Object) -> usize {
-    chat_blocks(object, DISCUSSION).len()
+    message_count(object, DISCUSSION)
 }
 
 /// The full-screen chat of `object_id`; fills a bounded parent.

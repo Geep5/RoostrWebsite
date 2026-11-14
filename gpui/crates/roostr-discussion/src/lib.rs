@@ -14,6 +14,7 @@ mod drafts;
 mod drawer;
 mod live;
 mod md;
+mod reactions;
 #[cfg(test)]
 mod tests;
 mod threads;
@@ -86,11 +87,11 @@ pub fn forget(s: &mut State, object_id: &str) {
 }
 
 /// (discussion message count, conversation count) for [`roostr_core::PaneState::publish`],
-/// by the object page's rules: the count is the chat lines under `__discussion__`; the
-/// conversation count is the exchange threads plus the discussion itself, or 0 when the
-/// object has no discussion.
+/// by the object page's rules: the count is the messages under `__discussion__` (reactions
+/// aside); the conversation count is the exchange threads plus the discussion itself, or 0
+/// when the object has no discussion.
 pub fn pane_counts(object: &Object) -> (usize, usize) {
-    let count = chat::chat_blocks(object, chat::DISCUSSION).len();
+    let count = chat::message_count(object, chat::DISCUSSION);
     let t = object.type_key.as_str();
     // An agent's page is its own transcript; queries and collections get a chat like any page.
     let has_discussion = object.mailbox.as_ref().is_some_and(|m| !m.is_empty())

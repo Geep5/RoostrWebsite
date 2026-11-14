@@ -5,22 +5,22 @@
 //! the web view's DOM text was: a drag selects across lines and messages, ⌘C
 //! copies.
 
-use roostr_core::nav::{self, Route};
-use roostr_core::{State, Store};
 use roostr_core::markdown::{Align, Block, Inline, Link, Span, TaskCheck, parse};
+use roostr_core::nav::{self, Route};
 use roostr_core::objects::object_icon;
+use roostr_core::{State, Store};
 use roostr_ui::tags::{TagPaint, tint_paint};
 use roostr_ui::{Theme, is_image_icon, radius, ty};
 use rune::{Color, El, TextStyle, Tx, col, rich, row, text};
 
 use crate::discussion::{OBJECT_GREEN, agent_tag_paint};
 
-/// Colours of the bubble the text sits in.
+/// Colours of a message's text.
 pub(crate) struct MdTheme {
-    /// Body text colour (bubble ink in a coloured bubble).
+    /// Body text colour.
     pub ink: Color,
-    /// A coloured bubble's tint (inline code, object links); `None` = the default grey bubble.
-    pub tint: Option<Color>,
+    /// Web links' colour: the author's name colour.
+    pub link: Color,
     /// Known agents (name, icon): `@Name` becomes a pill.
     pub mention_names: Vec<(String, String)>,
 }
@@ -163,7 +163,7 @@ fn build_line(inline: &Inline, md: &MdTheme, names: &[(String, String)], env: &M
         run.strike = span.strike;
         if span.code {
             run.mono = true;
-            run.bg = Some((md.tint.unwrap_or(t.hover), 0.0));
+            run.bg = Some((t.hover, 0.0));
         }
         if let Some(link) = &span.link {
             match &link.object_id {
@@ -178,31 +178,18 @@ fn build_line(inline: &Inline, md: &MdTheme, names: &[(String, String)], env: &M
                         env.space,
                     );
                     let type_icon = object_icon(env.store, "", type_key, env.space);
-                    // The composer's !object tag: the kit tag look in green (a coloured
-                    // bubble keeps its own tint).
-                    let paint = match md.tint {
-                        Some(tint) => {
-                            run.bg = Some((tint, 2.0));
-                            run.color = md.ink;
-                            None
-                        }
-                        None => {
-                            let paint = tint_paint(t, roostr_ui::color::rgb(OBJECT_GREEN));
-                            run.color = paint.fg;
-                            Some(paint)
-                        }
-                    };
+                    // The composer's !object tag: the kit tag look in green.
+                    let paint = tint_paint(t, roostr_ui::color::rgb(OBJECT_GREEN));
+                    run.color = paint.fg;
                     // A narrow no-break space: the icon stays with the name.
                     let start = line.text.len();
                     line.push(&format!("{}\u{202f}", text_icon(&icon, &type_icon)), run);
                     let end = line.push(&span.text, run).end.max(line.text.len());
-                    if let Some(paint) = paint {
-                        line.tag(start..end, paint);
-                    }
+                    line.tag(start..end, paint);
                     line.links.push((start..end, format!("{OBJECT_LINK}{id}")));
                 }
                 None => {
-                    let color = if md.tint.is_some() { md.ink } else { t.accent };
+                    let color = md.link;
                     run.color = color;
                     run.underline = Some(color);
                     let range = line.push(&span.text, run);
@@ -361,7 +348,7 @@ fn render_block(
         Block::Quote(ls) => {
             let quote = MdTheme {
                 ink: t.muted,
-                tint: md.tint,
+                link: md.link,
                 mention_names: Vec::new(),
             };
             col()
@@ -388,8 +375,6 @@ fn render_block(
                     .mb(4.),
                 );
             }
-            // The box is the theme's, not the bubble's: its text too, or a tinted
-            // bubble's dark ink vanishes on a dark theme's box.
             boxed.child(
                 col().key(format!("{key}-{ix}-code")).scroll_x().child(
                     env.reveal(
@@ -458,7 +443,7 @@ fn render_block(
             let cell = |key: String, inline: &Inline, align: Align, head: bool, last: bool| {
                 let theme_for = MdTheme {
                     ink: if head { t.muted } else { md.ink },
-                    tint: md.tint,
+                    link: md.link,
                     mention_names: Vec::new(),
                 };
                 let style = if head {

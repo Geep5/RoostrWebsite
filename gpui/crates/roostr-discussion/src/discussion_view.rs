@@ -15,20 +15,21 @@ use roostr_ui::ty::Weights as _;
 use roostr_ui::{
     Alert, AlertVariant, Button, ButtonCustomVariant, Checkbox, DropdownMenu, Glyph, Images,
     KitSize, Placement, PopupMenu, PopupMenuItem, ScrollArea, ScrollbarMode, Spinner, Tag, Theme,
-    glyph, motion, radius, rems, ty,
+    glyph, motion, overlay, radius, rems, ty,
 };
 use rune::{
-    Color, Cx, Cycle, El, GrowthSpec, PillStyle, ScrollSpec, Side, SurfaceFit, Transition, Tx, col,
-    el, memo, row, text, text_input,
+    Color, Cursor, Cx, Cycle, El, GrowthSpec, PillStyle, PointerPress, ScrollSpec, Side,
+    SurfaceFit, Transition, Tx, col, el, memo, row, text, text_input,
 };
 
-use crate::chat::ChatMessage;
+use crate::chat::{ChatMessage, Reaction};
 use crate::discussion::{
     AGENT_TOKEN, AgentPresence, Disc, DiscussionOptions, OBJECT_GREEN, OBJECT_TOKEN, Place, REVEAL,
     ScrollAsk, agent_tag_paint, composer_edit, get, instance_key, origin_label, request, with,
 };
 use crate::live::{Entry, LiveRuns, Run, Thought, clock, now_ms};
 use crate::md::{MdEnv, MdTheme, render_markdown};
+use crate::reactions::{BarAt, quick_emojis, touch_screen};
 use crate::threads::ObjectAgentOption;
 
 /// The instance of `object_id`'s discussion shown with `options`, asking for it when it
@@ -115,6 +116,32 @@ fn name_color(t: &Theme, base: Color) -> Color {
     let [h, s, _, _] = roostr_ui::color::to_hsla(base);
     let l = if t.dark { 0.74 } else { 0.36 };
     roostr_ui::color::hsla(h, s.max(0.45), l, 1.)
+}
+
+/// An author's name colour ([`name_color`]): their chat colour (yours on your own lines),
+/// else their avatar's hue. Their links and their row's hover take it too.
+fn author_ink(d: &Disc, store: &roostr_core::Store, t: &Theme, author: &str) -> Color {
+    let chat = if author == d.me {
+        store.chat_color.clone()
+    } else {
+        store
+            .agent(author)
+            .map(|a| a.chat_color.clone())
+            .unwrap_or_default()
+    };
+    let base = if chat.is_empty() {
+        avatar_color(author)
+    } else {
+        let colors: Bubble = bubble(&chat);
+        colors.bg
+    };
+    name_color(t, base)
+}
+
+/// The key of message `key_id`'s row in instance `key`, which the reaction bar anchors to
+/// (an anchor is found by its own key, so it carries the instance).
+fn row_anchor(key: &str, key_id: &str) -> String {
+    format!("{key}-row-{key_id}")
 }
 
 /// An avatar: an image icon (a web address or `data:image/` URL) is its picture; else the
@@ -407,6 +434,7 @@ pub(crate) fn view(
             .w_full()
             .growth(GrowthSpec::default())
             .selection_group(true)
+            .drawn_rect_into(&d.list_rect)
             .children(rows)
             .on_layout_tx(move |s: &mut State, _: [f32; 4], tx: &mut Tx| {
                 with(s, &k1, |d, _| match d.scroll_ask.take() {
@@ -444,6 +472,7 @@ pub(crate) fn view(
             .key(rows_key)
             .growth(GrowthSpec::default())
             .selection_group(true)
+            .drawn_rect_into(&d.list_rect)
             .children(rows);
         if d.full {
             list = list.grow(1.);
@@ -501,6 +530,7 @@ pub(crate) fn view(
         }
         root = root.child(composer(d, s, cx, t, layer));
     }
+    react_bar(d, s, cx, t, layer, window);
     root
 }
 
@@ -564,6 +594,8 @@ fn message_rows(d: &Disc, s: &State, t: &Theme) -> Vec<El> {
     let space = s.nav.space().to_string();
     let images = s.get::<Images>();
     let sig = store_sig(s);
+    // Rows on a touch screen hear the finger (holding opens the reaction bar).
+    let touch = touch_screen(s);
     let n = d.messages.len();
     let mention_names: Vec<(String, String)> = store
         .agents
@@ -593,7 +625,7 @@ fn message_rows(d: &Disc, s: &State, t: &Theme) -> Vec<El> {
             when(m.ts),
             revealing,
             files_sig(d, images, m),
-            d.thought_open.contains(&m.id),
+            (d.thought_open.contains(&m.id), touch),
         );
         // A sent line that landed keeps its placeholder's keys.
         let key_id = d.row_ids.get(&m.id).unwrap_or(&m.id);
@@ -675,16 +707,6 @@ fn message_row(
 ) -> El {
     let store = &s.store;
     let own = m.author == d.me;
-    let color = if own {
-        store.chat_color.clone()
-    } else {
-        store
-            .agent(&m.author)
-            .map(|a| a.chat_color.clone())
-            .unwrap_or_default()
-    };
-    let tinted = !color.is_empty();
-    let colors: Bubble = bubble(&color);
 
     // Header: author and time.
     let sending = d.outgoing.as_ref().is_some_and(|o| o.id == m.id);
@@ -696,14 +718,7 @@ fn message_row(
     .font(ty::ui(11.).lh(11. * 1.618))
     .color(t.muted);
     let name = d.who(&m.author, store);
-    let name_ink = name_color(
-        t,
-        if tinted {
-            colors.bg
-        } else {
-            avatar_color(&m.author)
-        },
-    );
+    let name_ink = author_ink(d, store, t, &m.author);
     let name_el = if d.author_links(&m.author, store) {
         let target = m.author.clone();
         roostr_ui::Link::new(format!("author-{ix}"))
@@ -721,10 +736,10 @@ fn message_row(
     };
     let meta = (!grouped || sending).then(|| row().items_end().gap(8.).child(name_el).child(time));
 
-    // The words on the theme's ink: the chat colour only tints the card behind them.
+    // The words on the theme's ink; their links in the author's colour.
     let md_theme = MdTheme {
         ink: t.fg,
-        tint: None,
+        link: name_ink,
         mention_names: mention_names.to_vec(),
     };
     // The object it came from leads the body as that object's tag; a deleted one, none.
@@ -750,27 +765,14 @@ fn message_row(
         .thought
         .as_ref()
         .map(|thought| thought_record(d, t, m, key_id, thought));
-    let mut card = col()
+    let card = col()
         .key(format!("msg-text-{key_id}"))
         .w_full()
         .gap(6.)
         .min_w(0.)
         .children(body)
         .children(files);
-    if tinted {
-        card = card
-            .radius(6.)
-            .pl(11.)
-            .pr(10.)
-            .py(5.)
-            .fill(colors.bg.alpha(if t.dark { 0.16 } else { 0.2 }))
-            .child(
-                el().pin(Some(0.), Some(0.), None, Some(0.))
-                    .w(3.)
-                    .corners([6., 0., 0., 6.])
-                    .fill(colors.bg),
-            );
-    }
+    let chips = (!m.reactions.is_empty()).then(|| reaction_chips(d, s, t, m, key_id));
 
     // Delivery / processing status: quiet when all is well.
     let status_line = m
@@ -779,6 +781,7 @@ fn message_row(
         .and_then(|entry| status(d, s, t, ix, m, entry, own));
 
     // Hover actions, at the row's top right over the card (Discord's).
+    let reacts = d.can_react() && !sending;
     let actions = (!d.read_only).then(|| {
         let exchange = d.is_exchange;
         let (id_reply, id_private) = (m.id.clone(), m.id.clone());
@@ -790,16 +793,30 @@ fn message_row(
             .fill(t.panel)
             .border(1., t.border)
             .group_opacity(0., 1.)
-            .hover_motion(motion::HOVER_REVEAL.anim(), motion::HOVER_REVEAL.anim())
-            .child(
-                Button::new(format!("reply-{ix}"))
+            .hover_motion(motion::HOVER_REVEAL.anim(), motion::HOVER_REVEAL.anim());
+        if reacts {
+            let id = m.id.clone();
+            a = a.child(
+                Button::new(format!("react-{ix}"))
                     .ghost()
                     .xsmall()
-                    .label("↩")
-                    .tooltip(if exchange { "Reply to all" } else { "Reply" })
-                    .on_press(act(&d.key, move |d, _| d.start_reply(&id_reply, false)))
+                    .label("🙂")
+                    .tooltip("Add reaction")
+                    .on_press(act(&d.key, move |d, s| {
+                        d.open_react_bar(&id, BarAt::Button, s)
+                    }))
                     .build(t),
             );
+        }
+        a = a.child(
+            Button::new(format!("reply-{ix}"))
+                .ghost()
+                .xsmall()
+                .label("↩")
+                .tooltip(if exchange { "Reply to all" } else { "Reply" })
+                .on_press(act(&d.key, move |d, _| d.start_reply(&id_reply, false)))
+                .build(t),
+        );
         if m.mailbox
             .as_ref()
             .is_some_and(|e| e.message.sender.object_id != d.object_id)
@@ -825,6 +842,7 @@ fn message_row(
         .children(meta)
         .children(thought)
         .child(card)
+        .children(chips)
         .children(status_line);
     // The avatar leads a group; a row continuing it keeps the avatar's width.
     let lead = if grouped {
@@ -832,7 +850,9 @@ fn message_row(
     } else {
         row_avatar(d, s, t, images, &m.author, ix)
     };
-    let message = row()
+    // Hovered, the row takes the author's colour, faintly.
+    let mut message = row()
+        .key(row_anchor(&d.key, key_id))
         .w_full()
         .items_start()
         .gap(12.)
@@ -840,15 +860,254 @@ fn message_row(
         .py(2.)
         .radius(6.)
         .hover_group()
-        .hover(t.hover)
+        .hover(name_ink.alpha(if t.dark { 0.08 } else { 0.10 }))
         .child(lead)
         .child(column)
         .children(actions);
+    if reacts {
+        // A right click opens the reaction bar where it landed; on a touch screen, holding
+        // the message does (the finger is the only hover there, so hovering is holding).
+        let (k, id) = (d.key.clone(), m.id.clone());
+        message = message.on_secondary_press(move |s: &mut State, p: PointerPress, _: &mut Tx| {
+            with(s, &k, |d, s| {
+                d.open_react_bar(&id, BarAt::Point(p.x, p.y), s)
+            });
+        });
+        if touch_screen(s) {
+            let (k, id) = (d.key.clone(), m.id.clone());
+            message = message.on_hover_change(move |s: &mut State, inside: bool, _: &mut Tx| {
+                with(s, &k, |d, s| {
+                    if inside {
+                        d.hold_start(&id, s);
+                    } else {
+                        d.hold_end(&id);
+                    }
+                });
+            });
+        }
+    }
     // Room above each author's group, outside the row's hover.
     col()
         .w_full()
         .pt(if grouped { 0. } else { 18. })
         .child(message)
+}
+
+/// A message's reactions as chips under it (Discord's): emoji and count, yours accent-tinted.
+/// Pressing one puts yours on or takes it back; its tooltip names who reacted.
+fn reaction_chips(d: &Disc, s: &State, t: &Theme, m: &ChatMessage, key_id: &str) -> El {
+    let chips = m
+        .reactions
+        .iter()
+        .enumerate()
+        .map(|(i, r)| reaction_chip(d, s, t, m, key_id, i, r));
+    row().flex_wrap().gaps(4., 4.).pt(2.).children(chips)
+}
+
+fn reaction_chip(
+    d: &Disc,
+    s: &State,
+    t: &Theme,
+    m: &ChatMessage,
+    key_id: &str,
+    i: usize,
+    r: &Reaction,
+) -> El {
+    let mine = r.authors.contains(&d.me);
+    let mut chip = row()
+        .key(format!("reaction-{key_id}-{i}"))
+        .center_y()
+        .gap(4.)
+        .h(24.)
+        .px(7.)
+        .radius(12.)
+        .fill(if mine { t.accent.alpha(0.16) } else { t.hover })
+        .border(1., if mine { t.accent.alpha(0.7) } else { t.border })
+        .child(roostr_ui::emoji_text(&r.emoji, ty::ui(14.).lh(16.)))
+        .child(
+            text(r.authors.len().to_string())
+                .font(ty::ui(12.).semibold())
+                .color(if mine { t.accent } else { t.muted }),
+        );
+    if d.can_react() {
+        let (id, emoji) = (m.id.clone(), r.emoji.clone());
+        chip = chip
+            .role("button")
+            .cursor(Cursor::Pointer)
+            .hover(if mine { t.accent.alpha(0.26) } else { t.border })
+            .on_press(act(&d.key, move |d, s| d.toggle_reaction(&id, &emoji, s)));
+    }
+    let names: Vec<String> = r.authors.iter().map(|a| d.who(a, &s.store)).collect();
+    roostr_ui::tooltip(
+        chip,
+        format!("{} reacted with {}", names.join(", "), r.emoji),
+    )
+}
+
+/// The reaction bar's width: the quick emoji and ＋ in a row.
+const BAR_W: f32 = 7. * 36. + 6. * 2. + 8.;
+
+/// The reaction bar open on a message, into `layer`: the quick emoji (yours marked) and ＋
+/// for the full picker, then Reply and Copy text. It opens above the held row, by the row's
+/// 🙂 button, or where a right click landed; a press outside or Escape closes it.
+fn react_bar(
+    d: &Disc,
+    s: &State,
+    cx: &mut Cx<State>,
+    t: &Theme,
+    layer: &mut Vec<El>,
+    window: [f32; 2],
+) {
+    let Some(bar) = &d.react_bar else {
+        return;
+    };
+    let Some(m) = d.message(&bar.message_id).filter(|_| d.can_react()) else {
+        return;
+    };
+    let key = d.key.as_str();
+    let key_id = d.row_ids.get(&m.id).unwrap_or(&m.id);
+    let point = format!("{key}-react-point");
+    let (anchor, placement) = match bar.at {
+        BarAt::Row => (row_anchor(key, key_id), Placement::TopStart),
+        BarAt::Button => (row_anchor(key, key_id), Placement::TopEnd),
+        BarAt::Point(..) => (point.clone(), Placement::BottomStart),
+    };
+    // A right click's point, kept in from the window's right edge so the bar fits.
+    let point_el = match bar.at {
+        BarAt::Point(x, y) => Some(
+            el().key(point)
+                .absolute(x.min(window[0] - BAR_W - 8.).max(8.), y)
+                .size(0., 0.),
+        ),
+        _ => None,
+    };
+
+    if bar.picker {
+        let (k_pick, k_close, id) = (key.to_string(), key.to_string(), m.id.clone());
+        let picker = roostr_properties::EmojiPicker::new(format!("{key}-react-emoji"))
+            .on_pick(move |s: &mut State, emoji: &str| {
+                with(s, &k_pick, |d, s| {
+                    d.close_react_bar();
+                    d.toggle_reaction(&id, emoji, s);
+                });
+            })
+            .on_close(move |s: &mut State| {
+                with(s, &k_close, |d, _| d.close_react_bar());
+            })
+            .build(s, cx, t, layer);
+        layer.extend(point_el);
+        layer.push(overlay::anchored(picker, &anchor, placement, 6.));
+        return;
+    }
+
+    let cell = |k: String| {
+        row()
+            .key(k)
+            .size(36., 36.)
+            .center()
+            .radius(8.)
+            .hover(t.hover)
+            .press(t.hover)
+            .cursor(Cursor::Pointer)
+    };
+    let quick = quick_emojis(s).into_iter().enumerate().map(|(i, emoji)| {
+        let on = d.reacted(&m.id, &emoji);
+        let tip = if on {
+            format!("Remove {emoji}")
+        } else {
+            format!("React with {emoji}")
+        };
+        let shown = roostr_ui::emoji_text(&emoji, ty::ui(20.).lh(24.));
+        let id = m.id.clone();
+        let mut c = cell(format!("react-pick-{i}"))
+            .help(tip.clone())
+            .label(tip)
+            .on_press(act(key, move |d, s| {
+                d.close_react_bar();
+                d.toggle_reaction(&id, &emoji, s);
+            }))
+            .child(shown);
+        if on {
+            c = c.fill(t.accent.alpha(0.18));
+        }
+        c
+    });
+    let more = cell("react-more".into())
+        .help("More emoji")
+        .label("More emoji")
+        .on_press(act(key, |d, _| {
+            if let Some(bar) = &mut d.react_bar {
+                bar.picker = true;
+            }
+        }))
+        .child(glyph(Glyph::Plus, 16.).color(t.muted));
+    let item = |k: &str, icon: El, label: &str| {
+        row()
+            .key(k.to_string())
+            .role("menuitem")
+            .w_full()
+            .center_y()
+            .gap(10.)
+            .px(10.)
+            .py(7.)
+            .radius(6.)
+            .hover(t.hover)
+            .cursor(Cursor::Pointer)
+            .child(row().w(16.).center().child(icon))
+            .child(text(label.to_string()).font(ty::ui(13.)).color(t.fg))
+    };
+    let id = m.id.clone();
+    let reply = item(
+        "react-reply",
+        text("↩").font(ty::ui(14.)).color(t.muted),
+        "Reply",
+    )
+    .on_press(act(key, move |d, _| {
+        d.close_react_bar();
+        d.start_reply(&id, false);
+    }));
+    let copy = (!m.text.trim().is_empty()).then(|| {
+        let (k, words) = (key.to_string(), m.text.clone());
+        item(
+            "react-copy",
+            glyph(Glyph::Copy, 14.).color(t.muted),
+            "Copy text",
+        )
+        .on_press_tx(move |s: &mut State, tx: &mut Tx| {
+            tx.copy(words.clone());
+            with(s, &k, |d, _| d.close_react_bar());
+        })
+    });
+    let mut surface = col()
+        .key(format!("{key}-react-bar"))
+        .role("menu")
+        .w(BAR_W)
+        .max_w(window[0] - 16.)
+        .padding(4.)
+        .gap(4.)
+        .fill(t.kit.popover)
+        .radius(radius::KIT_LG)
+        .child(row().flex_wrap().gap(2.).children(quick).child(more))
+        .child(el().w_full().h(1.).fill(t.border))
+        .child(reply)
+        .children(copy);
+    for sh in roostr_ui::shadow::kit_popover(t) {
+        surface = surface.box_shadow(sh);
+    }
+    let close = || act(key, |d, _| d.close_react_bar());
+    let right = close();
+    let backdrop = overlay::scrim(format!("{key}-react-backdrop"), close())
+        .on_secondary_press(move |s: &mut State, _: PointerPress, _: &mut Tx| right(s));
+    layer.push(
+        el().key(format!("{key}-react"))
+            .absolute(0., 0.)
+            .w_full()
+            .h_full()
+            .child(backdrop)
+            .children(point_el)
+            .child(overlay::anchored(surface, &anchor, placement, 6.))
+            .modal(false, close()),
+    );
 }
 
 /// The progress text's line height: the box shows [`PROGRESS_LINES`] of them.
@@ -966,7 +1225,7 @@ fn live_row(d: &Disc, s: &State, t: &Theme, images: Option<&Images>, run: &Run) 
                 .child(
                     text(d.who(&run.agent, store))
                         .font(ty::ui(14.).semibold().lh(14. * 1.4))
-                        .color(t.fg),
+                        .color(author_ink(d, store, t, &run.agent)),
                 )
                 .child(progress_box(
                     t,
@@ -1308,7 +1567,7 @@ fn footer(d: &Disc, s: &State, t: &Theme, images: Option<&Images>) -> El {
             .child(
                 text(agent.name.clone())
                     .font(ty::ui(12.).medium())
-                    .color(t.muted),
+                    .color(author_ink(d, &s.store, t, &agent.id)),
             )
             .child(typing_dots(t));
         f = f.child(roostr_ui::tooltip(typing, "The agent is composing a reply"));

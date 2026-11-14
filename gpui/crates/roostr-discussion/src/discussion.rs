@@ -17,7 +17,7 @@ use roostr_core::{
 use roostr_rt::Task;
 use roostr_ui::Theme;
 use roostr_ui::tags::{TagPaint, object_pill_paint, tint_paint};
-use rune::{KeyEvent, TextEdit};
+use rune::{KeyEvent, Live, TextEdit};
 use serde::Deserialize;
 
 use crate::attachments::{Attachment, ChatFile};
@@ -27,6 +27,7 @@ use crate::chat::{
 };
 use crate::drafts::{load_draft, save_draft};
 use crate::live::LiveRuns;
+use crate::reactions::{Hold, PendingReaction, ReactBar};
 use crate::threads::{ObjectAgentOption, endpoint_name, load_object_agents, seed_tags};
 
 /// The green that object links and `!object` tags are tinted with.
@@ -291,6 +292,15 @@ pub(crate) struct Disc {
     poll: Option<Task<()>>,
     /// The replies whose progress record is open (by message id).
     pub thought_open: HashSet<String>,
+
+    /// The reaction bar open on a message.
+    pub react_bar: Option<ReactBar>,
+    /// A finger held on a message: its reaction bar opens if it stays put.
+    pub hold: Option<Hold>,
+    /// Where the message list is drawn: a held finger that scrolled it is panning.
+    pub list_rect: Live<[f32; 4]>,
+    /// Your reactions sent and not yet carried by the object, shown meanwhile.
+    pub pending_reactions: Vec<PendingReaction>,
 }
 
 /// Runs `f` on instance `key` with the state: the instance leaves its slot meanwhile, so `f`
@@ -425,6 +435,10 @@ pub(crate) fn create(s: &mut State, key: String, object_id: String, options: Dis
         presence_error: String::new(),
         poll: None,
         thought_open: HashSet::new(),
+        react_bar: None,
+        hold: None,
+        list_rect: Live::new([0.; 4]),
+        pending_reactions: Vec::new(),
     };
     s.slot::<Discussions>().map.insert(key.clone(), d);
     with(s, &key, |d, s| {
@@ -550,12 +564,13 @@ impl Disc {
         let Some(object) = self.object.clone() else {
             return;
         };
-        let thread = self.thread_id.as_str();
-        let mut messages = if thread == DISCUSSION {
+        let mut messages = if self.thread_id == DISCUSSION {
             object_chat_messages(&object)
         } else {
-            chat_messages(&object, thread)
+            chat_messages(&object, &self.thread_id)
         };
+        self.show_pending_reactions(&mut messages);
+        let thread = self.thread_id.as_str();
         // The line being sent shows until the object has it (same author and text, written
         // no earlier than it).
         if let Some(out) = &self.outgoing {
@@ -635,6 +650,10 @@ impl Disc {
         self.sync_list(s);
         self.follow_new_messages(at_end);
         self.update_polling(s);
+        if self.is_open() && self.can_react() {
+            // The reaction bar leads with the space's Reaction emoji: have them ready.
+            crate::reactions::load_space_reactions(s);
+        }
         if self.is_open() && !self.focused_once {
             // The composer takes the focus once, when the open thread first shows.
             self.focused_once = true;
@@ -752,8 +771,8 @@ impl Disc {
                     &m.text,
                     &m.origin,
                     &m.files,
-                    origins.get(&m.origin),
                     &m.thought,
+                    &m.reactions,
                     &self.me,
                     self.read_only,
                     self.is_exchange,
@@ -1687,6 +1706,7 @@ impl Disc {
             mailbox: None,
             files,
             thought: None,
+            reactions: Vec::new(),
         });
         let draft = self.draft.clone();
         let tagged = self.tagged.clone();

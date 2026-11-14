@@ -400,6 +400,7 @@ mod tests {
             mailbox: None,
             files: Vec::new(),
             thought: None,
+            reactions: Vec::new(),
         };
         assert!(!runs.end_replied("page-1", std::slice::from_ref(&reply)));
         reply.thought = Some(Thought::default());

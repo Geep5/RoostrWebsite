@@ -438,6 +438,30 @@ pub mod chat {
         }
         mutate("chat_post", p, s)
     }
+
+    /// A reaction to message `target_id`: a chat line (meta `kind` "reaction") carrying
+    /// `emoji`; `removed` takes the author's reaction back. `thread_id` "" = the human thread.
+    pub fn react(
+        object_id: &str,
+        thread_id: &str,
+        target_id: &str,
+        emoji: &str,
+        removed: bool,
+        s: &mut State,
+    ) -> Task<Result<JsonMap>> {
+        mutate(
+            "chat_post",
+            params(json!({
+                "object_id": object_id,
+                "thread_id": thread_id,
+                "text": "",
+                "reply_to": target_id,
+                "reaction": emoji,
+                "removed": removed,
+            })),
+            s,
+        )
+    }
 }
 
 /// Agent mailbox exchanges.

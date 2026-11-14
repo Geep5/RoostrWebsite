@@ -29,6 +29,99 @@ pub(crate) struct ChatMessage {
     pub files: Vec<String>,
     /// An agent reply's record of the work behind it (meta `thinking` / `thought_ms`).
     pub thought: Option<Thought>,
+    /// The reactions it carries, folded from the thread's reaction lines.
+    pub reactions: Vec<Reaction>,
+}
+
+/// One emoji on a message and who reacted with it, oldest first.
+#[derive(Clone, Debug, PartialEq, Hash)]
+pub(crate) struct Reaction {
+    pub emoji: String,
+    pub authors: Vec<String>,
+}
+
+/// A reaction line (`chat_post` with `reaction`: meta `kind` "reaction"): `author` put `emoji`
+/// on message `target`, or took it back (`removed`). Never a row of its own.
+#[derive(Clone, Debug, PartialEq)]
+struct ReactionLine {
+    pub author: String,
+    pub emoji: String,
+    pub target: String,
+    pub ts: i64,
+    pub removed: bool,
+}
+
+/// The block's reaction line, when it is one.
+fn reaction_line(block: &Block) -> Option<ReactionLine> {
+    (meta(block, "kind") == "reaction").then(|| ReactionLine {
+        author: meta(block, "author").to_string(),
+        emoji: meta(block, "emoji").to_string(),
+        target: meta(block, "replyTo").to_string(),
+        ts: meta_ts(block),
+        removed: meta(block, "removed") == "1",
+    })
+}
+
+/// The messages under one conversation root: its chat lines but the reactions.
+pub(crate) fn message_count(object: &Object, root_id: &str) -> usize {
+    chat_blocks(object, root_id)
+        .into_iter()
+        .filter(|b| meta(b, "kind") != "reaction")
+        .count()
+}
+
+/// Reaction lines (in block order) folded per message id: for each author, emoji and
+/// message the line with the greatest `ts` wins (ties: the later block), and a winning
+/// removal leaves nothing. Emoji keep the order they were first put on, authors theirs.
+fn fold_reactions<'a>(
+    lines: impl IntoIterator<Item = &'a ReactionLine>,
+) -> HashMap<String, Vec<Reaction>> {
+    let mut latest: HashMap<(&str, &str, &str), (i64, usize, bool)> = HashMap::new();
+    for (order, line) in lines.into_iter().enumerate() {
+        if line.emoji.is_empty() || line.target.is_empty() {
+            continue;
+        }
+        let key = (
+            line.target.as_str(),
+            line.emoji.as_str(),
+            line.author.as_str(),
+        );
+        let newer = latest.get(&key).is_none_or(|&(ts, _, _)| line.ts >= ts);
+        if newer {
+            latest.insert(key, (line.ts, order, line.removed));
+        }
+    }
+    let mut kept: Vec<((&str, &str, &str), (i64, usize))> = latest
+        .into_iter()
+        .filter(|(_, (_, _, removed))| !removed)
+        .map(|(key, (ts, order, _))| (key, (ts, order)))
+        .collect();
+    kept.sort_by_key(|&(_, at)| at);
+    let mut out: HashMap<String, Vec<Reaction>> = HashMap::new();
+    for ((target, emoji, author), _) in kept {
+        let reactions = out.entry(target.to_string()).or_default();
+        match reactions.iter_mut().find(|r| r.emoji == emoji) {
+            Some(r) => r.authors.push(author.to_string()),
+            None => reactions.push(Reaction {
+                emoji: emoji.to_string(),
+                authors: vec![author.to_string()],
+            }),
+        }
+    }
+    out
+}
+
+/// Puts each message's folded reactions on it.
+fn attach_reactions(messages: &mut [ChatMessage], lines: &[ReactionLine]) {
+    if lines.is_empty() {
+        return;
+    }
+    let mut folded = fold_reactions(lines);
+    for m in messages {
+        if let Some(reactions) = folded.remove(&m.id) {
+            m.reactions = reactions;
+        }
+    }
 }
 
 fn meta<'a>(block: &'a Block, key: &str) -> &'a str {
@@ -307,6 +400,7 @@ fn envelope_message(object: &Object, entry: &MailboxEntry) -> ChatMessage {
         mailbox: Some(entry.clone()),
         files: Vec::new(),
         thought: None,
+        reactions: Vec::new(),
     }
 }
 
@@ -320,6 +414,7 @@ fn block_message(block: &Block) -> ChatMessage {
         mailbox: None,
         files: meta_files(block),
         thought: Thought::from_meta(meta(block, "thinking"), meta(block, "thought_ms")),
+        reactions: Vec::new(),
     }
 }
 
@@ -332,13 +427,18 @@ pub(crate) fn chat_messages(object: &Object, root_id: &str) -> Vec<ChatMessage> 
             .map(|e| envelope_message(object, e))
             .collect();
     }
-    let mut rows: Vec<(usize, ChatMessage)> = chat_blocks(object, root_id)
-        .into_iter()
-        .map(block_message)
-        .enumerate()
-        .collect();
+    let mut lines = Vec::new();
+    let mut rows: Vec<(usize, ChatMessage)> = Vec::new();
+    for block in chat_blocks(object, root_id) {
+        match reaction_line(block) {
+            Some(line) => lines.push(line),
+            None => rows.push((rows.len(), block_message(block))),
+        }
+    }
     rows.sort_by(|a, b| a.1.ts.cmp(&b.1.ts).then(a.0.cmp(&b.0)));
-    rows.into_iter().map(|(_, m)| m).collect()
+    let mut messages: Vec<ChatMessage> = rows.into_iter().map(|(_, m)| m).collect();
+    attach_reactions(&mut messages, &lines);
+    messages
 }
 
 /// The object's ONE chat: the human discussion plus every agent exchange,
@@ -394,8 +494,13 @@ pub(crate) fn object_chat_messages(object: &Object) -> Vec<ChatMessage> {
     // An agent answering in the discussion also writes the same line to its
     // private transcript; show that copy only when the discussion lacks it.
     let mut in_discussion: HashSet<(String, String, i64)> = HashSet::new();
+    let mut lines = Vec::new();
     for (root, authors) in &sources {
         for block in chat_blocks(object, root) {
+            if let Some(line) = reaction_line(block) {
+                lines.push(line);
+                continue;
+            }
             if seen.contains(&block.id) {
                 continue;
             }
@@ -417,6 +522,7 @@ pub(crate) fn object_chat_messages(object: &Object) -> Vec<ChatMessage> {
         }
     }
     out.sort_by(|a, b| a.ts.cmp(&b.ts).then_with(|| a.id.cmp(&b.id)));
+    attach_reactions(&mut out, &lines);
     out
 }
 
@@ -901,5 +1007,72 @@ mod tests {
             ..threaded()
         };
         assert!(is_legacy_exchange(&paired, DISCUSSION));
+    }
+
+    fn reaction(
+        id: &str,
+        author: &str,
+        ts: i64,
+        target: &str,
+        emoji: &str,
+        removed: bool,
+    ) -> serde_json::Value {
+        let mut line = msg(id, author, ts, "");
+        let meta = &mut line["content"]["custom"]["meta"];
+        meta["kind"] = "reaction".into();
+        meta["replyTo"] = target.into();
+        meta["emoji"] = emoji.into();
+        if removed {
+            meta["removed"] = "1".into();
+        }
+        line
+    }
+
+    fn chips(m: &ChatMessage) -> Vec<(&str, Vec<&str>)> {
+        m.reactions
+            .iter()
+            .map(|r| {
+                (
+                    r.emoji.as_str(),
+                    r.authors.iter().map(String::as_str).collect(),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn reaction_lines_fold_onto_their_message_and_are_no_rows() {
+        let chat = discussion_with(vec![
+            msg("m1", "agent", 100, "found one"),
+            reaction("r1", "human", 200, "m1", "✅", false),
+            reaction("r2", "agent", 210, "m1", "👀", false),
+            reaction("r3", "other", 220, "m1", "✅", false),
+        ]);
+        for messages in [
+            chat_messages(&chat, DISCUSSION),
+            object_chat_messages(&chat),
+        ] {
+            assert_eq!(ids(&messages), ["m1"]);
+            assert_eq!(
+                chips(&messages[0]),
+                [("✅", vec!["human", "other"]), ("👀", vec!["agent"])]
+            );
+        }
+    }
+
+    #[test]
+    fn the_latest_reaction_line_wins_and_a_removal_takes_it_off() {
+        let chat = discussion_with(vec![
+            msg("m1", "agent", 100, "found one"),
+            // Merged out of order: the removal is newer than the add after it.
+            reaction("r2", "human", 300, "m1", "✅", true),
+            reaction("r1", "human", 200, "m1", "✅", false),
+            reaction("r3", "human", 400, "m1", "🔥", false),
+            // Same millisecond: the later block wins.
+            reaction("r4", "other", 500, "m1", "🔥", false),
+            reaction("r5", "other", 500, "m1", "🔥", true),
+        ]);
+        let messages = chat_messages(&chat, DISCUSSION);
+        assert_eq!(chips(&messages[0]), [("🔥", vec!["human"])]);
     }
 }
