@@ -96,6 +96,7 @@ glyphs! {
     PaintBucket => "paint-bucket" => PAINT_BUCKET,
     Palette => "palette" => PALETTE,
     Pane => "pane" => PANE,
+    Paperclip => "paperclip" => PAPERCLIP,
     Pencil => "pencil" => PENCIL,
     Person => "person" => PERSON,
     Plus => "plus" => PLUS,

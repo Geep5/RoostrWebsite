@@ -2014,10 +2014,42 @@ fn composer(d: &Disc, s: &State, cx: &mut Cx<State>, t: &Theme, layer: &mut Vec<
                 .pt(4.)
                 .pb(8.)
                 .min_h(48.)
-                .child(el())
+                .child(attach_button(d, s, t).unwrap_or_else(el))
                 .child(send),
         );
     frame
+}
+
+/// The paperclip left of Send: the system's Open dialog, and the chosen file goes with the
+/// next message as a dropped one does. Only where this app can pick files (not the browser).
+fn attach_button(d: &Disc, s: &State, t: &Theme) -> Option<El> {
+    if !d.takes_files() || roostr_core::io::WEB || s.pick_file.is_none() {
+        return None;
+    }
+    let key = d.key.clone();
+    let button = row()
+        .key(path(&d.key, "attach"))
+        .role("button")
+        .label("Attach a file")
+        .size(28., 28.)
+        .center()
+        .radius(radius::SM)
+        .hover(t.hover)
+        .cursor(rune::Cursor::Pointer)
+        .on_press(move |s: &mut State| {
+            let Some(roostr_core::create::PickFile(pick)) = s.pick_file.clone() else {
+                return;
+            };
+            let chosen = pick(s);
+            let key = key.clone();
+            s.rt.spawn(async move |cx| {
+                let Some(path) = chosen.await else { return };
+                cx.update(|s| with(s, &key, |d, s| d.drop_files(vec![path], s)));
+            })
+            .detach();
+        })
+        .child(glyph(Glyph::Paperclip, 16.).color(t.muted));
+    Some(roostr_ui::tooltip(button, "Attach a file"))
 }
 
 /// Files dropped anywhere on the chat (its messages or its composer) go with the next

@@ -378,3 +378,41 @@ fn an_image_dragged_onto_the_chat_is_attached_to_the_next_message() {
     assert_eq!(posts.last().expect("a post")["files"], json!(["file-9"]));
     std::fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+fn the_paperclip_attaches_a_file_chosen_in_the_open_dialog() {
+    let vault = Vault::new(vec![page(Vec::new())]);
+    let dir = std::env::temp_dir().join(format!("roostr-chat-pick-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let photo = dir.join("chosen.png");
+    std::fs::write(&photo, PNG).expect("write the image");
+    let chosen = photo.clone();
+    let mut app = App::open_with(Arc::new(Handle(vault.clone())), 1568., 934., move |s| {
+        s.add_file = Some(AddFile(Rc::new(
+            |name, mime, _bytes, space, s: &mut State| {
+                s.slot::<Uploads>().0.push((name, mime, space));
+                Task::ready(Ok("file-9".to_string()))
+            },
+        )));
+        // The Open dialog answers with the file the person chose.
+        let chosen = chosen.clone();
+        s.pick_file = Some(roostr_core::create::PickFile(Rc::new(move |_| {
+            Task::ready(Some(chosen.clone()))
+        })));
+    });
+    app.navigate(Route::Object(PAGE.into()));
+    let clip = keys(&app)
+        .into_iter()
+        .find(|k| k.ends_with("/attach"))
+        .unwrap_or_else(|| panic!("no attach button; keys: {:?}", keys(&app)));
+    app.tap(&clip);
+    app.settle();
+    let uploads = app.state().slot::<Uploads>().0.clone();
+    assert_eq!(uploads.len(), 1, "the chosen file was not uploaded");
+    assert_eq!(uploads[0].0, "chosen.png");
+    assert!(
+        key_starting(&app, "attachment-").is_some(),
+        "no attachment above the field"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
