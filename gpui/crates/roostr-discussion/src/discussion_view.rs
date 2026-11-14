@@ -78,9 +78,9 @@ struct AvatarLook {
 }
 
 const ROW_AVATAR: AvatarLook = AvatarLook {
-    size: 28.,
-    letters: 10.,
-    emoji: 17.,
+    size: 36.,
+    letters: 12.,
+    emoji: 21.,
     disc: true,
     mono: true,
 };
@@ -572,7 +572,9 @@ fn message_rows(d: &Disc, s: &State, t: &Theme) -> Vec<El> {
         // until they have.
         let revealing = d.arrived.as_deref() == Some(m.id.as_str());
         let streaming = revealing && d.arriving;
+        let grouped = ix > 0 && follows(&d.messages[ix - 1], m);
         let version = (
+            grouped,
             d.fingerprints.get(ix).copied().unwrap_or_default(),
             sig,
             sending,
@@ -594,6 +596,7 @@ fn message_rows(d: &Disc, s: &State, t: &Theme) -> Vec<El> {
                 s,
                 t,
                 ix,
+                grouped,
                 m,
                 key_id,
                 revealing,
@@ -634,7 +637,19 @@ fn message_rows(d: &Disc, s: &State, t: &Theme) -> Vec<El> {
     rows
 }
 
-/// Message `m`'s row; `key_id` scopes its element keys (the message's id, or the placeholder
+/// Messages this close after the one before, by the same author, join its group: no
+/// avatar or name of their own (Discord's grouping).
+const GROUP_WINDOW_MS: i64 = 5 * 60 * 1000;
+
+/// Whether `m` continues `prev`'s group.
+fn follows(prev: &ChatMessage, m: &ChatMessage) -> bool {
+    prev.author == m.author && prev.thought.is_none() && (m.ts - prev.ts).abs() < GROUP_WINDOW_MS
+}
+
+/// Message `m`'s row, Discord style: every message on the left, the avatar and a header
+/// line (name, time) leading each author's group; `grouped` rows continue the group above.
+/// The author's chat colour tints a card behind the words, with a bar in it on the left.
+/// `key_id` scopes its element keys (the message's id, or the placeholder
 /// a sent line landed in) and `revealing` fades its words in.
 #[allow(clippy::too_many_arguments)]
 fn message_row(
@@ -642,6 +657,7 @@ fn message_row(
     s: &State,
     t: &Theme,
     ix: usize,
+    grouped: bool,
     m: &ChatMessage,
     key_id: &str,
     revealing: bool,
@@ -671,34 +687,28 @@ fn message_row(
     })
     .font(ty::ui(11.).lh(11. * 1.618))
     .color(t.muted);
-    let mut meta = row().items_end().gap(8.);
-    if own {
-        meta = meta.justify_end().child(time);
+    let name = d.who(&m.author, store);
+    let name_el = if d.author_links(&m.author, store) {
+        let target = m.author.clone();
+        roostr_ui::Link::new(format!("author-{ix}"))
+            .label(name)
+            .text_size(14.)
+            .weight(ty::SEMIBOLD)
+            .color(t.fg)
+            .plain()
+            .on_press(move |s: &mut State| nav::navigate(Route::Object(target.clone()), s))
+            .build(t)
     } else {
-        let name = d.who(&m.author, store);
-        let name_el = if d.author_links(&m.author, store) {
-            let target = m.author.clone();
-            roostr_ui::Link::new(format!("author-{ix}"))
-                .label(name)
-                .text_size(12.)
-                .weight(ty::SEMIBOLD)
-                .color(t.fg)
-                .plain()
-                .on_press(move |s: &mut State| nav::navigate(Route::Object(target.clone()), s))
-                .build(t)
-        } else {
-            text(name)
-                .font(ty::ui(12.).semibold().lh(12. * 1.618))
-                .color(t.fg)
-        };
-        meta = meta.child(name_el).child(time);
-    }
+        text(name)
+            .font(ty::ui(14.).semibold().lh(14. * 1.4))
+            .color(t.fg)
+    };
+    let meta = (!grouped || sending).then(|| row().items_end().gap(8.).child(name_el).child(time));
 
-    // The bubble: your chat colour, an agent's own colour, else neutral; the corner by the
-    // sender is the sharp one.
+    // The words on the theme's ink: the chat colour only tints the card behind them.
     let md_theme = MdTheme {
-        ink: if tinted { colors.ink } else { t.fg },
-        tint: tinted.then_some(colors.tint),
+        ink: t.fg,
+        tint: None,
         mention_names: mention_names.to_vec(),
     };
     // The object it came from leads the body as that object's tag; a deleted one, none.
@@ -724,21 +734,27 @@ fn message_row(
         .thought
         .as_ref()
         .map(|thought| thought_record(d, t, m, key_id, thought));
-    let bubble_el = col()
+    let mut card = col()
         .key(format!("msg-text-{key_id}"))
-        .corners(if own {
-            [16., 16., 5., 16.]
-        } else {
-            [16., 16., 16., 5.]
-        })
-        .px(12.)
-        .py(7.)
+        .w_full()
         .gap(6.)
-        .fill(if tinted { colors.bg } else { t.hover })
-        .shrink()
         .min_w(0.)
         .children(body)
         .children(files);
+    if tinted {
+        card = card
+            .radius(6.)
+            .pl(11.)
+            .pr(10.)
+            .py(5.)
+            .fill(colors.bg.alpha(if t.dark { 0.16 } else { 0.2 }))
+            .child(
+                el().pin(Some(0.), Some(0.), None, Some(0.))
+                    .w(3.)
+                    .corners([6., 0., 0., 6.])
+                    .fill(colors.bg),
+            );
+    }
 
     // Delivery / processing status: quiet when all is well.
     let status_line = m
@@ -746,12 +762,17 @@ fn message_row(
         .as_ref()
         .and_then(|entry| status(d, s, t, ix, m, entry, own));
 
-    // Hover actions, beside the bubble on the side away from the sender.
+    // Hover actions, at the row's top right over the card (Discord's).
     let actions = (!d.read_only).then(|| {
         let exchange = d.is_exchange;
         let (id_reply, id_private) = (m.id.clone(), m.id.clone());
         let mut a = row()
             .gap(2.)
+            .px(2.)
+            .py(2.)
+            .radius(6.)
+            .fill(t.panel)
+            .border(1., t.border)
             .group_opacity(0., 1.)
             .hover_motion(motion::HOVER_REVEAL.anim(), motion::HOVER_REVEAL.anim())
             .child(
@@ -778,48 +799,42 @@ fn message_row(
                     .build(t),
             );
         }
-        // Out of the flow: a zero-wide box beside the bubble holds them.
-        let placed = if own {
-            a.pin(None, Some(0.), Some(10.), None)
-        } else {
-            a.absolute(10., 0.)
-        };
-        el().w(0.).child(placed)
+        a.pin(None, Some(-10.), Some(12.), None)
     });
-    let mut content = row().w_full().items_start();
-    if own {
-        content = content.justify_end();
-    }
-    content = match (own, actions) {
-        (true, Some(a)) => content.child(a).child(bubble_el),
-        (false, Some(a)) => content.child(bubble_el).child(a),
-        (_, None) => content.child(bubble_el),
-    };
 
-    // The bubble column is 78% of the row; the bubble hugs its text on its side.
-    let mut column = col()
-        .w_frac(0.78)
+    let column = col()
+        .grow(1.)
         .min_w(0.)
-        .child(meta)
+        .gap(2.)
+        .children(meta)
         .children(thought)
-        .child(content)
+        .child(card)
         .children(status_line);
-    column = if own {
-        column.items_end()
+    // The avatar leads a group; a row continuing it keeps the avatar's width.
+    let lead = if grouped {
+        el().w(ROW_AVATAR.size).h(1.)
     } else {
-        column.items_start().pl(10.)
+        row_avatar(d, s, t, images, &m.author, ix)
     };
-    let mut r = row()
+    row()
         .w_full()
         .items_start()
+        .gap(12.)
+        .px(8.)
+        .py(2.)
+        .mt(if ix == 0 {
+            2.
+        } else if grouped {
+            0.
+        } else {
+            12.
+        })
+        .radius(6.)
         .hover_group()
-        .pt(if ix == 0 { 4. } else { 14. });
-    if own {
-        r = r.justify_end();
-    } else {
-        r = r.child(row_avatar(d, s, t, images, &m.author, ix));
-    }
-    r.child(column)
+        .hover(t.hover)
+        .child(lead)
+        .child(column)
+        .children(actions)
 }
 
 /// The progress text's line height: the box shows [`PROGRESS_LINES`] of them.
@@ -917,8 +932,9 @@ fn live_row(d: &Disc, s: &State, t: &Theme, images: Option<&Images>, run: &Run) 
         .key(format!("live-{}", run.id))
         .w_full()
         .items_start()
-        .gap(8.)
-        .pt(2.)
+        .gap(12.)
+        .px(8.)
+        .pt(12.)
         .pb(6.)
         .child(avatar(
             t,
@@ -930,13 +946,13 @@ fn live_row(d: &Disc, s: &State, t: &Theme, images: Option<&Images>, run: &Run) 
         ))
         .child(
             col()
-                .w_frac(0.78)
+                .grow(1.)
                 .min_w(0.)
                 .gap(4.)
                 .child(
                     text(d.who(&run.agent, store))
-                        .font(ty::ui(12.).medium().lh(12. * 1.618))
-                        .color(t.muted),
+                        .font(ty::ui(14.).semibold().lh(14. * 1.4))
+                        .color(t.fg),
                 )
                 .child(progress_box(
                     t,
@@ -1263,8 +1279,9 @@ fn footer(d: &Disc, s: &State, t: &Theme, images: Option<&Images>) -> El {
         let typing = row()
             .key("agent-typing")
             .center_y()
-            .gap(8.)
-            .pt(2.)
+            .gap(12.)
+            .px(8.)
+            .pt(12.)
             .pb(6.)
             .child(avatar(
                 t,

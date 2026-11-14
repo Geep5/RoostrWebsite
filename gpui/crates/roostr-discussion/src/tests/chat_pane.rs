@@ -28,7 +28,7 @@ fn select_message(h: &mut Harness, n: usize) -> String {
         .rect(&format!("msg-text-m{n}"))
         .unwrap_or_else(|| panic!("message {n}'s text is drawn"));
     let y = r[1] + r[3] * 0.5;
-    h.rt.pointer_down(r[0] + 13.0, y);
+    h.rt.pointer_down(r[0] + 1.0, y);
     h.frame();
     h.rt.pointer_move(r[0] + r[2] - 2.0, y);
     h.frame();

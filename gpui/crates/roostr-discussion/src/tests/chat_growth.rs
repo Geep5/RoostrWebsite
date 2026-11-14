@@ -26,9 +26,9 @@ fn info(h: &Harness, key: &str) -> Option<ElementInfo> {
         .find(|e| e.key.as_deref() == Some(key) && !e.exiting)
 }
 
-/// The chat pane open on `page-1`, whose thread already has a dozen messages.
+/// The chat pane open on `page-1`, whose thread already has more messages than it shows.
 fn open_chat() -> (std::sync::Arc<Vault>, Harness) {
-    let messages = (1..=12)
+    let messages = (1..=40)
         .map(|n| chat_block(&format!("m{n}"), "peer", 1_000 + n, &format!("Message {n}")))
         .collect();
     let vault = Vault::new(
@@ -44,7 +44,7 @@ fn open_chat() -> (std::sync::Arc<Vault>, Harness) {
         pane.set_open(PaneTab::Chat, true, &mut s.ui);
     });
     h.navigate(Route::Object("page-1".into()));
-    assert!(h.has("msg-m12"), "the chat shows its thread");
+    assert!(h.has("msg-m40"), "the chat shows its thread");
     (vault, h)
 }
 
