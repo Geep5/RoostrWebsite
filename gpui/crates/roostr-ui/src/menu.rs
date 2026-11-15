@@ -231,6 +231,8 @@ pub struct PopupMenuItem {
     picks: Vec<Pick>,
     toggle_el: Option<Box<dyn FnOnce(El, bool) -> El>>,
     sub_key: Option<Box<dyn FnOnce(El) -> El>>,
+    /// A submenu's close on the pointer reaching another row of its menu.
+    leave: Option<Rc<dyn Fn(El) -> El>>,
 }
 
 impl PopupMenuItem {
@@ -242,6 +244,7 @@ impl PopupMenuItem {
             picks: Vec::new(),
             toggle_el: None,
             sub_key: None,
+            leave: None,
         }
     }
     /// A plain item (`PopupMenuItem::new`).
@@ -308,10 +311,18 @@ impl PopupMenuItem {
         self
     }
     /// A submenu's open requests: pressing or hovering it, or Right, asks `true`; pressing it
-    /// open or Left inside it asks `false`.
+    /// open, Left inside it, or the pointer moving on to another item of its menu asks `false`.
     pub fn on_toggle<S: 'static>(mut self, f: impl Fn(&mut S, bool) + 'static) -> Self {
         let f = Rc::new(f);
-        let (press, hover, key) = (f.clone(), f.clone(), f.clone());
+        let (press, hover, key, away) = (f.clone(), f.clone(), f.clone(), f.clone());
+        self.leave = Some(Rc::new(move |e: El| {
+            let away = away.clone();
+            e.on_hover_change(move |s: &mut S, inside: bool, _: &mut Tx| {
+                if inside {
+                    away(s, false)
+                }
+            })
+        }));
         self.toggle_el = Some(Box::new(move |e: El, open: bool| {
             e.on_press(move |s: &mut S| press(s, !open))
                 .on_hover_change(move |s: &mut S, inside: bool, _: &mut Tx| {
@@ -358,8 +369,13 @@ impl PopupMenuItem {
         let width = |s: &str, style| rune::text::measure(s, &[], style, None).0;
         let lead = if left { rems(0.75) + rems(0.25) } else { 0.0 };
         let label = match &self.body {
-            Body::Item { label, shortcut, .. } => {
-                width(label, font) + shortcut.as_deref().map_or(0.0, |s| rems(0.75) + width(s, ty::ui(rems(0.75))))
+            Body::Item {
+                label, shortcut, ..
+            } => {
+                width(label, font)
+                    + shortcut
+                        .as_deref()
+                        .map_or(0.0, |s| rems(0.75) + width(s, ty::ui(rems(0.75))))
             }
             Body::Submenu { label, .. } => width(label, font) + rems(0.5) + rems(0.75),
             Body::Label(l) => width(l, font),
@@ -609,7 +625,12 @@ impl PopupMenu {
         // minimum, and a long label ran past its edge. So its minimum is its
         // widest row's text, within the menu's maximum.
         let max_w = self.max_w.unwrap_or(rems(31.25));
-        let natural = self.items.iter().map(|i| i.natural_w(left)).fold(0.0, f32::max) + rems(0.25) * 2.0;
+        let natural = self
+            .items
+            .iter()
+            .map(|i| i.natural_w(left))
+            .fold(0.0, f32::max)
+            + rems(0.25) * 2.0;
         let min_w = self.min_w.unwrap_or(rems(8.0)).max(natural).min(max_w);
         let mut rows = col()
             .key("items")
@@ -618,12 +639,24 @@ impl PopupMenu {
             .gap(rems(0.125))
             .min_w(min_w)
             .max_w(max_w);
+        // An open submenu closes when the pointer reaches another item (another submenu opens
+        // in its place on its own).
+        let leave = self
+            .items
+            .iter()
+            .find(|i| matches!(i.body, Body::Submenu { open: true, .. }))
+            .and_then(|i| i.leave.clone());
         for (i, item) in self.items.into_iter().enumerate() {
             // The kit drops a trailing separator.
             if i + 1 == n && matches!(item.body, Body::Separator) {
                 continue;
             }
-            rows = rows.child(item.build(t, format!("{key}-item{i}"), left, close, layer));
+            let other = matches!(item.body, Body::Item { .. } | Body::Element(_)) && !item.disabled;
+            let row = item.build(t, format!("{key}-item{i}"), left, close, layer);
+            rows = rows.child(match &leave {
+                Some(leave) if other => leave(row),
+                _ => row,
+            });
         }
         let mut surface = col()
             .key(format!("{key}-menu"))
@@ -1006,16 +1039,33 @@ mod tests {
                 .panel(&t, "m", &mut layer);
             crate::root(col().child(menu), layer)
         }
-        let mut rt = Runtime::new(S::default(), long_view, (1200.0, 600.0), Env { system_dark: true, scale: 2.0 });
+        let mut rt = Runtime::new(
+            S::default(),
+            long_view,
+            (1200.0, 600.0),
+            Env {
+                system_dark: true,
+                scale: 2.0,
+            },
+        );
         rt.frame(0.0);
         rt.frame(1.0 / 60.0);
         let all = rt.elements();
         let surface = all
             .iter()
             .find(|e| e.key.as_deref() == Some("m-item0-sub-menu"))
-            .unwrap_or_else(|| panic!("no submenu; keys: {:?}", all.iter().filter_map(|e| e.key.clone()).collect::<Vec<_>>()))
+            .unwrap_or_else(|| {
+                panic!(
+                    "no submenu; keys: {:?}",
+                    all.iter().filter_map(|e| e.key.clone()).collect::<Vec<_>>()
+                )
+            })
             .rect;
-        let label = all.iter().find(|e| e.text.as_deref() == Some(LONG)).expect("the long row's text").rect;
+        let label = all
+            .iter()
+            .find(|e| e.text.as_deref() == Some(LONG))
+            .expect("the long row's text")
+            .rect;
         assert!(
             label[0] + label[2] <= surface[0] + surface[2],
             "the text [{}..{}] runs past the submenu [{}..{}]",
@@ -1024,5 +1074,44 @@ mod tests {
             surface[0],
             surface[0] + surface[2]
         );
+    }
+
+    /// An open submenu closes once the pointer moves on to another item of its menu, as a
+    /// macOS menu's does. Field report: "Change type" stayed open over Duplicate and Copy ID.
+    #[test]
+    fn an_open_submenu_closes_when_the_pointer_reaches_another_item() {
+        fn sub_view(s: &S, _: &mut rune::Cx<S>) -> El {
+            let t = Theme::dark();
+            let mut layer = Vec::new();
+            let sub = PopupMenu::new().item(PopupMenuItem::new("Agent"));
+            let menu = PopupMenu::new()
+                .item(
+                    PopupMenuItem::submenu("Change type", sub, s.sub)
+                        .on_toggle(|s: &mut S, open: bool| s.sub = open),
+                )
+                .item(PopupMenuItem::new("Duplicate"))
+                .panel(&t, "m", &mut layer);
+            crate::root(col().child(menu), layer)
+        }
+        let mut rt = Runtime::new(
+            S::default(),
+            sub_view,
+            (1200.0, 600.0),
+            Env {
+                system_dark: true,
+                scale: 2.0,
+            },
+        );
+        rt.frame(0.0);
+        let at = |rt: &Runtime<S>, k: &str| rt.find(k).unwrap_or_else(|| panic!("{k}"));
+        let (x, y) = at(&rt, "m-item0");
+        rt.pointer_move(x, y);
+        rt.frame(1.0 / 60.0);
+        assert!(rt.state.sub, "hovering Change type opens it");
+        rt.frame(1.0 / 60.0);
+        let (x, y) = at(&rt, "m-item1");
+        rt.pointer_move(x, y);
+        rt.frame(1.0 / 60.0);
+        assert!(!rt.state.sub, "moving on to Duplicate closes it");
     }
 }
