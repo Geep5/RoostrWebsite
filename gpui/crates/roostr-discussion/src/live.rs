@@ -109,15 +109,20 @@ pub(crate) fn clock(ms: i64) -> String {
     }
 }
 
-/// Adds one piece in order: thinking deltas run on into the prose before them.
-fn append(entries: &mut Vec<Entry>, kind: LiveKind, text: &str) {
+/// Adds one piece in order: thinking deltas run on into the prose before them, reply text
+/// onto `reply`, which a tool step starts over.
+fn append(entries: &mut Vec<Entry>, reply: &mut String, kind: LiveKind, text: &str) {
     match kind {
         LiveKind::Thinking => match entries.last_mut() {
             Some(Entry::Thinking(prose)) => prose.push_str(text),
             _ => entries.push(Entry::Thinking(text.to_string())),
         },
-        LiveKind::Step => entries.push(Entry::Step(text.trim().to_string())),
-        LiveKind::Text | LiveKind::Done | LiveKind::Error => {}
+        LiveKind::Step => {
+            reply.clear();
+            entries.push(Entry::Step(text.trim().to_string()));
+        }
+        LiveKind::Text => reply.push_str(text),
+        LiveKind::Done | LiveKind::Error => {}
     }
 }
 
@@ -139,6 +144,9 @@ pub(crate) struct Run {
     events: BTreeMap<u64, (LiveKind, String)>,
     /// `events` in seq order, consecutive thinking joined.
     pub entries: Vec<Entry>,
+    /// The reply as it streams: the text since the run's last tool step (words written
+    /// before a step were the agent talking to itself on the way).
+    pub reply: String,
 }
 
 impl Run {
@@ -161,6 +169,7 @@ impl Run {
             ended: false,
             events: BTreeMap::new(),
             entries: Vec::new(),
+            reply: String::new(),
         }
     }
 
@@ -175,9 +184,7 @@ impl Run {
                 self.ended = true;
                 return true;
             }
-            // The reply's own words show as the reply.
-            LiveKind::Text => return false,
-            LiveKind::Thinking | LiveKind::Step => {}
+            LiveKind::Text | LiveKind::Thinking | LiveKind::Step => {}
         }
         if self.events.contains_key(&e.seq) {
             return false;
@@ -188,11 +195,12 @@ impl Run {
             .is_none_or(|(&last, _)| last < e.seq);
         self.events.insert(e.seq, (e.kind, e.text.clone()));
         if in_order {
-            append(&mut self.entries, e.kind, &e.text);
+            append(&mut self.entries, &mut self.reply, e.kind, &e.text);
         } else {
             self.entries.clear();
+            self.reply.clear();
             for (kind, text) in self.events.values() {
-                append(&mut self.entries, *kind, text);
+                append(&mut self.entries, &mut self.reply, *kind, text);
             }
         }
         true

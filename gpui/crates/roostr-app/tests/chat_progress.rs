@@ -366,3 +366,29 @@ fn an_open_records_scroll_bar_stays_in_its_box_as_the_chat_scrolls() {
         );
     }
 }
+
+#[test]
+fn the_reply_streams_in_under_the_thinking_before_it_lands() {
+    let (mut app, tx) = open(page(vec![("m1", BTreeMap::new())]));
+    live(&tx, 0, LiveKind::Thinking, "Checking the inbox.");
+    live(&tx, 1, LiveKind::Text, "Let me look");
+    live(&tx, 2, LiveKind::Step, "shell_exec: gws gmail");
+    // Words before a tool step were on the way; the reply is what comes after the last one.
+    live(&tx, 3, LiveKind::Text, "You have ");
+    live(&tx, 4, LiveKind::Text, "**3** new emails.");
+    app.settle();
+    let shown = texts_in(&app, "live-reply-run-1");
+    assert!(
+        shown.contains("You have 3 new emails."),
+        "the reply so far: {shown:?}"
+    );
+    assert!(!shown.contains("Let me look"), "{shown:?}");
+    assert!(app.shown("live-box-run-1"), "the thinking stays above it");
+
+    live(&tx, 5, LiveKind::Done, "");
+    app.settle();
+    assert!(
+        !app.shown("live-reply-run-1"),
+        "done hands over to the saved message"
+    );
+}

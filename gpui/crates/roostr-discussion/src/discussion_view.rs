@@ -1234,8 +1234,43 @@ fn live_row(d: &Disc, s: &State, t: &Theme, images: Option<&Images>, run: &Run) 
                     Some(format!("Thinking… {elapsed}")),
                     &run.entries,
                     true,
-                )),
+                ))
+                .children(streaming_reply(d, s, t, run)),
         )
+}
+
+/// The reply as the agent writes it, under its thinking; the saved message takes its place
+/// when it lands.
+fn streaming_reply(d: &Disc, s: &State, t: &Theme, run: &Run) -> Option<El> {
+    if run.reply.trim().is_empty() {
+        return None;
+    }
+    let space = s.nav.space().to_string();
+    let ink = author_ink(d, &s.store, t, &run.agent);
+    let md_theme = MdTheme {
+        ink: t.fg,
+        link: ink,
+        mention_names: Vec::new(),
+    };
+    let env = MdEnv {
+        t,
+        store: &s.store,
+        space: &space,
+        reveal: None,
+    };
+    Some(
+        col()
+            .key(format!("live-reply-{}", run.id))
+            .w_full()
+            .pt(4.)
+            .child(render_markdown(
+                &format!("md-live-{}", run.id),
+                &run.reply,
+                None,
+                &md_theme,
+                &env,
+            )),
+    )
 }
 
 /// The widest a message's image draws; a tall one stops at [`THUMB_MAX_H`].
