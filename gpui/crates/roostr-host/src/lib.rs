@@ -38,10 +38,26 @@ pub fn setup(s: &mut State, waker: Waker) {
 pub fn poll(s: &mut State, _clock: f64, tx: &mut Tx) -> bool {
     let ran = s.poll();
     fetch_images(s);
+    apply_font(s, tx);
     if let Some(wait) = ran.next_timer {
         tx.wake_after(wait);
     }
     ran.updated
+}
+
+/// The UI font last put behind the sans slot.
+struct AppliedFont(roostr_ui::fonts::UiFont);
+
+/// Puts the picked UI font (Settings › Appearance) behind the sans slot, at launch and when
+/// the pick changes; every window follows on its next frame.
+fn apply_font(s: &mut State, tx: &mut Tx) {
+    use roostr_ui::fonts::{MONO, UiFont};
+    let font = UiFont::from_name(s.ui.font_name());
+    if s.get::<AppliedFont>().is_some_and(|a| a.0 == font) {
+        return;
+    }
+    tx.set_font_families(&font.families(), MONO);
+    s.put(AppliedFont(font));
 }
 
 /// Desktop: fetch the web images views asked for (Rune has no HTTP client), sending Roostr's

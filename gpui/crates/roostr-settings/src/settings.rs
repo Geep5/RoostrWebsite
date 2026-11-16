@@ -148,6 +148,7 @@ pub struct Settings {
     swatch: ColorPickerState,
 
     // Appearance
+    font_select: SelectState,
     theme_select: SelectState,
 
     // Dictionary
@@ -198,6 +199,16 @@ impl Settings {
                 .collect(),
             THEMES.iter().position(|(p, _)| *p == pref),
         );
+        let font = roostr_ui::fonts::UiFont::from_name(s.ui.font_name());
+        let font_select = SelectState::new(
+            roostr_ui::fonts::UiFont::ALL
+                .iter()
+                .map(|f| roostr_ui::SelectItem::new(f.name(), f.label()))
+                .collect(),
+            roostr_ui::fonts::UiFont::ALL
+                .iter()
+                .position(|f| *f == font),
+        );
         let export_select = SelectState::new(
             vec![
                 roostr_ui::SelectItem::new("markdown", ExportFormat::Markdown.label()),
@@ -243,6 +254,7 @@ impl Settings {
             chat_color_state: String::new(),
             swatch: ColorPickerState::new().default_value(swatch_color),
             theme_select,
+            font_select,
             ignored: read_ignored(s),
             export_format: ExportFormat::Markdown,
             export_select,
@@ -1287,18 +1299,31 @@ fn appearance_section(me: &Settings, t: &Theme, layer: &mut Vec<El>) -> El {
             "How Roostr looks on this device. System follows your computer's light or dark setting.",
         ))
         .child(
-            row().child(select(
-                t,
-                layer,
-                "settings-theme",
-                &me.theme_select,
-                |s: &mut State| &mut me_or_dummy(s).theme_select,
-                120.0,
-                t.bg,
-                |s: &mut State, value: &str, tx: &mut Tx| {
-                    crate::set_theme_pref(s, tx, ThemePref::from_name(value))
-                },
-            )),
+            row()
+                .gap(8.0)
+                .child(select(
+                    t,
+                    layer,
+                    "settings-theme",
+                    &me.theme_select,
+                    |s: &mut State| &mut me_or_dummy(s).theme_select,
+                    120.0,
+                    t.bg,
+                    |s: &mut State, value: &str, tx: &mut Tx| {
+                        crate::set_theme_pref(s, tx, ThemePref::from_name(value))
+                    },
+                ))
+                // The UI font; roostr-host applies the pick on the next frame.
+                .child(select(
+                    t,
+                    layer,
+                    "settings-font",
+                    &me.font_select,
+                    |s: &mut State| &mut me_or_dummy(s).font_select,
+                    160.0,
+                    t.bg,
+                    |s: &mut State, value: &str, _: &mut Tx| s.ui.set_font_name(value),
+                )),
         )
 }
 
@@ -2495,6 +2520,7 @@ impl Settings {
             chat_color_state: String::new(),
             swatch: ColorPickerState::new(),
             theme_select: SelectState::new(Vec::new(), None),
+            font_select: SelectState::new(Vec::new(), None),
             ignored: Vec::new(),
             export_format: ExportFormat::Markdown,
             export_select: SelectState::new(Vec::new(), None),

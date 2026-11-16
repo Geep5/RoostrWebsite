@@ -1,8 +1,10 @@
 //! Fonts for an app's `AppSpec`: `AppSpec { fonts: fonts::FONTS, families: fonts::FAMILIES, .. }`.
 //!
-//! The UI is Intern everywhere (a fully rounded Inter, `fonts/Intern.ttf`, variable weight and
-//! optical size, OFL: `fonts/Intern-OFL.txt`). It covers Latin only, so Inter follows it for
-//! Greek and Cyrillic. Code is Menlo on macOS; elsewhere the bundled JetBrains Mono, with the
+//! The UI font is the person's pick ([`UiFont`], Settings › Appearance): IBM Plex Sans by
+//! default (`fonts/IBMPlexSans-*.ttf`, OFL: `fonts/IBMPlexSans-OFL.txt`), or Intern (a fully
+//! rounded Inter, `fonts/Intern.ttf`, OFL: `fonts/Intern-OFL.txt`), Inter, or Helvetica (the
+//! system's, Arial where it has none). Inter follows each for scripts it lacks.
+//! Code is Menlo on macOS; elsewhere the bundled JetBrains Mono, with the
 //! symbols those lack (`▨` `◍` `⌕` `☐` `＋` …) from the 4 KB Roostr Symbols subset. Archivo Black
 //! (landing-page headings) and Inter (landing-page body) are bundled everywhere, named by
 //! [`ARCHIVO_BLACK`] and [`INTER`].
@@ -17,6 +19,11 @@
 
 static INTER_TTF: &[u8] = include_bytes!("../../../../static/fonts/Inter.ttf");
 static INTERN_TTF: &[u8] = include_bytes!("../fonts/Intern.ttf");
+static PLEX_REGULAR_TTF: &[u8] = include_bytes!("../fonts/IBMPlexSans-Regular.ttf");
+static PLEX_ITALIC_TTF: &[u8] = include_bytes!("../fonts/IBMPlexSans-Italic.ttf");
+static PLEX_MEDIUM_TTF: &[u8] = include_bytes!("../fonts/IBMPlexSans-Medium.ttf");
+static PLEX_SEMIBOLD_TTF: &[u8] = include_bytes!("../fonts/IBMPlexSans-SemiBold.ttf");
+static PLEX_BOLD_TTF: &[u8] = include_bytes!("../fonts/IBMPlexSans-Bold.ttf");
 static ARCHIVO_BLACK_TTF: &[u8] = include_bytes!("../../../../static/fonts/ArchivoBlack.ttf");
 #[cfg(not(target_os = "macos"))]
 static MONO_TTF: &[u8] = include_bytes!("../fonts/JetBrainsMono-Regular.ttf");
@@ -25,11 +32,71 @@ static SYMBOLS_TTF: &[u8] = include_bytes!("../fonts/RoostrSymbols.ttf");
 #[cfg(target_os = "ios")]
 static EMOJI_TTF: &[u8] = include_bytes!("../fonts/TwemojiMozilla.ttf");
 
-/// The UI family (CSS family list).
+/// What follows the picked UI font: Inter for scripts it lacks, and off macOS the bundled
+/// symbols and emoji.
 #[cfg(target_os = "macos")]
-pub const UI: &str = "Intern, Inter";
+const UI_FALLBACK: &str = "Inter";
 #[cfg(not(target_os = "macos"))]
-pub const UI: &str = "Intern, Inter, Roostr Symbols, Twemoji Mozilla";
+const UI_FALLBACK: &str = "Inter, Roostr Symbols, Twemoji Mozilla";
+
+/// The UI fonts a person can pick (Settings › Appearance), by their stored name.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum UiFont {
+    #[default]
+    Plex,
+    Intern,
+    Inter,
+    Helvetica,
+}
+
+impl UiFont {
+    pub const ALL: [UiFont; 4] = [
+        UiFont::Plex,
+        UiFont::Intern,
+        UiFont::Inter,
+        UiFont::Helvetica,
+    ];
+
+    /// The stored name (`UiState` key `"font"`); unknown names read as the default.
+    pub fn from_name(name: &str) -> UiFont {
+        UiFont::ALL
+            .into_iter()
+            .find(|f| f.name() == name)
+            .unwrap_or_default()
+    }
+    pub fn name(self) -> &'static str {
+        match self {
+            UiFont::Plex => "plex",
+            UiFont::Intern => "intern",
+            UiFont::Inter => "inter",
+            UiFont::Helvetica => "helvetica",
+        }
+    }
+    pub fn label(self) -> &'static str {
+        match self {
+            UiFont::Plex => "IBM Plex Sans",
+            UiFont::Intern => "Intern",
+            UiFont::Inter => "Inter",
+            UiFont::Helvetica => "Helvetica",
+        }
+    }
+    /// The sans slot's family list for this font.
+    pub fn families(self) -> String {
+        let first = match self {
+            UiFont::Plex => "IBM Plex Sans",
+            UiFont::Intern => "Intern",
+            UiFont::Inter => "Inter",
+            UiFont::Helvetica => "Helvetica Neue, Helvetica, Arial",
+        };
+        format!("{first}, {UI_FALLBACK}")
+    }
+}
+
+/// The UI family (CSS family list) at launch: the default [`UiFont`].
+#[cfg(target_os = "macos")]
+pub const UI: &str = "IBM Plex Sans, Inter";
+#[cfg(not(target_os = "macos"))]
+pub const UI: &str = "IBM Plex Sans, Inter, Roostr Symbols, Twemoji Mozilla";
 /// Code.
 #[cfg(target_os = "macos")]
 pub const MONO: &str = "Menlo";
@@ -52,12 +119,43 @@ pub mod family {
 
 /// The faces every build registers (`AppSpec::fonts`). They replace Rune's built-in Inter.
 #[cfg(target_os = "macos")]
-pub static FONTS: &[&[u8]] = &[INTERN_TTF, INTER_TTF, ARCHIVO_BLACK_TTF];
+pub static FONTS: &[&[u8]] = &[
+    PLEX_REGULAR_TTF,
+    PLEX_ITALIC_TTF,
+    PLEX_MEDIUM_TTF,
+    PLEX_SEMIBOLD_TTF,
+    PLEX_BOLD_TTF,
+    INTERN_TTF,
+    INTER_TTF,
+    ARCHIVO_BLACK_TTF,
+];
 #[cfg(not(any(target_os = "macos", target_os = "ios")))]
-pub static FONTS: &[&[u8]] = &[INTERN_TTF, INTER_TTF, ARCHIVO_BLACK_TTF, MONO_TTF, SYMBOLS_TTF];
+pub static FONTS: &[&[u8]] = &[
+    PLEX_REGULAR_TTF,
+    PLEX_ITALIC_TTF,
+    PLEX_MEDIUM_TTF,
+    PLEX_SEMIBOLD_TTF,
+    PLEX_BOLD_TTF,
+    INTERN_TTF,
+    INTER_TTF,
+    ARCHIVO_BLACK_TTF,
+    MONO_TTF,
+    SYMBOLS_TTF,
+];
 #[cfg(target_os = "ios")]
-pub static FONTS: &[&[u8]] =
-    &[INTERN_TTF, INTER_TTF, ARCHIVO_BLACK_TTF, MONO_TTF, SYMBOLS_TTF, EMOJI_TTF];
+pub static FONTS: &[&[u8]] = &[
+    PLEX_REGULAR_TTF,
+    PLEX_ITALIC_TTF,
+    PLEX_MEDIUM_TTF,
+    PLEX_SEMIBOLD_TTF,
+    PLEX_BOLD_TTF,
+    INTERN_TTF,
+    INTER_TTF,
+    ARCHIVO_BLACK_TTF,
+    MONO_TTF,
+    SYMBOLS_TTF,
+    EMOJI_TTF,
+];
 
 /// The sans and mono slots (`AppSpec::families`).
 pub const FAMILIES: (&str, &str) = (UI, MONO);
@@ -65,3 +163,47 @@ pub const FAMILIES: (&str, &str) = (UI, MONO);
 /// Where the browser build fetches Twemoji (a COLR build, see
 /// `fonts/TwemojiMozilla-LICENSE.md`), relative to the page: `App::font_url(EMOJI_FONT_PATH)`.
 pub const EMOJI_FONT_PATH: &str = "fonts/TwemojiMozilla.ttf";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rune::text::TextSystem;
+    use rune::{Family, TextStyle};
+
+    fn width(sans: &str, weight: f32) -> f32 {
+        let mut text = TextSystem::new(FONTS, (sans, MONO));
+        let style = TextStyle {
+            family: Family::Sans,
+            ..TextStyle::new(16.0, weight)
+        };
+        text.measure("Hamburgefonstiv 0123456789", style, 1.0).0
+    }
+
+    /// IBM Plex Sans draws in its own face: a family name that doesn't match its files would
+    /// quietly fall back to Inter. (Intern is Inter's metrics with rounded shapes, so width
+    /// can't tell those two apart.)
+    #[test]
+    fn ibm_plex_sans_draws_its_own_face() {
+        let plex = UiFont::Plex.families();
+        assert_ne!(
+            width(&plex, 400.0),
+            width("Inter", 400.0),
+            "IBM Plex Sans fell back to Inter"
+        );
+        // Plex's bold is its own face, not a synthesized regular.
+        assert_ne!(width(&plex, 700.0), width(&plex, 400.0));
+    }
+
+    #[test]
+    fn the_default_and_unknown_picks_are_plex() {
+        assert_eq!(UiFont::from_name(""), UiFont::Plex);
+        assert_eq!(UiFont::from_name("comic sans"), UiFont::Plex);
+        for f in UiFont::ALL {
+            assert_eq!(UiFont::from_name(f.name()), f);
+        }
+        assert!(
+            UI.starts_with("IBM Plex Sans"),
+            "the launch font is the default pick"
+        );
+    }
+}

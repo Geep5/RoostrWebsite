@@ -20,6 +20,8 @@ pub const WEB_KEY: &str = "roostr-gpui.ui-state";
 
 /// The key of the colour theme preference ([`UiState::theme_name`]).
 pub const THEME_KEY: &str = "theme";
+/// The key of the UI font preference ([`UiState::font_name`]).
+pub const FONT_KEY: &str = "font";
 
 /// The stored UI state ([`crate::State::ui`]).
 pub struct UiState {
@@ -94,6 +96,20 @@ impl UiState {
     /// Remember the picked colour theme (see [`Self::theme_name`]).
     pub fn set_theme_name(&mut self, name: &str) {
         self.set(THEME_KEY, &name);
+    }
+
+    /// The UI font the person picked in Settings (roostr-ui's `UiFont::from_name` reads it);
+    /// empty until one is picked, which reads as the default.
+    pub fn font_name(&self) -> &str {
+        self.values
+            .get(FONT_KEY)
+            .and_then(Json::as_str)
+            .unwrap_or("")
+    }
+
+    /// Remember the picked UI font (see [`Self::font_name`]).
+    pub fn set_font_name(&mut self, name: &str) {
+        self.set(FONT_KEY, &name);
     }
 
     #[cfg(target_family = "wasm")]
