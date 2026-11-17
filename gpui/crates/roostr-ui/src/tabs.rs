@@ -258,6 +258,12 @@ impl TabVariant {
     }
 }
 
+thread_local! {
+    /// Each bar's indicator place (left, width) as last read from the layout.
+    static LAST_PLACED: std::cell::RefCell<std::collections::HashMap<String, (f32, f32)>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
 /// gpui-kit's `raised_shadow` (the segmented indicator), black at 10%.
 fn raised_shadow() -> [Shadow; 2] {
     [
@@ -533,9 +539,19 @@ impl<S: 'static> TabBar<S> {
         });
         let slides = v.has_indicator() || (self.slide && v == TabVariant::Tab);
         let placed = sel.filter(|_| slides).and_then(|_| {
-            let tabs = rune::memo::layout(&row_key)?;
-            let tab = rune::memo::layout(&selected_key?)?;
-            Some((tab[0] - tabs[0], tab[2]))
+            let found = rune::memo::layout(&row_key)
+                .zip(selected_key.as_deref().and_then(rune::memo::layout));
+            // A build that can't read the layout (one right after the selection moved, in a
+            // window, not a test) keeps the indicator where it was, so it still slides
+            // there next build rather than being made afresh in its new place.
+            LAST_PLACED.with_borrow_mut(|last| match found {
+                Some((tabs, tab)) => {
+                    let at = (tab[0] - tabs[0], tab[2]);
+                    last.insert(k.clone(), at);
+                    Some(at)
+                }
+                None => last.get(k).copied(),
+            })
         });
         let mut tabs = row().key(row_key).center_y().gap(gap);
         if let Some((left, width)) = placed {
