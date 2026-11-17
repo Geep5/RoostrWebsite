@@ -373,6 +373,8 @@ pub struct TabBar<S> {
     px: Option<f32>,
     h: Option<f32>,
     scroll: bool,
+    /// The default variant's active look is one element that slides to the selected tab.
+    slide: bool,
 }
 
 impl<S: 'static> TabBar<S> {
@@ -395,6 +397,7 @@ impl<S: 'static> TabBar<S> {
             px: None,
             h: None,
             scroll: false,
+            slide: false,
         }
     }
     pub fn variant(mut self, v: TabVariant) -> Self {
@@ -487,6 +490,12 @@ impl<S: 'static> TabBar<S> {
         self.scroll = true;
         self
     }
+    /// The selected tab's look slides from tab to tab as the selection moves (the variants
+    /// with an indicator always do; this turns it on for the default `Tab` variant).
+    pub fn sliding(mut self, on: bool) -> Self {
+        self.slide = on;
+        self
+    }
 
     pub fn build(mut self, t: &Theme) -> El {
         let v = self.variant;
@@ -522,7 +531,8 @@ impl<S: 'static> TabBar<S> {
                 .clone()
                 .unwrap_or_else(|| format!("{k}-tab{s}"))
         });
-        let placed = sel.filter(|_| v.has_indicator()).and_then(|_| {
+        let slides = v.has_indicator() || (self.slide && v == TabVariant::Tab);
+        let placed = sel.filter(|_| slides).and_then(|_| {
             let tabs = rune::memo::layout(&row_key)?;
             let tab = rune::memo::layout(&selected_key?)?;
             Some((tab[0] - tabs[0], tab[2]))
@@ -532,7 +542,10 @@ impl<S: 'static> TabBar<S> {
             let h = v.height(size);
             let mut ind = el()
                 .key(format!("{k}-indicator"))
-                .absolute(left, 0.0)
+                .absolute(0.0, 0.0)
+                // Moved by its offset, which springs to the newly picked tab.
+                .offset(left, 0.0)
+                .offset_motion(SPRING_MOVE)
                 .w(width)
                 .h(h)
                 .motion(SPRING_MOVE);
@@ -550,6 +563,13 @@ impl<S: 'static> TabBar<S> {
                     ind.center_y().child(inner)
                 }
                 TabVariant::Pill => ind.fill(t.kit.primary).radius(9999.0),
+                TabVariant::Tab => {
+                    let look = v.selected(t);
+                    ind.fill(look.bg)
+                        .radius(v.radius(size))
+                        .border_sides(look.borders, look.border)
+                        .border_layout()
+                }
                 _ => ind.child(
                     el().absolute(0.0, h - 2.0)
                         .w_full()
@@ -659,6 +679,10 @@ impl<S: 'static> TabBar<S> {
                 match v {
                     TabVariant::Pill => s.bg = Color::TRANSPARENT,
                     TabVariant::Underline => s.border = Color::TRANSPARENT,
+                    TabVariant::Tab => {
+                        s.bg = Color::TRANSPARENT;
+                        s.border = Color::TRANSPARENT;
+                    }
                     TabVariant::Segmented => s.inner_bg = Color::TRANSPARENT,
                     _ => {}
                 }

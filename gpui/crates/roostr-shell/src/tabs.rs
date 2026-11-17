@@ -206,6 +206,8 @@ pub(crate) fn view(s: &State, _cx: &mut Cx<State>, t: &Theme) -> El {
         .max_width(220.)
         .h(40.)
         .scrollable()
+        // The active tab's look slides to the picked tab; a dragged tab carries its own.
+        .sliding(lifted.is_none())
         .px(8.)
         .fill(t.panel)
         .on_click(|s: &mut State, ix: usize| s.nav.activate(ix, &mut s.ui));

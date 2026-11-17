@@ -777,6 +777,7 @@ fn main_column(
                     stick_bottom: false,
                 })
                 .px(32.)
+                .transition(page_in())
                 .child(body);
             // On a touch screen a drag scrolls: no page drag there.
             if roostr_core::layout::is_touch() {
@@ -787,6 +788,21 @@ fn main_column(
                     .on_drag(move |s: &mut State, d: &mut Drag, tx: &mut Tx| drag(s, &route, d, tx))
             }
         })
+}
+
+/// A page coming in (another tab, another page): it fades up from 8 pt below on a quick
+/// spring; the page it replaces goes at once, so the two never overlap.
+fn page_in() -> rune::Transition {
+    rune::Transition {
+        insertion: rune::Effect {
+            opacity: 0.0,
+            offset: rune::Vec2::new(0.0, 8.0),
+            ..rune::Effect::IDENTITY
+        },
+        removal: rune::Effect::IDENTITY,
+        springs: rune::SpringPair::new(rune::Spring::new(0.28, 0.0), rune::Spring::NONE),
+        ..rune::Transition::identity()
+    }
 }
 
 /// A pane column `column` wide (sliding), its 6 pt gap on the right: the
