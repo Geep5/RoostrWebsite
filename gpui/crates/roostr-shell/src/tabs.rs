@@ -191,6 +191,19 @@ fn indicator_place(s: &State, active: usize) -> Option<(f32, f32)> {
     Some((tab[0] - first[0], tab[2]))
 }
 
+/// A tab picked with the pointer, switched to on the next poll ([`switch_pending`]).
+#[derive(Default)]
+struct PendingTab(Option<usize>);
+
+/// Switch to the tab picked since the last poll; true when it did.
+pub(crate) fn switch_pending(s: &mut State) -> bool {
+    let Some(index) = s.slot::<PendingTab>().0.take() else {
+        return false;
+    };
+    s.nav.activate(index, &mut s.ui);
+    true
+}
+
 /// The press that ended a tab drag: true once, and it doesn't switch tabs.
 fn take_swallowed(s: &mut State) -> bool {
     std::mem::take(&mut s.slot::<TabDrag>().swallow)
@@ -262,7 +275,11 @@ pub(crate) fn view(s: &State, _cx: &mut Cx<State>, t: &Theme) -> El {
                 if tx.button() == PointerButton::Middle {
                     s.nav.close(i, &mut s.ui);
                 } else {
-                    s.nav.activate(i, &mut s.ui);
+                    // Switched on the next poll, in a commit of its own: the click's commit
+                    // also carries the tab's drag, which lands everything it moves at once,
+                    // so the active look and the page fade would jump.
+                    s.slot::<PendingTab>().0 = Some(i);
+                    tx.wake_after(std::time::Duration::ZERO);
                 }
             });
         content =

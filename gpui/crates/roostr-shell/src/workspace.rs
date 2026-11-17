@@ -78,7 +78,8 @@ fn on_poll(s: &mut State) -> bool {
     // A phone browses outside the tabs; the desktop in them.
     let phone = crate::is_mobile(s);
     s.nav.set_phone(phone, &mut s.ui);
-    let mut changed = on_store_changed(s);
+    let mut changed = crate::tabs::switch_pending(s);
+    changed |= on_store_changed(s);
     changed |= open_shown_route(s);
     changed |= top_pin_redirect(s);
     changed |= sync_pins(s);

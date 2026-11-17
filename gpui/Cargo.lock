@@ -5107,7 +5107,7 @@ dependencies = [
 [[package]]
 name = "rune"
 version = "0.0.1"
-source = "git+https://github.com/Geep5/rune?rev=ed73571#ed7357129b0c5c91eb5db5b7d77f09f8f2cb6460"
+source = "git+https://github.com/Geep5/rune?rev=bcecbfa#bcecbfa39d2b4956d2c8a4bc1516a62cd1c1e59c"
 dependencies = [
  "accesskit",
  "accesskit_macos",
@@ -5186,7 +5186,7 @@ dependencies = [
 [[package]]
 name = "rune-highlights"
 version = "0.0.1"
-source = "git+https://github.com/Geep5/rune?rev=ed73571#ed7357129b0c5c91eb5db5b7d77f09f8f2cb6460"
+source = "git+https://github.com/Geep5/rune?rev=bcecbfa#bcecbfa39d2b4956d2c8a4bc1516a62cd1c1e59c"
 dependencies = [
  "unicode-ident",
  "wasmparser",
@@ -5195,7 +5195,7 @@ dependencies = [
 [[package]]
 name = "rune-kit"
 version = "0.0.1"
-source = "git+https://github.com/Geep5/rune?rev=ed73571#ed7357129b0c5c91eb5db5b7d77f09f8f2cb6460"
+source = "git+https://github.com/Geep5/rune?rev=bcecbfa#bcecbfa39d2b4956d2c8a4bc1516a62cd1c1e59c"
 dependencies = [
  "rune",
  "rune-highlights",
@@ -5206,12 +5206,12 @@ dependencies = [
 [[package]]
 name = "rune-motion"
 version = "0.1.0"
-source = "git+https://github.com/Geep5/rune?rev=ed73571#ed7357129b0c5c91eb5db5b7d77f09f8f2cb6460"
+source = "git+https://github.com/Geep5/rune?rev=bcecbfa#bcecbfa39d2b4956d2c8a4bc1516a62cd1c1e59c"
 
 [[package]]
 name = "rune-staging"
 version = "0.0.1"
-source = "git+https://github.com/Geep5/rune?rev=ed73571#ed7357129b0c5c91eb5db5b7d77f09f8f2cb6460"
+source = "git+https://github.com/Geep5/rune?rev=bcecbfa#bcecbfa39d2b4956d2c8a4bc1516a62cd1c1e59c"
 dependencies = [
  "wgpu",
 ]
@@ -5219,7 +5219,7 @@ dependencies = [
 [[package]]
 name = "rune-taffy"
 version = "0.0.1"
-source = "git+https://github.com/Geep5/rune?rev=ed73571#ed7357129b0c5c91eb5db5b7d77f09f8f2cb6460"
+source = "git+https://github.com/Geep5/rune?rev=bcecbfa#bcecbfa39d2b4956d2c8a4bc1516a62cd1c1e59c"
 dependencies = [
  "taffy",
 ]
