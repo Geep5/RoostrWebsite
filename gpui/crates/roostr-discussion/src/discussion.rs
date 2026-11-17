@@ -191,6 +191,11 @@ pub(crate) enum ScrollAsk {
     Follow,
 }
 
+/// The newest messages a chat first shows, and how many more each "Show earlier messages"
+/// adds: a long thread (hundreds of messages) builds only what one can read, so opening its
+/// object stays quick.
+pub(crate) const CHAT_PAGE: usize = 30;
+
 /// One shown discussion.
 pub(crate) struct Disc {
     pub key: String,
@@ -234,6 +239,8 @@ pub(crate) struct Disc {
     /// several messages): the message list's growth stack takes a new key, so they land
     /// at once rather than growing in.
     pub rows_epoch: u64,
+    /// How many of the newest messages show; "Show earlier messages" adds [`CHAT_PAGE`] more.
+    pub shown: usize,
     seen_count: usize,
     focused_once: bool,
     seeded: bool,
@@ -397,6 +404,7 @@ pub(crate) fn create(s: &mut State, key: String, object_id: String, options: Dis
         arrive_timer: None,
         row_ids: HashMap::new(),
         rows_epoch: 0,
+        shown: CHAT_PAGE,
         seen_count: 0,
         focused_once: false,
         seeded: false,

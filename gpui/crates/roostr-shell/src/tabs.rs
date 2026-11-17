@@ -181,6 +181,16 @@ fn on_tab_drag(s: &mut State, index: usize, d: &Drag) {
     }
 }
 
+/// Tab `active`'s place in the strip's row (left from the first tab, width), from the tabs'
+/// laid-out rects: known in the very commit that picks the tab, so its look slides there.
+fn indicator_place(s: &State, active: usize) -> Option<(f32, f32)> {
+    let rects = &s.get::<TabDrag>()?.rects;
+    let tabs = s.nav.tabs();
+    let first = rects.get(&tabs.first()?.uid)?;
+    let tab = rects.get(&tabs.get(active)?.uid)?;
+    Some((tab[0] - first[0], tab[2]))
+}
+
 /// The press that ended a tab drag: true once, and it doesn't switch tabs.
 fn take_swallowed(s: &mut State) -> bool {
     std::mem::take(&mut s.slot::<TabDrag>().swallow)
@@ -208,6 +218,7 @@ pub(crate) fn view(s: &State, _cx: &mut Cx<State>, t: &Theme) -> El {
         .scrollable()
         // The active tab's look slides to the picked tab; a dragged tab carries its own.
         .sliding(lifted.is_none())
+        .indicator_place(indicator_place(s, active))
         .px(8.)
         .fill(t.panel)
         .on_click(|s: &mut State, ix: usize| s.nav.activate(ix, &mut s.ui));

@@ -381,6 +381,9 @@ pub struct TabBar<S> {
     scroll: bool,
     /// The default variant's active look is one element that slides to the selected tab.
     slide: bool,
+    /// Where the indicator goes (left in the tab row, width), when the caller knows: it then
+    /// moves in the same commit as the selection, not a layout read later.
+    place: Option<(f32, f32)>,
 }
 
 impl<S: 'static> TabBar<S> {
@@ -404,6 +407,7 @@ impl<S: 'static> TabBar<S> {
             h: None,
             scroll: false,
             slide: false,
+            place: None,
         }
     }
     pub fn variant(mut self, v: TabVariant) -> Self {
@@ -502,6 +506,13 @@ impl<S: 'static> TabBar<S> {
         self.slide = on;
         self
     }
+    /// The selected tab's place in the tab row (left, width), from the caller's own record of
+    /// the tabs' layout. A window animates the indicator only when it moves in the commit that
+    /// changed the selection; a move that waits for a layout read lands at once.
+    pub fn indicator_place(mut self, place: Option<(f32, f32)>) -> Self {
+        self.place = place;
+        self
+    }
 
     pub fn build(mut self, t: &Theme) -> El {
         let v = self.variant;
@@ -538,7 +549,11 @@ impl<S: 'static> TabBar<S> {
                 .unwrap_or_else(|| format!("{k}-tab{s}"))
         });
         let slides = v.has_indicator() || (self.slide && v == TabVariant::Tab);
+        let place = self.place;
         let placed = sel.filter(|_| slides).and_then(|_| {
+            if place.is_some() {
+                return place;
+            }
             let found = rune::memo::layout(&row_key)
                 .zip(selected_key.as_deref().and_then(rune::memo::layout));
             // A build that can't read the layout (one right after the selection moved, in a
@@ -558,10 +573,9 @@ impl<S: 'static> TabBar<S> {
             let h = v.height(size);
             let mut ind = el()
                 .key(format!("{k}-indicator"))
-                .absolute(0.0, 0.0)
-                // Moved by its offset, which springs to the newly picked tab.
-                .offset(left, 0.0)
-                .offset_motion(SPRING_MOVE)
+                // Its layout place, so the move springs as layout (`motion`) wherever the
+                // window lays out only what changed.
+                .absolute(left, 0.0)
                 .w(width)
                 .h(h)
                 .motion(SPRING_MOVE);

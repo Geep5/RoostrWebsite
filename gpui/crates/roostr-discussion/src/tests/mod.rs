@@ -10,6 +10,7 @@ mod chat_agents_live;
 mod chat_growth;
 mod chat_pane;
 mod chat_rows;
+mod chat_window;
 mod mention_typed;
 mod reactions;
 

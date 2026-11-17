@@ -589,6 +589,27 @@ fn opener(d: &Disc, t: &Theme, mobile: bool) -> El {
         .build(t)
 }
 
+/// "Show earlier messages" over the oldest shown one: `hidden` older messages wait.
+fn earlier_button(d: &Disc, t: &Theme, hidden: usize) -> El {
+    let key = d.key.clone();
+    let more = hidden.min(crate::discussion::CHAT_PAGE);
+    row()
+        .key("chat-earlier")
+        .w_full()
+        .justify_center()
+        .py(8.)
+        .child(
+            Button::new("chat-earlier-button")
+                .ghost()
+                .small()
+                .label(format!("Show {more} earlier messages"))
+                .on_press(move |s: &mut State| {
+                    with(s, &key, |d, _| d.shown += crate::discussion::CHAT_PAGE);
+                })
+                .build(t),
+        )
+}
+
 /// One row per message, then the trailing footer row.
 fn message_rows(d: &Disc, s: &State, t: &Theme) -> Vec<El> {
     let store = &s.store;
@@ -604,8 +625,13 @@ fn message_rows(d: &Disc, s: &State, t: &Theme) -> Vec<El> {
         .filter(|a| !a.name.is_empty())
         .map(|a| (a.name.clone(), a.icon.clone()))
         .collect();
-    let mut rows: Vec<El> = Vec::with_capacity(n + 1);
-    for (ix, m) in d.messages.iter().enumerate() {
+    // Only the newest `shown`: older ones wait behind "Show earlier messages".
+    let from = n.saturating_sub(d.shown);
+    let mut rows: Vec<El> = Vec::with_capacity(n - from + 2);
+    if from > 0 {
+        rows.push(earlier_button(d, t, from));
+    }
+    for (ix, m) in d.messages.iter().enumerate().skip(from) {
         let sending = d.outgoing.as_ref().is_some_and(|o| o.id == m.id);
         let retrying: Vec<&String> = d.retrying.iter().filter(|k| k.starts_with(&m.id)).collect();
         let last = ix + 1 == n;
