@@ -2,8 +2,10 @@
 //!
 //! The UI font is the person's pick ([`UiFont`], Settings › Appearance): IBM Plex Sans by
 //! default (`fonts/IBMPlexSans-*.ttf`, OFL: `fonts/IBMPlexSans-OFL.txt`), or Intern (a fully
-//! rounded Inter, `fonts/Intern.ttf`, OFL: `fonts/Intern-OFL.txt`), Inter, or Helvetica (the
-//! system's, Arial where it has none). Inter follows each for scripts it lacks.
+//! rounded Inter, `fonts/Intern.ttf`, OFL: `fonts/Intern-OFL.txt`), Geist (Vercel's,
+//! `fonts/Geist*.ttf`, OFL: `fonts/Geist-OFL.txt`), Allo (Josh Puckett's, `fonts/Allo.ttf`,
+//! OFL: `fonts/Allo-OFL.txt`), Inter, or Helvetica (the system's, Arial where it has none).
+//! Inter follows each for scripts it lacks.
 //! Code is Menlo on macOS; elsewhere the bundled JetBrains Mono, with the
 //! symbols those lack (`▨` `◍` `⌕` `☐` `＋` …) from the 4 KB Roostr Symbols subset. Archivo Black
 //! (landing-page headings) and Inter (landing-page body) are bundled everywhere, named by
@@ -24,6 +26,9 @@ static PLEX_ITALIC_TTF: &[u8] = include_bytes!("../fonts/IBMPlexSans-Italic.ttf"
 static PLEX_MEDIUM_TTF: &[u8] = include_bytes!("../fonts/IBMPlexSans-Medium.ttf");
 static PLEX_SEMIBOLD_TTF: &[u8] = include_bytes!("../fonts/IBMPlexSans-SemiBold.ttf");
 static PLEX_BOLD_TTF: &[u8] = include_bytes!("../fonts/IBMPlexSans-Bold.ttf");
+static GEIST_TTF: &[u8] = include_bytes!("../fonts/Geist.ttf");
+static GEIST_ITALIC_TTF: &[u8] = include_bytes!("../fonts/Geist-Italic.ttf");
+static ALLO_TTF: &[u8] = include_bytes!("../fonts/Allo.ttf");
 static ARCHIVO_BLACK_TTF: &[u8] = include_bytes!("../../../../static/fonts/ArchivoBlack.ttf");
 #[cfg(not(target_os = "macos"))]
 static MONO_TTF: &[u8] = include_bytes!("../fonts/JetBrainsMono-Regular.ttf");
@@ -45,14 +50,18 @@ pub enum UiFont {
     #[default]
     Plex,
     Intern,
+    Geist,
+    Allo,
     Inter,
     Helvetica,
 }
 
 impl UiFont {
-    pub const ALL: [UiFont; 4] = [
+    pub const ALL: [UiFont; 6] = [
         UiFont::Plex,
         UiFont::Intern,
+        UiFont::Geist,
+        UiFont::Allo,
         UiFont::Inter,
         UiFont::Helvetica,
     ];
@@ -68,6 +77,8 @@ impl UiFont {
         match self {
             UiFont::Plex => "plex",
             UiFont::Intern => "intern",
+            UiFont::Geist => "geist",
+            UiFont::Allo => "allo",
             UiFont::Inter => "inter",
             UiFont::Helvetica => "helvetica",
         }
@@ -76,6 +87,8 @@ impl UiFont {
         match self {
             UiFont::Plex => "IBM Plex Sans",
             UiFont::Intern => "Intern",
+            UiFont::Geist => "Geist",
+            UiFont::Allo => "Allo",
             UiFont::Inter => "Inter",
             UiFont::Helvetica => "Helvetica",
         }
@@ -85,6 +98,8 @@ impl UiFont {
         let first = match self {
             UiFont::Plex => "IBM Plex Sans",
             UiFont::Intern => "Intern",
+            UiFont::Geist => "Geist",
+            UiFont::Allo => "Allo Variable",
             UiFont::Inter => "Inter",
             UiFont::Helvetica => "Helvetica Neue, Helvetica, Arial",
         };
@@ -125,6 +140,9 @@ pub static FONTS: &[&[u8]] = &[
     PLEX_MEDIUM_TTF,
     PLEX_SEMIBOLD_TTF,
     PLEX_BOLD_TTF,
+    GEIST_TTF,
+    GEIST_ITALIC_TTF,
+    ALLO_TTF,
     INTERN_TTF,
     INTER_TTF,
     ARCHIVO_BLACK_TTF,
@@ -136,6 +154,9 @@ pub static FONTS: &[&[u8]] = &[
     PLEX_MEDIUM_TTF,
     PLEX_SEMIBOLD_TTF,
     PLEX_BOLD_TTF,
+    GEIST_TTF,
+    GEIST_ITALIC_TTF,
+    ALLO_TTF,
     INTERN_TTF,
     INTER_TTF,
     ARCHIVO_BLACK_TTF,
@@ -149,6 +170,9 @@ pub static FONTS: &[&[u8]] = &[
     PLEX_MEDIUM_TTF,
     PLEX_SEMIBOLD_TTF,
     PLEX_BOLD_TTF,
+    GEIST_TTF,
+    GEIST_ITALIC_TTF,
+    ALLO_TTF,
     INTERN_TTF,
     INTER_TTF,
     ARCHIVO_BLACK_TTF,
@@ -190,6 +214,14 @@ mod tests {
             width("Inter", 400.0),
             "IBM Plex Sans fell back to Inter"
         );
+        for font in [UiFont::Geist, UiFont::Allo] {
+            assert_ne!(
+                width(&font.families(), 400.0),
+                width("Inter", 400.0),
+                "{} fell back to Inter",
+                font.label()
+            );
+        }
         // Plex's bold is its own face, not a synthesized regular.
         assert_ne!(width(&plex, 700.0), width(&plex, 400.0));
     }
