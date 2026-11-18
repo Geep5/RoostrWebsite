@@ -213,6 +213,8 @@ struct Inner {
     device: DeviceInfo,
     /// One device record write at a time.
     device_lock: AsyncMutex<()>,
+    /// Makes this device's id once: two first readers at once would each make their own.
+    device_id_lock: Mutex<()>,
     /// Record mode ([`ReplicaBackend::with_records`]): states are record
     /// views and commits are patches; unset = the change DAG.
     records: std::sync::OnceLock<Arc<Records>>,
@@ -462,6 +464,7 @@ impl ReplicaBackend {
                 lite_frame_lock: AsyncMutex::new(()),
                 device: DeviceInfo::this_platform(),
                 device_lock: AsyncMutex::new(()),
+                device_id_lock: Mutex::new(()),
                 records: std::sync::OnceLock::new(),
                 #[cfg(target_family = "wasm")]
                 svelte_import: std::cell::OnceCell::new(),
@@ -1822,6 +1825,7 @@ impl Inner {
 
     /// This install's stable id ([`DEVICE_ID`]), made on first use.
     fn device_id(&self) -> String {
+        let _one = self.device_id_lock.lock();
         if let Some(id) = self.kv.get(DEVICE_ID).filter(|id| !id.is_empty()) {
             return id;
         }

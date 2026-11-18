@@ -768,6 +768,9 @@ struct SyncInner {
     spaces: Mutex<Vec<StreamKey>>,
     stopped: AtomicBool,
     started: AtomicBool,
+    /// This device has loaded the vault before (a stream has a cursor, or a start finished):
+    /// later catch-ups and errors then don't read as the first load.
+    loaded: AtomicBool,
     /// Bumped by every (re)subscription: an older live loop ends.
     generation: AtomicU64,
     /// One catch-up or pack load per stream at a time.
@@ -788,6 +791,7 @@ impl RecordSync {
                 spaces: Mutex::new(Vec::new()),
                 stopped: AtomicBool::new(false),
                 started: AtomicBool::new(false),
+                loaded: AtomicBool::new(false),
                 generation: AtomicU64::new(0),
                 stream_lock: AsyncMutex::new(()),
                 publish_lock: AsyncMutex::new(()),
@@ -840,20 +844,25 @@ impl RecordSync {
         self.inner.stopped.store(false, Ordering::Relaxed);
         self.inner.started.store(true, Ordering::Relaxed);
         let streams = self.streams();
+        if !self.inner.loaded.load(Ordering::Relaxed) && self.inner.records.cursor(&self.inner.personal).await?.is_some() {
+            self.inner.loaded.store(true, Ordering::Relaxed);
+        }
         let total = streams.len();
         for (i, stream) in streams.iter().enumerate() {
             let step = if total > 1 { format!(" ({} of {total})", i + 1) } else { String::new() };
-            self.inner.status(false, format!("checking {}{step}", stream.label()));
+            self.inner.status(format!("checking {}{step}", stream.label()));
             if let Err(error) = self.inner.sync_stream(stream).await {
                 self.inner.host.on_status(crate::sync::SyncStatus {
                     phase: crate::sync::Phase::Error,
                     detail: Some(format!("{}: {error:#}", stream.label())),
+                    bootstrapped: self.inner.loaded.load(Ordering::Relaxed),
                     ..Default::default()
                 });
                 return Err(error);
             }
         }
         self.inner.publish_journal().await?;
+        self.inner.loaded.store(true, Ordering::Relaxed);
         self.inner.host.on_status(crate::sync::SyncStatus {
             phase: crate::sync::Phase::Live,
             bootstrapped: true,
@@ -954,11 +963,11 @@ impl Heads {
 
 impl SyncInner {
     /// Loading in progress: `detail` on the "Loading your vault…" line.
-    fn status(&self, bootstrapped: bool, detail: String) {
+    fn status(&self, detail: String) {
         self.host.on_status(crate::sync::SyncStatus {
             phase: crate::sync::Phase::Backfill,
             detail: Some(detail),
-            bootstrapped,
+            bootstrapped: self.loaded.load(Ordering::Relaxed),
             ..Default::default()
         });
     }
@@ -1076,7 +1085,7 @@ impl SyncInner {
             let last = events.iter().map(|(_, seq)| *seq).max().unwrap_or(after);
             if count > 0 {
                 let behind = heads.map_or(String::new(), |h| format!(", {} to go", h.head.saturating_sub(last)));
-                self.status(false, format!("catching up {}: {count} edits{behind}", stream.label()));
+                self.status(format!("catching up {}: {count} edits{behind}", stream.label()));
             }
             self.apply(stream, events, last).await?;
             after = last;
@@ -1092,9 +1101,7 @@ impl SyncInner {
 
     /// Downloads, checks and merges the announced pack.
     async fn load_pack(&self, stream: &StreamKey, announcement: &PackAnnouncement) -> Result<()> {
-        self.status(
-            false,
-            format!(
+        self.status(format!(
                 "downloading {} ({:.1} MB, {} objects)",
                 stream.label(),
                 announcement.size as f64 / 1_048_576.,
@@ -1104,7 +1111,7 @@ impl SyncInner {
         let records = fetch_pack(&self.server().await, stream, announcement)
             .await
             .with_context(|| format!("pack of {stream:?} at cursor {}", announcement.cursor))?;
-        self.status(false, format!("unpacking {} objects of {}", records.len(), stream.label()));
+        self.status(format!("unpacking {} objects of {}", records.len(), stream.label()));
         let touched = self.records.merge_pack(stream, records, announcement.cursor).await?;
         if !touched.is_empty() {
             self.host.on_records(touched);

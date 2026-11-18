@@ -594,3 +594,47 @@ fn a_replica_reaches_the_daemons_root() {
         b.stop();
     });
 }
+
+/// The statuses a record sync reports, kept.
+#[derive(Default)]
+struct Statuses(parking_lot::Mutex<Vec<roostr_replica::sync::SyncStatus>>);
+
+impl RecordHost for Statuses {
+    fn on_records(&self, _: Vec<String>) {}
+    fn space_of(&self, _: &str) -> Option<String> {
+        None
+    }
+    fn on_status(&self, status: roostr_replica::sync::SyncStatus) {
+        self.0.lock().push(status);
+    }
+}
+
+/// Only a device's first load reads as loading the vault: a later start's
+/// catch-up (the app reopened) reports the vault as loaded throughout, so the
+/// Spaces list doesn't sit on "Loading your vault" while the streams are checked.
+#[test]
+fn a_reopened_device_catches_up_without_reading_as_the_first_load() {
+    use roostr_replica::sync::Phase;
+    let _turn = ENGINE_TURN.lock();
+    block_on(async {
+        let w = world().await;
+        let store: Arc<dyn RecordStore> = Arc::new(SqliteChangeStore::in_memory().await.unwrap());
+        let records = Arc::new(Records::open(store).await.unwrap());
+        let start = async |records: &Arc<Records>| {
+            let host = Arc::new(Statuses::default());
+            let sync = RecordSync::new(w.keys.clone(), vec![w.relay.url.clone()], records.clone(), host.clone()).unwrap();
+            sync.start().await.unwrap();
+            sync.stop();
+            std::mem::take(&mut *host.0.lock())
+        };
+
+        let first = start(&records).await;
+        let loading: Vec<_> = first.iter().filter(|s| s.phase == Phase::Backfill).collect();
+        assert!(!loading.is_empty() && loading.iter().all(|s| !s.bootstrapped), "{first:?}");
+        assert!(first.last().is_some_and(|s| s.phase == Phase::Live && s.bootstrapped));
+
+        let again = start(&records).await;
+        assert!(again.iter().any(|s| s.phase == Phase::Backfill), "{again:?}");
+        assert!(again.iter().all(|s| s.bootstrapped), "{again:?}");
+    });
+}
