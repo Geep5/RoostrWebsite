@@ -388,7 +388,8 @@ fn the_spaces_open_tabs_run_along_the_top_of_a_phone() {
     let mut h = Harness::with_pages(Arc::new(Shared(vault)), (390., 844.), pane_pages());
     h.update(|s| navigate(Route::Home, s));
     h.click("m-card-sp-1");
-    assert!(!h.has("m-tab-strip"), "no strip while nothing is open");
+    let strip_h = |h: &Harness| h.rect("m-tab-strip").map_or(0., |r| r[3]);
+    assert_eq!(strip_h(&h), 0., "no strip while nothing is open");
 
     h.update(|s| {
         open_tab(Route::Object("page-1".into()), true, s);
@@ -399,7 +400,7 @@ fn the_spaces_open_tabs_run_along_the_top_of_a_phone() {
         format!("m-strip-tab-{}", uids[0]),
         format!("m-strip-tab-{}", uids[1]),
     );
-    assert!(h.has("m-tab-strip") && h.has(&page) && h.has(&chat));
+    assert!(strip_h(&h) > 40. && h.has(&page) && h.has(&chat));
     let strip = h.rect("m-tab-strip").expect("the strip");
     let home = h.rect("m-space-home").expect("the space home");
     assert!(
@@ -418,4 +419,22 @@ fn the_spaces_open_tabs_run_along_the_top_of_a_phone() {
     assert!(h.has(&close) && !h.has(&format!("m-strip-close-{}", uids[0])));
     h.click(&close);
     assert!(!h.has(&chat) && h.has(&page));
+
+    // Back on the Spaces list it folds away over a few frames, not at once.
+    h.update(|s| navigate(Route::Home, s));
+    let (x, y) = h.rt.find("m-spaces").expect("the Spaces button");
+    h.rt.pointer_move(x, y);
+    h.rt.pointer_down(x, y);
+    h.rt.pointer_up(x, y);
+    let mut heights = Vec::new();
+    for _ in 0..40 {
+        h.frame();
+        heights.push(strip_h(&h));
+    }
+    let between = heights.iter().filter(|v| **v > 1. && **v < 44.).count();
+    assert!(
+        between >= 3,
+        "the strip folds over several frames: {heights:?}"
+    );
+    assert_eq!(*heights.last().unwrap(), 0., "and ends folded");
 }

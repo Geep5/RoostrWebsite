@@ -521,30 +521,30 @@ pub(crate) fn view(s: &State, cx: &mut Cx<State>, t: &Theme, layer: &mut Vec<El>
         );
     }
     // Inside a space, its open tabs run along the top, as the desktop's strip does.
-    match tab_strip(s, t, &screen) {
-        Some(strip) => col()
-            .key("m-frame")
-            .w_full()
-            .grow(1.)
-            .min_h(0.)
-            .fill(t.bg)
-            .child(strip)
-            .child(shell),
-        None => shell,
-    }
+    col()
+        .key("m-frame")
+        .w_full()
+        .grow(1.)
+        .min_h(0.)
+        .fill(t.bg)
+        .child(tab_strip(s, t, &screen))
+        .child(shell)
 }
+
+/// The strip's height while it shows: the pills' 32 pt, 6 pt above and below, the rule.
+const STRIP_H: f32 = 45.;
 
 /// The space's open tabs as a row of pills along the top (it scrolls sideways when they
 /// don't fit): a tap shows the tab, the shown one carries a × that closes it. Not on the
-/// Spaces list, nor while the space has no tab open.
-fn tab_strip(s: &State, t: &Theme, screen: &Screen) -> Option<El> {
-    if matches!(screen, Screen::Spaces) {
-        return None;
-    }
-    let tabs = listed_tabs(s);
-    if tabs.is_empty() {
-        return None;
-    }
+/// Spaces list, nor while the space has no tab open: there it folds away (its height and
+/// opacity glide to nothing) rather than vanishing, so the screen under it slides up.
+fn tab_strip(s: &State, t: &Theme, screen: &Screen) -> El {
+    let tabs = if matches!(screen, Screen::Spaces) {
+        Vec::new()
+    } else {
+        listed_tabs(s)
+    };
+    let showing = !tabs.is_empty();
     let shown = s.nav.route().clone();
     let pills = tabs.into_iter().map(|(index, tab)| {
         let info = crate::tabs::tab_info(s, &tab.route);
@@ -598,16 +598,29 @@ fn tab_strip(s: &State, t: &Theme, screen: &Screen) -> Option<El> {
         }
         pill
     });
-    Some(
-        row()
-            .key("m-tab-strip")
-            .w_full()
-            .scroll_x()
-            .fill(t.bg)
-            .border_sides([0., 0., 1., 0.], t.border)
-            .border_layout()
-            .child(row().gap(6.).px(10.).py(6.).children(pills)),
-    )
+    let pills: Vec<El> = pills.collect();
+    row()
+        .key("m-tab-strip")
+        .w_full()
+        .h(if showing { STRIP_H } else { 0. })
+        .clip_rounded(0.)
+        .opacity(if showing { 1. } else { 0. })
+        .motion(motion::DISCLOSURE.spring())
+        .opacity_motion(motion::DISCLOSURE.anim())
+        .fill(t.bg)
+        // The rule under it, drawn inside its height so a folded strip takes no room.
+        .child(
+            el().pin(Some(0.), None, Some(0.), Some(0.))
+                .h(1.)
+                .fill(t.border),
+        )
+        .child(
+            row()
+                .key("m-tab-strip-row")
+                .w_full()
+                .scroll_x()
+                .child(row().gap(6.).px(10.).py(6.).children(pills)),
+        )
 }
 
 /// The left edge's drag (iOS's interactive pop): a pan from it that heads
