@@ -229,6 +229,23 @@ fn phone_width_runs_the_mobile_shell() {
     assert!(!h.has("disc-sheet"));
     h.click("m-sync");
     assert_eq!(syncs.get(), 3, "the sync dot syncs now");
+    // ⋯'s menu closes on a tap outside it.
+    h.click("m-more");
+    assert!(h.has("more-menu-item0"));
+    h.click_at(20., 600.);
+    assert!(!h.has("more-menu-item0"), "a tap outside closes the menu");
+    // Open in new tab opens a background tab.
+    let before = h.state().nav.tabs().len();
+    h.click("m-more");
+    assert!(h.texts().iter().any(|t| t == "Open in new tab"));
+    h.click("more-menu-item1");
+    assert!(!h.has("more-menu-item0"));
+    assert_eq!(h.state().nav.tabs().len(), before + 1);
+    assert_eq!(
+        h.state().nav.tabs().last().unwrap().route,
+        Route::Object("page-1".into())
+    );
+    assert_eq!(route(&h), Route::Object("page-1".into()));
     // ⋯ leads with Graph; the graph's back returns to the object.
     h.click("m-more");
     h.click("more-graph");

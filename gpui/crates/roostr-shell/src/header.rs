@@ -284,7 +284,7 @@ fn blocked_item(t: &Theme, blocker: &str) -> PopupMenuItem {
 }
 
 /// The open More menu (desktop and phone), anchored under the ⋯ keyed
-/// `more`. A desktop press outside closes it; a phone's ⋯ toggles it.
+/// `more`. A press or tap outside it closes it.
 pub(crate) fn more_overlay(
     s: &State,
     _cx: &mut Cx<State>,
@@ -298,13 +298,18 @@ pub(crate) fn more_overlay(
     let mut flyouts = Vec::new();
     let panel = menu.panel(t, "more-menu", &mut flyouts);
     let panel = roostr_ui::overlay::anchored(panel, "more", roostr_ui::Placement::BottomEnd, 4.);
-    if mobile {
-        layer.push(panel);
-    } else {
-        let panel = roostr_ui::overlay::dismissable(panel, "more-menu", close_more, layer);
-        layer.push(panel);
-    }
+    let panel = roostr_ui::overlay::dismissable(panel, "more-menu", close_more, layer);
+    layer.push(panel);
     layer.extend(flyouts);
+}
+
+/// "Open in new tab" for `id`: a background tab, the menu closed.
+fn open_in_new_tab(id: &str) -> PopupMenuItem {
+    let target = id.to_string();
+    item("Open in new tab", Glyph::ExternalLink).on_press(move |s: &mut State| {
+        close_more(s);
+        open_tab(Route::Object(target.clone()), true, s);
+    })
 }
 
 /// The More menu's rows for the open object, `None` without one.
@@ -319,8 +324,7 @@ fn more_menu(s: &State, t: &Theme, mobile: bool) -> Option<PopupMenu> {
     };
     let store = &s.store;
     let mut menu = PopupMenu::new().min_w(234.);
-    // A phone leads with Graph (its header has no graph link) instead of
-    // Open in new tab (it has no tabs).
+    // A phone leads with Graph (its header has no graph link), then Open in new tab.
     let target = id.clone();
     menu = menu.item(if mobile {
         PopupMenuItem::element(
@@ -341,11 +345,11 @@ fn more_menu(s: &State, t: &Theme, mobile: bool) -> Option<PopupMenu> {
             );
         })
     } else {
-        item("Open in new tab", Glyph::ExternalLink).on_press(move |s: &mut State| {
-            close_more(s);
-            open_tab(Route::Object(target.clone()), true, s);
-        })
+        open_in_new_tab(&id)
     });
+    if mobile {
+        menu = menu.item(open_in_new_tab(&id));
+    }
     // A phone has no hover: its cover actions live here.
     if mobile && let Some(object) = store.object(&id).filter(|o| cover::can_have_cover(o)) {
         let has_cover = cover::cover_file(&object.fields).is_some();
