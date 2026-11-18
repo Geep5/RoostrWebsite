@@ -479,3 +479,29 @@ fn window_key(app: &mut App, key: Key) {
     app.key(key);
     app.step();
 }
+
+/// The New Object entry row is a full field (up to 444 pt) from the start, not an
+/// empty input's sliver that grows as the name is typed.
+#[test]
+fn the_new_object_entry_starts_full_width() {
+    let objects = vec![
+        object(
+            "q1",
+            "query",
+            &[
+                ("name", Value::string("Support Emails")),
+                ("setOf", Value::values(vec![Value::string("email")])),
+            ],
+        ),
+        object("e0", "email", &[("name", Value::string("Email 0"))]),
+    ];
+    let vault = Vault::new(objects, vec![], query_rows("email"));
+    let mut app = App::new(vault, "q1", DataViewKind::Query, (1400., 600.));
+    app.until_shown("q1/new-object");
+    app.click("q1/new-object");
+    app.until_shown("q1/new-entry");
+    let entry = app.rect("q1/new-entry").expect("the entry row");
+    let input = app.rect("q1/new-input").expect("the entry input");
+    assert!(entry[2] >= 440., "the entry row is full width: {entry:?}");
+    assert!(input[2] >= 400., "the input fills it: {input:?}");
+}

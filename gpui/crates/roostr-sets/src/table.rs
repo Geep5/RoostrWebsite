@@ -2090,11 +2090,12 @@ pub(crate) fn view(
     if t.pending_new {
         let (submit, key_id, lens) = (id.to_string(), id.to_string(), id.to_string());
         rows_el = rows_el.child(
-            el().py(4.0).child(
+            el().w_full().py(4.0).child(
                 row()
                     .key(format!("{id}/new-entry"))
                     .center_y()
                     .gap(6.0)
+                    .w_full()
                     .max_w(444.0)
                     .border(2.0, th.accent)
                     .border_layout()
@@ -2121,7 +2122,9 @@ pub(crate) fn view(
                                 }
                                 false
                             })
-                            .build(th),
+                            .build(th)
+                            .grow(1.0)
+                            .min_w(0.0),
                     ),
             ),
         );
