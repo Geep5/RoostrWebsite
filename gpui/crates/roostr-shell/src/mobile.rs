@@ -520,7 +520,94 @@ pub(crate) fn view(s: &State, cx: &mut Cx<State>, t: &Theme, layer: &mut Vec<El>
                 .child((pages.pane)(s, cx, id, PanePart::Sheet, layer)),
         );
     }
-    shell
+    // Inside a space, its open tabs run along the top, as the desktop's strip does.
+    match tab_strip(s, t, &screen) {
+        Some(strip) => col()
+            .key("m-frame")
+            .w_full()
+            .grow(1.)
+            .min_h(0.)
+            .fill(t.bg)
+            .child(strip)
+            .child(shell),
+        None => shell,
+    }
+}
+
+/// The space's open tabs as a row of pills along the top (it scrolls sideways when they
+/// don't fit): a tap shows the tab, the shown one carries a × that closes it. Not on the
+/// Spaces list, nor while the space has no tab open.
+fn tab_strip(s: &State, t: &Theme, screen: &Screen) -> Option<El> {
+    if matches!(screen, Screen::Spaces) {
+        return None;
+    }
+    let tabs = listed_tabs(s);
+    if tabs.is_empty() {
+        return None;
+    }
+    let shown = s.nav.route().clone();
+    let pills = tabs.into_iter().map(|(index, tab)| {
+        let info = crate::tabs::tab_info(s, &tab.route);
+        let active = tab.route == shown;
+        let lead = match info.task {
+            Some(done) => checkbox_display(format!("m-strip-check-{}", tab.uid), done)
+                .small()
+                .build(t),
+            None => shell::obj_icon(s, t, &info.icon),
+        };
+        let mut pill = motion::pressable(row())
+            .key(format!("m-strip-tab-{}", tab.uid))
+            .role("tab")
+            .checked(active)
+            .label(info.name.clone())
+            .items_center()
+            .gap(6.)
+            .h(32.)
+            .pl(10.)
+            .pr(if active { 4. } else { 12. })
+            .max_w(200.)
+            .radius(8.)
+            .fill(if active { t.hover } else { t.panel })
+            .border(1., if active { t.fg.alpha(0.25) } else { t.border })
+            .border_layout()
+            .cursor(Cursor::Pointer)
+            .child(lead)
+            .child(
+                text(info.name)
+                    .font(ty::ui(13.))
+                    .color(if active { t.fg } else { t.muted })
+                    .truncate()
+                    .shrink()
+                    .min_w(0.),
+            )
+            .on_press(move |s: &mut State| open_listed_tab(s, index));
+        if active {
+            pill = pill.child(
+                motion::pressable(fill(
+                    format!("m-strip-close-{}", tab.uid),
+                    Color::TRANSPARENT,
+                ))
+                .role("button")
+                .label("Close tab")
+                .size(26., 26.)
+                .radius(13.)
+                .center()
+                .child(text("×").font(ty::ui(16.).lh(16.)).color(t.muted))
+                .on_press(move |s: &mut State| s.nav.close(index, &mut s.ui)),
+            );
+        }
+        pill
+    });
+    Some(
+        row()
+            .key("m-tab-strip")
+            .w_full()
+            .scroll_x()
+            .fill(t.bg)
+            .border_sides([0., 0., 1., 0.], t.border)
+            .border_layout()
+            .child(row().gap(6.).px(10.).py(6.).children(pills)),
+    )
 }
 
 /// The left edge's drag (iOS's interactive pop): a pan from it that heads

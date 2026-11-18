@@ -381,3 +381,41 @@ fn the_open_tabs_list_shows_opens_and_closes_the_spaces_tabs() {
         [("sp-1".to_string(), paths(&h))].into()
     );
 }
+
+#[test]
+fn the_spaces_open_tabs_run_along_the_top_of_a_phone() {
+    let vault = Arc::new(Vault::default());
+    let mut h = Harness::with_pages(Arc::new(Shared(vault)), (390., 844.), pane_pages());
+    h.update(|s| navigate(Route::Home, s));
+    h.click("m-card-sp-1");
+    assert!(!h.has("m-tab-strip"), "no strip while nothing is open");
+
+    h.update(|s| {
+        open_tab(Route::Object("page-1".into()), true, s);
+        open_tab(Route::Object("chat-1".into()), true, s);
+    });
+    let uids: Vec<u64> = h.state().nav.tabs()[1..].iter().map(|t| t.uid).collect();
+    let (page, chat) = (
+        format!("m-strip-tab-{}", uids[0]),
+        format!("m-strip-tab-{}", uids[1]),
+    );
+    assert!(h.has("m-tab-strip") && h.has(&page) && h.has(&chat));
+    let strip = h.rect("m-tab-strip").expect("the strip");
+    let home = h.rect("m-space-home").expect("the space home");
+    assert!(
+        strip[1] + strip[3] <= home[1] + 0.5,
+        "the strip sits above the screen"
+    );
+    assert!(
+        center(&h, &page)[0] < center(&h, &chat)[0],
+        "in order, left to right"
+    );
+
+    // A tap shows the tab; the shown one carries ×, which closes it.
+    h.click(&chat);
+    assert_eq!(route(&h), Route::Object("chat-1".into()));
+    let close = format!("m-strip-close-{}", uids[1]);
+    assert!(h.has(&close) && !h.has(&format!("m-strip-close-{}", uids[0])));
+    h.click(&close);
+    assert!(!h.has(&chat) && h.has(&page));
+}
