@@ -1,6 +1,6 @@
-//! Device reminders for recurring objects (`Reminders.swift`). The phone runs
-//! no scheduler and no agents; it only knows every object's next occurrence
-//! from the replica, so after each commit it mirrors the soonest ones into
+//! Device reminders for recurring objects with Mobile alert ticked (`Reminders.swift`).
+//! The phone runs no scheduler and no agents; it only knows every object's next
+//! occurrence from the replica, so after each commit it mirrors the soonest ones into
 //! pending local notifications. Tapping one opens the object.
 //!
 //! iOS keeps at most 64 pending notifications per app; the soonest 64 are

@@ -1506,6 +1506,17 @@ fn render_row(
                 .on_change(move |s: &mut State, on: bool| save_value(s, &id, &k, Value::bool(on)))
                 .build(t),
         );
+        // Today a Repeat run is what triggers a phone alert: without one, say so.
+        if key == "mobile_alert" && on && roostr_core::types::repeat_of(&object.fields).is_none() {
+            value = value.child(
+                text("Alerts on each Repeat run; this has no Repeat")
+                    .key("mobile-alert-hint")
+                    .font(ty::ui(12.))
+                    .color(t.muted)
+                    .wrap()
+                    .shrink(),
+            );
+        }
     } else if rel.format == "tag" {
         if list.is_empty() {
             value = value.child(empty());

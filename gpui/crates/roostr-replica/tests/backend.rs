@@ -305,7 +305,21 @@ fn upcoming_occurrences_follow_repeat_next() {
             .await
             .unwrap();
         let next = set["next"].as_i64().unwrap();
+        let alert = |on: bool| {
+            params(
+                json!({ "object_id": ids[0], "key": "mobile_alert", "value": { "boolValue": on } }),
+            )
+        };
 
+        // A repeat alone doesn't alert phones: only with its Mobile alert ticked.
+        assert!(
+            backend
+                .upcoming_occurrences(next - 1, 64)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        backend.mutate("set_field", alert(true)).await.unwrap();
         let upcoming = backend.upcoming_occurrences(next - 1, 64).await.unwrap();
         assert_eq!(upcoming.len(), 1, "{upcoming:?}");
         let occurrence = &upcoming[0];
@@ -323,6 +337,15 @@ fn upcoming_occurrences_follow_repeat_next() {
         assert!(
             backend
                 .upcoming_occurrences(next, 64)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        // Unticked, it is gone again.
+        backend.mutate("set_field", alert(false)).await.unwrap();
+        assert!(
+            backend
+                .upcoming_occurrences(next - 1, 64)
                 .await
                 .unwrap()
                 .is_empty()

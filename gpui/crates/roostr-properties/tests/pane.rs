@@ -530,3 +530,56 @@ fn the_repeat_selects_open_under_their_triggers() {
         assert!(app.shown("repeat-pop"), "{key}: and leaves the editor");
     }
 }
+
+/// Mobile alert ticked on an object with no Repeat says nothing will trigger it yet;
+/// with a Repeat, or unticked, there's no note.
+#[test]
+fn mobile_alert_without_a_repeat_says_so() {
+    let mut objects = types();
+    let alert = ("mobile_alert", Value::bool(true));
+    objects.push(object(
+        "t1",
+        "task",
+        &[("name", Value::string("Plain")), alert.clone()],
+    ));
+    objects.push(object(
+        "t2",
+        "task",
+        &[
+            ("name", Value::string("Repeats")),
+            alert,
+            (
+                "repeat",
+                Value::map(
+                    [
+                        ("freq".to_string(), Value::string("hour")),
+                        ("anchor".to_string(), Value::int(1)),
+                        ("next".to_string(), Value::int(5)),
+                    ]
+                    .into(),
+                ),
+            ),
+        ],
+    ));
+    objects.push(object(
+        "t3",
+        "task",
+        &[
+            ("name", Value::string("Off")),
+            ("mobile_alert", Value::bool(false)),
+        ],
+    ));
+    let rel = relation(
+        "rel-mobile-alert",
+        "mobile_alert",
+        "checkbox",
+        "Mobile alert",
+    );
+    let mut app = App::new(Vault::new(objects, vec![rel]), view);
+    show(&mut app, "t1");
+    assert!(app.shown("prop-row-mobile_alert") && app.shown("mobile-alert-hint"));
+    show(&mut app, "t2");
+    assert!(app.shown("prop-row-mobile_alert") && !app.shown("mobile-alert-hint"));
+    show(&mut app, "t3");
+    assert!(!app.shown("mobile-alert-hint"));
+}

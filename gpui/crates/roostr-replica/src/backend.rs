@@ -2883,8 +2883,12 @@ impl Inner {
         let mut out: Vec<Occurrence> = st
             .states
             .iter()
+            // Only what asks to alert phones: its Mobile alert ticked.
             .filter(|(id, o)| {
-                id.as_str() != VANISH_LOG_ID && !st.vanished.contains(*id) && !deleted(o)
+                id.as_str() != VANISH_LOG_ID
+                    && !st.vanished.contains(*id)
+                    && !deleted(o)
+                    && fbool(o, "mobile_alert")
             })
             .filter_map(|(id, o)| {
                 let at = repeat_entry(o, "next").and_then(|next| int_of(&next["intValue"]))?;
