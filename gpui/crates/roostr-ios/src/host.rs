@@ -303,6 +303,11 @@ impl Shell {
                 job(host.runtime_mut());
             }
             let frame = host.frame();
+            // Links handlers asked to open (a chat message's web link): the embedded host
+            // keeps them for the app, which hands them to the system here.
+            for url in host.runtime_mut().take_url_requests() {
+                open_external(&url);
+            }
             let rt = host.runtime();
             Drawn {
                 animating: frame.animating,
@@ -410,5 +415,24 @@ fn same_content(a: Option<&ClipboardContent>, b: Option<&ClipboardContent>) -> b
         (None, None) => true,
         (Some(a), Some(b)) => a.text() == b.text() && a.html() == b.html(),
         _ => false,
+    }
+}
+
+/// Opens `url` in the app the system picks for it (Safari for a web page), as a tap on a link.
+fn open_external(url: &str) {
+    let Some(mtm) = MainThreadMarker::new() else {
+        return;
+    };
+    let Some(url) =
+        objc2_foundation::NSURL::URLWithString(&objc2_foundation::NSString::from_str(url))
+    else {
+        log::warn!("open {url}: not a URL");
+        return;
+    };
+    let options = objc2_foundation::NSDictionary::new();
+    // SAFETY: a valid NSURL and an empty options dictionary; no completion handler.
+    unsafe {
+        objc2_ui_kit::UIApplication::sharedApplication(mtm)
+            .openURL_options_completionHandler(&url, &options, None);
     }
 }
