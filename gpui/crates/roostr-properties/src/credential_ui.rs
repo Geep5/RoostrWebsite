@@ -15,9 +15,9 @@ use rune::{Cursor, El, ScrollSpec, col, el, row, text};
 use serde_json::json;
 
 use crate::credentials::{
-    CredentialRef, CredentialTarget, Progress, ReconnectPhase, action_gate, can_connect, changed,
-    check_says, connect_label, connecting_hint, credential_status_text, credentials_for_error,
-    linked_credential_ids, run_action, signed_out_names,
+    CredentialRef, CredentialTarget, Progress, ReconnectPhase, action_gate, browser_login,
+    can_connect, changed, check_says, connect_label, connecting_hint, credential_status_text,
+    credentials_for_error, linked_credential_ids, run_action, signed_out_names,
 };
 use crate::widgets::{act_button, backdrop, below, later, tip};
 
@@ -515,7 +515,12 @@ fn reconnect_block(s: &State, t: &Theme, cell_key: &str, open: u64, b: &Reconnec
         }
         c = c.child(actions);
     }
-    if !connectable {
+    if browser_login(fields) {
+        c = c.child(muted_line(
+            t,
+            format!("Roostr Pass brings {name}'s sign-in from Chrome: sign in there if it asks."),
+        ));
+    } else if !connectable {
         c = c.child(muted_line(
             t,
             format!("{name} signs in with pasted keys - open it to replace them."),

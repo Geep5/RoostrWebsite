@@ -70,14 +70,18 @@ pub fn credential_status_badge(status: &str) -> (Glyph, &'static str) {
     }
 }
 
-/// Connect can sign this in: a Google account, or a browser sign-in with its login page and proof cookie.
+/// Connect can sign this in: a Google account. A browser sign-in has no Connect: Roostr Pass
+/// brings it from Chrome when the credential is signed out (glonOdin `harness/src/pass.ts`).
 pub(crate) fn can_connect(fields: &Fields) -> bool {
-    if field_str(fields, "service") == GOOGLE_ACCOUNT {
-        return true;
-    }
-    ["login_url", "session_host", "session_cookie"]
-        .iter()
-        .all(|k| !field_str(fields, k).trim().is_empty())
+    field_str(fields, "service") == GOOGLE_ACCOUNT
+}
+
+/// A browser sign-in (its login page and proof cookie, not Google): Roostr Pass's to bring.
+pub(crate) fn browser_login(fields: &Fields) -> bool {
+    field_str(fields, "service") != GOOGLE_ACCOUNT
+        && ["login_url", "session_host", "session_cookie"]
+            .iter()
+            .all(|k| !field_str(fields, k).trim().is_empty())
 }
 
 /// A pasted key (`key_*`, not `key_fields`) or a saved cookie value (`cookie_*`, not `cookie_meta`).
@@ -126,6 +130,15 @@ pub(crate) fn action_gate(
         );
     }
     let linked = paired && !this_machine.is_empty();
+    // No Connect: Roostr Pass brings it; the computer serving it checks it straight.
+    if browser_login(fields) {
+        return gate(
+            false,
+            true,
+            linked && this_machine == served_by,
+            String::new(),
+        );
+    }
     if linked && this_machine == served_by {
         return gate(true, true, true, String::new());
     }
@@ -168,7 +181,7 @@ pub(crate) fn connecting_hint(fields: &Fields, place: &str, hands_to: &str) -> S
         };
         format!("Sign in to {account} in the browser window gws opens on {place}{then}.")
     } else {
-        format!("Sign in in the Chrome window on {place}{then}.")
+        format!("Finish signing in on {place}{then}.")
     }
 }
 
@@ -957,7 +970,7 @@ mod tests {
 
     #[test]
     fn the_window_paired_with_the_serving_computer_does_everything_and_checks_straight() {
-        for f in [website(), google(), database()] {
+        for f in [google(), database()] {
             assert_eq!(
                 gate(true, "m1", "m1", &f),
                 (true, true, true, String::new())
@@ -966,13 +979,27 @@ mod tests {
     }
 
     #[test]
-    fn a_website_or_google_sign_in_connects_from_any_paired_computer() {
-        for f in [website(), google()] {
+    fn a_google_sign_in_connects_from_any_paired_computer() {
+        assert_eq!(
+            gate(true, "m2", "m1", &google()),
+            (true, true, false, String::new())
+        );
+    }
+
+    #[test]
+    fn a_website_sign_in_has_no_connect_anywhere_roostr_pass_brings_it() {
+        assert_eq!(
+            gate(true, "m1", "m1", &website()),
+            (false, true, true, String::new())
+        );
+        for (paired, this) in [(true, "m2"), (false, "")] {
             assert_eq!(
-                gate(true, "m2", "m1", &f),
-                (true, true, false, String::new())
+                gate(paired, this, "m1", &website()),
+                (false, true, false, String::new())
             );
         }
+        assert!(!can_connect(&website()) && browser_login(&website()));
+        assert!(can_connect(&google()) && !browser_login(&google()));
     }
 
     #[test]
@@ -991,7 +1018,7 @@ mod tests {
     #[test]
     fn an_unpaired_window_still_checks_and_without_served_by_nobody_acts() {
         assert_eq!(
-            gate(false, "", "m1", &website()),
+            gate(false, "", "m1", &google()),
             (
                 false,
                 true,
@@ -1019,14 +1046,6 @@ mod tests {
 
     #[test]
     fn the_sign_in_hint_names_where_the_window_opened_and_who_gets_the_login() {
-        assert_eq!(
-            connecting_hint(&website(), "this computer", "Sharky's Mac Studio"),
-            "Sign in in the Chrome window on this computer; Roostr then hands the login to Sharky's Mac Studio."
-        );
-        assert_eq!(
-            connecting_hint(&website(), "this computer", ""),
-            "Sign in in the Chrome window on this computer."
-        );
         assert_eq!(
             connecting_hint(&google(), "this computer", "Mac"),
             "Sign in to me@example.com in the browser window gws opens on this computer; Roostr then hands the login to Mac."
