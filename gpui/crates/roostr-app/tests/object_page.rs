@@ -31,6 +31,8 @@ struct Vault {
     /// Saved names by object id.
     names: Mutex<HashMap<String, String>>,
     mutations: Mutex<Vec<(String, JsonMap)>>,
+    /// Blocks added, by object id.
+    blocks: Mutex<HashMap<String, Vec<roostr_core::types::Block>>>,
 }
 
 fn ready<T: Send + 'static>(value: T) -> BoxFuture<T> {
@@ -79,6 +81,7 @@ impl Backend for Handle {
                 ("channel".to_string(), Value::string("sp-1")),
             ]
             .into(),
+            blocks: self.0.blocks.lock().get(id).cloned().unwrap_or_default(),
             ..Object::default()
         }))
     }
@@ -111,6 +114,12 @@ impl Backend for Handle {
             let id = params["object_id"].as_str().unwrap_or("");
             let name = params["value"]["stringValue"].as_str().unwrap_or("");
             self.0.names.lock().insert(id.to_string(), name.to_string());
+        }
+        if action == "block_add"
+            && let Ok(block) = serde_json::from_value(params["block"].clone())
+        {
+            let id = params["object_id"].as_str().unwrap_or("").to_string();
+            self.0.blocks.lock().entry(id).or_default().push(block);
         }
         self.0.mutations.lock().push((action.to_string(), params));
         ready(Ok(JsonMap::new()))
@@ -258,4 +267,44 @@ fn a_rubber_band_starts_in_the_empty_space_beside_a_table() {
         app.shown(&format!("{QUERY}/sel-bar")),
         "the drag selected nothing"
     );
+}
+
+/// Return in a new page's title moves the caret into its body without the keyboard ever
+/// losing a field: on iOS a frame or two with nothing focused puts the keyboard away, and
+/// the body's new first line, focused without a tap, can't bring it back.
+#[test]
+fn return_in_a_new_pages_title_keeps_a_field_focused_into_the_body() {
+    let vault = Arc::new(Vault::default());
+    let mut app = open(&vault, PAGE, 390., 844.);
+    app.tap("object-title");
+    app.type_text("Trip notes");
+    app.rt.key(rune::KeyEvent {
+        key: Key::Enter,
+        mods: rune::Mods::default(),
+    });
+    let focused = |app: &App| {
+        app.rt
+            .elements()
+            .into_iter()
+            .filter(|e| e.focused)
+            .filter_map(|e| e.key)
+            .collect::<Vec<_>>()
+    };
+    let mut frames = Vec::new();
+    for _ in 0..60 {
+        app.rt.update_if(|s, tx| roostr_host::poll(s, 0., tx));
+        app.rt.frame(1. / 60.);
+        frames.push(focused(&app));
+    }
+    app.settle();
+    let last = focused(&app);
+    assert!(
+        last.iter().any(|k| k != "object-title-field"),
+        "the caret ends in the body: {last:?}"
+    );
+    assert!(
+        frames.iter().all(|f| !f.is_empty()),
+        "a frame had no field focused: {frames:?}"
+    );
+    assert!(saved(&vault, PAGE, "Trip notes"));
 }

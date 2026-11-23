@@ -361,15 +361,19 @@ fn title_changed(s: &mut State, id: &str) {
     }
 }
 
-/// Enter in the title: leave it, save, and start typing the body.
+/// Enter in the title: save, and start typing the body. The title keeps the focus until
+/// the body's first line takes it (a new page's line is written first): a gap with no
+/// field focused puts the iOS keyboard away, and a field focused without a tap can't
+/// bring it back. Without a body to go to, the title is left.
 fn title_entered(s: &mut State, id: &str, tx: &mut Tx) {
-    tx.blur();
     save_name(s, id);
     if matches!(
         page(s, id).and_then(|p| p.body),
         Some(Kind::Document { .. })
     ) {
         roostr_editor::focus_start(s, id);
+    } else {
+        tx.blur();
     }
 }
 
