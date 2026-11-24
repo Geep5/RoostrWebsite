@@ -162,6 +162,12 @@ pub struct Editor {
     // Multi-block selection.
     pub(crate) selected: Vec<String>,
     pub(crate) last_focused: String,
+    /// A finger held on lines (touch): what it covers and the timer that selects (crate::touch).
+    pub(crate) hold: Option<crate::touch::Hold>,
+    /// Where the finger last was (touch), for a tap on the page background.
+    pub(crate) touch_y: f32,
+    /// A hold just selected: the release that ends it is no tap.
+    pub(crate) swallow_tap: bool,
     pub(crate) drag_sel: Option<DragSel>,
     pub(crate) sel_rect: Option<[f32; 4]>,
     // Popups.
@@ -316,6 +322,9 @@ impl Editor {
             active: None,
             focus_request: None,
             focus_self: false,
+            hold: None,
+            touch_y: 0.,
+            swallow_tap: false,
             history: History::default(),
             writes,
             dirty: HashSet::new(),

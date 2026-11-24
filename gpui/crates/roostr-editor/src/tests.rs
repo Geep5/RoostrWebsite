@@ -691,3 +691,88 @@ fn a_long_unbroken_word_in_a_code_block_wraps_inside_it() {
     );
     assert!(text[3] > 40., "the key wraps onto more lines: {text:?}");
 }
+
+/// A press that stays down `held` (virtual time) at `el_key`'s middle, then lifts.
+fn hold(rt: &mut Runtime<State>, el_key: &str, held: Duration) {
+    let (x, y) = rt
+        .find(el_key)
+        .unwrap_or_else(|| panic!("{el_key} is on screen"));
+    rt.pointer_move(x, y);
+    rt.pointer_down(x, y);
+    rt.state.poll();
+    rt.frame(1. / 60.);
+    rt.state.rt.advance(held);
+    settle(rt);
+    rt.pointer_up(x, y);
+    rt.state.poll();
+    rt.frame(1. / 60.);
+}
+
+fn selected(rt: &Runtime<State>) -> Vec<String> {
+    crate::editor::editor(&rt.state, PAGE)
+        .map(|e| e.selected.clone())
+        .unwrap_or_default()
+}
+
+/// On a touch screen a drag across lines selects nothing (it scrolls); holding a line
+/// selects it, and while selecting a tap on a line toggles it - not the caret - and a tap on
+/// the page around the lines ends the selection.
+#[test]
+fn on_a_touch_screen_holding_a_line_selects_it_and_taps_toggle() {
+    crate::touch::TOUCH.with(|t| t.set(true));
+    let vault = Vault::new(
+        (0..4)
+            .map(|i| text_block(&format!("p{i}"), &format!("Line {i}"), Vec::new()))
+            .collect(),
+    );
+    let mut rt = open(&vault);
+
+    let (x0, y0) = rt.find("text-p0").unwrap();
+    let (_, y3) = rt.find("text-p3").unwrap();
+    rt.pointer_move(x0, y0);
+    rt.pointer_down(x0, y0);
+    for i in 1..=10 {
+        rt.pointer_move(x0, y0 + (y3 - y0) * i as f32 / 10.);
+        rt.frame(1. / 60.);
+    }
+    rt.pointer_up(x0, y3);
+    settle(&mut rt);
+    assert!(selected(&rt).is_empty(), "a drag selects nothing");
+
+    // A quick tap edits as before; a hold selects.
+    hold(&mut rt, "text-p1", Duration::from_millis(100));
+    assert!(selected(&rt).is_empty(), "a tap is no hold");
+    hold(
+        &mut rt,
+        "text-p1",
+        crate::touch::HOLD + Duration::from_millis(50),
+    );
+    assert_eq!(
+        selected(&rt),
+        ["p1"],
+        "held, the line is selected (its release toggles nothing)"
+    );
+    assert!(
+        crate::editor::editor(&rt.state, PAGE).is_some_and(|e| e.active.is_none()),
+        "selecting takes the caret away"
+    );
+
+    click(&mut rt, "text-p2");
+    assert_eq!(selected(&rt), ["p1", "p2"], "a tap adds a line");
+    click(&mut rt, "text-p1");
+    assert_eq!(selected(&rt), ["p2"], "a tap on a selected line removes it");
+
+    // Below the lines, inside the page: its background.
+    let bounds = crate::editor::editor(&rt.state, PAGE).unwrap().bounds;
+    let (bx, by) = (x0, bounds[1] + bounds[3] - 4.);
+    assert!(by > y3 + 10., "the page reaches below its last line: {bounds:?} vs {y3}");
+    rt.pointer_move(bx, by);
+    rt.pointer_down(bx, by);
+    rt.pointer_up(bx, by);
+    settle(&mut rt);
+    assert!(
+        selected(&rt).is_empty(),
+        "a tap around the lines ends the selection"
+    );
+    crate::touch::TOUCH.with(|t| t.set(false));
+}

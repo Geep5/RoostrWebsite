@@ -102,21 +102,28 @@ pub fn view(s: &State, cx: &mut Cx<State>, t: &Theme, layer: &mut Vec<El>, objec
         body = body
             .focusable(true)
             .focus_ring(0., 0., Color::TRANSPARENT)
-            .on_key(move |s: &mut State, ev, tx| keys::editor_keys(s, &k, ev, tx))
-            // The page background: a rubber band, or a click that puts the caret on a line.
-            .on_drag(move |s: &mut State, drag, tx| {
-                let [x, y] = drag.window_point();
-                with_editor(s, &d, |e, s| match drag.phase {
-                    Phase::Down => e.arm_drag(None, (x, y), tx.mods(), s),
-                    Phase::Move => {
-                        e.sel_update((x, y), s);
-                        if !e.selected.is_empty() {
-                            tx.focus(editor_key(&e.object_id), false);
+            .on_key(move |s: &mut State, ev, tx| keys::editor_keys(s, &k, ev, tx));
+        // A touch screen scrolls under a drag: holding a line selects it (crate::touch).
+        body = if crate::touch::on() {
+            crate::touch::background(body, &d)
+        } else {
+            body
+                // The page background: a rubber band, or a click that puts the caret on a line.
+                .on_drag(move |s: &mut State, drag, tx| {
+                    let [x, y] = drag.window_point();
+                    with_editor(s, &d, |e, s| match drag.phase {
+                        Phase::Down => e.arm_drag(None, (x, y), tx.mods(), s),
+                        Phase::Move => {
+                            e.sel_update((x, y), s);
+                            if !e.selected.is_empty() {
+                                tx.focus(editor_key(&e.object_id), false);
+                            }
                         }
-                    }
-                    Phase::Up => e.drag_release((x, y), s),
-                });
-            })
+                        Phase::Up => e.drag_release((x, y), s),
+                    });
+                })
+        };
+        body = body
             .on_layout_tx(move |s: &mut State, rect, tx| {
                 with_editor(s, &l, |e, _| {
                     e.bounds = rect;
@@ -445,6 +452,9 @@ fn block_row(f: &Frame, id: &str, gutter: bool) -> El {
     }
     let (doid, did) = (f.oid(), id.to_string());
     let (moid, mid) = (f.oid(), id.to_string());
+    if crate::touch::on() {
+        return crate::touch::row(r, &doid, &did);
+    }
     r.on_drag(move |s: &mut State, drag, tx| {
         let [x, y] = drag.window_point();
         with_editor(s, &doid, |e, s| match drag.phase {
@@ -571,7 +581,7 @@ fn rich_text(
     let (ko, ki) = (f.oid(), id.to_string());
     let (co, ci) = (f.oid(), id.to_string());
     let (po, pi) = (f.oid(), id.to_string());
-    text_input(&live.edit, look.style)
+    let field = text_input(&live.edit, look.style)
         .key(text_key(id))
         .w_full()
         .align(align)
@@ -588,7 +598,13 @@ fn rich_text(
         .on_input_paste(move |s: &mut State, content, tx| {
             keys::input_paste(s, &po, &pi, content, tx)
         })
-        .on_link(|s: &mut State, url: &str, tx| keys::open_link(s, url, tx))
+        .on_link(|s: &mut State, url: &str, tx| keys::open_link(s, url, tx));
+    // Selecting on a touch screen: a tap on a line toggles it (its row's), not the caret.
+    if crate::touch::selecting(f.e) {
+        field.inert()
+    } else {
+        field
+    }
 }
 
 fn render_block(

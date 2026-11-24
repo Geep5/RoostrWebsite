@@ -33,6 +33,7 @@ mod spellcheck;
 mod tests;
 mod text;
 mod toggles;
+mod touch;
 mod write_queue;
 
 use std::rc::Rc;
