@@ -1309,6 +1309,9 @@ fn overlays(f: &Frame, s: &State, cx: &mut Cx<State>, layer: &mut Vec<El>) {
     let (win_w, win_h) = cx
         .layout_with("kit-root", |r| (r[2], r[3]))
         .unwrap_or((1280., 900.));
+    if crate::touch::selecting(e) {
+        layer.push(crate::touch::selection_bar(e, t, win_w, win_h));
+    }
     if !e.file_notice.is_empty() {
         let w = 560f32.min(win_w - 32.);
         let o = oid.clone();

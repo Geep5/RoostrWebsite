@@ -952,7 +952,7 @@ impl Editor {
     }
 
     /// Duplicate a block's subtree below it (fresh ids, preserved order).
-    fn duplicate_block(&mut self, id: &str, s: &mut State) {
+    pub(crate) fn duplicate_block(&mut self, id: &str, s: &mut State) {
         let Some(src) = self.block(id).cloned() else {
             return;
         };

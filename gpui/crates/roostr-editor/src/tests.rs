@@ -740,7 +740,7 @@ fn on_a_touch_screen_holding_a_line_selects_it_and_taps_toggle() {
     assert!(selected(&rt).is_empty(), "a drag selects nothing");
 
     // A quick tap edits as before; a hold selects.
-    hold(&mut rt, "text-p1", Duration::from_millis(100));
+    hold(&mut rt, "text-p0", Duration::from_millis(100));
     assert!(selected(&rt).is_empty(), "a tap is no hold");
     hold(
         &mut rt,
@@ -762,10 +762,49 @@ fn on_a_touch_screen_holding_a_line_selects_it_and_taps_toggle() {
     click(&mut rt, "text-p1");
     assert_eq!(selected(&rt), ["p2"], "a tap on a selected line removes it");
 
+    // The bar acts on the selection: Copy puts its text on the clipboard, Paste puts the
+    // copied lines after it.
+    let clipboard = rune::clipboard::memory();
+    rt.use_clipboard(&clipboard);
+    assert!(
+        rt.find("ed-page-1-sel-bar").is_some(),
+        "the selection bar shows"
+    );
+    click(&mut rt, "ed-page-1-sel-copy");
+    settle(&mut rt);
+    assert_eq!(
+        clipboard.text().as_deref().map(String::as_str),
+        Some("Line 2")
+    );
+    click(&mut rt, "ed-page-1-sel-paste");
+    after_saves(&mut rt);
+    let lines = roots(&rt);
+    assert_eq!(
+        lines.len(),
+        5,
+        "the copy pasted after the selection: {lines:?}"
+    );
+    assert_eq!(live(&rt, &lines[3]), "Line 2");
+    click(&mut rt, "ed-page-1-sel-done");
+    settle(&mut rt);
+    assert!(
+        selected(&rt).is_empty() && rt.find("ed-page-1-sel-bar").is_none(),
+        "Done ends it"
+    );
+    hold(
+        &mut rt,
+        "text-p2",
+        crate::touch::HOLD + Duration::from_millis(50),
+    );
+    assert_eq!(selected(&rt), ["p2"]);
+
     // Below the lines, inside the page: its background.
     let bounds = crate::editor::editor(&rt.state, PAGE).unwrap().bounds;
     let (bx, by) = (x0, bounds[1] + bounds[3] - 4.);
-    assert!(by > y3 + 10., "the page reaches below its last line: {bounds:?} vs {y3}");
+    assert!(
+        by > y3 + 10.,
+        "the page reaches below its last line: {bounds:?} vs {y3}"
+    );
     rt.pointer_move(bx, by);
     rt.pointer_down(bx, by);
     rt.pointer_up(bx, by);
@@ -773,6 +812,22 @@ fn on_a_touch_screen_holding_a_line_selects_it_and_taps_toggle() {
     assert!(
         selected(&rt).is_empty(),
         "a tap around the lines ends the selection"
+    );
+
+    // Holding inside the line being typed in is the system's text menu (Paste), not a selection.
+    click(&mut rt, "text-p0");
+    settle(&mut rt);
+    assert!(
+        crate::editor::editor(&rt.state, PAGE).is_some_and(|e| e.active.as_deref() == Some("p0"))
+    );
+    hold(
+        &mut rt,
+        "text-p0",
+        crate::touch::HOLD + Duration::from_millis(50),
+    );
+    assert!(
+        selected(&rt).is_empty(),
+        "the typed-in line's hold selects nothing"
     );
     crate::touch::TOUCH.with(|t| t.set(false));
 }

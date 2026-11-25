@@ -166,8 +166,8 @@ pub struct Editor {
     pub(crate) hold: Option<crate::touch::Hold>,
     /// Where the finger last was (touch), for a tap on the page background.
     pub(crate) touch_y: f32,
-    /// A hold just selected: the release that ends it is no tap.
-    pub(crate) swallow_tap: bool,
+    /// The row a hold just selected: the release that ends it there is no tap.
+    pub(crate) swallow_tap: Option<String>,
     pub(crate) drag_sel: Option<DragSel>,
     pub(crate) sel_rect: Option<[f32; 4]>,
     // Popups.
@@ -324,7 +324,7 @@ impl Editor {
             focus_self: false,
             hold: None,
             touch_y: 0.,
-            swallow_tap: false,
+            swallow_tap: None,
             history: History::default(),
             writes,
             dirty: HashSet::new(),
