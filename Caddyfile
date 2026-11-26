@@ -6,13 +6,38 @@
 	# key and outbox live in that origin's storage and must not be orphaned.
 	@legacy {
 		header_regexp host Host ^(getroostr\.fly\.dev|www\.roostr\.space)$
-		not path /app /app/* /main.js /roostr_web.js /roostr_web_bg.wasm /snippets/* /engine.wasm /engine-core.json /fonts/*
+		not path /app /app/* /main.js /roostr_web.js /roostr_web_bg.wasm /snippets/* /engine.wasm /engine-core.json /fonts/* /api/claude
 	}
 	redir @legacy https://roostr.space{uri} permanent
 	# The app was previewed under /gpui/ before it served the whole site.
 	redir /gpui /{?query} permanent
 	@preview path_regexp preview ^/gpui(/.*)$
 	redir @preview {re.preview.1}{?query} permanent
+	# Finder in the browser asks Claude through here: Anthropic refuses browser
+	# (CORS) calls for organizations that turned them off, so the tab posts to
+	# its own origin and this passes the request on without the browser's
+	# Origin. Only the one endpoint; the caller's own key or plan login rides
+	# in its headers and nothing here keeps it.
+	@claude {
+		method POST
+		path /api/claude
+	}
+	handle @claude {
+		request_body {
+			max_size 4MB
+		}
+		rewrite * /v1/messages
+		reverse_proxy https://api.anthropic.com {
+			header_up Host api.anthropic.com
+			header_up -Origin
+			header_up -Referer
+			header_up -Cookie
+			header_up -Anthropic-Dangerous-Direct-Browser-Access
+			# A browser can't set User-Agent; a Claude plan login needs Claude Code's.
+			header_up User-Agent {http.request.header.X-Roostr-User-Agent}
+			header_up -X-Roostr-User-Agent
+		}
+	}
 	# Each website page has its own HTML (its title and link-preview tags);
 	# every other path - the workspace, /app/** - gets 200.html, and the app
 	# routes from the address bar. Nothing is content-hashed, so everything

@@ -67,12 +67,13 @@ fn words(s: &str) -> Vec<String> {
         .collect()
 }
 
-/// Pages of `space` matching `query`: every word that matches a name scores (a whole word
-/// twice), a request naming every word of a page's name scores more, recent edits break ties.
+/// Pages of `space` matching `query`: each word of three letters or more scores when it is a
+/// word of a page's name (2), or - four letters or more - part of one (1); a request naming
+/// every word of a page's name scores more; recent edits break ties.
 pub fn rank_pages(rows: &[QueryRow], space: &str, query: &str, limit: usize) -> Vec<PageHit> {
     let asked: Vec<String> = words(query)
         .into_iter()
-        .filter(|w| w.chars().count() > 1)
+        .filter(|w| w.chars().count() > 2)
         .collect();
     let mut scored: Vec<(usize, i64, PageHit)> = rows
         .iter()
@@ -87,12 +88,13 @@ pub fn rank_pages(rows: &[QueryRow], space: &str, query: &str, limit: usize) -> 
             let matched: usize = asked
                 .iter()
                 .map(|w| {
-                    if !lower.contains(w.as_str()) {
-                        0
-                    } else if name_words.contains(w) {
+                    if name_words.contains(w) {
                         2
-                    } else {
+                    } else if w.chars().count() > 3 && lower.contains(w.as_str()) {
+                        // Part of a word only for longer words: "hi" is not "Things".
                         1
+                    } else {
+                        0
                     }
                 })
                 .sum();
@@ -326,7 +328,11 @@ pub async fn call_claude(
         "tools": tools,
     });
     let bearer = format!("Bearer {key}");
-    let agent = format!("claude-cli/{CLAUDE_CODE_VERSION} (external, cli)");
+    let agent = if plan {
+        format!("claude-cli/{CLAUDE_CODE_VERSION} (external, cli)")
+    } else {
+        "roostr".to_string()
+    };
     let mut headers: Vec<(&str, &str)> = vec![
         ("content-type", "application/json"),
         ("anthropic-version", "2023-06-01"),
@@ -335,18 +341,22 @@ pub async fn call_claude(
         headers.extend([
             ("authorization", bearer.as_str()),
             ("anthropic-beta", CLAUDE_CODE_BETAS),
-            ("user-agent", agent.as_str()),
             ("x-app", "cli"),
         ]);
     } else {
         headers.push(("x-api-key", key));
     }
-    // A browser may call Anthropic only when the request says it means to.
-    if cfg!(target_family = "wasm") {
-        headers.push(("anthropic-dangerous-direct-browser-access", "true"));
-    }
+    // A browser can't call Anthropic itself (organizations may refuse CORS) nor set
+    // User-Agent: it posts to its own site, which passes the call on (RoostrWebsite Caddyfile).
+    let url = if cfg!(target_family = "wasm") {
+        headers.push(("x-roostr-user-agent", agent.as_str()));
+        "/api/claude"
+    } else {
+        headers.push(("user-agent", agent.as_str()));
+        "https://api.anthropic.com/v1/messages"
+    };
     let res = http::post(
-        "https://api.anthropic.com/v1/messages",
+        url,
         &headers,
         &serde_json::to_vec(&body)?,
         Some(Duration::from_secs(60)),
@@ -438,6 +448,7 @@ mod tests {
             row("notes", "page", "Hunting notes", 9, &[]),
             row("agent", "agent", "Hunter Overview", 9, &[]),
             row("other", "page", "Groceries", 9, &[]),
+            row("things", "page", "Things to try", 9, &[]),
         ];
         let hits = rank_pages(&rows, "sp", "add this link to the hunter overview", 8);
         // "Hunting notes" shares no word with it; "hunting" finds both, the whole word first.
@@ -447,6 +458,8 @@ mod tests {
             hits.iter().map(|h| h.id.as_str()).collect::<Vec<_>>(),
             ["hunt"]
         );
+        // Two-letter words ("hi", "to") are ignored.
+        assert!(rank_pages(&rows, "sp", "hi", 8).is_empty());
         // Another space's page never shows.
         assert!(rank_pages(&rows, "elsewhere", "hunter", 8).is_empty());
     }
