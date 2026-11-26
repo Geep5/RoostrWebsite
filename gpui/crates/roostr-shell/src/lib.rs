@@ -201,6 +201,16 @@ pub fn window_height(s: &State) -> f32 {
     s.get::<shell::Shell>().map_or(0.0, |sh| sh.height)
 }
 
+/// The Finder bubble's chat is open (the app draws it: roostr-app `finder`).
+#[derive(Default)]
+pub struct FinderOpen(pub bool);
+
+/// Open or close the Finder chat (the desktop bubble, the phone's 🧭 button).
+pub fn toggle_finder(s: &mut State) {
+    let open = &mut s.slot::<FinderOpen>().0;
+    *open = !*open;
+}
+
 /// The window is phone-narrow (≤ 720 pt): the mobile shell shows.
 pub fn is_mobile(s: &State) -> bool {
     let width = window_width(s);

@@ -219,7 +219,11 @@ fn pinned_card(
             }
         })
         .on_press(move |s: &mut State| pin_collapse::toggle(s, &flip));
-    let arrow = if drag::any(s) { arrow } else { motion::pressable(arrow) };
+    let arrow = if drag::any(s) {
+        arrow
+    } else {
+        motion::pressable(arrow)
+    };
     let mut head = fill(format!("widget-head:{id}"), t.hl_med)
         .grow(1.)
         .min_w(0.)
@@ -252,7 +256,13 @@ fn pinned_card(
         head = head.fill(t.hl_med);
     }
     // The head (the pin's name) drags the pin too, not just the card's border.
-    let head = drag::handle(motion::pressable_row(head), "widgets", id, Axis::Y, drop_widget);
+    let head = drag::handle(
+        motion::pressable_row(head),
+        "widgets",
+        id,
+        Axis::Y,
+        drop_widget,
+    );
     let boxed = col()
         .key(format!("widget-box:{id}"))
         .w_full()

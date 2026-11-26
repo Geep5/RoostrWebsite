@@ -3,6 +3,7 @@
 //! the page for each route, and the object page that dispatches on an
 //! object's type, plugged into the shell ([`roostr_shell::Pages`]).
 
+mod finder;
 mod object_page;
 
 use roostr_core::State;
@@ -23,6 +24,7 @@ pub fn register(s: &mut State) {
     roostr_settings::register(s);
     roostr_site::register(s);
     object_page::register(s);
+    finder::register(s);
     roostr_shell::register(s, pages());
 }
 
@@ -76,6 +78,7 @@ fn identity_gate(s: &State, cx: &mut Cx<State>, layer: &mut Vec<El>) -> El {
 fn overlays(s: &State, cx: &mut Cx<State>, layer: &mut Vec<El>) {
     let t = roostr_shell::theme(s, cx);
     roostr_settings::settings_modal(s, cx, t, layer);
+    finder::view(s, cx, t, layer);
 }
 
 fn shown(s: &mut State, route: &Route) {

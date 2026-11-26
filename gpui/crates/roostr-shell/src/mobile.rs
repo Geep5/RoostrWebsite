@@ -1913,6 +1913,15 @@ fn space_home(
                                 .on_press(crate::search::open),
                         )
                         .child(roostr_ui::tooltip(
+                            panel_button(t, "m-finder")
+                                .size(46., 46.)
+                                .radius(23.)
+                                .label("Finder")
+                                .child(text("🧭").font(ty::ui(19.)))
+                                .on_press(crate::toggle_finder),
+                            "Finder",
+                        ))
+                        .child(roostr_ui::tooltip(
                             panel_button(t, "m-compose")
                                 .size(46., 46.)
                                 .radius(23.)
