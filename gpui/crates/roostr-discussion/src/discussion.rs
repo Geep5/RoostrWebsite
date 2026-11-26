@@ -61,7 +61,13 @@ pub struct DiscussionOptions {
     /// Inside the conversation drawer: messages in their own scroller, no outer margins,
     /// 14px sides.
     pub embedded: bool,
+    /// Drawn between the messages and the composer (the Finder's tappable choices), given the
+    /// object's id.
+    pub above_composer: Option<AboveComposer>,
 }
+
+/// What [`DiscussionOptions::above_composer`] draws.
+pub type AboveComposer = fn(&State, &Theme, &str) -> rune::El;
 
 impl Default for DiscussionOptions {
     fn default() -> Self {
@@ -70,6 +76,7 @@ impl Default for DiscussionOptions {
             page_mode: false,
             thread_id: DISCUSSION.into(),
             embedded: false,
+            above_composer: None,
         }
     }
 }
@@ -204,6 +211,7 @@ pub(crate) struct Disc {
     pub page_mode: bool,
     pub thread_id: String,
     pub embedded: bool,
+    pub above_composer: Option<AboveComposer>,
 
     pub object: Option<Arc<Object>>,
     pub messages: Rc<Vec<ChatMessage>>,
@@ -386,6 +394,7 @@ pub(crate) fn create(s: &mut State, key: String, object_id: String, options: Dis
         page_mode: options.page_mode,
         thread_id,
         embedded: options.embedded,
+        above_composer: options.above_composer,
         object: None,
         messages: Rc::new(Vec::new()),
         conversation: None,

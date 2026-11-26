@@ -28,6 +28,8 @@ struct Finder {
     opened: String,
     /// Whether the panel was open when last drawn: a fresh opening makes a fresh session.
     was_open: bool,
+    /// The buttons (their JSON) a tap already answered: hidden until Finder offers new ones.
+    tapped: String,
 }
 
 const SESSION_TYPE: &str = "finder_session";
@@ -104,23 +106,107 @@ fn follow(s: &mut State) -> bool {
     true
 }
 
-/// The choices Finder last offered: (id, name).
-fn options(s: &State, id: &str) -> Vec<(String, String)> {
+/// A button Finder offered (glonOdin finder.ts `FinderOption`).
+#[derive(serde::Deserialize)]
+struct Choice {
+    id: String,
+    name: String,
+    kind: String,
+    #[serde(default, rename = "type")]
+    type_key: String,
+    #[serde(default)]
+    icon: String,
+}
+
+/// Finder's buttons, drawn between its messages and the composer: page cards (icon, name, type)
+/// and the confirm's buttons. A tap posts the button's name once; they hide until Finder
+/// offers new ones.
+fn choices(s: &State, t: &Theme, id: &str) -> El {
     let raw = s
         .store
         .object(id)
         .map(|o| o.field_str("finder_options").to_string())
         .unwrap_or_default();
-    serde_json::from_str::<Vec<serde_json::Value>>(&raw)
-        .unwrap_or_default()
-        .into_iter()
-        .filter_map(|o| {
-            Some((
-                o["id"].as_str()?.to_string(),
-                o["name"].as_str()?.to_string(),
-            ))
-        })
-        .collect()
+    let list: Vec<Choice> = serde_json::from_str(&raw).unwrap_or_default();
+    if list.is_empty() || s.get::<Finder>().is_some_and(|f| f.tapped == raw) {
+        return col();
+    }
+    let mut out = col().key("finder-choices").gap(6.).px(14.).pt(4.).pb(8.);
+    for c in list {
+        let (sid, label, answered) = (id.to_string(), c.name.clone(), raw.clone());
+        let press = move |s: &mut State| {
+            s.slot::<Finder>().tapped = answered.clone();
+            api::chat::post(&sid, &label, "", "", &[], s).detach_and_log_err(&s.rt);
+        };
+        let button = motion::pressable(row())
+            .key(format!("finder-choice-{}", c.id))
+            .role("button")
+            .label(c.name.clone())
+            .items_center()
+            .gap(8.)
+            .radius(10.)
+            .cursor(Cursor::Pointer)
+            .hover(t.hover)
+            .on_press(press);
+        let el = match c.kind.as_str() {
+            "page" | "new" => {
+                let icon = if c.icon.is_empty() {
+                    if c.kind == "new" { "＋" } else { "📄" }.to_string()
+                } else {
+                    c.icon.clone()
+                };
+                let kind = match c.type_key.as_str() {
+                    "" => String::new(),
+                    "query" => "Query".into(),
+                    "collection" => "Collection".into(),
+                    k => {
+                        let mut k = k.replace('_', " ");
+                        if let Some(f) = k.get_mut(0..1) {
+                            f.make_ascii_uppercase();
+                        }
+                        k
+                    }
+                };
+                button
+                    .w_full()
+                    .px(12.)
+                    .py(9.)
+                    .fill(t.panel)
+                    .border(1., t.border)
+                    .border_layout()
+                    .child(text(icon).font(ty::ui(16.)))
+                    .child(
+                        text(c.name)
+                            .font(ty::ui(14.).semibold())
+                            .color(t.fg)
+                            .truncate()
+                            .grow(1.)
+                            .min_w(0.),
+                    )
+                    .child(text(kind).font(ty::ui(12.)).color(t.muted))
+            }
+            "do" => button.self_start().px(16.).py(8.).fill(t.accent).child(
+                text(c.name)
+                    .font(ty::ui(14.).semibold())
+                    .color(Color::BLACK),
+            ),
+            _ => button
+                .self_start()
+                .px(14.)
+                .py(8.)
+                .fill(t.panel)
+                .border(1., t.border)
+                .border_layout()
+                .child(if c.icon.is_empty() {
+                    text("")
+                } else {
+                    text(c.icon).font(ty::ui(14.))
+                })
+                .child(text(c.name).font(ty::ui(14.)).color(t.fg)),
+        };
+        out = out.child(el);
+    }
+    out
 }
 
 /// Draw the bubble (desktop) and, while open, the Finder chat.
@@ -229,6 +315,7 @@ pub(crate) fn view(s: &State, cx: &mut Cx<State>, t: &Theme, layer: &mut Vec<El>
             let opts = DiscussionOptions {
                 full: true,
                 embedded: true,
+                above_composer: Some(choices),
                 ..DiscussionOptions::default()
             };
             body = body.child(
@@ -246,37 +333,6 @@ pub(crate) fn view(s: &State, cx: &mut Cx<State>, t: &Theme, layer: &mut Vec<El>
                         [pw, ph],
                     )),
             );
-            let choices = options(s, &id);
-            if !choices.is_empty() {
-                let mut chips = row()
-                    .key("finder-choices")
-                    .flex_wrap()
-                    .gap(6.)
-                    .px(12.)
-                    .py(8.);
-                for (oid, name) in choices {
-                    let (sid, label) = (id.clone(), name.clone());
-                    chips = chips.child(
-                        motion::pressable(row())
-                            .key(format!("finder-choice-{oid}"))
-                            .role("button")
-                            .label(name.clone())
-                            .px(12.)
-                            .py(6.)
-                            .radius(999.)
-                            .fill(t.panel)
-                            .border(1., t.accent)
-                            .border_layout()
-                            .cursor(Cursor::Pointer)
-                            .child(text(name).font(ty::ui(13.)).color(t.fg))
-                            .on_press(move |s: &mut State| {
-                                api::chat::post(&sid, &label, "", "", &[], s)
-                                    .detach_and_log_err(&s.rt);
-                            }),
-                    );
-                }
-                body = body.child(chips);
-            }
         }
         None => {
             body = body.child(

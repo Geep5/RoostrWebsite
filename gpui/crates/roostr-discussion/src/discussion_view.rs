@@ -528,6 +528,9 @@ pub(crate) fn view(
         if d.is_exchange {
             root = root.child(audience(d, s, t, layer));
         }
+        if let Some(above) = d.above_composer {
+            root = root.child(above(s, t, &d.object_id));
+        }
         root = root.child(composer(d, s, cx, t, layer));
         root = file_drop(d, t, root);
     }

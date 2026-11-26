@@ -21,6 +21,7 @@ const SESSION: &str = "session-1";
 #[derive(Default)]
 struct Vault {
     created: Mutex<Vec<JsonMap>>,
+    posted: Mutex<Vec<String>>,
 }
 
 struct Handle(Arc<Vault>);
@@ -56,10 +57,18 @@ impl Backend for Handle {
                 ("channel".to_string(), Value::string("sp-1")),
             ]
             .into(),
-            SESSION if !self.0.created.lock().is_empty() => [(
-                "finder_handoff".to_string(),
-                Value::string(r#"{"page":"page-1","at":5}"#),
-            )]
+            SESSION if !self.0.created.lock().is_empty() => [
+                (
+                    "finder_handoff".to_string(),
+                    Value::string(r#"{"page":"page-1","at":5}"#),
+                ),
+                (
+                    "finder_options".to_string(),
+                    Value::string(
+                        r#"[{"id":"page-1","name":"Quotes","kind":"page","type":"page","icon":"💬"},{"id":"new","name":"＋ New page","kind":"new"}]"#,
+                    ),
+                ),
+            ]
             .into(),
             _ => return ready(Err(anyhow::anyhow!("unknown object {id}"))),
         };
@@ -87,6 +96,12 @@ impl Backend for Handle {
     }
     fn mutate(&self, action: &str, params: JsonMap) -> BoxFuture<anyhow::Result<JsonMap>> {
         let mut out = JsonMap::new();
+        if action == "chat_post" {
+            self.0
+                .posted
+                .lock()
+                .push(params["text"].as_str().unwrap_or("").to_string());
+        }
         if action == "create" && params["type_key"] == "finder_session" {
             self.0.created.lock().push(params);
             out.insert("id".into(), SESSION.into());
@@ -126,4 +141,11 @@ fn the_bubble_starts_a_private_session_and_a_hand_off_opens_its_page() {
         Route::Object(PAGE.into()),
         "the hand-off's page opened"
     );
+
+    // Finder's choices are cards to tap; a tap sends the card's name once, and they hide.
+    assert!(app.shown("finder-choice-page-1") && app.shown("finder-choice-new"));
+    app.tap("finder-choice-page-1");
+    app.settle();
+    assert_eq!(*vault.posted.lock(), ["Quotes"]);
+    assert!(!app.shown("finder-choice-page-1"), "answered: the cards go");
 }

@@ -4655,6 +4655,7 @@ dependencies = [
  "roostr-site",
  "roostr-ui",
  "rune",
+ "serde",
  "serde_json",
 ]
 

@@ -17,6 +17,7 @@ roostr-graph.workspace = true
 roostr-settings.workspace = true
 roostr-site.workspace = true
 roostr-shell.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 rune.workspace = true
 log.workspace = true

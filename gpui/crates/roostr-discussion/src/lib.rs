@@ -24,7 +24,7 @@ use std::collections::HashSet;
 use roostr_core::{NavEvent, Object, State};
 
 pub use chat_page::chat_page;
-pub use discussion::DiscussionOptions;
+pub use discussion::{AboveComposer, DiscussionOptions};
 pub use discussion_view::discussion;
 pub use drawer::{on_escape, pane_column, pane_sheet};
 
