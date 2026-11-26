@@ -24,7 +24,7 @@ pub const ROLES: [Role; 5] = [
 
 const WHO: &[&str] = &["agent", "assignee", "served_by", "repo_path"];
 const WHEN: &[&str] = &["repeat", "repeat_instructions", "check_first", "due_date"];
-const STATE: &[&str] = &["done", "status"];
+const STATE: &[&str] = &["error", "done", "status"];
 const SETUP: &[&str] = &[
     "model",
     "prompt",

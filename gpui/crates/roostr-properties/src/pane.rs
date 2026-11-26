@@ -110,14 +110,17 @@ const REPEAT_KEY: &str = "__repeat__";
 const SKILL_HELP: &str = "Give this Skill an **Answer** to make it a Jev Skill: its page becomes the question (a numbered list of levels for a Score, bullets for a Choice, `Yes:` / `No:` lines for Yes or no), and agents that have it in their Skills run it with `jev_score`, filling **Writes to** (default: this Skill's name). They need a TypeSafe credential.";
 
 fn prop_rank(key: &str) -> u8 {
-    if SYSTEM_KEYS.contains(&key) {
+    // The Error leads its section: it says what to fix.
+    if key == "error" {
         0
-    } else if TOOL_KEYS.contains(&key) {
+    } else if SYSTEM_KEYS.contains(&key) {
         1
-    } else if JEV_KEYS.contains(&key) {
+    } else if TOOL_KEYS.contains(&key) {
         2
-    } else {
+    } else if JEV_KEYS.contains(&key) {
         3
+    } else {
+        4
     }
 }
 
@@ -693,8 +696,8 @@ fn shown(
                 return true;
             }
             match k {
-                // Shown as the bar above the sections, never a row.
-                "error" => false,
+                // The Error property: a row while it holds something (State).
+                "error" => has(k),
                 _ if type_key == "channel" => k == "agent",
                 "keep_all_files" | "autostart" => type_key == "machine" || has(k),
                 // Where its agents work on it: shown once it has an agent.
@@ -1141,50 +1144,6 @@ fn skill_help(t: &Theme) -> El {
         )
 }
 
-/// The object's `error` above its sections: red, wrapping, with a × that clears it
-/// (removes the field, as the old Error row's ×) unless the object is locked.
-fn error_bar(t: &Theme, id: &str, error: &str, clearable: bool) -> El {
-    let mut bar = row()
-        .key("prop-error-bar")
-        .role("alert")
-        .items_start()
-        .gap(8.0)
-        .mx(4.0)
-        .mt(6.0)
-        .mb(2.0)
-        .px(10.0)
-        .py(6.0)
-        .radius(radius::SM)
-        .fill(t.red.alpha(0.1))
-        .border(1.0, t.red.alpha(0.35))
-        .child(
-            text(error.to_string())
-                .font(ty::ui(13.0).lh(18.0))
-                .color(t.red)
-                .wrap()
-                .grow(1.0)
-                .shrink()
-                .min_w(0.0),
-        );
-    if clearable {
-        let id = id.to_string();
-        let button = motion::pressable(row())
-            .key("prop-error-clear")
-            .role("button")
-            .label("Clear error")
-            .size(18.0, 18.0)
-            .center()
-            .radius(9.0)
-            .hover(ghost_hover(t))
-            .hover_group()
-            .cursor(Cursor::Pointer)
-            .on_press(move |s: &mut State| remove_prop(s, &id, "error"))
-            .child(glyph(Glyph::Close, 11.0).color(t.red));
-        bar = bar.child(tip(button, "Clear error"));
-    }
-    bar
-}
-
 /// The properties section of `object_id` (the discussion drawer's
 /// Properties column): content only, the host scrolls and pads it.
 pub fn properties_pane(
@@ -1291,10 +1250,6 @@ pub fn properties_pane(
         tag_seeds: &tag_seeds,
     };
     let mut root = col();
-    let error = object.field_str("error");
-    if !error.is_empty() && object.type_key != "template" {
-        root = root.child(error_bar(t, &object.id, error, !locked));
-    }
     for (role, rows) in sections {
         if rows.is_empty() {
             continue;
@@ -1834,12 +1789,18 @@ fn render_row(
         } else {
             shown_text.clone()
         };
+        // An Error reads whole and red: it is what to fix.
+        let is_error = key == "error";
         let val = text(line)
-            .color(if overdue { t.red } else { t.fg })
+            .color(if overdue || is_error { t.red } else { t.fg })
             .min_w(0.0)
             .shrink()
-            .font(ty::ui(13.0).lh(22.0))
-            .truncate();
+            .font(ty::ui(13.0).lh(if is_error { 18.0 } else { 22.0 }));
+        let val = if is_error {
+            val.wrap().pt(2.0)
+        } else {
+            val.truncate()
+        };
         value = value.child(val);
     }
     let judged = judged(s, object, &key);
@@ -2085,11 +2046,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn ranks_system_tool_jev_then_the_rest() {
-        assert_eq!(prop_rank("due_date"), 0);
-        assert_eq!(prop_rank("tool_version"), 1);
-        assert_eq!(prop_rank("jev_answer"), 2);
-        assert_eq!(prop_rank("priority"), 3);
+    fn ranks_the_error_then_system_tool_jev_then_the_rest() {
+        let order = [
+            "error",
+            "due_date",
+            "tool_version",
+            "jev_answer",
+            "priority",
+        ];
+        assert!(order.windows(2).all(|w| prop_rank(w[0]) < prop_rank(w[1])));
     }
 
     #[test]

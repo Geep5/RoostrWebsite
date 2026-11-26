@@ -410,30 +410,19 @@ fn sections_follow_each_property_role_and_the_error_is_a_bar() {
     // A role set on the relation moves it out of Details.
     assert!(inside(&app, "prop-row-budget", "prop-section-who"));
 
-    // The error: a bar above Who, not a row.
-    assert!(!app.shown("prop-row-error"), "no Error row");
-    let (bar, _) = app.rt.presented("prop-error-bar").expect("the error bar");
-    assert!(bar[1] < tops[0], "the bar sits above Who");
+    // The error is its Error property: the first row of State, its whole text shown.
+    assert!(!app.shown("prop-error-bar"), "no bar");
+    assert!(inside(&app, "prop-row-error", "prop-section-state"));
+    let state_rows: Vec<f32> = ["prop-row-error", "prop-row-status"]
+        .iter()
+        .map(|k| app.rt.presented(k).expect(k).0[1])
+        .collect();
+    assert!(state_rows[0] < state_rows[1], "Error leads State");
     assert!(
-        texts_in(&app, "prop-error-bar")
+        texts_in(&app, "prop-row-error")
             .iter()
             .any(|t| t == "The agent's model is gone.")
     );
-    app.click("prop-error-clear");
-    app.until("the error clears", |s| {
-        s.store
-            .object("t1")
-            .is_some_and(|o| !o.fields.contains_key("error"))
-    });
-    assert!(
-        app.vault
-            .calls("delete_field")
-            .iter()
-            .any(|p| p["key"] == "error"),
-        "the × removes the error"
-    );
-    app.step();
-    assert!(!app.shown("prop-error-bar"), "and the bar goes");
 }
 
 /// The pane as the desktop shows it: a Properties column at the right of a 1440×850 window.
