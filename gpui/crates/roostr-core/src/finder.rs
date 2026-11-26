@@ -17,7 +17,7 @@ pub const SESSION_TYPE: &str = "finder_session";
 /// Tool calls one answer may make before it must reply.
 pub const MAX_STEPS: usize = 6;
 /// The model a Finder runs on when its agent names none.
-pub const DEFAULT_MODEL: &str = "claude-haiku-4-5";
+pub const DEFAULT_MODEL: &str = "claude-opus-5-5";
 
 /// Types that are setup, not pages a request belongs on.
 const NOT_PAGES: &[&str] = &[
