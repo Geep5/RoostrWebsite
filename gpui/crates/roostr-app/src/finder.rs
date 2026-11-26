@@ -35,7 +35,6 @@ struct Finder {
 const SESSION_TYPE: &str = "finder_session";
 const PANEL_W: f32 = 380.;
 const PANEL_H: f32 = 540.;
-const BUBBLE: f32 = 52.;
 
 /// A new session for `space`, served by the computer this app talks to (its harness answers
 /// it as the space's Finder); a browser with no computer leaves it to the Finder's own.
@@ -218,7 +217,8 @@ fn choices(s: &State, t: &Theme, id: &str) -> El {
     out
 }
 
-/// Draw the bubble (desktop) and, while open, the Finder chat.
+/// While open, the Finder chat: on the desktop beside its 🧭 tile in the rail (roostr-shell
+/// draws the tile), its bottom level with the tile's; on the phone a sheet from the bottom.
 pub(crate) fn view(s: &State, cx: &mut Cx<State>, t: &Theme, layer: &mut Vec<El>) {
     let [w, h] = crate::object_page::window_size(s);
     if w <= 0. {
@@ -226,36 +226,6 @@ pub(crate) fn view(s: &State, cx: &mut Cx<State>, t: &Theme, layer: &mut Vec<El>
     }
     let mobile = roostr_shell::is_mobile(s);
     let open = s.get::<FinderOpen>().is_some_and(|o| o.0);
-    if !mobile {
-        layer.push(
-            motion::pressable(row())
-                .key("finder-bubble")
-                .role("button")
-                .label("Finder")
-                .absolute(w - BUBBLE - 20., h - BUBBLE - 20.)
-                .size(BUBBLE, BUBBLE)
-                .radius(BUBBLE / 2.)
-                .center()
-                .fill(t.panel)
-                .border(1., t.border)
-                .border_layout()
-                .box_shadow(Shadow {
-                    x: 0.,
-                    y: 4.,
-                    blur: 16.,
-                    spread: 0.,
-                    color: Color::BLACK.alpha(0.25),
-                    inset: false,
-                })
-                .cursor(Cursor::Pointer)
-                .child(
-                    text(if open { "✕" } else { "🧭" })
-                        .font(ty::ui(22.))
-                        .color(t.fg),
-                )
-                .on_press(roostr_shell::toggle_finder),
-        );
-    }
     if !open {
         return;
     }
@@ -263,8 +233,14 @@ pub(crate) fn view(s: &State, cx: &mut Cx<State>, t: &Theme, layer: &mut Vec<El>
         let ph = (h * 0.72).min(h - 40.);
         (0., h - ph, w, ph)
     } else {
-        let ph = PANEL_H.min(h - BUBBLE - 60.);
-        (w - PANEL_W - 20., h - BUBBLE - 32. - ph, PANEL_W, ph)
+        let ph = PANEL_H.min(h - 24.);
+        // The tile's box [x, y, w, h]; before the rail is laid out, the bottom-left corner.
+        let tile = cx
+            .layout_with("rail-finder", |r| r)
+            .unwrap_or([12., h - 56., 44., 44.]);
+        let x = (tile[0] + tile[2] + 10.).min(w - PANEL_W - 12.).max(12.);
+        let y = (tile[1] + tile[3] - ph).max(12.);
+        (x, y, PANEL_W, ph)
     };
     let space = s
         .store

@@ -120,14 +120,29 @@ impl Backend for Handle {
 }
 
 #[test]
-fn the_bubble_starts_a_private_session_and_a_hand_off_opens_its_page() {
+fn the_rail_tile_starts_a_private_session_and_a_hand_off_opens_its_page() {
     let vault = Arc::new(Vault::default());
     let mut app = App::open(Arc::new(Handle(vault.clone())), 1280., 800.);
     app.navigate(Route::Home);
-    assert!(app.shown("finder-bubble") && !app.shown("finder-panel"));
-    app.tap("finder-bubble");
+    assert!(app.shown("rail-finder") && !app.shown("finder-panel"));
+    app.tap("rail-finder");
     app.settle();
     assert!(app.shown("finder-panel"), "the chat opens");
+    // Beside its tile in the rail, bottoms level - not floating over the chat's composer.
+    let tile = app.rect("rail-finder").expect("the tile");
+    let panel = app.rect("finder-panel").expect("the panel");
+    assert!(
+        panel[0] >= tile[0] + tile[2],
+        "the chat opens right of the rail: {panel:?} vs {tile:?}"
+    );
+    assert!(
+        (panel[1] + panel[3] - (tile[1] + tile[3])).abs() < 1.,
+        "bottoms level: {panel:?} vs {tile:?}"
+    );
+    assert!(
+        panel[0] + panel[2] < 1280. / 2.,
+        "on the left, away from the chat column"
+    );
     let made = vault.created.lock().clone();
     assert_eq!(made.len(), 1, "one new session");
     let fields = &made[0]["fields"];
@@ -209,7 +224,7 @@ fn a_session_is_served_by_the_computer_the_app_talks_to() {
         s.harness = Some(fake_harness("studio-1"));
     });
     app.navigate(Route::Home);
-    app.tap("finder-bubble");
+    app.tap("rail-finder");
     app.settle();
     let made = vault.created.lock().clone();
     assert_eq!(made.len(), 1, "one new session");

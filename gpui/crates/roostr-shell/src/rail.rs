@@ -238,6 +238,34 @@ pub(crate) fn view(s: &State, _cx: &mut rune::Cx<State>, t: &Theme, sh: &Shell, 
         rail = rail.child(roostr_ui::tooltip(dot, sync_tip(status)));
     }
 
+    // Finder: above the account, on every space. Open, its square takes the accent ring.
+    let finder_open = s.get::<crate::FinderOpen>().is_some_and(|o| o.0);
+    let side = if wide { 38. } else { 36. };
+    let mut finder_tile = rail_tile(t, "rail-finder", wide).label("Finder").child(
+        row()
+            .key("rail-finder-icon")
+            .size(side, side)
+            .center()
+            .radius(9.)
+            .fill(t.panel)
+            .border(if finder_open { 2. } else { 0. }, t.accent)
+            .child(text("🧭").font(ty::ui(if wide { 18. } else { 17. }))),
+    );
+    if wide {
+        finder_tile = finder_tile.child(hover_fg(
+            text("Finder")
+                .font(ty::ui(15.).medium())
+                .truncate()
+                .shrink()
+                .min_w(0.),
+            t,
+        ));
+    }
+    rail = rail.child(roostr_ui::tooltip(
+        finder_tile.mb(4.).on_press(crate::toggle_finder),
+        "Finder",
+    ));
+
     // Account / Settings.
     let profile_name = s.profile.name().to_string();
     let label = if profile_name.is_empty() {
