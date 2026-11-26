@@ -1,5 +1,5 @@
-//! Finder: a chat that gets what you say to the right page and agent of the space you're in
-//! (glonOdin `harness/src/finder.ts` answers it).
+//! Finder: a chat that gets what you say to the right page and agent of the space you're in.
+//! The app you type in answers it (`finder_answer.rs`): every device runs its own Finder.
 //!
 //! Desktop: a floating 🧭 bubble, bottom right, opens a chat panel above it. Phone: the 🧭
 //! button by Search opens the same chat as a sheet from the bottom. Each opening starts a new,
@@ -17,6 +17,8 @@ use roostr_ui::ty::{self, Weights as _};
 use roostr_ui::{Theme, motion};
 use rune::{Color, Cursor, Cx, El, Shadow, col, row, text};
 
+use crate::finder_answer::{self, Choice};
+
 /// The session open now, and what of it this window has acted on.
 #[derive(Default)]
 struct Finder {
@@ -30,14 +32,21 @@ struct Finder {
     was_open: bool,
     /// The buttons (their JSON) a tap already answered: hidden until Finder offers new ones.
     tapped: String,
+    /// The person's message answered last ("session:ts"): each is answered once.
+    answered: String,
+    /// Finder is working on an answer.
+    busy: bool,
+    /// Old sessions were cleared this run.
+    swept: bool,
 }
 
-const SESSION_TYPE: &str = "finder_session";
+const SESSION_TYPE: &str = roostr_core::finder::SESSION_TYPE;
+/// Sessions older than this are removed when Finder first opens.
+const SESSION_TTL_MS: i64 = 7 * 86_400_000;
 const PANEL_W: f32 = 380.;
 const PANEL_H: f32 = 540.;
 
-/// A new session for `space`, served by the computer this app talks to (its harness answers
-/// it as the space's Finder); a browser with no computer leaves it to the Finder's own.
+/// A new session for `space`; this app answers it.
 fn start(s: &mut State, space: String) {
     let f = s.slot::<Finder>();
     if f.making {
@@ -45,15 +54,11 @@ fn start(s: &mut State, space: String) {
     }
     f.making = true;
     f.session = None;
-    let machine = roostr_core::create::this_machine_id(s);
-    let session_space = space.clone();
+    if !std::mem::replace(&mut f.swept, true) {
+        sweep(s);
+    }
+    let fields: Fields = [("finder_space".to_string(), Value::string(&space))].into();
     s.rt.spawn(async move |cx| {
-        let machine = machine.await;
-        let mut fields: Fields =
-            [("finder_space".to_string(), Value::string(&session_space))].into();
-        if !machine.is_empty() {
-            fields.insert("served_by".into(), Value::string(machine));
-        }
         let made = cx
             .update(|s| api::note::create("Finder", Some(SESSION_TYPE), Some(fields), s))
             .await;
@@ -68,6 +73,22 @@ fn start(s: &mut State, space: String) {
                 Err(error) => log::warn!("[finder] new session failed: {error:#}"),
             }
         });
+    })
+    .detach();
+}
+
+/// Remove this person's Finder sessions older than a week.
+fn sweep(s: &mut State) {
+    let rows = api::query_all(serde_json::json!({ "type": SESSION_TYPE }), s);
+    s.rt.spawn(async move |cx| {
+        let Ok(rows) = rows.await else { return };
+        let cutoff = roostr_core::finder::now_ms() - SESSION_TTL_MS;
+        for r in rows.into_iter().filter(|r| r.updated_at < cutoff) {
+            let params = [("object_id".to_string(), serde_json::json!(r.id))]
+                .into_iter()
+                .collect();
+            let _ = cx.update(|s| api::mutate("delete", params, s)).await;
+        }
     })
     .detach();
 }
@@ -93,16 +114,17 @@ fn follow(s: &mut State) -> bool {
         start(s, space);
         return true;
     }
-    let Some((id, _)) = s.get::<Finder>().and_then(|f| f.session.clone()) else {
+    let Some((id, space)) = s.get::<Finder>().and_then(|f| f.session.clone()) else {
         return false;
     };
+    let answering = answer_newest(s, &id, &space);
     let handoff = s
         .store
         .object(&id)
         .map(|o| o.field_str("finder_handoff").to_string())
         .unwrap_or_default();
     if handoff.is_empty() || s.get::<Finder>().is_some_and(|f| f.opened == handoff) {
-        return false;
+        return answering;
     }
     s.slot::<Finder>().opened = handoff.clone();
     if let Some(page) = serde_json::from_str::<serde_json::Value>(&handoff)
@@ -114,16 +136,30 @@ fn follow(s: &mut State) -> bool {
     true
 }
 
-/// A button Finder offered (glonOdin finder.ts `FinderOption`).
-#[derive(serde::Deserialize)]
-struct Choice {
-    id: String,
-    name: String,
-    kind: String,
-    #[serde(default, rename = "type")]
-    type_key: String,
-    #[serde(default)]
-    icon: String,
+/// The person's newest message in the session, unanswered: Finder answers it here. True when
+/// an answer started.
+fn answer_newest(s: &mut State, id: &str, space: &str) -> bool {
+    let Some(session) = s.store.object(id) else {
+        return false;
+    };
+    let finder = roostr_core::finder::finder_id(space);
+    let Some(newest) = finder_answer::lines(&session).pop() else {
+        return false;
+    };
+    let key = format!("{id}:{}", newest.ts);
+    let f = s.slot::<Finder>();
+    if newest.author == finder || f.busy || f.answered == key {
+        return false;
+    }
+    f.answered = key;
+    f.busy = true;
+    let (id, space) = (id.to_string(), space.to_string());
+    s.rt.spawn(async move |cx| {
+        finder_answer::answer(cx.clone(), id, space).await;
+        cx.update(|s| s.slot::<Finder>().busy = false);
+    })
+    .detach();
+    true
 }
 
 /// Finder's buttons, drawn between its messages and the composer: page cards (icon, name, type)
@@ -135,6 +171,14 @@ fn choices(s: &State, t: &Theme, id: &str) -> El {
         .object(id)
         .map(|o| o.field_str("finder_options").to_string())
         .unwrap_or_default();
+    if s.get::<Finder>().is_some_and(|f| f.busy) {
+        return col()
+            .key("finder-thinking")
+            .px(14.)
+            .pt(4.)
+            .pb(8.)
+            .child(text("🧭 Finding…").font(ty::ui(13.)).color(t.muted));
+    }
     let list: Vec<Choice> = serde_json::from_str(&raw).unwrap_or_default();
     if list.is_empty() || s.get::<Finder>().is_some_and(|f| f.tapped == raw) {
         return col();
@@ -157,7 +201,7 @@ fn choices(s: &State, t: &Theme, id: &str) -> El {
             .hover(t.hover)
             .on_press(press);
         let el = match c.kind.as_str() {
-            "page" | "new" => {
+            "page" | "new" | "open" => {
                 let icon = if c.icon.is_empty() {
                     if c.kind == "new" { "＋" } else { "📄" }.to_string()
                 } else {

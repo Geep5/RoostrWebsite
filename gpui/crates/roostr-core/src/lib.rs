@@ -17,6 +17,7 @@ pub mod dates;
 pub mod devices;
 pub mod direct;
 pub mod filters;
+pub mod finder;
 pub mod harness;
 pub mod http;
 pub mod icons;

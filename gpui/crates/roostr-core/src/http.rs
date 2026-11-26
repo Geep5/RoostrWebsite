@@ -121,13 +121,40 @@ pub async fn get(
 
 /// PUT `body` to `url` (a Blossom upload). Any HTTP status is an `Ok` answer.
 pub async fn put(url: &str, headers: &[(&str, &str)], body: &[u8], limit: u64) -> Result<Response> {
+    send("PUT", url, headers, body, None, limit).await
+}
+
+/// POST `body` to `url` (a model's API). Any HTTP status is an `Ok` answer.
+pub async fn post(
+    url: &str,
+    headers: &[(&str, &str)],
+    body: &[u8],
+    timeout: Option<Duration>,
+    limit: u64,
+) -> Result<Response> {
+    send("POST", url, headers, body, timeout, limit).await
+}
+
+async fn send(
+    method: &'static str,
+    url: &str,
+    headers: &[(&str, &str)],
+    body: &[u8],
+    timeout: Option<Duration>,
+    limit: u64,
+) -> Result<Response> {
     #[cfg(not(target_family = "wasm"))]
     {
         let agent: ureq::Agent = ureq::Agent::config_builder()
             .http_status_as_error(false)
+            .timeout_global(timeout)
             .build()
             .into();
-        let mut request = agent.put(url);
+        let mut request = if method == "POST" {
+            agent.post(url)
+        } else {
+            agent.put(url)
+        };
         for (name, value) in headers {
             request = request.header(*name, *value);
         }
@@ -158,6 +185,7 @@ pub async fn put(url: &str, headers: &[(&str, &str)], body: &[u8], limit: u64) -
     #[cfg(target_family = "wasm")]
     {
         let _ = limit;
-        crate::web::request("PUT", url, headers, Some(body), None).await
+        let timeout_ms = timeout.map(|t| t.as_millis().min(u32::MAX as u128) as u32);
+        crate::web::request(method, url, headers, Some(body), timeout_ms).await
     }
 }

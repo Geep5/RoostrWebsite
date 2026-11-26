@@ -165,68 +165,261 @@ fn the_rail_tile_starts_a_private_session_and_a_hand_off_opens_its_page() {
     assert!(!app.shown("finder-choice-page-1"), "answered: the cards go");
 }
 
-/// A fake harness on a local port that answers `/machine` with `machine`: the computer the
-/// app talks to.
-fn fake_harness(machine: &'static str) -> Arc<roostr_core::harness::Harness> {
-    use std::io::{BufRead, BufReader, Write};
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind fake harness");
-    let url = format!("http://{}", listener.local_addr().expect("addr"));
-    // The harness client finds its computer by ROOSTR_HARNESS (else this machine's real one),
-    // and keeps its session file under HOME: both point at the test's own.
-    let home = std::env::temp_dir().join(format!("roostr-finder-home-{}", std::process::id()));
-    // SAFETY: set before this test's harness exists; the other test here makes none.
-    unsafe {
-        std::env::set_var("HOME", &home);
-        std::env::set_var("ROOSTR_HARNESS", &url);
-    }
-    std::thread::spawn(move || {
-        for stream in listener.incoming() {
-            let Ok(mut stream) = stream else { continue };
-            let mut reader = BufReader::new(stream.try_clone().expect("clone"));
-            let mut first = String::new();
-            if reader.read_line(&mut first).is_err() {
-                continue;
-            }
-            loop {
-                let mut line = String::new();
-                if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
-                    break;
-                }
-            }
-            let body = match first.split_whitespace().nth(1).unwrap_or("") {
-                "/machine" => format!(r#"{{"id":"{machine}"}}"#),
-                "/api/local-auth/session" => r#"{"token":"t","expiresAt":4.0e12}"#.to_string(),
-                _ => "{}".to_string(),
-            };
-            let _ = write!(
-                stream,
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                body.len()
-            );
-        }
-    });
-    Arc::new(roostr_core::harness::Harness::new(
-        roostr_core::daemon::DaemonConfig {
-            base_url: url,
-            token: "test".into(),
-            token_source: "test".into(),
-        },
-    ))
+/// A vault whose Finder agent has no Anthropic login: the app answers the session itself,
+/// without a model or any computer, with the pages the words name.
+#[derive(Default)]
+struct Offline {
+    /// The session's chat: (author, text).
+    chat: Mutex<Vec<(String, String)>>,
+    fields: Mutex<Vec<(String, String)>>,
+    /// Posted elsewhere (a page's chat): (object, author, text).
+    elsewhere: Mutex<Vec<(String, String, String)>>,
 }
 
-/// Each computer runs Finder for its own people: a new session names the computer the app
-/// talks to, whose harness answers it. Field report: a Finder message went unanswered while
-/// the one computer every space's Finder named was asleep.
+struct OfflineHandle(Arc<Offline>);
+
+const FINDER: &str = "finder-agent-sp-1";
+
+fn row(id: &str, type_key: &str, name: &str) -> roostr_core::types::QueryRow {
+    roostr_core::types::QueryRow {
+        id: id.into(),
+        type_key: type_key.into(),
+        updated_at: 1,
+        fields: [
+            ("name".to_string(), Value::string(name)),
+            ("channel".to_string(), Value::string("sp-1")),
+        ]
+        .into(),
+        ..Default::default()
+    }
+}
+
+impl Backend for OfflineHandle {
+    fn describe(&self) -> String {
+        "finder offline test".into()
+    }
+    fn settings(&self) -> BoxFuture<anyhow::Result<Settings>> {
+        ready(Ok(Settings {
+            has_key: true,
+            author_id: "me".into(),
+            ..Settings::default()
+        }))
+    }
+    fn objects(&self) -> BoxFuture<anyhow::Result<Vec<ObjectSummary>>> {
+        ready(Ok(Vec::new()))
+    }
+    fn object(&self, id: &str) -> BoxFuture<anyhow::Result<Object>> {
+        let object = match id {
+            SESSION => {
+                let chat = self.0.chat.lock().clone();
+                let mut ids = Vec::new();
+                let mut blocks = Vec::new();
+                for (n, (author, text)) in chat.into_iter().enumerate() {
+                    let id = format!("m{n}");
+                    ids.push(id.clone());
+                    blocks.push(roostr_core::types::Block {
+                        id,
+                        content: roostr_core::types::BlockContent {
+                            custom: Some(roostr_core::types::CustomContent {
+                                content_type: "chat".into(),
+                                meta: Some(
+                                    [
+                                        ("author".to_string(), author),
+                                        ("ts".to_string(), (n + 1).to_string()),
+                                        ("text".to_string(), text),
+                                    ]
+                                    .into(),
+                                ),
+                                data: None,
+                            }),
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    });
+                }
+                Object {
+                    id: SESSION.into(),
+                    type_key: "finder_session".into(),
+                    fields: self
+                        .0
+                        .fields
+                        .lock()
+                        .iter()
+                        .map(|(k, v)| (k.clone(), Value::string(v)))
+                        .collect(),
+                    blocks,
+                    ..Object::default()
+                }
+            }
+            FINDER => Object {
+                id: FINDER.into(),
+                type_key: "agent".into(),
+                fields: [("name".to_string(), Value::string("Finder"))].into(),
+                ..Object::default()
+            },
+            "sp-1" => Object {
+                id: "sp-1".into(),
+                type_key: "channel".into(),
+                fields: [("name".to_string(), Value::string("Personal"))].into(),
+                ..Object::default()
+            },
+            _ => return ready(Err(anyhow::anyhow!("unknown object {id}"))),
+        };
+        ready(Ok(object))
+    }
+    fn channels(&self) -> BoxFuture<anyhow::Result<Vec<Space>>> {
+        ready(Ok(vec![Space {
+            id: "sp-1".into(),
+            name: "Personal".into(),
+            created_at: 1,
+            ..Space::default()
+        }]))
+    }
+    fn relations(&self) -> BoxFuture<anyhow::Result<Vec<RelationDef>>> {
+        ready(Ok(Vec::new()))
+    }
+    fn query(&self, body: &Json) -> BoxFuture<anyhow::Result<QueryResult>> {
+        let records = if body["filters"].is_array() {
+            vec![
+                row("hunt", "page", "Hunter Overview"),
+                row("groceries", "page", "Groceries"),
+                row(FINDER, "agent", "Finder"),
+                row("space-agent-sp-1", "agent", "Personal Space"),
+            ]
+        } else {
+            Vec::new()
+        };
+        ready(Ok(QueryResult {
+            total: records.len() as u64,
+            records,
+        }))
+    }
+    fn mutate(&self, action: &str, params: JsonMap) -> BoxFuture<anyhow::Result<JsonMap>> {
+        let mut out = JsonMap::new();
+        match action {
+            "create" => {
+                out.insert("id".into(), SESSION.into());
+            }
+            "chat_post" if params["object_id"] == SESSION => {
+                let author = params
+                    .get("as_author")
+                    .and_then(Json::as_str)
+                    .unwrap_or("me")
+                    .to_string();
+                let text = params["text"].as_str().unwrap_or("").to_string();
+                self.0.chat.lock().push((author, text));
+            }
+            "chat_post" => self.0.elsewhere.lock().push((
+                params["object_id"].as_str().unwrap_or("").to_string(),
+                params["as_author"].as_str().unwrap_or("").to_string(),
+                params["text"].as_str().unwrap_or("").to_string(),
+            )),
+            "set_field" => {
+                let key = params["key"].as_str().unwrap_or("").to_string();
+                let value = params["value"]["stringValue"]
+                    .as_str()
+                    .unwrap_or("")
+                    .to_string();
+                let mut fields = self.0.fields.lock();
+                fields.retain(|(k, _)| *k != key);
+                fields.push((key, value));
+            }
+            _ => {}
+        }
+        ready(Ok(out))
+    }
+    fn serving(&self, _: &[String]) -> BoxFuture<anyhow::Result<JsonMap>> {
+        ready(Ok(JsonMap::new()))
+    }
+    fn sync_digest(&self) -> BoxFuture<anyhow::Result<JsonMap>> {
+        ready(Ok(JsonMap::new()))
+    }
+    fn events(&self) -> BoxStream<anyhow::Result<BackendEvent>> {
+        boxed_stream(futures::stream::pending())
+    }
+}
+
+/// Finder runs in the app, with no computer: with no model to ask, it still answers with the
+/// pages the words name, and tapping one opens it.
 #[test]
-fn a_session_is_served_by_the_computer_the_app_talks_to() {
-    let vault = Arc::new(Vault::default());
-    let mut app = App::open_with(Arc::new(Handle(vault.clone())), 1280., 800., |s| {
-        s.harness = Some(fake_harness("studio-1"));
-    });
+fn with_no_model_the_app_answers_with_matching_pages_that_open() {
+    let vault = Arc::new(Offline::default());
+    let mut app = App::open(Arc::new(OfflineHandle(vault.clone())), 1280., 800.);
     app.navigate(Route::Home);
     app.tap("rail-finder");
     app.settle();
-    let made = vault.created.lock().clone();
-    assert_eq!(made.len(), 1, "one new session");
-    assert_eq!(made[0]["fields"]["served_by"]["stringValue"], "studio-1");
+    roostr_core::api::chat::post(
+        SESSION,
+        "open the hunter overview",
+        "",
+        "",
+        &[],
+        app.state(),
+    )
+    .detach();
+    app.settle();
+    let chat = vault.chat.lock().clone();
+    assert_eq!(chat.len(), 2, "Finder answered once: {chat:?}");
+    assert_eq!(chat[1].0, FINDER, "as Finder");
+    assert!(
+        chat[1].1.contains("no Anthropic login"),
+        "says why: {}",
+        chat[1].1
+    );
+    assert!(
+        app.shown("finder-choice-hunt"),
+        "the matching page, as a card"
+    );
+    assert!(
+        !app.shown("finder-choice-groceries"),
+        "only pages the words name"
+    );
+    app.tap("finder-choice-hunt");
+    app.settle();
+    assert_eq!(
+        app.rt.state.nav.route().clone(),
+        Route::Object("hunt".into()),
+        "the page opened, no model asked"
+    );
+    assert_eq!(vault.chat.lock().len(), 4, "the tap, then \"Opened …\"");
+}
+
+/// [✅ Do it] needs no model: the app posts the request on the page as Finder, tagging the
+/// agent (the @ wakes it), says where it went, and opens the page.
+#[test]
+fn do_it_hands_the_request_to_the_agent_on_its_page() {
+    let vault = Arc::new(Offline::default());
+    *vault.fields.lock() = vec![
+        (
+            "finder_options".into(),
+            r#"[{"id":"do","name":"✅ Do it","kind":"do"},{"id":"pick","name":"Pick another agent","kind":"pick_agent"}]"#.into(),
+        ),
+        (
+            "finder_pending".into(),
+            r#"{"page":"hunt","agent":"space-agent-sp-1","message":"Grant asks: add a pvp note"}"#.into(),
+        ),
+    ];
+    let mut app = App::open(Arc::new(OfflineHandle(vault.clone())), 1280., 800.);
+    app.navigate(Route::Home);
+    app.tap("rail-finder");
+    app.settle();
+    app.tap("finder-choice-do");
+    app.settle();
+    assert_eq!(
+        *vault.elsewhere.lock(),
+        [(
+            "hunt".to_string(),
+            FINDER.to_string(),
+            "@Personal Space Grant asks: add a pvp note".to_string()
+        )]
+    );
+    let chat = vault.chat.lock().clone();
+    assert_eq!(
+        chat.last().map(|c| c.1.as_str()),
+        Some("➡️ Sent to @Personal Space on [Hunter Overview](/app/object/hunt).")
+    );
+    assert_eq!(
+        app.rt.state.nav.route().clone(),
+        Route::Object("hunt".into())
+    );
 }

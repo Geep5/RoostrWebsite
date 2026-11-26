@@ -4,6 +4,7 @@
 //! object's type, plugged into the shell ([`roostr_shell::Pages`]).
 
 mod finder;
+mod finder_answer;
 mod object_page;
 
 use roostr_core::State;
