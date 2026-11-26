@@ -149,3 +149,69 @@ fn the_bubble_starts_a_private_session_and_a_hand_off_opens_its_page() {
     assert_eq!(*vault.posted.lock(), ["Quotes"]);
     assert!(!app.shown("finder-choice-page-1"), "answered: the cards go");
 }
+
+/// A fake harness on a local port that answers `/machine` with `machine`: the computer the
+/// app talks to.
+fn fake_harness(machine: &'static str) -> Arc<roostr_core::harness::Harness> {
+    use std::io::{BufRead, BufReader, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind fake harness");
+    let url = format!("http://{}", listener.local_addr().expect("addr"));
+    // The harness client finds its computer by ROOSTR_HARNESS (else this machine's real one),
+    // and keeps its session file under HOME: both point at the test's own.
+    let home = std::env::temp_dir().join(format!("roostr-finder-home-{}", std::process::id()));
+    // SAFETY: set before this test's harness exists; the other test here makes none.
+    unsafe {
+        std::env::set_var("HOME", &home);
+        std::env::set_var("ROOSTR_HARNESS", &url);
+    }
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            let mut reader = BufReader::new(stream.try_clone().expect("clone"));
+            let mut first = String::new();
+            if reader.read_line(&mut first).is_err() {
+                continue;
+            }
+            loop {
+                let mut line = String::new();
+                if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
+                    break;
+                }
+            }
+            let body = match first.split_whitespace().nth(1).unwrap_or("") {
+                "/machine" => format!(r#"{{"id":"{machine}"}}"#),
+                "/api/local-auth/session" => r#"{"token":"t","expiresAt":4.0e12}"#.to_string(),
+                _ => "{}".to_string(),
+            };
+            let _ = write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+        }
+    });
+    Arc::new(roostr_core::harness::Harness::new(
+        roostr_core::daemon::DaemonConfig {
+            base_url: url,
+            token: "test".into(),
+            token_source: "test".into(),
+        },
+    ))
+}
+
+/// Each computer runs Finder for its own people: a new session names the computer the app
+/// talks to, whose harness answers it. Field report: a Finder message went unanswered while
+/// the one computer every space's Finder named was asleep.
+#[test]
+fn a_session_is_served_by_the_computer_the_app_talks_to() {
+    let vault = Arc::new(Vault::default());
+    let mut app = App::open_with(Arc::new(Handle(vault.clone())), 1280., 800., |s| {
+        s.harness = Some(fake_harness("studio-1"));
+    });
+    app.navigate(Route::Home);
+    app.tap("finder-bubble");
+    app.settle();
+    let made = vault.created.lock().clone();
+    assert_eq!(made.len(), 1, "one new session");
+    assert_eq!(made[0]["fields"]["served_by"]["stringValue"], "studio-1");
+}

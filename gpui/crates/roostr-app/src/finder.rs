@@ -37,7 +37,8 @@ const PANEL_W: f32 = 380.;
 const PANEL_H: f32 = 540.;
 const BUBBLE: f32 = 52.;
 
-/// A new session for `space`.
+/// A new session for `space`, served by the computer this app talks to (its harness answers
+/// it as the space's Finder); a browser with no computer leaves it to the Finder's own.
 fn start(s: &mut State, space: String) {
     let f = s.slot::<Finder>();
     if f.making {
@@ -45,10 +46,18 @@ fn start(s: &mut State, space: String) {
     }
     f.making = true;
     f.session = None;
-    let fields: Fields = [("finder_space".to_string(), Value::string(&space))].into();
-    let task = api::note::create("Finder", Some(SESSION_TYPE), Some(fields), s);
+    let machine = roostr_core::create::this_machine_id(s);
+    let session_space = space.clone();
     s.rt.spawn(async move |cx| {
-        let made = task.await;
+        let machine = machine.await;
+        let mut fields: Fields =
+            [("finder_space".to_string(), Value::string(&session_space))].into();
+        if !machine.is_empty() {
+            fields.insert("served_by".into(), Value::string(machine));
+        }
+        let made = cx
+            .update(|s| api::note::create("Finder", Some(SESSION_TYPE), Some(fields), s))
+            .await;
         cx.update(move |s| {
             let f = s.slot::<Finder>();
             f.making = false;
