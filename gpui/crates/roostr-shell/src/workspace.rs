@@ -849,19 +849,30 @@ fn pane_column(
     outer
 }
 
-/// A collapsed column: its icon over its name, letter by letter; a press expands it.
+/// A collapsed column: its icon over its name turned on its side (read bottom to top, as
+/// side tabs are); a press expands it.
 fn pane_strip(s: &State, t: &Theme, tab: PaneTab) -> El {
     let name = tab.name();
     let tip = match tab {
         PaneTab::Chat => "Show chat",
         PaneTab::Properties => "Show properties",
     };
-    let letters = name.chars().fold(col().items_center(), |c, ch| {
-        c.child(crate::shell::hover_fg(
-            text(ch.to_string()).font(ty::ui(11.5).semibold().lh(13.)),
-            t,
-        ))
-    });
+    // Rotation keeps the upright box, so the word sits in a slot one line wide and a word
+    // tall, upright and centred on it, then turns a quarter left about that centre.
+    let font = ty::ui(11.5).semibold();
+    let line = 14.;
+    let word = rune::text::measure(name, &[], font, None).0.ceil();
+    let letters = el()
+        .key(format!("pane-strip-{name}-label"))
+        .w(line)
+        .h(word)
+        .child(
+            crate::shell::hover_fg(text(name).font(font.lh(line)), t)
+                .absolute((line - word) / 2., (word - line) / 2.)
+                .w(word)
+                .h(line)
+                .rotate(-std::f32::consts::FRAC_PI_2),
+        );
     let strip = col()
         .key(format!("pane-strip-{name}"))
         .w_full()

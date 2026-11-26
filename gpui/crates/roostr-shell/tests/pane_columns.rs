@@ -102,6 +102,26 @@ fn chat_and_properties_are_columns_that_fold_strip_resize_and_persist() {
         strip[0] + strip[2] <= desk[0] + desk[2] + 0.5,
         "the strip is inside the window"
     );
+    // Its name reads as one word turned on its side, not a letter per line.
+    let words: Vec<_> =
+        h.rt.elements()
+            .into_iter()
+            .filter(|e| e.path.contains("pane-strip-Properties") && e.text.is_some())
+            .map(|e| (e.text.unwrap_or_default(), e.rect))
+            .collect();
+    let (_, word) = words
+        .iter()
+        .find(|(text, _)| text == "Properties")
+        .unwrap_or_else(|| panic!("the strip's name as one word: {words:?}"));
+    assert!(
+        !words.iter().any(|(text, _)| text == "P"),
+        "not letter by letter: {words:?}"
+    );
+    assert!(word[3] > word[2] * 3., "turned on its side: {word:?}");
+    assert!(
+        word[0] >= strip[0] - 0.5 && word[0] + word[2] <= strip[0] + strip[2] + 0.5,
+        "inside the strip: {word:?} vs {strip:?}"
+    );
     // The strip brings Properties in, Chat giving way to its strip.
     h.click("pane-strip-Properties");
     assert_eq!(columns(&h), ("strip", "col"));
