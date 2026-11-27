@@ -579,6 +579,61 @@ fn the_paste_as_menu_opens_under_the_block_pasted_into() {
 
 /// A web link in a page's text opens in the browser when clicked. Field
 /// report: links in a page body did nothing.
+/// The toolbar's 🔗 on a highlighted web address: the "Link URL" prompt opens holding that
+/// address, and OK links it. Field report: pressing 🔗 did nothing - the press blurred the
+/// text, which took the toolbar away under the pointer before the press landed.
+#[test]
+fn the_toolbars_link_button_links_a_highlighted_address() {
+    const URL: &str = "https://youtube.com/shorts/rRsluEFr7pg?si=KX";
+    let vault = Vault::new(vec![text_block("p0", URL, Vec::new())]);
+    let mut rt = open(&vault);
+    // Highlighted as a person does: a triple-click on the line.
+    let (x, y) = rt.find("text-p0").expect("the line is drawn");
+    for _ in 0..3 {
+        rt.pointer_down(x, y);
+        rt.pointer_up(x, y);
+    }
+    rt.state.poll();
+    rt.frame(1. / 60.);
+    settle(&mut rt);
+    // The toolbar hangs from the caret, which the view sees a frame after the selection.
+    rt.update(|_, _| {});
+    rt.frame(1. / 60.);
+    // A real press: the app runs a frame between the button going down and coming up.
+    let (x, y) = rt.find("tb-link").expect("the toolbar's 🔗");
+    rt.pointer_move(x, y);
+    rt.pointer_down(x, y);
+    rt.state.poll();
+    rt.frame(1. / 60.);
+    rt.pointer_up(x, y);
+    rt.state.poll();
+    rt.frame(1. / 60.);
+    settle(&mut rt);
+    let prompt = crate::editor::editor(&rt.state, PAGE)
+        .and_then(|e| e.link_prompt.as_ref().map(|p| p.url.text.clone()));
+    assert_eq!(
+        prompt.as_deref(),
+        Some(URL),
+        "the prompt opened with the address"
+    );
+    click(&mut rt, "link-ok");
+    after_saves(&mut rt);
+    let page = vault.page.lock();
+    let marks = page.blocks[0]
+        .content
+        .text
+        .as_ref()
+        .and_then(|t| t.marks.clone())
+        .unwrap_or_default();
+    assert_eq!(
+        marks
+            .iter()
+            .map(|m| (m.from, m.to, m.kind, m.param.as_deref()))
+            .collect::<Vec<_>>(),
+        [(0, URL.len() as u32, mark::LINK, Some(URL))]
+    );
+}
+
 #[test]
 fn a_link_in_page_text_opens_on_click() {
     const URL: &str = "https://example.com/page-link";

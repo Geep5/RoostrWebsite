@@ -1589,7 +1589,10 @@ fn marks_toolbar(f: &Frame, tb: &crate::editor::Toolbar, caret: [f32; 4], win_w:
         .border(1., t.border)
         .radius(8.)
         .padding(4.)
-        .shadow(8., 48., Color::BLACK.alpha(0.35));
+        .shadow(8., 48., Color::BLACK.alpha(0.35))
+        // A press here keeps the selection's text focused: blurring it would take the
+        // toolbar away under the pointer before the press landed.
+        .preserve_focus_on_press(true);
     let items: Vec<(roostr_ui::Button, &'static str)> = vec![
         {
             let (b, tip) = tool(

@@ -43,8 +43,14 @@ pub(crate) struct LinkPromptState {
 }
 
 impl LinkPromptState {
-    pub(crate) fn new(toolbar: Toolbar) -> Self {
-        let mut url = TextEdit::new("");
+    /// `selected`: the highlighted text - a web address already, it fills the field.
+    pub(crate) fn new(toolbar: Toolbar, selected: &str) -> Self {
+        let selected = selected.trim();
+        let address = (selected.starts_with("https://")
+            || selected.starts_with("http://")
+            || selected.starts_with("www."))
+            && !selected.contains(char::is_whitespace);
+        let mut url = TextEdit::new(if address { selected } else { "" });
         url.focused = true;
         Self { toolbar, url }
     }
@@ -196,7 +202,13 @@ impl Editor {
         let Some(tb) = self.toolbar.take() else {
             return;
         };
-        self.link_prompt = Some(LinkPromptState::new(tb));
+        let selected = self
+            .texts
+            .get(&tb.block)
+            .and_then(|t| t.text().get(tb.from..tb.to))
+            .unwrap_or_default()
+            .to_string();
+        self.link_prompt = Some(LinkPromptState::new(tb, &selected));
     }
 
     /// The prompt's OK (or Enter): link the selection to the URL unless it is empty.
