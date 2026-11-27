@@ -669,28 +669,28 @@ fn desk(
         .map_or(sh.width, |size| size[0]);
     // The sheet: the page and its panes. At rest it fills the window beside the nav. Sliding,
     // it stays where it was in layout, the whole window wide (what runs past the right edge is
-    // clipped), and moves by its offset: one piece, nothing in it re-wrapping until it lands,
-    // when layout takes the place the offset reached.
-    let (sheet_left, sheet_w, sheet_dx) = match slide {
+    // clipped), and moves by its offset: the page in one piece, nothing in it re-wrapping until
+    // it lands, when layout takes the place the offset reached. The panes hold still at the
+    // window's right edge all the while (their own offset undoes the sheet's), so only the
+    // page slides, under them.
+    let (sheet_left, sheet_w, sheet_dx, panes_dx) = match slide {
         NavSlide::Rest | NavSlide::Land => {
             let left = if sh.nav_hidden { 0. } else { nav_w };
-            (left, window_w - left, 0.)
+            (left, window_w - left, 0., 0.)
         }
-        NavSlide::Prep { hiding } => (if hiding { nav_w } else { 0. }, window_w, 0.),
-        NavSlide::Move { hiding } => {
-            if hiding {
-                (nav_w, window_w, -nav_w)
-            } else {
-                (0., window_w, nav_w)
-            }
-        }
+        NavSlide::Prep { hiding: true } => (nav_w, window_w, 0., -nav_w),
+        NavSlide::Prep { hiding: false } => (0., window_w, 0., 0.),
+        NavSlide::Move { hiding: true } => (nav_w, window_w, -nav_w, 0.),
+        NavSlide::Move { hiding: false } => (0., window_w, nav_w, -nav_w),
     };
     let sheet_motion: rune::Anim = if matches!(slide, NavSlide::Move { .. }) {
         NAV_SLIDE.anim()
     } else {
         rune::Spring::NONE.into()
     };
-    let room = sheet_w;
+    // The panes take their widths at rest beside the nav as it will be, so they never change
+    // in the slide.
+    let room = window_w - if sh.nav_hidden { 0. } else { nav_w };
     let pane_here = matches!(route, Route::Object(_)) && s.pane.available;
     let layout = if pane_here {
         s.pane.layout(room)
@@ -744,15 +744,23 @@ fn desk(
         .token_motion(RUNE_DEFAULT_MOTION)
         .child(main_column(s, cx, t, &route, wide, layer))
         // The right pane's columns: Properties, then Chat.
-        .child(pane_column(
-            s,
-            cx,
-            t,
-            PaneTab::Properties,
-            layout.properties,
-            layer,
-        ))
-        .child(pane_column(s, cx, t, PaneTab::Chat, layout.chat, layer));
+        .child(
+            row()
+                .key("page-panes")
+                .h_full()
+                .fill(t.gutter)
+                .offset(panes_dx, 0.)
+                .offset_motion(sheet_motion)
+                .child(pane_column(
+                    s,
+                    cx,
+                    t,
+                    PaneTab::Properties,
+                    layout.properties,
+                    layer,
+                ))
+                .child(pane_column(s, cx, t, PaneTab::Chat, layout.chat, layer)),
+        );
     if matches!(slide, NavSlide::Prep { .. } | NavSlide::Land) {
         body = body.instant_changes();
     }
