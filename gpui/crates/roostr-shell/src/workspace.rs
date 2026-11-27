@@ -338,8 +338,57 @@ pub(crate) fn toggle_nav(s: &mut State) {
     let shell = s.slot::<Shell>();
     shell.nav_hidden = !shell.nav_hidden;
     let hidden = shell.nav_hidden;
+    // The page sheet slides over the nav (hiding) or off it (showing): a frame in place at
+    // its sliding width, the slide, then rest.
+    shell.nav_slide = NavSlide::Prep { hiding: hidden };
+    shell.nav_slide_gen = shell.nav_slide_gen.wrapping_add(1);
+    let generation = shell.nav_slide_gen;
     s.ui.set("nav-hidden", &if hidden { "1" } else { "0" });
+    let slid = NAV_SLIDE_PREP + std::time::Duration::from_secs_f32(NAV_SLIDE.duration);
+    let (prep, done, landed) = (
+        s.rt.timer(NAV_SLIDE_PREP),
+        s.rt.timer(slid),
+        s.rt.timer(slid + NAV_SLIDE_PREP),
+    );
+    s.rt.spawn(async move |cx| {
+        prep.await;
+        let step = |next: NavSlide| {
+            move |s: &mut State| {
+                let shell = s.slot::<Shell>();
+                if shell.nav_slide_gen == generation {
+                    shell.nav_slide = next;
+                }
+            }
+        };
+        cx.update(step(NavSlide::Move { hiding: hidden }));
+        done.await;
+        cx.update(step(NavSlide::Land));
+        landed.await;
+        cx.update(step(NavSlide::Rest));
+    })
+    .detach();
 }
+
+/// Where the page sheet is in hiding or showing the nav (see `desk`).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) enum NavSlide {
+    #[default]
+    Rest,
+    /// The frame before it moves: in place, at its sliding width.
+    Prep { hiding: bool },
+    /// Moving over (hiding) or off (showing) the nav.
+    Move { hiding: bool },
+    /// The frame it takes its place and width at rest.
+    Land,
+}
+
+/// Rune's layout spring where nothing sets one (rune-motion `tokens::SETTLE`): the page keeps
+/// it under the sheet, whose own changes land at once.
+const RUNE_DEFAULT_MOTION: rune::Spring = rune::Spring::new(0.3, 0.0);
+
+/// The slide, and the frame before it.
+const NAV_SLIDE: motion::Tween = motion::Tween::bezier(300, [0.22, 1.0, 0.36, 1.0]);
+const NAV_SLIDE_PREP: std::time::Duration = std::time::Duration::from_millis(20);
 
 /// The edge drawer tab: collapse both columns while any is expanded, else expand both.
 fn toggle_pane(s: &mut State) {
@@ -601,16 +650,47 @@ fn desk(
     layer: &mut Vec<El>,
 ) -> El {
     let route = s.nav.route().clone();
-    let rail_col = if sh.nav_hidden { 0. } else { sh.rail_width };
-    let side_col = if sh.nav_hidden { 0. } else { sh.side_width };
-    // A narrower window narrows the columns to fit (or shows one and a
-    // strip); the chosen widths come back when there is room.
+    let nav_w = sh.rail_width + sh.side_width;
+    // Hiding or showing the nav, the page sheet slides over it (`NavSlide`); under Reduce
+    // Motion it lands at once.
+    let slide = if motion::reduced(cx) {
+        NavSlide::Rest
+    } else {
+        sh.nav_slide
+    };
+    let sliding = matches!(slide, NavSlide::Prep { .. } | NavSlide::Move { .. });
+    let nav_shown = !sh.nav_hidden || sliding;
+    let rail_col = if nav_shown { sh.rail_width } else { 0. };
+    let side_col = if nav_shown { sh.side_width } else { 0. };
     // The window's width as laid out (settles on the first frame; the slot's
     // copy lags a frame).
     let window_w = cx
         .layout_size("shell-root")
         .map_or(sh.width, |size| size[0]);
-    let room = window_w - rail_col - side_col;
+    // The sheet: the page and its panes. At rest it fills the window beside the nav. Sliding,
+    // it stays where it was in layout, the whole window wide (what runs past the right edge is
+    // clipped), and moves by its offset: one piece, nothing in it re-wrapping until it lands,
+    // when layout takes the place the offset reached.
+    let (sheet_left, sheet_w, sheet_dx) = match slide {
+        NavSlide::Rest | NavSlide::Land => {
+            let left = if sh.nav_hidden { 0. } else { nav_w };
+            (left, window_w - left, 0.)
+        }
+        NavSlide::Prep { hiding } => (if hiding { nav_w } else { 0. }, window_w, 0.),
+        NavSlide::Move { hiding } => {
+            if hiding {
+                (nav_w, window_w, -nav_w)
+            } else {
+                (0., window_w, nav_w)
+            }
+        }
+    };
+    let sheet_motion: rune::Anim = if matches!(slide, NavSlide::Move { .. }) {
+        NAV_SLIDE.anim()
+    } else {
+        rune::Spring::NONE.into()
+    };
+    let room = sheet_w;
     let pane_here = matches!(route, Route::Object(_)) && s.pane.available;
     let layout = if pane_here {
         s.pane.layout(room)
@@ -631,42 +711,37 @@ fn desk(
     } else {
         rail_col + side_col + 3. - 8. - drawer_tab_spill()
     };
-    let columns = motion::COLUMNS.spring();
-
-    let mut shell = row()
-        .key("desk")
-        .w_full()
-        .grow(1.)
-        .min_h(0.)
+    // The nav dims a little while the sheet covers it.
+    let covered = matches!(
+        slide,
+        NavSlide::Move { hiding: true } | NavSlide::Prep { hiding: false }
+    );
+    let sheet = row()
+        .key("page-sheet")
+        .pin(Some(sheet_left), Some(0.), None, Some(0.))
+        .w(sheet_w)
         .fill(t.gutter)
-        // Rail column.
-        .child(
-            col()
-                .key("rail-col")
-                .w(rail_col)
-                .h_full()
-                .py(6.)
-                .clip_rounded(0.)
-                .motion(columns)
-                .children(
-                    (!sh.nav_hidden && rail_col > 6.)
-                        .then(|| crate::rail::view(s, cx, t, sh, rail_col - 6.)),
-                ),
-        )
-        // Sidebar column.
-        .child(
-            col()
-                .key("side-col")
-                .w(side_col)
-                .h_full()
-                .py(6.)
-                .clip_rounded(0.)
-                .motion(columns)
-                .children(
-                    (!sh.nav_hidden && side_col > 6.)
-                        .then(|| crate::sidebar::view(s, cx, t, sh, side_col - 6., layer)),
-                ),
-        )
+        // Its own place and width land at once (only the offset moves it); what it holds
+        // keeps Rune's usual spring.
+        .motion(rune::Spring::NONE)
+        .offset(sheet_dx, 0.)
+        .offset_motion(sheet_motion)
+        .box_shadow(rune::Shadow {
+            x: -2.,
+            y: 0.,
+            blur: 16.,
+            spread: 0.,
+            color: Color::BLACK.alpha(if sliding { 0.35 } else { 0. }),
+            inset: false,
+        });
+    // Taking its sliding width, and its width at rest after, the page re-wraps at once
+    // rather than springing there.
+    let mut body = row()
+        .key("page-sheet-body")
+        .grow(1.)
+        .h_full()
+        .min_w(0.)
+        .token_motion(RUNE_DEFAULT_MOTION)
         .child(main_column(s, cx, t, &route, wide, layer))
         // The right pane's columns: Properties, then Chat.
         .child(pane_column(
@@ -678,6 +753,54 @@ fn desk(
             layer,
         ))
         .child(pane_column(s, cx, t, PaneTab::Chat, layout.chat, layer));
+    if matches!(slide, NavSlide::Prep { .. } | NavSlide::Land) {
+        body = body.instant_changes();
+    }
+    let sheet = sheet.child(body);
+
+    let mut shell = row()
+        .key("desk")
+        .w_full()
+        .grow(1.)
+        .min_h(0.)
+        .fill(t.gutter)
+        .clip_rounded(0.)
+        // Rail column.
+        .child(
+            col()
+                .key("rail-col")
+                .w(rail_col)
+                .h_full()
+                .py(6.)
+                .clip_rounded(0.)
+                .children(
+                    (nav_shown && rail_col > 6.)
+                        .then(|| crate::rail::view(s, cx, t, sh, rail_col - 6.)),
+                ),
+        )
+        // Sidebar column.
+        .child(
+            col()
+                .key("side-col")
+                .w(side_col)
+                .h_full()
+                .py(6.)
+                .clip_rounded(0.)
+                .children(
+                    (nav_shown && side_col > 6.)
+                        .then(|| crate::sidebar::view(s, cx, t, sh, side_col - 6., layer)),
+                ),
+        )
+        .child(
+            el().key("nav-dim")
+                .pin(Some(0.), Some(0.), None, Some(0.))
+                .w(nav_w)
+                .fill(Color::BLACK)
+                .inert()
+                .opacity(if covered { 0.25 } else { 0. })
+                .opacity_motion(NAV_SLIDE.anim()),
+        )
+        .child(sheet);
     // Resizers (in the gaps between panes).
     if !sh.nav_hidden {
         shell = shell

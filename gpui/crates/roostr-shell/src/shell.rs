@@ -63,6 +63,9 @@ pub(crate) struct Shell {
     pub(crate) rail_wide_width: f32,
     pub(crate) side_width: f32,
     pub(crate) nav_hidden: bool,
+    /// The page sheet's slide over the nav, and which toggle it belongs to.
+    pub(crate) nav_slide: crate::workspace::NavSlide,
+    pub(crate) nav_slide_gen: u32,
     pub(crate) resize: Option<Resize>,
     pub(crate) dwell: Option<Dwell>,
     /// Routes whose pages are open (GPUI's page cache): opened when first shown,
@@ -97,6 +100,8 @@ impl Default for Shell {
             rail_wide_width: RAIL_WIDE_DEFAULT,
             side_width: SIDE_DEFAULT,
             nav_hidden: false,
+            nav_slide: Default::default(),
+            nav_slide_gen: 0,
             resize: None,
             dwell: None,
             live: Vec::new(),
@@ -138,6 +143,8 @@ impl Shell {
             rail_wide_width: number("rail-width-wide").unwrap_or(RAIL_WIDE_DEFAULT),
             side_width: number("side-width").unwrap_or(SIDE_DEFAULT),
             nav_hidden: flag("nav-hidden"),
+            nav_slide: Default::default(),
+            nav_slide_gen: 0,
             section_collapsed: ui.get("section-collapsed").unwrap_or_default(),
             ..Shell::default()
         }
